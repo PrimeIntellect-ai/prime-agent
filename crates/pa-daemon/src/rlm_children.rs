@@ -235,6 +235,11 @@ pub struct SupervisorChildSessions {
     inner: Arc<SupervisorChildSessionsInner>,
 }
 
+/// The `delete_subagent` completion hook (the worker wires its
+/// context-tree cache invalidation): called once per completed delete
+/// with the deleted child's id.
+pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -262,6 +267,11 @@ struct SupervisorChildSessionsInner {
     /// into it — the producer owns the target row and the durable
     /// append).
     usage_sink: std::sync::Mutex<Option<std::sync::Arc<dyn RlmChildUsageSink>>>,
+    /// The delete notification hook (wired by the worker with its
+    /// context-tree cache handle): a deleted child must leave the cached
+    /// `/context` children immediately, not ride out the next background
+    /// refresh.
+    delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -291,8 +301,20 @@ impl SupervisorChildSessions {
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
+                delete_notifier: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Wire the delete notification hook (the worker's context-tree cache
+    /// invalidation): called once per completed `delete_subagent` with
+    /// the deleted child's id.
+    pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
+        *self
+            .inner
+            .delete_notifier
+            .lock()
+            .expect("delete notifier lock") = Some(notifier);
     }
 
     /// The worker saw the parent's turn end: release prompt tasks waiting
@@ -1904,6 +1926,26 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
+            // The deletion commits BEFORE the best-effort terminal
+            // notice: the notice's supervisor delivery can ride its full
+            // timeout, and a deleted child must leave the registry and the
+            // cached context tree immediately, not after it.
+            this.children
+                .lock()
+                .await
+                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
+            // The cached context-tree rows must not outlive the child: a
+            // deleted subagent leaves `/context` immediately (the
+            // background refresh would otherwise resurrect it through the
+            // settled-children backfill until its next walk).
+            if let Some(notify) = this
+                .delete_notifier
+                .lock()
+                .expect("delete notifier lock")
+                .clone()
+            {
+                notify(&entry.rlm_child_id);
+            }
             // A still-running child was cut short by the delete: the parent
             // session receives the cancelled terminal notice (TS
             // `completeDeletion`, reason `Deleted by parent orchestrator`).
@@ -1924,10 +1966,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     this.deliver_terminal_notice(&notice).await;
                 }
             }
-            this.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),

@@ -31,6 +31,9 @@ from pathlib import Path
 
 # The bundled-catalog gate (same release-scripts directory).
 from bundle_catalog import validate_bundled_catalog_dir
+# The release platform alias the archive name carries (TS parity; the update
+# flow's channel manifest requires alias-named archives).
+from assemble_artifacts import TARGET_ALIASES
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
 # Continuous builds additionally stage the package.json version manifest.
@@ -88,7 +91,9 @@ def main() -> int:
         CONTINUOUS_EXTRA_TOP_LEVEL if args.sha else set()
     )
 
-    archive_name = f"prime-agent-{args.version}-{args.target}.tar.gz"
+    archive_name = (
+        f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.tar.gz"
+    )
     archive = args.dist_dir / archive_name
     if not archive.is_file():
         fail(f"archive {archive} not found; run assemble_artifacts.py first")

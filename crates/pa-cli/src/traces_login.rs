@@ -1,15 +1,11 @@
-//! The composition root's terminal Prime Agent Traces login (TS
+//! The composition root's Prime Agent Traces login (TS
 //! `runPrimeAgentTracesLogin`): the prime-cli credential reuse, the RSA
 //! browser challenge raced against the paste prompt (the TS dialog's
 //! manual-key fallback), the `agent_traces` access check, and the
-//! credential write. Runs with the terminal handed over (the TUI is
-//! suspended around the call), so the progress lines and the paste
-//! prompt own the plain terminal — the TS dialog's surfaces.
-//!
-//! The terminal race differs from the dialog in one way: a pasted line
-//! read that the browser login overtakes is dropped, so a half-typed
-//! paste can be lost (the TS field would keep it; the plain terminal
-//! has no field to keep).
+//! credential write. The flow renders through the inline auth panel (TS
+//! the login dialog mounts in the TUI): every progress line, the auth
+//! URL block, and the paste prompt ride the panel channel, and no
+//! surface touches the terminal.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -23,6 +19,7 @@ use pa_core::auth::{
     PRIME_AGENT_TRACES_PROVIDER_NAME,
 };
 
+use pa_tui::auth_panel::PasteStyle;
 use pa_tui::traces::TraceLoginOutcome;
 
 /// TS `armManualInput`'s armed prompt after the browser URL shows.
@@ -61,9 +58,13 @@ pub(crate) struct TracesLoginInputs<'a> {
     pub poll_interval_ms: Option<u64>,
 }
 
-/// TS `runPrimeAgentTracesLogin`: the whole flow on the plain terminal
-/// (the TUI is suspended around the call).
-pub(crate) async fn run_traces_login(agent_dir: &Path) -> TraceLoginOutcome {
+/// TS `runPrimeAgentTracesLogin`: the whole flow against the inline auth
+/// panel (TS the login dialog mounts in the TUI; no surface touches the
+/// terminal).
+pub(crate) async fn run_traces_login(
+    agent_dir: &Path,
+    panel: pa_tui::auth_panel::AuthPanelHandle,
+) -> TraceLoginOutcome {
     let http = ReqwestPrimeHttp;
     let prime_cli_config_path: Option<PathBuf> = (agent_dir == crate::config::get_agent_dir())
         .then(pa_core::auth::default_prime_cli_config_path);
@@ -73,7 +74,7 @@ pub(crate) async fn run_traces_login(agent_dir: &Path) -> TraceLoginOutcome {
         prime_cli_config_path: prime_cli_config_path.as_deref(),
         poll_interval_ms: None,
     };
-    run_traces_login_inner(&inputs, &TerminalTracesLoginUi).await
+    run_traces_login_inner(&inputs, &PanelTracesLoginUi::new(panel)).await
 }
 
 async fn run_traces_login_inner(
@@ -220,19 +221,27 @@ fn complete_login(inputs: &TracesLoginInputs<'_>, api_key: &str) -> TraceLoginOu
     ))
 }
 
-/// The terminal login surface while the TUI is suspended (the TS dialog's
-/// surfaces on the plain terminal).
-struct TerminalTracesLoginUi;
+/// The login's inline-panel surface (TS the login dialog renders in the
+/// TUI): the progress lines, the auth URL (with the browser open), and
+/// the paste prompt drive the auth panel through the request channel;
+/// the flow never touches the terminal.
+struct PanelTracesLoginUi {
+    panel: pa_tui::auth_panel::AuthPanelHandle,
+}
 
-impl TracesLoginUi for TerminalTracesLoginUi {
+impl PanelTracesLoginUi {
+    fn new(panel: pa_tui::auth_panel::AuthPanelHandle) -> Self {
+        PanelTracesLoginUi { panel }
+    }
+}
+
+impl TracesLoginUi for PanelTracesLoginUi {
     fn progress(&self, message: &str) {
-        println!("{message}");
+        self.panel.progress(message);
     }
 
     fn on_auth(&self, url: &str, instructions: &str) {
-        println!("{instructions}");
-        println!("{url}");
-        println!();
+        self.panel.auth_url(url, Some(instructions));
         pa_core::platform::browser::open_in_browser(url);
     }
 
@@ -240,26 +249,9 @@ impl TracesLoginUi for TerminalTracesLoginUi {
         &self,
         prompt: &str,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let panel = self.panel.clone();
         let prompt = prompt.to_string();
-        Box::pin(async move {
-            println!("{prompt}");
-            read_terminal_line().await
-        })
-    }
-}
-
-/// One line off the plain terminal (the paste read must be cancellable:
-/// the browser login overtaking it drops the read, exactly the TS abort
-/// the dialog's paste field sees).
-async fn read_terminal_line() -> Option<String> {
-    use tokio::io::AsyncBufReadExt;
-    let mut line = String::new();
-    match tokio::io::BufReader::new(tokio::io::stdin())
-        .read_line(&mut line)
-        .await
-    {
-        Ok(0) | Err(_) => None,
-        Ok(_) => Some(line.trim().to_string()),
+        Box::pin(async move { panel.paste_prompt(&prompt, PasteStyle::Visible).await })
     }
 }
 

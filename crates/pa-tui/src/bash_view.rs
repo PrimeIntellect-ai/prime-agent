@@ -1,8 +1,10 @@
 //! The dedicated bash view (the operator's 2026-09-23 redesign, refined
 //! 2026-09-24): the session's kernel bash registry — the background
 //! commands the agent's REPL started — as a columned table (command,
-//! duration, pid, status) that hugs its content width (the columns never
-//! stretch to the terminal edge), and Enter on a row opens the detail
+//! duration, pid, status) whose columns hug their content (the columns
+//! never stretch to the terminal edge) while the table surface fills
+//! the full width (the selected row's wash spans the terminal, the
+//! operator's 2026-09-24 ruling), and Enter on a row opens the detail
 //! drill-in (the operator's refined shape): one metadata row (pid,
 //! started, duration, status), the exact command, and the fetched output
 //! tail in a scrollable region — up/down walk the output, and reaching
@@ -10,14 +12,18 @@
 //! window starts at [`FIRST_TAIL_LINES`] and doubles on each load up to
 //! the 200-line wire cap). The status colors code the rows (running
 //! green, finished dim, failed red). The pane runs all the way to the
-//! bottom of the screen: nothing rides below the shortcuts hint. Pure
+//! bottom of the screen: no rule rides below the shortcuts hint — one
+//! blank line of spacing rides under it (the operator's 2026-09-24
+//! ruling). Pure
 //! presentation and selection: the host owns the 2s registry refresh,
 //! fetches the output tails, and executes the kill.
 
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, scrub_controls, status_dot};
+use crate::menu_panel::{
+    fill_row, hug_row, menu_list_layout, plain_cell, scrub_controls, status_dot,
+};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -26,11 +32,12 @@ use crate::{Line, Span};
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, blank, hint — the conditional
+/// title, blank, column header, blank, hint, blank — the conditional
 /// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
-/// never counted twice). The pane runs to the bottom of the screen: no
-/// rule rides below the hint.
-const LIST_FRAME_ROWS: usize = 6;
+/// never counted twice). No rule rides below the hint: one blank line of
+/// spacing rides under the shortcuts instead (the operator's 2026-09-24
+/// ruling).
+const LIST_FRAME_ROWS: usize = 7;
 
 /// The command column's width cap.
 const COMMAND_CAP: usize = 44;
@@ -625,12 +632,12 @@ impl BashView {
         let actions = Self::available_actions(activity);
         let error_rows = if self.error.is_some() { 2 } else { 0 };
         // The pane's fixed rows: the rule, the metadata row, the blank
-        // under the command, the blank over the hint, the hint, the
-        // actions block (blank + row), and the error block when present.
-        // The command and the output region ride the remaining budget in
-        // that order — the output keeps at least one row, so a long
-        // command clips before the region starves.
-        let fixed = 5 + if actions.is_empty() { 0 } else { 2 } + error_rows;
+        // under the command, the blank over the hint, the hint, the blank
+        // below the hint, the actions block (blank + row), and the error
+        // block when present. The command and the output region ride the
+        // remaining budget in that order — the output keeps at least one
+        // row, so a long command clips before the region starves.
+        let fixed = 6 + if actions.is_empty() { 0 } else { 2 } + error_rows;
         let budget = self.viewport_rows.saturating_sub(fixed);
         let command_width = width.saturating_sub(4).max(10);
         let command_wrapped = wrap_text(&command_exact, command_width);
@@ -807,9 +814,9 @@ impl BashView {
         }
     }
 
-    /// The pane footer: the error block, a blank, and the hint line —
-    /// the pane runs all the way to the bottom of the screen, so nothing
-    /// rides below the shortcuts hint (no bottom border).
+    /// The pane footer: the error block, a blank, the hint line, and one
+    /// blank line below the shortcuts (the operator's 2026-09-24 ruling:
+    /// no rule rides under the hint — spacing, not a divider).
     fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(error) = &self.error {
@@ -818,6 +825,7 @@ impl BashView {
         }
         lines.push(Vec::new());
         lines.push(hint_line(theme, width, hint));
+        lines.push(Vec::new());
         lines
     }
 }
@@ -829,7 +837,6 @@ struct Columns {
     command: usize,
     duration: usize,
     pid: usize,
-    status: usize,
 }
 
 impl Columns {
@@ -873,13 +880,7 @@ impl Columns {
             command,
             duration: duration_content,
             pid,
-            status,
         }
-    }
-
-    /// The full span the row content covers (the hug's content width).
-    fn content_width(&self) -> usize {
-        2 + self.command + 2 + self.duration + 2 + self.pid + 2 + self.status
     }
 
     /// The dim column header row.
@@ -897,8 +898,10 @@ impl Columns {
 
     /// One columned row: the command, the duration, the pid, and the
     /// status word in its status color (running green, a nonzero exit
-    /// red — failed — everything else dim). The selected row's wash hugs
-    /// the columns plus a little trailing pad.
+    /// red — failed — everything else dim). The selected row's wash
+    /// spans the full frame width (the operator's "table fills the
+    /// width" ruling) while the columns keep their content-hug
+    /// geometry.
     fn activity_row(
         &self,
         theme: &Theme,
@@ -938,7 +941,7 @@ impl Columns {
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&activity.status);
         row.push(theme.fg_span(status_color, format!("{dot} {}", activity.status)));
-        hug_row(theme, row, self.content_width(), selected, width)
+        fill_row(theme, row, selected, width)
     }
 }
 
@@ -1227,24 +1230,15 @@ mod tests {
         }
     }
 
-    /// The table hugs its content width (the operator's 2026-09-24
-    /// directive): the columns never stretch to the terminal edge — the
-    /// rows, the header, and even the selected row's wash all stop before
-    /// the end of the screen.
+    /// The table fills the full width of the TUI (the operator's
+    /// 2026-09-24 ruling) while the columns keep their content-hug
+    /// geometry: the selected row's wash spans the terminal width, the
+    /// plain rows' text stops well short of the edge, and no column
+    /// ever stretches its text to the terminal edge.
     #[test]
-    fn the_table_hugs_its_content_width() {
+    fn the_table_fills_the_full_width_columns_hug_their_content() {
         let view = BashView::new(activities(), 24);
         let frame = view.render(&theme(), 120, &kb());
-        for line in &frame {
-            let used = crate::width::spans_width(line);
-            // Only the pane's top rule spans the frame; every table row
-            // (header, plain, selected) stops well short of the edge.
-            let is_rule = line.len() == 1 && line[0].content.starts_with("\u{2500}");
-            assert!(
-                is_rule || used < 120,
-                "a content row never reaches the terminal edge: {used}"
-            );
-        }
         let selected = frame
             .iter()
             .find(|line| {
@@ -1253,41 +1247,46 @@ mod tests {
             })
             .expect("the selected row carries the wash");
         let used = crate::width::spans_width(selected);
-        assert!(
-            (crate::menu_panel::MIN_HUG_WIDTH..120).contains(&used),
-            "the wash hugs the columns plus a little pad, never the width: {used}"
+        assert_eq!(
+            used, 120,
+            "the selected row's wash spans the whole terminal width: {used}"
         );
         let header = frame
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("Duration")))
             .expect("the column header");
-        assert!(crate::width::spans_width(header) < 120);
-    }
-
-    /// The selected row's wash hugs the columns plus a little trailing
-    /// pad, never the whole terminal width.
-    #[test]
-    fn the_selection_hug_stops_a_little_past_the_text() {
-        let view = BashView::new(activities(), 24);
-        let frame = view.render(&theme(), 90, &kb());
-        let selected = frame
-            .iter()
-            .find(|line| {
-                line.iter()
-                    .any(|span| span.style.bg.is_some() && span.content.contains("cargo"))
-            })
-            .expect("the selected row carries the wash");
-        let used = crate::width::spans_width(selected);
-        assert!(used < 90, "never the whole width: {used}");
         assert!(
-            used >= crate::menu_panel::MIN_HUG_WIDTH,
-            "hug floor: {used}"
+            crate::width::spans_width(header) < 120,
+            "the columns never stretch their text to the edge"
         );
         let plain = frame
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("echo hi")))
             .expect("the other row");
+        assert!(crate::width::spans_width(plain) < 120);
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    /// The selected row's wash spans the whole terminal width at every
+    /// width the pane renders at.
+    #[test]
+    fn the_selection_wash_spans_the_whole_width() {
+        for width in [50usize, 90, 186] {
+            let view = BashView::new(activities(), 24);
+            let frame = view.render(&theme(), width, &kb());
+            let selected = frame
+                .iter()
+                .find(|line| {
+                    line.iter()
+                        .any(|span| span.style.bg.is_some() && span.content.contains("cargo"))
+                })
+                .expect("the selected row carries the wash");
+            assert_eq!(
+                crate::width::spans_width(selected),
+                width,
+                "the wash fills {width}"
+            );
+        }
     }
 
     /// The status column color-codes the rows (the operator's
@@ -1317,11 +1316,12 @@ mod tests {
     }
 
     /// The pane runs all the way to the bottom of the screen (the
-    /// operator's 2026-09-24 directive): the shortcuts hint is the pane's
-    /// last row, and nothing — no blank, no rule — rides below it. A
-    /// tall catalog fills the whole budget (the truncate keeps exactly
-    /// the viewport rows), and a short catalog still ends on the hint
-    /// (the dock's frame pads the rows above).
+    /// operator's 2026-09-24 directive): no rule rides below the
+    /// shortcuts hint — exactly one blank line of spacing rides under
+    /// it, the same treatment as the `/model` view. A tall catalog fills
+    /// the whole budget (the truncate keeps exactly the viewport rows),
+    /// and a short catalog still ends on the blank (the dock's frame
+    /// pads the rows above).
     #[test]
     fn the_pane_runs_to_the_bottom() {
         let rows: Vec<BashActivity> = (0..20)
@@ -1338,42 +1338,43 @@ mod tests {
         for viewport in [10usize, 16, 24] {
             let view = BashView::new(rows.clone(), viewport);
             let frame = view.render(&theme(), 70, &kb());
-            // The pane never renders past its budget; its last row is the
-            // hint (the dock anchors the pane's rows on the screen's
-            // bottom — the rows above are the transcript, never a gap
-            // below the shortcuts).
+            // The pane never renders past its budget; the hint is its
+            // last content row with exactly one blank below it (the dock
+            // anchors the pane's rows on the screen's bottom).
             assert!(frame.len() <= viewport, "never past the budget");
             let text = frame_text(&frame);
-            let last_row = text.last().expect("the hint row");
+            let last_row = text.last().expect("the trailing blank row");
             assert!(
-                last_row.contains("close"),
-                "the shortcuts hint rides the pane's last row: {last_row}"
-            );
-            assert!(
-                !last_row.trim().is_empty() && !last_row.contains("\u{2500}"),
-                "no rule or blank below the shortcuts: {last_row}"
+                last_row.trim().is_empty() && !last_row.contains("\u{2500}"),
+                "one blank line rides below the shortcuts, never a rule: {last_row}"
             );
             let second_to_last = &text[text.len() - 2];
             assert!(
-                second_to_last.trim().is_empty(),
-                "the one blank above the hint stays: {second_to_last}"
+                second_to_last.contains("close"),
+                "the shortcuts hint rides just above the blank: {second_to_last}"
+            );
+            let third_to_last = &text[text.len() - 3];
+            assert!(
+                third_to_last.trim().is_empty(),
+                "the one blank above the hint stays: {third_to_last}"
             );
         }
-        // A short catalog: the pane ends on the hint, never on a rule.
+        // A short catalog: the pane ends on the blank below the hint,
+        // never on a rule.
         let view = BashView::new(activities(), 24);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
-        let last_row = text.last().expect("the hint row");
-        assert!(last_row.contains("close"));
+        let last_row = text.last().expect("the trailing blank row");
+        assert!(last_row.trim().is_empty());
         assert!(!last_row.contains("\u{2500}"));
         // The detail pane too.
         let mut view = BashView::new(activities(), 16);
         view.handle_key("enter", &kb());
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
-        let last_row = text.last().expect("the detail hint row");
-        assert!(last_row.contains("close"));
-        assert!(!last_row.contains("\u{2500}"));
+        let last_row = text.last().expect("the trailing blank row");
+        assert!(last_row.trim().is_empty());
+        assert!(text[text.len() - 2].contains("close"));
     }
 
     /// Enter on a list row opens the detail drill-in and asks the host
@@ -1649,7 +1650,7 @@ mod tests {
         frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(
-            text.iter().any(|row| row.contains("line-25")),
+            text.iter().any(|row| row.contains("line-26")),
             "one up reveals the next older line: {text:?}"
         );
         assert!(

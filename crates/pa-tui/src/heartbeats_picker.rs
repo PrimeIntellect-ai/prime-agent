@@ -4,16 +4,18 @@
 //! status) instead of text blobs, and Enter on a row opens the detail
 //! drill-in — the full prompt text, which agent created it, and the
 //! management actions (pause/resume, stop) as up/down-selectable rows in
-//! the same control pattern as the `/mcp` view. The selected row washes a
-//! little past its text (the onboarding choice panel's treatment), never
-//! the whole terminal width. Rendered inline-picker style (the `/model`
-//! geometry — a plain-text title line with the status counts, one bottom
-//! hint line).
+//! the same control pattern as the `/mcp` view. The table fills the full
+//! width of the TUI (the operator's 2026-09-24 ruling): the selected
+//! row's wash spans the terminal width while the columns keep their
+//! content-hug geometry. Rendered inline-picker style (the `/model`
+//! geometry — a plain-text title line with the status counts, the
+//! shortcuts at the bottom with no rule below them, one blank line of
+//! spacing under the hint).
 
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, status_dot};
+use crate::menu_panel::{fill_row, hug_row, menu_list_layout, plain_cell, status_dot};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -23,13 +25,18 @@ use crate::{Line, Span};
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, blank, hint, rule — the conditional
-/// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
-/// never counted twice).
+/// title, blank, column header, blank, hint, blank — the shortcuts ride
+/// the pane's last row with no rule below them, one blank line of
+/// spacing under them instead (the operator's 2026-09-24 /model ruling);
+/// the conditional scroll-indicator row rides `menu_list_layout`'s
+/// scroll reservation, never counted twice).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The detail pane's labeled-pair row budget.
-const MAX_DETAIL_ROWS: usize = 6;
+/// The detail pane's labeled-pair row budget: the seven base pairs
+/// (created, session, delivery, schedule, next run, runs, last error)
+/// all fit — the schedule fact (item 3) must never displace the error
+/// row to the clipped tail.
+const MAX_DETAIL_ROWS: usize = 7;
 
 /// The table's column width caps: the schedule expression and the label
 /// shrink to their content, the timestamp column is the fixed
@@ -276,6 +283,7 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
         ("created", source_label(entry).to_string()),
         ("session", session_label(entry)),
         ("delivery", delivery_label(entry).to_string()),
+        ("schedule", human_schedule_pair(entry)),
         (
             "next run",
             entry
@@ -293,6 +301,19 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
         }
     }
     pairs
+}
+
+/// The schedule fact for the drill-in's pairs: the human-readable form,
+/// with the raw cron riding beside it whenever the interpretation covers
+/// it (the storage format stays reachable, "every 2 minutes (*/2 * * * *)").
+fn human_schedule_pair(entry: &HeartbeatEntry) -> String {
+    let expression = entry.job.schedule_expression.trim();
+    let human = human_schedule(expression);
+    if human != expression {
+        format!("{human} ({expression})")
+    } else {
+        human
+    }
 }
 
 /// Render a `(label, value)` detail block: the dim label column padded
@@ -763,14 +784,15 @@ impl HeartbeatsPicker {
             .map_or_else(|| default_heartbeat_name(entry).to_string(), str::to_string);
         let subtitle = format!(
             "{} \u{b7} {}",
-            entry.job.schedule_expression, entry.job.status
+            human_schedule(&entry.job.schedule_expression),
+            entry.job.status
         );
         let mut lines = pane_header_lines(theme, width, &name, &[], Some(&subtitle));
         let actions = Self::available_actions(entry);
         let pairs = detail_pairs(entry);
         // The pane's fixed rows: the header block (rule, title, subtitle,
         // blank), the blank before the actions, the action rows, the
-        // footer (blank, hint, rule), and the error rows when present.
+        // footer (blank, hint, blank), and the error rows when present.
         let error_rows = match (self.fetch_error.is_some(), self.error.is_some()) {
             (true, true) => 4,
             (some, _) if some => 2,
@@ -798,8 +820,13 @@ impl HeartbeatsPicker {
         let mut prompt_budget = self
             .viewport_rows
             .saturating_sub(fixed + 1 + pairs_rows + 2);
-        if prompt_budget == 0 && pairs_rows > 0 {
-            pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 2));
+        // The prompt is the drill-in's content: when the default math
+        // starves it, the pairs shrink first (they summarize — the
+        // documented order) until at least one prompt row renders. A
+        // heartbeat without prompt text never trades pairs away.
+        let has_prompt = !entry.job.prompt.trim().is_empty();
+        if prompt_budget == 0 && pairs_rows > 0 && has_prompt {
+            pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 4));
             prompt_budget = self
                 .viewport_rows
                 .saturating_sub(fixed + 1 + pairs_rows + 2);
@@ -884,7 +911,9 @@ impl HeartbeatsPicker {
     }
 
     /// The pane footer: the fetch and action errors, a blank, the hint
-    /// line, the bottom border.
+    /// line, and one blank line below the shortcuts (the operator's
+    /// 2026-09-24 ruling: no rule rides under the hint — the /model
+    /// geometry, with the same single blank of spacing below).
     fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(fetch_error) = &self.fetch_error {
@@ -904,11 +933,117 @@ impl HeartbeatsPicker {
         }
         lines.push(Vec::new());
         lines.push(hint_line(theme, width, hint));
-        lines.push(vec![
-            theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))
-        ]);
+        lines.push(Vec::new());
         lines
     }
+}
+
+/// The interpreted form of one cron field: `*`, `*/n`, a single value,
+/// or anything else the small interpreter below does not cover (lists,
+/// ranges — those keep the raw expression).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CronField {
+    Any,
+    Step(u32),
+    Value(u32),
+    Other,
+}
+
+fn parse_cron_field(field: &str) -> CronField {
+    if field == "*" {
+        CronField::Any
+    } else if let Some(step) = field.strip_prefix("*/") {
+        step.parse::<u32>()
+            .map_or(CronField::Other, CronField::Step)
+    } else {
+        field
+            .parse::<u32>()
+            .map_or(CronField::Other, CronField::Value)
+    }
+}
+
+/// The day name for one cron day-of-week value (`0`/`7` Sunday through
+/// `6` Saturday).
+fn cron_day_name(value: u32) -> Option<&'static str> {
+    Some(match value {
+        0 | 7 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => return None,
+    })
+}
+
+/// The human-readable form of one schedule expression for the interval
+/// column (the operator's 2026-09-24 ruling: "cron format is not human
+/// readable"). The storage format stays the raw cron — this is
+/// render-side only, and the drill-in keeps the raw expression beside
+/// the interpretation. The natural-language schedules (`every 10m`,
+/// `in 2h`, `at <date>`) pass through unchanged, the five-field cron
+/// forms interpret into their plain-English meaning (`*/2 * * * *` is
+/// "every 2 minutes", `0 9 * * 1` is "Mondays 09:00", the stored
+/// `@hourly`/`@daily` aliases expand at creation into the five-field
+/// forms they mean), and anything the interpreter cannot cover falls
+/// back to the raw expression.
+pub fn human_schedule(expression: &str) -> String {
+    let trimmed = expression.trim();
+    match trimmed {
+        "@hourly" => return "hourly".to_string(),
+        "@daily" | "@midnight" => return "daily".to_string(),
+        "@weekly" => return "weekly".to_string(),
+        "@monthly" => return "monthly".to_string(),
+        "@yearly" | "@annually" => return "yearly".to_string(),
+        _ => {}
+    }
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    if fields.len() != 5 {
+        // The passthrough stays the expression itself (a natural-language
+        // schedule already reads), trimmed: a whitespace-padded wire value
+        // must never render its padding into the column (or twice, via
+        // the pair's raw-append fallback).
+        return trimmed.to_string();
+    }
+    let minute = parse_cron_field(fields[0]);
+    let hour = parse_cron_field(fields[1]);
+    let dom = parse_cron_field(fields[2]);
+    let month = parse_cron_field(fields[3]);
+    let dow = parse_cron_field(fields[4]);
+    if month != CronField::Any {
+        return trimmed.to_string();
+    }
+    let at = |h: u32, m: u32| format!("{h:02}:{m:02}");
+    if dom == CronField::Any && dow == CronField::Any {
+        return match (hour, minute) {
+            (CronField::Any, CronField::Any) => "every minute".to_string(),
+            (CronField::Any, CronField::Step(1)) => "every minute".to_string(),
+            (CronField::Any, CronField::Step(n)) => format!("every {n} minutes"),
+            (CronField::Step(1), CronField::Value(0)) => "hourly".to_string(),
+            (CronField::Step(n), CronField::Value(0)) => format!("every {n} hours"),
+            (CronField::Any, CronField::Value(0)) => "hourly".to_string(),
+            (CronField::Any, CronField::Value(m)) => format!("hourly at :{m:02}"),
+            (CronField::Value(h), CronField::Value(m)) => format!("daily {}", at(h, m)),
+            _ => trimmed.to_string(),
+        };
+    }
+    if dom == CronField::Any {
+        if let (CronField::Value(d), CronField::Value(h), CronField::Value(m)) = (dow, hour, minute)
+        {
+            if let Some(day) = cron_day_name(d) {
+                return format!("{day}s {}", at(h, m));
+            }
+        }
+        return trimmed.to_string();
+    }
+    if dow == CronField::Any {
+        if let (CronField::Value(1), CronField::Value(h), CronField::Value(m)) = (dom, hour, minute)
+        {
+            return format!("monthly {}", at(h, m));
+        }
+    }
+    trimmed.to_string()
 }
 
 /// The table's column geometry: the interval, label, next-run, and status
@@ -918,15 +1053,13 @@ impl HeartbeatsPicker {
 struct Columns {
     interval: usize,
     label: usize,
-    next_run: usize,
-    status: usize,
 }
 
 impl Columns {
     fn new(width: usize, entries: &[HeartbeatEntry]) -> Self {
         let interval_content = entries
             .iter()
-            .map(|entry| str_width(&entry.job.schedule_expression))
+            .map(|entry| str_width(&human_schedule(&entry.job.schedule_expression)))
             .chain([str_width("Interval")])
             .max()
             .unwrap_or(0)
@@ -954,14 +1087,7 @@ impl Columns {
         Self {
             interval: interval_content.min(width.saturating_sub(fixed + label)),
             label,
-            next_run: 16,
-            status,
         }
-    }
-
-    /// The full span the row content covers (the hug's content width).
-    fn content_width(&self) -> usize {
-        2 + self.interval + 2 + self.label + 2 + self.next_run + 2 + self.status
     }
 
     /// The dim column header row.
@@ -978,9 +1104,11 @@ impl Columns {
         truncate_line(&row, width, "")
     }
 
-    /// One columned row: the schedule expression, the label, the next
-    /// run, and the status word in its status color. The selected row's
-    /// wash hugs the columns plus a little trailing pad.
+    /// One columned row: the schedule expression (in its human-readable
+    /// form), the label, the next run, and the status word in its status
+    /// color. The selected row's wash spans the full frame width (the
+    /// operator's "table fills the width" ruling) while the columns keep
+    /// their content-hug geometry.
     fn entry_row(
         &self,
         theme: &Theme,
@@ -997,7 +1125,10 @@ impl Columns {
         row.push(Span::raw(" "));
         row.push(theme.fg_span(
             ThemeColor::Muted,
-            plain_cell(&entry.job.schedule_expression, self.interval),
+            plain_cell(
+                &human_schedule(&entry.job.schedule_expression),
+                self.interval,
+            ),
         ));
         row.push(Span::raw("  "));
         if selected {
@@ -1025,7 +1156,7 @@ impl Columns {
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&entry.job.status);
         row.push(theme.fg_span(status_color, format!("{dot} {}", entry.job.status)));
-        hug_row(theme, row, self.content_width(), selected, width)
+        fill_row(theme, row, selected, width)
     }
 }
 
@@ -1277,11 +1408,12 @@ mod tests {
         }
     }
 
-    /// The selected row's wash hugs the columns plus a little trailing
-    /// pad (the onboarding choice treatment), never the whole terminal
-    /// width.
+    /// The table fills the full width of the TUI (the operator's
+    /// 2026-09-24 ruling): the selected row's wash spans the whole
+    /// terminal width, while the columns keep their content-hug geometry
+    /// — the column text never stretches to the edge.
     #[test]
-    fn the_selection_hug_stops_a_little_past_the_text() {
+    fn the_table_fills_the_full_width() {
         let picker = HeartbeatsPicker::new(entries(), None, None, 24);
         let frame = picker.render(&theme(), 90, &kb());
         let selected = frame
@@ -1292,15 +1424,12 @@ mod tests {
             })
             .expect("the selected row carries the wash");
         let used = crate::width::spans_width(selected);
-        assert!(
-            used < 90,
-            "the wash never spans the whole terminal width: {used}"
+        assert_eq!(
+            used, 90,
+            "the selected row's wash spans the whole terminal width: {used}"
         );
-        assert!(
-            used >= crate::menu_panel::MIN_HUG_WIDTH,
-            "the wash floors at the onboarding hug width: {used}"
-        );
-        // The unselected row carries no wash at all.
+        // The columns still hug their content: the label text stops
+        // well short of the edge, the wash fills the rest.
         let plain = frame
             .iter()
             .find(|line| {
@@ -1308,7 +1437,98 @@ mod tests {
                     .any(|span| span.content.contains("tick agent-1"))
             })
             .expect("the other row");
+        assert!(crate::width::spans_width(plain) < 90);
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    /// The shortcuts ride the pane's last rows with no rule below them
+    /// (the operator's 2026-09-24 /model ruling): one blank line of
+    /// spacing rides under the hint, never a `─` divider.
+    #[test]
+    fn the_footer_is_a_blank_below_the_shortcuts_never_a_rule() {
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let hint_index = text
+            .iter()
+            .position(|row| row.contains("Esc close"))
+            .expect("the hint row");
+        let last = text.last().expect("the pane's last row");
+        assert!(
+            last.trim().is_empty(),
+            "one blank line rides below the shortcuts: {last:?} ({text:?})"
+        );
+        assert!(!last.contains("\u{2500}"), "no rule below the hint");
+        // The rows below the hint are exactly one blank (the detail
+        // pane's footer shares the shape).
+        assert_eq!(
+            text.len() - hint_index - 1,
+            1,
+            "exactly one blank below the hint: {text:?}"
+        );
+        // The pane never renders past its viewport budget.
+        assert!(frame.len() <= 24);
+        let mut drill = HeartbeatsPicker::new(entries(), None, None, 20);
+        drill.handle_key("enter", &kb());
+        let frame = drill.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let last = text.last().expect("the detail pane's last row");
+        assert!(
+            last.trim().is_empty(),
+            "the detail footer ends on the same blank: {last:?}"
+        );
+    }
+
+    /// The interval column renders the human-readable form (the
+    /// operator's 2026-09-24 ruling: "cron format is not human
+    /// readable"): the interpreted expression rides the column, and the
+    /// drill-in's pairs keep the raw cron reachable beside it.
+    #[test]
+    fn the_interval_column_is_human_readable() {
+        assert_eq!(human_schedule("*/2 * * * *"), "every 2 minutes");
+        assert_eq!(human_schedule("0 9 * * 1"), "Mondays 09:00");
+        assert_eq!(human_schedule("@hourly"), "hourly");
+        assert_eq!(human_schedule("0 * * * *"), "hourly");
+        assert_eq!(human_schedule("0 0 * * *"), "daily 00:00");
+        assert_eq!(human_schedule("0 */3 * * *"), "every 3 hours");
+        assert_eq!(human_schedule("*/1 * * * *"), "every minute");
+        assert_eq!(human_schedule("30 * * * *"), "hourly at :30");
+        assert_eq!(human_schedule("0 0 1 * *"), "monthly 00:00");
+        assert_eq!(human_schedule("*/2 9-17 * * 1-5"), "*/2 9-17 * * 1-5");
+        assert_eq!(human_schedule("every 10m"), "every 10m");
+        assert_eq!(human_schedule("0 9 * * 8"), "0 9 * * 8");
+        // The bot-round pins: star-only fields read as every-minute, and
+        // whitespace-padded passthroughs trim (never render twice).
+        assert_eq!(human_schedule("* * * * *"), "every minute");
+        assert_eq!(human_schedule(" every 10m "), "every 10m");
+
+        // The column renders the interpreted form; the pairs keep the
+        // raw cron beside it.
+        let mut catalog = entries();
+        catalog[1].job.schedule_expression = "*/2 * * * *".to_string();
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("every 2 minutes")),
+            "the interpreted interval rides the column: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("*/2 * * * *")),
+            "the raw cron leaves the column: {text:?}"
+        );
+        picker.handle_key("down", &kb());
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let schedule_row = text
+            .iter()
+            .find(|row| row.starts_with("  schedule"))
+            .expect("the schedule pair");
+        assert!(
+            schedule_row.contains("every 2 minutes (*/2 * * * *)"),
+            "the pairs keep the raw cron beside the interpretation: {schedule_row}"
+        );
     }
 
     /// Enter on a list row opens the detail drill-in; Enter on an action
@@ -1543,10 +1763,12 @@ mod tests {
             .map(|n| format!("word-{n:02}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
+        // The schedule pair (item 3) rides the block too, so the prompt
+        // needs one more row than the pre-batch fixture budgeted.
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 23);
         picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
+        assert!(frame.len() <= 23, "the drill-in fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(
             text.iter().any(|row| row.trim() == "…"),
@@ -1588,6 +1810,61 @@ mod tests {
         assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
     }
 
+    /// The pairs shrink before the prompt starves (the bot-round fix and
+    /// the documented design order): at a viewport that cannot hold both
+    /// the six base pairs and a prompt row, the pairs give rows back so
+    /// the drill-in's primary content always renders.
+    #[test]
+    fn the_pairs_shrink_before_the_prompt_starves() {
+        let mut catalog = entries();
+        catalog[0].job.status = "active".to_string();
+        catalog[0].job.prompt = (1..=20)
+            .map(|n| format!("word-{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 19);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join(" ");
+        assert!(
+            joined.contains("word-01"),
+            "the prompt's first line renders: {joined}"
+        );
+        assert!(
+            joined.contains("Prompt"),
+            "the prompt block label stays: {joined}"
+        );
+        assert!(frame.len() <= 19, "the pane fits: {}", frame.len());
+    }
+
+    /// The schedule pair never displaces the error row (the bot-round
+    /// fix): a heartbeat carrying both a schedule fact and a last error
+    /// renders every pair — MAX_DETAIL_ROWS covers the seven base pairs.
+    #[test]
+    fn the_schedule_pair_never_hides_the_error_row() {
+        let mut catalog = entries();
+        catalog[0].job.last_error = Some("provider 429".to_string());
+        catalog[0].job.schedule_expression = "*/2 * * * *".to_string();
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 40);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("every 2 minutes (*/2 * * * *)"),
+            "the schedule fact rides its pair: {joined}"
+        );
+        assert!(
+            joined.contains("last error"),
+            "the error row stays in the block: {joined}"
+        );
+        assert!(
+            joined.contains("provider 429"),
+            "the error's value renders: {joined}"
+        );
+    }
+
     /// The prompt block never degrades to a lone marker: a budget of one
     /// renders the first prompt line instead.
     #[test]
@@ -1597,10 +1874,12 @@ mod tests {
             .map(|n| format!("word-{n:02}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut picker = HeartbeatsPicker::new(catalog, None, None, 19);
+        // The schedule pair (item 3) rides the block too, so the
+        // one-row prompt budget needs one more viewport row.
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
         picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 19, "the drill-in fits: {}", frame.len());
+        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(text.join(" ").contains("word-01"), "a prompt line renders");
         assert!(

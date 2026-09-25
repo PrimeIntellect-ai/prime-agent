@@ -1,0 +1,107 @@
+# CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
+# plus PR gating, in one workflow (the shape of the TS product's ci.yml).
+#
+# Promoted from ci/workflows/ci.yml (see ci/workflows/README.md; promotion
+# needs a push credential with the `workflow` scope). Two triggers, one gate
+# set mirroring `make check` exactly (fmt --all --check, clippy --workspace
+# --all-targets -- -D warnings, cargo test --workspace) on the pinned
+# toolchain (1.98.1) and runner image the continuous/release builds use:
+#
+#   push to main/rust — every merge is a push. continuous.yml proves the
+#   release binaries link; THIS workflow proves the tip's test/bench/example
+#   targets compile (`cargo check --workspace --all-targets`) and the test
+#   suites pass (`cargo test --workspace`). Until now no workflow ever
+#   compiled tests on the tip or ran any test: on 2026-09-23 alone that gap
+#   let #2620's epoch hunk-skip and #2632's missing IsTerminal import land as
+#   red tip builds, #2632's missed initial_images fixture and #2627's
+#   fork_from test-target errors land as latent compile breaks, and #2635's
+#   login-recovery test land red — none noticed by CI.
+#
+#   pull_request against main/rust — the same gates on the merge candidate,
+#   so the merge bar stops relying solely on review bots.
+#
+# Strictly read-only: contents: read, persist-credentials: false, no secrets.
+# The windows-cross/windows/deny jobs remain staged at ci/workflows/ci.yml
+# until windows-readiness lands and a deny policy decision is made (see
+# ci/workflows/README.md).
+#
+name: ci
+
+on:
+  push:
+    branches: [main, rust]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, rust]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # PRs: a newer push supersedes the stale gates. Pushes: the newest tip
+  # supersedes the older run — under this fleet's merge cadence a queued
+  # (non-canceling) push run would lag hours behind and bill stale tips.
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Draft PRs do not gate (no billing on work-in-progress pushes); the
+    # ready_for_review trigger runs the gates once a draft is marked ready.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: check + clippy + test (workspace)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Red gates cache too: an iterating PR keeps its dependency set
+          # warm instead of paying a cold rebuild per fix push.
+          cache-on-failure: true
+      - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # --locked everywhere: the lockfile is committed, so a PR that changes
+      # Cargo.toml without its lockfile in the same push fails here instead
+      # of in a teammate's local build.
+      # --all-targets compiles the test/bench/example targets the release
+      # builds never touch (#2632's missed `initial_images` fixture was
+      # exactly this class: a latent test-target compile break no workflow
+      # could see).
+      - name: Check (workspace, all targets, locked)
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test (workspace, locked)
+        run: cargo test --workspace --locked
+
+  # windows-cross runs here once validated green at the tip (the staged
+  # ci/workflows/ci.yml carries it until then); the real windows-latest test
+  # job and cargo-deny stay staged as well — see ci/workflows/README.md.

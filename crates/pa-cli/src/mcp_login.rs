@@ -1,11 +1,13 @@
 //! The composition root's MCP auth flows behind the TUI's
 //! `/mcp login <name>` and `/mcp logout <name>`: resolve the server
-//! through the settings + builtin catalog, run the pa-core OAuth login on
-//! the terminal (browser plus paste fallback), and persist the
-//! endpoint-bound credential in the shared auth store. The TS interactive
-//! client runs the same flow in its own process (auth-flows.ts
-//! `runMcpLogin`) and reloads the session; this build surfaces the
-/// activation state instead (the skill gating resolves at session build).
+//! through the settings + builtin catalog, run the pa-core OAuth login
+//! against the inline auth panel (the authorization URL block and the
+//! paste fallbacks render in the TUI; the browser launch rides the
+//! request), and persist the endpoint-bound credential in the shared auth
+//! store. The TS interactive client runs the same flow in its own process
+//! (auth-flows.ts `runMcpLogin`) and reloads the session; this build
+//! surfaces the activation state instead (the skill gating resolves at
+//! session build).
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -15,6 +17,7 @@ use pa_core::auth::AuthStorage;
 use pa_core::mcp::{
     McpLoginUi, McpManager, McpManagerOptions, McpServerConfig, OAuthHttp, ReqwestOAuthHttp,
 };
+use pa_tui::auth_panel::PasteStyle;
 use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 
 /// The CLI's live MCP manager: the shared auth store, settings-declared
@@ -91,7 +94,8 @@ impl TerminalMcpAuth {
     }
 
     /// Run one login against an injectable UI/transport (the product uses
-    /// the terminal UI and the reqwest transport; tests script the flow).
+    /// the inline auth panel and the reqwest transport; tests script the
+    /// flow).
     async fn login_with(
         &self,
         server: &str,
@@ -109,14 +113,27 @@ impl TerminalMcpAuth {
         ))
     }
 
-    async fn login_inner(&self, server: &str) -> Result<String> {
-        self.login_with(server, &TerminalLoginUi, &ReqwestOAuthHttp::new())
-            .await
+    /// The login against the inline auth panel (TS `LoginDialogComponent`'s
+    /// surface): progress lines, the authorization URL block, and the
+    /// paste fallbacks render in the TUI; nothing touches the terminal.
+    async fn login_inner(
+        &self,
+        server: &str,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> Result<String> {
+        let ui = PanelMcpLoginUi { panel };
+        self.login_with(server, &ui, &ReqwestOAuthHttp::new()).await
     }
 
-    /// The inline paste panel's flow (TS: prompt for the ONE credential a
-    /// pasteable service collects, store it bound to the endpoint, verify).
-    async fn paste_inner(&self, server: &str) -> Result<String> {
+    /// The inline paste panel's flow (TS `McpTokenPastePanelComponent`):
+    /// prompt for the ONE credential a pasteable service collects (the
+    /// masked field never renders the secret), store it bound to the
+    /// endpoint, verify.
+    async fn paste_inner(
+        &self,
+        server: &str,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> Result<String> {
         let manager = self.manager();
         let service = manager
             .service_descriptor(server)
@@ -125,8 +142,11 @@ impl TerminalMcpAuth {
             anyhow!("{server} does not collect a single credential; it is not pasteable.")
         })?;
         let prompt = pa_core::mcp::mcp_credential_field_prompt_label(service, &pasted.field);
-        println!("Paste the {prompt} for {server}:");
-        let token = read_terminal_line()
+        let token = panel
+            .paste_prompt(
+                &format!("Paste the {prompt} for {server}:"),
+                PasteStyle::Masked,
+            )
             .await
             .filter(|line| !line.is_empty())
             .ok_or_else(|| anyhow!("Paste cancelled"))?;
@@ -168,14 +188,14 @@ impl TerminalMcpAuth {
 }
 
 impl ClientAuthCommands for TerminalMcpAuth {
-    fn login(&self, server: &str) -> AuthFuture {
+    fn login(&self, server: &str, panel: pa_tui::auth_panel::AuthPanelHandle) -> AuthFuture {
         let (auth, server) = (self.clone(), server.to_string());
-        Box::pin(async move { auth.login_inner(&server).await })
+        Box::pin(async move { auth.login_inner(&server, panel).await })
     }
 
-    fn paste_token(&self, server: &str) -> AuthFuture {
+    fn paste_token(&self, server: &str, panel: pa_tui::auth_panel::AuthPanelHandle) -> AuthFuture {
         let (auth, server) = (self.clone(), server.to_string());
-        Box::pin(async move { auth.paste_inner(&server).await })
+        Box::pin(async move { auth.paste_inner(&server, panel).await })
     }
 
     fn logout(&self, server: &str) -> AuthFuture {
@@ -184,38 +204,22 @@ impl ClientAuthCommands for TerminalMcpAuth {
     }
 }
 
-/// One line read from the terminal. `None` on EOF (the input surface went
-/// away, so the waiting side treats it as a cancel). The read runs on the
-/// blocking pool: raw mode is suspended for the login, and a cancel leaves
-/// the waiting thread parked until a line arrives (the TS dialog's input
-/// races the same way).
-pub(crate) async fn read_terminal_line() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line.trim().to_string()),
-        }
-    })
-    .await
-    .ok()
-    .flatten()
+/// The login's inline-panel surface (TS the OAuth login dialog renders in
+/// the TUI): progress lines, the authorization URL block (the browser
+/// launch rides the request; the panel only renders), and the paste
+/// fallbacks drive the auth panel through the request channel; the flow
+/// never touches the terminal.
+struct PanelMcpLoginUi {
+    panel: pa_tui::auth_panel::AuthPanelHandle,
 }
 
-/// The terminal login surface while the TUI is suspended: progress lines,
-/// the authorization URL plus a browser launch, and the paste fallback
-/// for a browser on another machine (the TS login dialog's surface).
-struct TerminalLoginUi;
-
-impl McpLoginUi for TerminalLoginUi {
+impl McpLoginUi for PanelMcpLoginUi {
     fn on_progress(&self, message: &str) {
-        println!("{message}");
+        self.panel.progress(message);
     }
 
     fn on_auth(&self, url: &str, instructions: &str) {
-        println!("{instructions}");
-        println!("{url}");
-        println!();
+        self.panel.auth_url(url, Some(instructions));
         pa_core::platform::browser::open_in_browser(url);
     }
 
@@ -224,11 +228,11 @@ impl McpLoginUi for TerminalLoginUi {
         message: &str,
         placeholder: &str,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>> {
-        let message = message.to_string();
-        let placeholder = placeholder.to_string();
+        let panel = self.panel.clone();
+        let message = format!("{message} (e.g. {placeholder})");
         Box::pin(async move {
-            println!("{message} ({placeholder})");
-            read_terminal_line()
+            panel
+                .paste_prompt(&message, PasteStyle::Visible)
                 .await
                 .filter(|line| !line.is_empty())
                 .ok_or_else(|| anyhow!("Login cancelled"))
@@ -238,9 +242,14 @@ impl McpLoginUi for TerminalLoginUi {
     fn on_manual_code_input(
         &self,
     ) -> Option<Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>> {
+        let panel = self.panel.clone();
         Some(Box::pin(async move {
-            println!("Paste the redirect URL below, or complete login in the browser:");
-            read_terminal_line().await
+            panel
+                .paste_prompt(
+                    "Paste the redirect URL below, or complete login in the browser:",
+                    PasteStyle::Visible,
+                )
+                .await
         }))
     }
 }

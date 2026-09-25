@@ -142,13 +142,20 @@ fn sandbox() -> Sandbox {
 
 impl Sandbox {
     /// The packaged binary with a hermetic environment: sandboxed HOME and
-    /// agent dir, no ambient `PI_PACKAGE_DIR`, no ambient API keys.
+    /// agent dir, no ambient `PI_PACKAGE_DIR`, no ambient kernel-override
+    /// env (`PRIME_AGENT_KERNEL_PYTHON` / `PRIME_AGENT_KERNEL_VENV` — the
+    /// gate kernel-env recipe exports them for the live-kernel suites, and
+    /// they must not steer the packaged layout's own resolution), no
+    /// ambient API keys. A test that wants an override sets it after this
+    /// call: a later `Command::env` wins over the scrub.
     fn command(&self, staged: &Path) -> Command {
         let mut command = Command::new(staged.join("prime-agent"));
         command
             .env("HOME", self.home.path())
             .env("PRIME_AGENT_CODING_AGENT_DIR", &self.agent_dir)
             .env_remove("PI_PACKAGE_DIR")
+            .env_remove("PRIME_AGENT_KERNEL_PYTHON")
+            .env_remove("PRIME_AGENT_KERNEL_VENV")
             .env_remove("PRIME_AGENT_SESSION_DIR")
             .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
             .env_remove("PRIME_API_KEY")
@@ -345,6 +352,140 @@ fn invalid_kernel_python_override_reports_ts_error() {
     assert!(
         stderr.contains("PRIME_AGENT_KERNEL_PYTHON points to a Python missing"),
         "TS override error missing: {stderr}"
+    );
+}
+
+/// The staged manifest version the hostile-env regression pins (the parent
+/// writes it; the child asserts `--version` reports it, so the decoy
+/// `PI_PACKAGE_DIR` manifest can never win).
+const HOSTILE_STAGED_VERSION: &str = "9.8.7-hostile";
+
+/// Re-exec marker: the child mode of the hostile-host-env regression test
+/// below. The parent sets it (plus the hostile host env) on a re-exec of
+/// this test binary; the child then exercises the staged layout through
+/// the normal hermetic sandbox harness.
+const HOSTILE_CHILD_STAGE: &str = "PA_PACKAGED_E2E_HOSTILE_STAGE";
+
+/// The child half of the hostile-host-env regression: the whole test
+/// process carries the hostile env — a `PRIME_AGENT_KERNEL_PYTHON` that
+/// would satisfy the bootstrap if it leaked, a `PI_PACKAGE_DIR` package
+/// dir with its own manifest, a decoy `PRIME_AGENT_KERNEL_VENV` — and the
+/// packaged layout must still behave exactly as on a clean host.
+fn hostile_child_assertions(staged: &Path) {
+    let _guard = serial_lock();
+    let box_ = sandbox();
+
+    // The staged version manifest wins over the hostile PI_PACKAGE_DIR
+    // decoy: --version reads the exe-adjacent package.json.
+    let output = box_
+        .command(staged)
+        .arg("--version")
+        .output()
+        .expect("run packaged binary");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        HOSTILE_STAGED_VERSION,
+        "the hostile PI_PACKAGE_DIR must not win: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The missing-sidecar bootstrap failure stays the actionable one:
+    // exit 1 with the hint naming the STAGED dir — never the hostile
+    // kernel-python override error and never the decoy package dir.
+    let output = box_
+        .command(staged)
+        .arg("--prime-agent-bootstrap")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run packaged binary");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to set up the Python kernel runtime"),
+        "TS bootstrap failure text missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("prime-agent-runtime directory was not found"),
+        "missing-sidecar hint missing: {stderr}"
+    );
+    assert!(
+        stderr.contains(staged.to_string_lossy().as_ref()),
+        "the hint must name the staged dir: {stderr}"
+    );
+    assert!(
+        !stderr.contains("PRIME_AGENT_KERNEL_PYTHON points to"),
+        "the hostile kernel-python override leaked into the packaged layout: {stderr}"
+    );
+    if let Some(package_decoy) = std::env::var_os("PI_PACKAGE_DIR") {
+        assert!(
+            !stderr.contains(Path::new(&package_decoy).to_string_lossy().as_ref()),
+            "the hostile PI_PACKAGE_DIR leaked into the packaged layout: {stderr}"
+        );
+    }
+}
+
+/// Regression for the recurring battery finding: a gate/battery host that
+/// exports the kernel-env recipe (`PRIME_AGENT_KERNEL_PYTHON` for the
+/// live-kernel suites, `PI_PACKAGE_DIR` for the sidecar) leaks it into the
+/// packaged layout's test env, and `missing_sidecar_reports_actionable_bootstrap_error`
+/// flips (the bootstrap honors the override and exits 0 instead of 1).
+/// The leak vector is env inheritance into the test process itself, so
+/// this test re-execs this test binary with a hostile host env set and
+/// asserts, in the child, that the staged layout behaves exactly as on a
+/// clean host.
+#[test]
+fn packaged_layout_stays_hermetic_under_hostile_host_env() {
+    if let Some(stage) = std::env::var_os(HOSTILE_CHILD_STAGE) {
+        hostile_child_assertions(&PathBuf::from(stage));
+        return;
+    }
+    let _guard = serial_lock();
+    let dir = tempfile::TempDir::new().expect("stage dir");
+    let staged = dir.path();
+    stage_packaged_layout(staged, false);
+    std::fs::write(
+        staged.join("package.json"),
+        format!(r#"{{"name":"prime-agent","version":"{HOSTILE_STAGED_VERSION}"}}"#),
+    )
+    .expect("version manifest");
+
+    // Decoys that would win if the hostile env leaked into the packaged
+    // binary: a package dir with its own manifest and a decoy kernel venv.
+    let decoys = tempfile::TempDir::new().expect("decoys dir");
+    let package_decoy = decoys.path().join("package");
+    std::fs::create_dir_all(&package_decoy).expect("package decoy dir");
+    std::fs::write(
+        package_decoy.join("package.json"),
+        r#"{"name":"prime-agent","version":"0.0.0-decoy"}"#,
+    )
+    .expect("decoy manifest");
+    let venv_decoy = decoys.path().join("kernel-venv");
+    std::fs::create_dir_all(venv_decoy.join("bin")).expect("venv decoy dir");
+    std::fs::write(venv_decoy.join("bin").join("python"), "#!/bin/sh\nexit 0\n")
+        .expect("decoy python");
+
+    // The most hostile PRIME_AGENT_KERNEL_PYTHON is a python that would
+    // satisfy the bootstrap (exit 0) if it leaked: the live kernel venv on
+    // this machine when present, else a plausible bogus path (which would
+    // flip the failure to the override error instead).
+    let hostile_python =
+        kernel_python().unwrap_or_else(|| decoys.path().join("hostile-kernel-python"));
+
+    let child = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--exact")
+        .arg("packaged_layout_stays_hermetic_under_hostile_host_env")
+        .env(HOSTILE_CHILD_STAGE, staged)
+        .env("PRIME_AGENT_KERNEL_PYTHON", &hostile_python)
+        .env("PI_PACKAGE_DIR", &package_decoy)
+        .env("PRIME_AGENT_KERNEL_VENV", &venv_decoy)
+        .output()
+        .expect("re-exec the test binary with the hostile host env");
+    assert!(
+        child.status.success(),
+        "the packaged layout must stay hermetic under a hostile host env; child: {}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
     );
 }
 
@@ -680,8 +821,9 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Heavy (network + uv): the packaged sidecar bootstraps a fresh kernel venv
-/// with no `PRIME_AGENT_KERNEL_PYTHON` and no `PI_PACKAGE_DIR`, then boots a
-/// session on it. Run explicitly:
+/// with no `PRIME_AGENT_KERNEL_PYTHON` and no `PI_PACKAGE_DIR` (both scrubbed
+/// by the hermetic sandbox command, so a gate host exporting them cannot
+/// steer this run), then boots a session on it. Run explicitly:
 /// `cargo test -p pa-cli --test packaged_layout_e2e -- --ignored`
 #[test]
 #[ignore = "network + uv bootstrap (~minutes); the lane verifier runs it explicitly"]

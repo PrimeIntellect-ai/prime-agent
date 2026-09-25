@@ -1,9 +1,13 @@
-//! The composition root's terminal Prime Inference login (TS
+//! The composition root's Prime Inference login (TS
 //! `runPrimeInferenceLogin`'s API-key surface): the prime-cli credential
 //! reuse, the pasted-key prompt with the whoami access check, the team
 //! selection, and the credential write. The TS flow races its browser
 //! challenge against the paste field; that challenge is not ported, so
 //! the paste prompt is the only entry and no line claims a browser step.
+//! The flow renders through the inline auth panel (TS the login dialog
+//! and the `PrimeTeamSelectorComponent` mount in the TUI): every
+//! progress line, prompt, and the team picker ride the panel channel,
+//! and no surface touches the terminal.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -13,6 +17,7 @@ use pa_core::auth::{
     PrimeAccessError, PrimeHttp, PrimeInferenceAuthConfig, PrimeTeamAssignment,
     PrimeTeamCredential, StoredPrimeTeam, DEFAULT_REQUEST_TIMEOUT_MS,
 };
+use pa_tui::auth_panel::{PasteStyle, PrimeTeamOption, PrimeTeamPick};
 use pa_tui::provider_auth::ProviderAuthOutcome;
 
 /// The result of the team selection (TS `PrimeTeamSelectorComponent`'s
@@ -60,8 +65,8 @@ pub(crate) struct PrimeLoginInputs<'a> {
     pub prime_team_id: Option<&'a str>,
 }
 
-/// TS `runPrimeInferenceLogin`: the whole flow on the plain terminal (the
-/// TUI is suspended around the call).
+/// TS `runPrimeInferenceLogin`: the whole flow against the login UI seam
+/// (the inline auth panel in the TUI, a scripted UI in tests).
 pub(crate) async fn run_prime_inference_login(
     inputs: PrimeLoginInputs<'_>,
     ui: &dyn PrimeLoginUi,
@@ -268,25 +273,32 @@ fn default_team_status(auth: &AuthStorage, prime_team_id: Option<&str>) -> Strin
     }
 }
 
-/// The terminal login surface while the TUI is suspended: progress
-/// lines, the paste prompt, and the numbered team list (the TS login
-/// dialog's and team selector's surface).
-pub(crate) struct TerminalPrimeLoginUi;
+/// The login's inline-panel surface (TS the login dialog renders in the
+/// TUI): progress lines, the paste prompt, and the team selection drive
+/// the auth panel through the request channel (the TUI loop answers the
+/// prompts and the picker); the flow never touches the terminal.
+pub(crate) struct PanelPrimeLoginUi {
+    panel: pa_tui::auth_panel::AuthPanelHandle,
+}
 
-impl PrimeLoginUi for TerminalPrimeLoginUi {
+impl PanelPrimeLoginUi {
+    pub(crate) fn new(panel: pa_tui::auth_panel::AuthPanelHandle) -> Self {
+        PanelPrimeLoginUi { panel }
+    }
+}
+
+impl PrimeLoginUi for PanelPrimeLoginUi {
     fn progress(&self, message: &str) {
-        println!("{message}");
+        self.panel.progress(message);
     }
 
     fn prompt_line(
         &self,
         prompt: &str,
     ) -> Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        let panel = self.panel.clone();
         let prompt = prompt.to_string();
-        Box::pin(async move {
-            println!("{prompt}");
-            crate::mcp_login::read_terminal_line().await
-        })
+        Box::pin(async move { panel.paste_prompt(&prompt, PasteStyle::Visible).await })
     }
 
     fn select_team(
@@ -294,67 +306,32 @@ impl PrimeLoginUi for TerminalPrimeLoginUi {
         teams: &[PrimeTeamCredential],
         current: Option<&str>,
     ) -> Pin<Box<dyn std::future::Future<Output = TeamChoice> + Send + '_>> {
-        let lines = team_list_lines(teams, current);
-        let teams = teams.to_vec();
+        let options = teams
+            .iter()
+            .map(|team| PrimeTeamOption {
+                team_id: team.team_id.clone(),
+                name: team.name.clone(),
+                slug: team.slug.clone(),
+                role: team.role.clone(),
+                created_at: team.created_at.clone(),
+            })
+            .collect::<Vec<_>>();
+        let panel = self.panel.clone();
+        let current = current.map(str::to_string);
         Box::pin(async move {
-            for line in &lines {
-                println!("{line}");
-            }
-            loop {
-                let Some(line) = crate::mcp_login::read_terminal_line().await else {
-                    return TeamChoice::Cancelled;
-                };
-                let line = line.trim();
-                if line.is_empty() {
-                    return TeamChoice::Cancelled;
-                }
-                match line.parse::<usize>() {
-                    Ok(1) => return TeamChoice::PersonalAccount,
-                    Ok(number) if (2..=teams.len() + 1).contains(&number) => {
-                        return TeamChoice::Team(teams[number - 2].clone());
-                    }
-                    // The TS selector ignores keys that select nothing.
-                    _ => {}
-                }
+            match panel.select_team(options, current.as_deref()).await {
+                PrimeTeamPick::Team(team) => TeamChoice::Team(PrimeTeamCredential {
+                    team_id: team.team_id,
+                    name: team.name,
+                    slug: team.slug,
+                    role: team.role,
+                    created_at: team.created_at,
+                }),
+                PrimeTeamPick::PersonalAccount => TeamChoice::PersonalAccount,
+                PrimeTeamPick::Cancelled => TeamChoice::Cancelled,
             }
         })
     }
-}
-
-/// The team selector's rendered lines (the TS `PrimeTeamSelector`'s
-/// rows): the panel title and subtitle, Personal first, the slug/role
-/// meta, the current marker, and the numbered-selection hint.
-fn team_list_lines(teams: &[PrimeTeamCredential], current: Option<&str>) -> Vec<String> {
-    let marker = |team_id: Option<&str>| {
-        if current == team_id {
-            " (current)"
-        } else {
-            ""
-        }
-    };
-    let mut lines = vec![
-        "Select a Prime Team:".to_string(),
-        "Choose which account pays for Prime Inference usage.".to_string(),
-        format!("  1. Personal — personal account{}", marker(None)),
-    ];
-    for (index, team) in teams.iter().enumerate() {
-        let role = team
-            .role
-            .as_deref()
-            .map_or_else(|| "member".to_string(), str::to_lowercase);
-        let secondary = match &team.slug {
-            Some(slug) => format!("slug: {slug}, role: {role}"),
-            None => format!("role: {role}"),
-        };
-        lines.push(format!(
-            "  {}. {} — {secondary}{}",
-            index + 2,
-            team.name,
-            marker(Some(&team.team_id))
-        ));
-    }
-    lines.push("Enter a team number, or press Enter to keep the current selection:".to_string());
-    lines
 }
 
 /// TS `getPrimeCliConfigPath`'s enablement: the prime CLI config is
@@ -886,32 +863,6 @@ mod tests {
         assert_eq!(
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::Team(team("t-1", "Team One"))
-        );
-    }
-
-    #[test]
-    fn the_terminal_team_list_renders_the_ts_rows() {
-        // The terminal list is the TS selector's surface: the panel title
-        // and subtitle, Personal first, the slug/role meta, and the
-        // current marker.
-        let teams = vec![
-            PrimeTeamCredential {
-                slug: Some("one".to_string()),
-                role: Some("Member".to_string()),
-                ..team("t-1", "Team One")
-            },
-            team("t-2", "Team Two"),
-        ];
-        assert_eq!(
-            team_list_lines(&teams, Some("t-2")),
-            vec![
-                "Select a Prime Team:".to_string(),
-                "Choose which account pays for Prime Inference usage.".to_string(),
-                "  1. Personal — personal account".to_string(),
-                "  2. Team One — slug: one, role: member".to_string(),
-                "  3. Team Two — role: member (current)".to_string(),
-                "Enter a team number, or press Enter to keep the current selection:".to_string(),
-            ]
         );
     }
 }
