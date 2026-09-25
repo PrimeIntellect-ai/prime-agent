@@ -82,6 +82,14 @@ where
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
+/// Publishes the pre-imported Python skills that failed to import into a
+/// freshly started kernel (skill import name -> import error), so the
+/// session can tell the model before it wastes turns calling them (TS
+/// `IpythonToolOptions.onUnavailableSkills`).
+pub type UnavailableSkillsCallback = Arc<
+    dyn Fn(&crate::session_engine::python_skills_notice::UnavailablePythonSkills) + Send + Sync,
+>;
+
 /// Outcome of one full kernel bootstrap (spawn + handshake + namespace
 /// restore + runtime bootstrap), reported once per actual boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +134,10 @@ pub struct IpythonKernelProvisionerOptions {
     pub ready_gate: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
+    /// Fires once per kernel start when installed Python skills failed to
+    /// import into the kernel (skill import name -> import error), so the
+    /// session can tell the model before it wastes turns calling them.
+    pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
     /// Publishes the per-boot result for `kernel bootstrap` telemetry.
     /// Telemetry only; kernel behavior never depends on it.
     pub on_bootstrap_result: Option<KernelBootstrapResultHandler>,
@@ -694,6 +706,11 @@ async fn start_kernel_impl(
             &bootstrap_code,
             ExecuteOptions {
                 signal: Some(dispose_signal.clone()),
+                // The skill-import report rides stdout at the END of the
+                // cell (after any module-init noise): keep the cap high
+                // enough that imported skills' import-time output cannot
+                // push it out of the buffer.
+                max_output_chars: Some(262_144),
                 ..Default::default()
             },
         )
@@ -718,7 +735,20 @@ async fn start_kernel_impl(
                 .await;
             return Err(anyhow!("Kernel provisioner disposed during startup"));
         }
-        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {}
+        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {
+            // Broken skills stay importable-looking placeholders; report them
+            // so the model learns before its first call, not from the
+            // placeholder's error (TS startKernel parses the same marker).
+            if let Some(errors) =
+                crate::session_engine::python_skills_notice::parse_unavailable_python_skills(
+                    &bootstrap.stdout,
+                )
+            {
+                if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
+                    on_unavailable_skills(&errors);
+                }
+            }
+        }
         Ok(bootstrap) => {
             let details = [bootstrap.stderr.clone()]
                 .into_iter()

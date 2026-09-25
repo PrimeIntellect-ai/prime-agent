@@ -602,6 +602,18 @@ impl SettingsManager {
         self.merged.auxiliary_model.as_deref()
     }
 
+    /// TS `getImageModel`: the "provider/model-id" (or bare id) reference
+    /// that serves turns attaching images on session models without image
+    /// input. Same shape as `providerBackupModel`: malformed values behave
+    /// as unset and the image-turn refusal names the setting instead.
+    pub fn get_image_model(&self) -> Option<String> {
+        self.merged
+            .image_model
+            .as_ref()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+    }
+
     /// The daemon-level model allowlist (settings `allowedModels`): model
     /// patterns the daemon may resolve to, enforced at every daemon
     /// model resolution (`set_model`, RLM child-model resolution, the
@@ -1122,5 +1134,26 @@ mod tests {
         assert_eq!(manager.get_session_archive_policy().max_sessions, None);
         manager.global.session_archive_max_sessions = Some(serde_json::json!(50));
         assert_eq!(manager.get_session_archive_policy().max_sessions, Some(50));
+    }
+
+    /// TS `getImageModel`: the `imageModel` reference reads trimmed, and
+    /// malformed values (empty/whitespace) behave as unset.
+    #[test]
+    fn image_model_reads_trimmed_or_unset() {
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("  battery/mock-vision  ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(
+            manager.get_image_model().as_deref(),
+            Some("battery/mock-vision")
+        );
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("   ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(manager.get_image_model(), None);
+        let manager = SettingsManager::in_memory(Settings::default());
+        assert_eq!(manager.get_image_model(), None);
     }
 }

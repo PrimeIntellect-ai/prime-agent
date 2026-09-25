@@ -4,6 +4,15 @@
 
 use super::KernelPythonSkill;
 
+/// The line the runtime bootstrap prints (once, after the skill import
+/// loop) when one or more pre-imported Python skills failed to import
+/// (TS `PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER`): the marker, then one
+/// JSON object of `{importName: error}`. The host scans the bootstrap
+/// cell's stdout for this line so unavailable skills reach the model
+/// instead of failing only on first call.
+pub const PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER: &str =
+    "__PRIME_AGENT_PYTHON_SKILL_IMPORT_ERRORS__";
+
 const RLM_BOOTSTRAP_HEADER_CODE: &str =
     "import asyncio\nimport os as _prime_agent_os\n\n_prime_agent_os.environ[\"NO_COLOR\"] = \"1\"";
 
@@ -122,11 +131,23 @@ for _prime_agent_skill_name in {imports_json}:
             _prime_agent_importlib.import_module(_prime_agent_skill_name)
         )
     except Exception as _prime_agent_skill_error:
-        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = str(_prime_agent_skill_error)
+        # An exception with an empty message would otherwise be dropped by
+        # the host-side parser; fall back to the exception type name.
+        _prime_agent_skill_error_text = (
+            str(_prime_agent_skill_error) or type(_prime_agent_skill_error).__name__
+        )
+        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = _prime_agent_skill_error_text
         globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
             _prime_agent_skill_name,
-            str(_prime_agent_skill_error),
+            _prime_agent_skill_error_text,
         )
+
+if _PRIME_AGENT_SKILL_IMPORT_ERRORS:
+    import json as _prime_agent_json
+    print(
+        "{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}"
+        + _prime_agent_json.dumps(_PRIME_AGENT_SKILL_IMPORT_ERRORS)
+    )
 "#
     )
     .trim()
@@ -156,5 +177,25 @@ mod tests {
         let code = build_rlm_bootstrap_code(&skills);
         assert!(code.contains(r#"for _prime_agent_skill_name in ["edit"]"#));
         assert!(code.contains("_PrimeAgentUnavailableSkill"));
+        // Failed imports report through the marker line (TS #2381): the
+        // host scans the bootstrap cell's stdout for the marker + JSON of
+        // the import errors, and an empty exception message falls back to
+        // the exception type name (the parser drops empty errors).
+        assert!(code.contains(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER));
+        assert!(
+            code.contains("print("),
+            "the marker report prints after the import loop"
+        );
+        assert!(
+            code.contains("_prime_agent_skill_error_text = ("),
+            "empty exception messages fall back to the type name"
+        );
+        assert!(
+            code.contains("if _PRIME_AGENT_SKILL_IMPORT_ERRORS:"),
+            "the report prints only when something failed"
+        );
+        // No skills: no marker machinery at all.
+        let bare = build_rlm_bootstrap_code(&[]);
+        assert!(!bare.contains(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER));
     }
 }

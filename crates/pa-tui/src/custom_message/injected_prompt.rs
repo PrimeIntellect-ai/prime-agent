@@ -21,8 +21,8 @@
 use super::render::{markdown_rows, spacer, text_rows, truncate_text};
 use super::{
     custom_content_text, GOAL_CONTEXT_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE,
-    IPYTHON_STATE_RESTORED_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
-    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+    IPYTHON_STATE_RESTORED_CUSTOM_TYPE, PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+    RLM_CHILD_FAILURE_CUSTOM_TYPE, RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 };
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
@@ -51,6 +51,11 @@ pub enum InjectedPromptKind {
     },
     /// `◆ Restored Python kernel state` / `◆ Started fresh Python kernel`.
     KernelRestored { restored: bool },
+    /// `Python skills unavailable · <skills>` (muted label, dim skill
+    /// list; the full report renders expanded — TS
+    /// `InjectedPromptMessageComponent`'s `python_skills_unavailable`
+    /// header).
+    PythonSkillsUnavailable { skills: Vec<String> },
     /// `◆ Subagent <name> finished|failed|cancelled` (the diamond and the
     /// label share the row's semantic color; failed/cancelled rows expand
     /// to the reason).
@@ -100,6 +105,19 @@ pub(crate) fn injected_prompt_row(
         IPYTHON_STATE_RESTORED_CUSTOM_TYPE => InjectedPromptKind::KernelRestored {
             restored: details.get("restored").and_then(Value::as_bool) != Some(false),
         },
+        PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE => InjectedPromptKind::PythonSkillsUnavailable {
+            skills: details
+                .get("skills")
+                .and_then(Value::as_array)
+                .map(|skills| {
+                    skills
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
         RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => InjectedPromptKind::RlmChildStatus {
             outcome: if details.get("kind").and_then(Value::as_str) == Some("cancelled") {
                 RlmChildOutcome::Cancelled
@@ -120,8 +138,10 @@ pub(crate) fn injected_prompt_row(
     let body = match &kind {
         // The kernel-state row stays header-only (TS keeps
         // `ipython_state_restored` header-only); a finished child carries
-        // no reason to expand.
+        // no reason to expand. The unavailable-skills row expands to the
+        // full import-error report.
         InjectedPromptKind::KernelRestored { .. } => None,
+        InjectedPromptKind::PythonSkillsUnavailable { .. } => Some(content),
         InjectedPromptKind::RlmChildStatus { outcome, .. } => match outcome {
             RlmChildOutcome::Finished => None,
             RlmChildOutcome::Failed => rlm_child_reason(details, "error", &content),
@@ -231,6 +251,15 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
                 muted,
             ),
         ],
+        InjectedPromptKind::PythonSkillsUnavailable { skills } => {
+            let mut spans: Line =
+                vec![Span::styled("Python skills unavailable".to_string(), muted)];
+            if !skills.is_empty() {
+                spans.push(Span::styled(" \u{b7} ".to_string(), dim));
+                spans.push(Span::styled(skills.join(", "), dim));
+            }
+            spans
+        }
         InjectedPromptKind::RlmChildStatus {
             outcome,
             session_name,
@@ -391,6 +420,44 @@ mod tests {
             crate::chat::ChatEntry::InjectedPrompt(boxed) => *boxed,
             other => panic!("not an injected prompt: {other:?}"),
         }
+    }
+
+    #[test]
+    fn python_skills_unavailable_row_decodes_and_renders() {
+        // The wire row decodes into the unavailable-skills kind with its
+        // skill list, the header renders the muted label + dim skills, and
+        // the collapsed row expands to the full report (TS
+        // `InjectedPromptMessageComponent`'s `python_skills_unavailable`).
+        let row = decoded_row(serde_json::json!({
+            "role": "custom",
+            "customType": "python_skills_unavailable",
+            "content": "[python-skills-unavailable]\n\nThese installed Python skill modules failed to import into the Python kernel, so calling them raises an error:\n- websearch: No module named 'websearch'",
+            "display": true,
+            "details": { "skills": ["websearch", "edit"] },
+        }));
+        assert_eq!(
+            row.kind,
+            InjectedPromptKind::PythonSkillsUnavailable {
+                skills: vec!["websearch".to_string(), "edit".to_string()],
+            }
+        );
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            " Python skills unavailable \u{b7} websearch, edit"
+        );
+        assert!(row.body.is_some(), "the row expands to the report");
+        // Missing details fall back to the bare label.
+        let row = decoded_row(serde_json::json!({
+            "role": "custom",
+            "customType": "python_skills_unavailable",
+            "content": "[python-skills-unavailable]",
+            "display": true,
+        }));
+        assert_eq!(
+            row.kind,
+            InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() }
+        );
     }
 
     #[test]

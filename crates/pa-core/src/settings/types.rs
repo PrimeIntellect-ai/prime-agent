@@ -321,6 +321,11 @@ pub struct Settings {
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,
     pub provider_backup_model: Option<String>,
+    /// Model ("provider/model-id" or a bare model id) that serves turns
+    /// attaching images when the session model does not accept image
+    /// input. Default: none - image turns on a text-only model fail with
+    /// a configuration hint instead of silently dropping the images.
+    pub image_model: Option<String>,
     pub autonomous: Option<AutonomousSettings>,
     pub shell_path: Option<String>,
     pub quiet_startup: Option<bool>,

@@ -379,6 +379,7 @@ mod tests {
                     prewarm_ipython_kernel: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
+                    image_model_router: None,
                     steering_mode: None,
                     follow_up_mode: None,
                 },

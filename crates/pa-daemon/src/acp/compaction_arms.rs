@@ -736,6 +736,7 @@ mod tests {
             create_session(SessionEngineConfig {
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
                 steering_mode: None,
                 follow_up_mode: None,
                 telemetry: None,

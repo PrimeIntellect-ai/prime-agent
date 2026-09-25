@@ -15,6 +15,7 @@ pub use catalog_chain::{
 pub mod allowlist;
 pub(crate) mod catalog_chain;
 pub(crate) mod custom;
+pub mod image_model_routing;
 pub(crate) mod prime_inference;
 pub(crate) mod prime_inference_catalog;
 pub(crate) mod private_auth;
@@ -26,6 +27,9 @@ pub use custom::{
     apply_model_override, load_custom_models, merge_compat, parse_models_config,
     strip_json_comments, validate_config, CustomModelsResult, ModelOverride, ModelsConfig,
     ProviderOverride,
+};
+pub use image_model_routing::{
+    resolve_image_model_override, ImageModelRoutingInputs, ResolvedImageModel,
 };
 pub use prime_inference::{
     is_private_prime_inference_model, is_private_prime_inference_model_id,

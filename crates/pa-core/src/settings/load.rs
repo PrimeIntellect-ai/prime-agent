@@ -31,6 +31,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "branchSummary",
     "retry",
     "providerBackupModel",
+    "imageModel",
     "autonomous",
     "shellPath",
     "quietStartup",

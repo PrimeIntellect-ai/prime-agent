@@ -37,6 +37,7 @@ use crate::engine::{
     SessionEngine, SideQuestionOutcome, SideQuestionRequest,
 };
 use crate::goal_continuation::GoalBoundary;
+use crate::image_route::ImageRoute;
 use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_MAX_DEPTH};
 
 /// Configuration for the real engine.
@@ -204,7 +205,7 @@ pub struct AgentSessionEngine {
     /// turn holds the core session's mutex across its admission, so an
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
-    turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     /// The session's queue delivery modes (TS `agent.steeringMode` /
     /// `agent.followUpMode`): seeded from the start config, applied to the
     /// built session's agent at build time, and switched live by the
@@ -252,7 +253,7 @@ pub struct AgentSessionEngine {
     /// Resolved at create time (before any turn) so summary/state polls
     /// during a live turn stay side-effect-free.
     effective_thinking: std::sync::RwLock<Option<pa_types::ai::ModelThinkingLevel>>,
-    service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
+    pub(crate) service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
     /// Built once on the first prompt, reused across prompts, shared
     /// behind an Arc: a running model turn (the admission in
     /// `run_turn_once`), a compaction summarizer, and a refinement run
@@ -284,7 +285,7 @@ pub struct AgentSessionEngine {
     /// (api key + model), set when the session builds: `set_model` swaps
     /// the slot so the live session follows the new model without a
     /// rebuild.
-    provider_target: std::sync::Arc<
+    pub(crate) provider_target: std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
     /// One shared supervisor-link client for the worker: agent messaging
@@ -378,6 +379,14 @@ pub struct AgentSessionEngine {
     /// One compact-and-retry attempt per context overflow (TS
     /// `_overflowRecovery`): the state machine the overflow arm walks.
     pub(crate) overflow_recovery: std::sync::Mutex<OverflowRecovery>,
+    /// The image-model route armed for the dispatched episode (TS
+    /// `agent.modelOverride`, set at dispatch when the batch attaches
+    /// images the session model cannot serve): the stream's provider
+    /// target for the episode plus the agent's per-run override. Re-applied
+    /// at every model-turn attempt so retries and post-compaction
+    /// continuations keep serving it; cleared (and the session target
+    /// restored) when the episode settles.
+    pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
     /// The live automatic-compaction abort slot (TS
     /// `_autoCompactionAbortController`): the threshold and requested
     /// turn-boundary runs each register their controller here for the
@@ -579,6 +588,7 @@ impl AgentSessionEngine {
             reloaded_goal_update: std::sync::Mutex::new(None),
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
+            image_route: std::sync::Mutex::new(None),
             auto_compaction_abort: std::sync::Mutex::new(None),
             model_refusal_telemetry,
         })
@@ -606,7 +616,7 @@ impl AgentSessionEngine {
     }
 
     /// The session's live working directory (the engine's cwd slot).
-    fn cwd(&self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 
@@ -1289,7 +1299,7 @@ impl AgentSessionEngine {
     /// flagged create); a model that cannot be resolved degrades to
     /// "off". Resolved once at the create/restore seam and cached so
     /// summary/state calls stay side-effect-free while turns run.
-    fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
+    pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
             .effective_thinking
             .read()
@@ -1506,6 +1516,10 @@ impl AgentSessionEngine {
             // the stop hooks (a queued steer cuts the run at the next
             // turn boundary; the runner delivers it as the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
+            // The daemon worker owns image-model routing itself (its turn
+            // dispatch arms, applies, and restores the route around the
+            // episode), so the core session installs no router seam.
+            image_model_router: None,
             // TS `sdk.ts` seeds the Agent's queue modes from the settings
             // manager; the worker create reads the same settings (the
             // engine-level queues drain per the mode at the loop
@@ -3188,7 +3202,28 @@ impl SessionEngine for AgentSessionEngine {
                 batch: request.batch,
             },
         };
+        // TS commit-time routing decision (`_imageModelOverrideForTurns` at
+        // commit): a batch whose delivered messages attach image blocks
+        // routes to `settings.imageModel` when the session model cannot
+        // serve them, or the turn fails with the actionable refusal naming
+        // the setting - nothing silently downgrades the images to
+        // "(image omitted)" placeholders.
+        let carries_images = match &turn_prompt {
+            TurnPrompt::User { images, batch, .. } => {
+                !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
+            }
+            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+        };
+        if let Err(refusal) = self.arm_image_turn_route(carries_images) {
+            emit(EngineEvent::Done(Err(refusal)));
+            return;
+        }
         self.run_turns(turn_prompt, aborted, &mut emit);
+        // The episode settled: clear the routed image model and restore the
+        // session's serving target, so the next dispatched batch
+        // re-evaluates the routing against the session model (TS the next
+        // dispatch re-evaluates the override before pre-turn compaction).
+        self.clear_image_route();
     }
 
     fn abort_in_flight_turn(&self) {
@@ -3271,7 +3306,14 @@ impl AgentSessionEngine {
         // has no configured credential fails the run before the provider
         // request, with the login-guidance message. The create-config key
         // covers the TS runtime-key candidate (`setRuntimeApiKey`), and the
-        // scripted faux seam has no credentials at all.
+        // scripted faux seam has no credentials at all. The preflight
+        // validates the model SERVING the run (TS `_runModel()`): a routed
+        // image-model episode is authenticated by its own image model, not
+        // by a text-only session model that never receives a request.
+        let preflight_model = self
+            .armed_image_route()
+            .map(|route| route.target.model)
+            .unwrap_or_else(|| model.clone());
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
             let mut registry = pa_core::models::ModelRegistry::create(
@@ -3279,24 +3321,24 @@ impl AgentSessionEngine {
                 self.config.agent_dir.join("models.json"),
             );
             registry.load_private_authorization_from_cache();
-            if !registry.has_configured_auth(&model) {
+            if !registry.has_configured_auth(&preflight_model) {
                 let uses_oauth = registry
                     .auth
                     .get_all()
-                    .credential(&model.provider)
+                    .credential(&preflight_model.provider)
                     .is_some_and(|credential| {
                         matches!(credential, pa_core::auth::AuthCredential::Oauth { .. })
                     });
                 let message = if uses_oauth {
                     format!(
                         "Authentication failed for \"{}\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials.",
-                        model.provider
+                        preflight_model.provider
                     )
                 } else {
                     let docs = pa_core::packages::docs_path();
                     format!(
                         "No API key found for {}.\n\nUse /login to log into a provider via OAuth or API key. See:\n  {}\n  {}",
-                        model.provider,
+                        preflight_model.provider,
                         docs.join("providers.md").display(),
                         docs.join("models.md").display()
                     )
@@ -3316,9 +3358,33 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // A routed image-model episode serves this attempt on the routed
+        // model: the build-time target cannot clobber it (the swap follows
+        // the session build), and retries/continuations re-apply it (TS the
+        // override stays until the next dispatch re-evaluates it).
+        self.apply_armed_image_route(&agent);
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
-        let candidates = self.failover_candidates(&model);
+        // A routed image-model episode fails over between providers serving
+        // the SERVING (routed) model, and its overflow classification
+        // follows the routed model's context window (TS `_runModel()`):
+        // the session model's id would switch the images to a provider
+        // that cannot serve them.
+        let (candidates, serving_context_window) = match self.armed_image_route() {
+            Some(route) => (
+                // The routed episode's failover chain serves the SAME image
+                // capability (TS `_resolveBackupModel` rejects a text-only
+                // backup for a routed run): a same-id model without image
+                // input would silently downgrade the turn's images to
+                // placeholders.
+                self.failover_candidates(&route.target.model)
+                    .into_iter()
+                    .filter(|candidate| candidate.input.contains(&pa_types::ai::ModelInput::Image))
+                    .collect(),
+                route.target.model.context_window,
+            ),
+            None => (self.failover_candidates(&model), model.context_window),
+        };
         // The pa-core retry driver owns the attempt loop; this engine owns
         // one turn. The driver awaits each attempt to completion before
         // emitting retry events, so the single `emit` reference is handed
@@ -3345,11 +3411,14 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
+        // TS `_backupModel` state: the primary serving target (the stream's
+        // provider slot restored when the failover episode settles), plus
+        // the session model + thinking level the agent state restores to.
         let primary_state: std::cell::RefCell<
             Option<(
+                ProviderTarget,
                 pa_types::ai::Model,
                 pa_agent::types::ThinkingLevel,
-                Option<String>,
             )>,
         > = std::cell::RefCell::new(None);
         let result = self.runtime.block_on(
@@ -3357,7 +3426,7 @@ impl AgentSessionEngine {
                 &policy,
                 &failover_policy,
                 &candidates,
-                model.context_window,
+                serving_context_window,
                 None,
                 || {
                     let mut emit = emit_cell.borrow_mut();
@@ -3438,16 +3507,33 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     {
                         let mut primary = primary_state.borrow_mut();
-                        // Capture the primary model + thinking level + key
-                        // once (TS `_backupModel` state): the level the
-                        // session was built with, restored when the turn
-                        // settles.
+                        // Capture the primary serving target + session state
+                        // once (TS `_backupModel` state): the target the
+                        // stream's provider slot restores to (the ROUTED
+                        // image-model target while a routed episode runs -
+                        // the failover keeps serving the routed model), plus
+                        // the session model + thinking level the agent state
+                        // returns to when the episode settles.
                         if primary.is_none() {
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                self.resolve_request_api_key(&model),
-                            ));
+                            *primary = Some(match self.armed_image_route() {
+                                Some(route) => (
+                                    route.target,
+                                    model.clone(),
+                                    map_thinking_level(self.effective_thinking()),
+                                ),
+                                None => (
+                                    ProviderTarget {
+                                        service_tier: *self
+                                            .service_tier
+                                            .read()
+                                            .expect("service tier lock"),
+                                        api_key: self.resolve_request_api_key(&model),
+                                        model: model.clone(),
+                                    },
+                                    model.clone(),
+                                    map_thinking_level(self.effective_thinking()),
+                                ),
+                            });
                         }
                     }
                     let next = next.clone();
@@ -3463,12 +3549,25 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch
                         // (the same slot `set_model` swaps): the retried
                         // request hits the switched-to provider with its
-                        // resolved key.
+                        // resolved key. A routed episode keeps its clamped
+                        // tier (the route clamped the session's `priority`
+                        // down for a model without fast mode; the failover
+                        // provider must not un-clamp it), and the agent's
+                        // per-run override follows the switched-to model
+                        // (TS `_handleBackupModelRetry` moves the override
+                        // to the backup; the primary's route restores it).
+                        let armed = self.armed_image_route();
                         {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: match &armed {
+                                    Some(route) => route.target.service_tier,
+                                    None => *self
+                                        .service_tier
+                                        .read()
+                                        .expect("service tier lock"),
+                                },
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
                             });
@@ -3477,6 +3576,16 @@ impl AgentSessionEngine {
                         agent
                             .set_thinking_level(map_thinking_level(clamped))
                             .await;
+                        if armed.is_some() {
+                            let agent_model = json_round_trip(&next)
+                                .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                            agent.set_model_override(Some(
+                                pa_agent::agent::AgentModelOverride {
+                                    model: agent_model,
+                                    thinking_level: map_thinking_level(clamped),
+                                },
+                            ));
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
@@ -3489,35 +3598,45 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((primary_model, thinking_level, primary_api_key)) = primary
+                        let Some((primary_target, session_model, session_thinking)) = primary
                         else {
                             return Ok(None);
                         };
-                        let agent_model = json_round_trip(&primary_model)
+                        let agent_model = json_round_trip(&session_model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         // Restore the stream's provider target with the
-                        // primary (the slot the build-time target set).
+                        // primary (the slot the build-time target set; the
+                        // ROUTED image-model target while a routed episode
+                        // runs, so the episode keeps serving the routed
+                        // model across the failover restore).
                         {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
-                            *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: primary_api_key,
-                                model: primary_model.clone(),
-                            });
+                            *target = Some(primary_target.clone());
                         }
+                        // The agent state returns to the session model +
+                        // thinking level (a routed turn never swaps them:
+                        // the loop reads the per-run override, not the
+                        // state).
                         agent.set_model(agent_model).await;
-                        agent.set_thinking_level(thinking_level).await;
+                        agent.set_thinking_level(session_thinking).await;
+                        // A routed episode restores its override with the
+                        // primary (the failover switch moved it to the
+                        // backup; the episode keeps serving the routed
+                        // model).
+                        if let Some(route) = self.armed_image_route() {
+                            agent.set_model_override(Some(route.agent_override));
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(
-                                &primary_model.provider,
-                                &primary_model.id,
+                                &session_model.provider,
+                                &session_model.id,
                             )?;
                         }
                         Ok(Some(format!(
                             "{}/{}",
-                            primary_model.provider, primary_model.id
+                            session_model.provider, session_model.id
                         )))
                     }
                 },

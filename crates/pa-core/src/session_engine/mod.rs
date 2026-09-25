@@ -22,11 +22,13 @@ pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
+pub mod image_model_routing;
 pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_retry;
+pub mod python_skills_notice;
 pub mod refine;
 pub mod rlm_host;
 pub mod rlm_notices;
@@ -169,6 +171,10 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The image-model routing host seam (`None` keeps the session model on
+    /// image turns: verification harnesses, and the daemon worker whose
+    /// turn dispatch owns routing itself).
+    image_model_router: Option<image_model_routing::ImageModelRouter>,
 }
 
 impl AgentSession {
@@ -232,9 +238,62 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            image_model_router: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
+    }
+
+    /// Install the image-model routing host seam (the headless surfaces'
+    /// settings + registry + pinned stream target); `None` keeps image
+    /// turns on the session model.
+    pub fn set_image_model_router(
+        &mut self,
+        router: Option<image_model_routing::ImageModelRouter>,
+    ) {
+        self.image_model_router = router;
+    }
+
+    /// The dispatch-time routing decision for one admitted batch (TS
+    /// `_imageModelOverrideForTurns` at commit): when the batch attaches
+    /// image blocks the session model cannot serve, the host's route
+    /// takes the stream target and the agent's per-run override, so the
+    /// run serves on the configured image model while the session model
+    /// keeps identifying the session. The fresh decision of EVERY admitted
+    /// batch (image-free included) re-evaluates the route, so retries and
+    /// post-compaction continuations of a routed turn keep serving it and
+    /// the next image-free batch returns to the session model. `Err` fails
+    /// the turn with the actionable refusal.
+    async fn apply_image_model_routing(
+        &self,
+        images: &[pa_agent::types::ImageContent],
+        batch: &[PromptBatchRow],
+    ) -> anyhow::Result<()> {
+        let Some(router) = self.image_model_router.as_ref() else {
+            return Ok(());
+        };
+        let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
+        let route = (router.decide)(carries_images).map_err(anyhow::Error::msg)?;
+        match &route {
+            Some(resolved) => {
+                (router.swap_target)(Some(resolved));
+                let agent_model =
+                    crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+                        .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                self.agent
+                    .set_model_override(Some(pa_agent::agent::AgentModelOverride {
+                        model: agent_model,
+                        thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
+                            resolved.thinking_level,
+                        ),
+                    }));
+            }
+            None => {
+                (router.swap_target)(None);
+                self.agent.set_model_override(None);
+            }
+        }
+        Ok(())
     }
 
     /// Override the compaction settings from the session's resolved
@@ -685,6 +744,11 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        // The dispatch-time routing decision fires for every dispatched
+        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
+        // action): an injected row never carries images, so it clears a
+        // route left behind by the previous dispatched turn.
+        self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
@@ -779,6 +843,13 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
+            // The dispatch-time image-model routing decision (TS
+            // `_imageModelOverrideForTurns` at commit): an image-attaching
+            // batch routes to the host's configured image model or fails
+            // with the actionable refusal, never silently downgrading the
+            // images to placeholders.
+            self.apply_image_model_routing(&images, &options.batch)
+                .await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and
@@ -804,9 +875,29 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
+            if let Err(error) = self
+                .agent
                 .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+                .await
+            {
+                // A concurrent admission won the agent's run slot: this
+                // prompt never started, so its route must not survive. The
+                // unwind only happens while NO run streams - the winner's
+                // live run keeps its own serving target (an idle slot means
+                // our route never served a request; a streaming one belongs
+                // to the winner). TS decides per prepared action inside the
+                // same commit fence, so its single-threaded commit cannot
+                // observe this race at all; the headless surfaces serialize
+                // prompt admissions (one ACP prompt turn per session, the
+                // print loop's sequential awaits) besides.
+                if !self.agent.state().await.is_streaming {
+                    if let Some(router) = self.image_model_router.as_ref() {
+                        (router.swap_target)(None);
+                        self.agent.set_model_override(None);
+                    }
+                }
+                return Err(error);
+            }
         }
         Ok(PromptOutcome::Prompt)
     }
@@ -1218,6 +1309,86 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" "),
         }
+    }
+
+    /// The `[python-skills-unavailable]` notice rides the next admitted turn
+    /// ahead of its prompt row (TS `_onPythonSkillsUnavailable` through
+    /// `deliverAs: "nextTurn"`): a boot whose skill imports failed parks the
+    /// row in the next-turn mailbox, and the next prompt's provider request
+    /// carries its user-role view before the prompt text.
+    #[tokio::test]
+    async fn python_skills_unavailable_notice_rides_the_next_turn() {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("acknowledged");
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                ..Default::default()
+            },
+            convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let session = AgentSession::from_session_arc(
+            Arc::new(agent),
+            Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
+                tmp.path(),
+            ))),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The kernel boot's report (skill import name -> import error).
+        let errors: python_skills_notice::UnavailablePythonSkills = [
+            (
+                "websearch".to_string(),
+                "No module named 'websearch'".to_string(),
+            ),
+            ("edit".to_string(), "boom".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        session
+            .queue_next_turn_row(python_skills_notice::notice_message(&errors))
+            .await;
+
+        session
+            .prompt("go", PromptOptions::default())
+            .await
+            .unwrap();
+        session.agent().wait_for_idle().await;
+
+        // The provider's request carried the notice row ahead of the prompt.
+        let calls = provider.calls();
+        let first = calls.first().expect("one provider call");
+        let texts: Vec<String> = first
+            .messages
+            .iter()
+            .map(user_text)
+            .filter(|text| !text.is_empty())
+            .collect();
+        let joined = texts.join("\u{0}");
+        assert!(
+            joined.contains("failed to import into the Python kernel"),
+            "the notice must reach the provider: {joined:?}"
+        );
+        assert!(
+            joined.contains("- websearch: No module named 'websearch'"),
+            "the notice names the broken skill: {joined:?}"
+        );
+        assert!(
+            joined.contains("uv pip install"),
+            "the notice carries the fix hint: {joined:?}"
+        );
+        // The notice precedes the prompt row.
+        let notice_at = joined
+            .find("[python-skills-unavailable]")
+            .expect("notice header");
+        let prompt_at = joined.find("go").expect("prompt row");
+        assert!(notice_at < prompt_at);
     }
 
     #[tokio::test]
