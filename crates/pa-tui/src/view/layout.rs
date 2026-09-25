@@ -71,17 +71,19 @@ impl AgentView {
             | ChatEntry::User { .. }
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. }
-            | ChatEntry::SkillInvocation(_) => true,
+            | ChatEntry::SkillInvocation(_)
             // Spacing-driven rows (agent messages, shell completions, tool
             // cards) lean on the conversation-spacing scan over PRECEDING
             // entries; the scan result is stored with the cached rows, and
             // a preceding entry's mutation propagates through
             // `mark_entry_stale`, so the look-back stays correct without a
             // per-frame re-render.
-            ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) => true,
-            ChatEntry::InjectedPrompt(_) | ChatEntry::RefinementOutcome(_) => true,
-            ChatEntry::CustomPanel(_) => true,
-            ChatEntry::ClientMarkdown { .. }
+            | ChatEntry::AgentMessage(_)
+            | ChatEntry::ShellCompletion(_)
+            | ChatEntry::InjectedPrompt(_)
+            | ChatEntry::RefinementOutcome(_)
+            | ChatEntry::CustomPanel(_)
+            | ChatEntry::ClientMarkdown { .. }
             | ChatEntry::ClientText { .. }
             | ChatEntry::ChangelogPanel { .. } => true,
             ChatEntry::Assistant(message) => !message.streaming,
