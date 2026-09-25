@@ -118,17 +118,37 @@ pub enum AuthPanelRequest {
 /// The flow-side handle to the inline auth panel: one login run's
 /// request channel. The composition root drives its flow against this
 /// handle; the TUI run loop owns the receiving side and services every
-/// request. Cheap to clone; a clone shares the run's channel.
+/// request. Cheap to clone; a clone shares the run's channel and the
+/// run's cancel signal.
 #[derive(Clone)]
 pub struct AuthPanelHandle {
     tx: mpsc::UnboundedSender<AuthPanelRequest>,
+    /// The flow's cooperative cancel signal: the driving pane marks it
+    /// when it exits, and a blocking login body checks it before its
+    /// auth-store writes — a `JoinHandle::abort` cannot reach a started
+    /// `spawn_blocking` closure.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AuthPanelHandle {
     /// Build the handle over one run's request channel (the session
     /// creates the pair; the loop owns the receiver).
     pub fn new(tx: mpsc::UnboundedSender<AuthPanelRequest>) -> Self {
-        AuthPanelHandle { tx }
+        AuthPanelHandle {
+            tx,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// The flow's cancel state: `true` once the driving pane exited.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The flow's cancel signal for the driving side (the pane marks it
+    /// on exit; every handle clone shares it).
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.cancel)
     }
 
     /// Submit one request directly (the helpers below and the session's

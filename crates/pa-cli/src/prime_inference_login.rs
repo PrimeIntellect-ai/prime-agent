@@ -37,6 +37,15 @@ pub(crate) enum TeamChoice {
 pub(crate) trait PrimeLoginUi {
     /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
+    /// The driving surface's cooperative cancel state: `true` once the
+    /// pane that mounted the login exited. The flow checks it before
+    /// its auth-store writes — a `JoinHandle::abort` cannot reach a
+    /// started `spawn_blocking` body, so the pane marks this instead.
+    /// The default (`false`) serves the surfaces that never cancel
+    /// mid-flow (the scripted tests, the plain terminal).
+    fn is_cancelled(&self) -> bool {
+        false
+    }
     /// One paste prompt (TS `armManualInput`): an empty line re-prompts,
     /// `None` (the input surface went away) cancels the login.
     fn prompt_line(
@@ -179,6 +188,11 @@ async fn complete_login(
     team: PrimeTeamAssignment,
     ui: &dyn PrimeLoginUi,
 ) -> ProviderAuthOutcome {
+    // The pane exited while the login ran: no credential write lands —
+    // the exit ends the flow (TS the dialog's abort signal).
+    if ui.is_cancelled() {
+        return ProviderAuthOutcome::Cancelled;
+    }
     let mut auth = AuthStorage::create(inputs.agent_dir);
     auth.set_prime_inference_api_key(api_key, team);
     if let Some(error) = auth.drain_errors().pop() {
@@ -214,6 +228,11 @@ async fn select_team(
     {
         auth.reload();
         return "Using team from PRIME_TEAM_ID.".to_string();
+    }
+    // The pane exited: the stored key keeps its standing selection (the
+    // same state as a failed fetch below).
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
     }
     ui.progress("Loading Prime teams...");
     let teams = match fetch_prime_teams(
@@ -290,6 +309,10 @@ impl PanelPrimeLoginUi {
 impl PrimeLoginUi for PanelPrimeLoginUi {
     fn progress(&self, message: &str) {
         self.panel.progress(message);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.panel.cancelled()
     }
 
     fn prompt_line(

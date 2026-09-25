@@ -477,9 +477,48 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 }
 
 /// One onboarding flow's background task (the Prime login, a provider's
-/// key prompt): the phase drives the pane while it runs and takes the
-/// settled outcome from the handle.
-type OnboardingFlowTask = tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome>;
+/// key prompt): the spawned join plus the flow's cooperative cancel
+/// signal, shared with the panel handle the flow holds. The phase
+/// drives the pane while it runs and takes the settled outcome.
+struct OnboardingFlowTask {
+    join: tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl OnboardingFlowTask {
+    /// Spawn the flow and pair it with the panel handle's cancel signal:
+    /// the blocking login body checks the signal before its auth-store
+    /// writes, so the pane can end the flow without aborting it
+    /// (a `JoinHandle::abort` cannot reach a started `spawn_blocking`
+    /// login — without the signal an exited pane would leave the login
+    /// running to completion and still writing credentials).
+    fn spawn<F>(future: F, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self
+    where
+        F: std::future::Future<Output = crate::provider_auth::ProviderAuthOutcome> + Send + 'static,
+    {
+        OnboardingFlowTask {
+            join: tokio::spawn(future),
+            cancel,
+        }
+    }
+
+    /// The flow's settled outcome (the pane waits for it).
+    fn settle(
+        &mut self,
+    ) -> &mut tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome> {
+        &mut self.join
+    }
+
+    /// End the flow with the exiting pane: mark the cooperative signal,
+    /// then wait for the blocking login to observe it (bounded by the
+    /// login's request timeouts) — the exit never leaves a detached
+    /// flow writing credentials in the background.
+    async fn end(self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.join.await;
+    }
+}
 
 /// The outcome of one onboarding pane drive: a screen decision, the exit
 /// keys, or the background flow settling while the pane waited.
@@ -557,14 +596,14 @@ async fn drive_onboarding_pane(
                         drive.exit_guard.note_ctrl_c_handled();
                     }
                     if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
-                        // A decision tears the pane down mid-drive: abort
+                        // A decision tears the pane down mid-drive: end
                         // a still-running login flow with it (TS the
-                        // dialog's abort signal) so a quit never leaves a
-                        // detached task writing credentials in the
-                        // background.
+                        // dialog's abort signal) — the cooperative
+                        // cancel reaches the blocking login body, so a
+                        // quit never leaves a detached flow writing
+                        // credentials in the background.
                         if let Some(task) = flow.take() {
-                            task.abort();
-                            let _ = task.await;
+                            task.end().await;
                         }
                         return Ok((pane, PaneOutcome::Decision(decision)));
                     }
@@ -582,7 +621,7 @@ async fn drive_onboarding_pane(
             }
             settled = async {
                 match flow.as_mut() {
-                    Some(task) => task.await,
+                    Some(task) => task.settle().await,
                     None => std::future::pending().await,
                 }
             } => {
@@ -714,14 +753,18 @@ async fn run_onboarding_phase(
         heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
     });
     let prime_panel = session.auth_panel_handle();
+    let prime_cancel = prime_panel.cancel_flag();
     let prime_row_for_flow = prime_row.clone();
     let prime_auth = provider_auth.clone();
-    let prime_flow = tokio::spawn(async move {
-        prime_auth
-            .0
-            .login_on_panel(&prime_row_for_flow, prime_panel)
-            .await
-    });
+    let prime_flow = OnboardingFlowTask::spawn(
+        async move {
+            prime_auth
+                .0
+                .login_on_panel(&prime_row_for_flow, prime_panel)
+                .await
+        },
+        prime_cancel,
+    );
     let (mut screen, outcome) =
         drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow)).await?;
     // The dialog consumes every key itself; only the flow settling or
@@ -840,28 +883,32 @@ async fn run_onboarding_phase(
                     heading: None,
                 });
                 let panel = session.auth_panel_handle();
+                let prompt_cancel = panel.cancel_flag();
                 let row = row.clone();
                 let prompt_auth = provider_auth.clone();
-                let prompt_flow = tokio::spawn(async move {
-                    // TS `showApiKeyLoginDialog`: the submitted key
-                    // stores through the composition root; a cancel is
-                    // silent.
-                    match panel
-                        .paste_prompt(
-                            crate::onboarding_flow::API_KEY_PROMPT,
-                            // The field renders bullets, not the typed key:
-                            // a first-run screen is exactly the shared and
-                            // recorded surface a secret must never render on
-                            // (the token paste panel's rule; TS renders the
-                            // typed key — the port masks the secret).
-                            crate::auth_panel::PasteStyle::Masked,
-                        )
-                        .await
-                    {
-                        Some(api_key) => prompt_auth.0.login(&row, Some(&api_key)).await,
-                        None => crate::provider_auth::ProviderAuthOutcome::Cancelled,
-                    }
-                });
+                let prompt_flow = OnboardingFlowTask::spawn(
+                    async move {
+                        // TS `showApiKeyLoginDialog`: the submitted key
+                        // stores through the composition root; a cancel is
+                        // silent.
+                        match panel
+                            .paste_prompt(
+                                crate::onboarding_flow::API_KEY_PROMPT,
+                                // The field renders bullets, not the typed key:
+                                // a first-run screen is exactly the shared and
+                                // recorded surface a secret must never render on
+                                // (the token paste panel's rule; TS renders the
+                                // typed key — the port masks the secret).
+                                crate::auth_panel::PasteStyle::Masked,
+                            )
+                            .await
+                        {
+                            Some(api_key) => prompt_auth.0.login(&row, Some(&api_key)).await,
+                            None => crate::provider_auth::ProviderAuthOutcome::Cancelled,
+                        }
+                    },
+                    prompt_cancel,
+                );
                 let (prompted_screen, outcome) =
                     drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
                 screen = prompted_screen;
@@ -897,12 +944,13 @@ async fn run_onboarding_phase(
                         heading: None,
                     });
                     let panel = session.auth_panel_handle();
+                    let service_cancel = panel.cancel_flag();
                     let row = row.clone();
                     let service_auth = provider_auth.clone();
-                    let provider_login =
-                        tokio::spawn(
-                            async move { service_auth.0.login_on_panel(&row, panel).await },
-                        );
+                    let provider_login = OnboardingFlowTask::spawn(
+                        async move { service_auth.0.login_on_panel(&row, panel).await },
+                        service_cancel,
+                    );
                     let (login_screen, outcome) =
                         drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login))
                             .await?;

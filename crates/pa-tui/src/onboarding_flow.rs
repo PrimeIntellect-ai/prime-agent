@@ -280,6 +280,10 @@ impl ProviderPicker {
             }
             line.push(Span::styled(pad, theme.fg_style(ThemeColor::Dim)));
         }
+        // A label wider than the pane truncates to the pane width (TS
+        // `line()` runs every row through `truncateToWidth`), so the row
+        // never spills the frame.
+        let line = crate::width::truncate_line(&line, width, "");
         pad_to(line, width)
     }
 
