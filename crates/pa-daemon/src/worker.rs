@@ -6882,7 +6882,10 @@ mod update_snapshot_tests {
                 }),
             )
             .await;
-        assert!(!replay.success, "the consumed mint is replay-proof: {replay:?}");
+        assert!(
+            !replay.success,
+            "the consumed mint is replay-proof: {replay:?}"
+        );
         let spoofed = worker
             .dispatch(
                 "follow_up",
@@ -6952,7 +6955,10 @@ mod update_snapshot_tests {
                 }),
             )
             .await;
-        assert!(!guessed.success, "a guessed nonce is no capability: {guessed:?}");
+        assert!(
+            !guessed.success,
+            "a guessed nonce is no capability: {guessed:?}"
+        );
         // The notice route is follow-up only: `prompt` refuses the
         // reserved kinds outright.
         let prompted = worker
@@ -6964,7 +6970,10 @@ mod update_snapshot_tests {
                 }),
             )
             .await;
-        assert!(!prompted.success, "prompt refuses the reserved kinds: {prompted:?}");
+        assert!(
+            !prompted.success,
+            "prompt refuses the reserved kinds: {prompted:?}"
+        );
         // Lookalike kinds are ordinary custom rows: they park, and the
         // rider never flags them (exact, case-sensitive matching).
         for lookalike in [
