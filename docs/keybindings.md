@@ -6,7 +6,7 @@ The config file uses the same namespaced keybinding ids that Prime Agent uses in
 
 Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
 
-After editing `keybindings.json`, restart Prime Agent to apply the changes (the TS product's `/reload` hot-reload of keybindings is not wired in this build yet).
+After editing `keybindings.json`, restart Prime Agent to apply the changes — or run `/reload`, which re-reads the file (together with extensions, skills, prompts, and themes) without leaving the session.
 
 ## Key Format
 
