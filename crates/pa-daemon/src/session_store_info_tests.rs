@@ -307,7 +307,7 @@ fn captured_fixture_cold_and_warm_timings() {
         let start = std::time::Instant::now();
         let reference = legacy_read_session_info(path);
         legacy.push(start.elapsed());
-        super::session_info_cache().lock().unwrap().remove(path);
+        super::session_info_cache().lock().unwrap().drop_state(path);
         let start = std::time::Instant::now();
         let result = read_session_info(path);
         cold.push(start.elapsed());
@@ -323,4 +323,206 @@ fn captured_fixture_cold_and_warm_timings() {
         "31MB read_session_info median old={:?} new_cold={:?} new_warm={:?}",
         legacy[3], cold[3], warm[3]
     );
+}
+
+#[test]
+fn a_torn_trailing_line_folds_once_completed() {
+    let dir = test_dir();
+    let path = dir.join("torn.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // A torn trailing message - invalid JSON (the write is mid-line), no
+    // newline: the scan leaves it unconsumed and the row cannot fold it
+    // (TS snapshotSessionInfo's tornTail is lenient: a parse failure is
+    // skipped).
+    let torn_head = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn"#;
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn_head.as_bytes()).unwrap();
+    }
+    let partial = read_session_info(&path).unwrap();
+    assert_eq!(partial.message_count, 0, "a torn line must not fold");
+    // The completed line folds exactly once, and the row matches the oracle.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#" text","timestamp":1790110000000}}"#.as_slice())
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.message_count, 1);
+    assert!(completed.all_messages_text.contains("torn text"));
+}
+
+#[test]
+fn a_same_size_rewrite_rescans_from_the_top() {
+    let dir = test_dir();
+    let path = dir.join("rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"r","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // A same-size rewrite with different early content: the resume must not
+    // answer the stale row (TS resumes only strictly-grown files).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let _ = fs::write(&path, rewritten.as_bytes());
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let rewritten_info = read_session_info(&path).unwrap();
+    assert_eq!(
+        rewritten_info.name.as_deref(),
+        Some("after!"),
+        "a same-size rewrite must rescan"
+    );
+    assert_fold_matches(&path);
+}
+
+#[test]
+fn multi_round_appends_match_the_legacy_fold() {
+    let dir = test_dir();
+    let path = dir.join("rounds.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"q","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    for round in 0..5 {
+        for index in 0..50 {
+            append_rows(
+                &path,
+                &[
+                    json!({"type":"message","id":format!("r{round}m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":format!("round {round} message {index}"),"timestamp":1_790_110_000_000_u64 + round as u64 * 1000 + index as u64}}),
+                ],
+            );
+        }
+        assert_fold_matches(&path);
+    }
+    let final_info = read_session_info(&path).unwrap();
+    assert_eq!(final_info.message_count, 250);
+}
+
+#[test]
+fn a_failed_prefix_check_rescans_from_byte_zero() {
+    let dir = test_dir();
+    let path = dir.join("grown-rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"g","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // An in-place rewrite of the consumed prefix's final line changes the
+    // resume tail window, so the grown-file path fails `prefix_intact` and
+    // must rescan from byte zero. A fresh scan that kept the shared cursor
+    // where `prefix_intact` left it would start mid-file, miss the session
+    // header, and return None (the bots' prefix-rewrite-then-append case).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    let _ = fs::write(&path, rewritten.as_bytes());
+    // The file also grows: a valid appended line enters the resume path.
+    append_rows(
+        &path,
+        &[
+            json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1_790_110_000_000_u64}}),
+        ],
+    );
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let second = read_session_info(&path).unwrap();
+    assert_eq!(
+        second.name.as_deref(),
+        Some("after!"),
+        "a prefix rewrite then append must rescan from the top"
+    );
+    assert_fold_matches(&path);
+}
+
+#[test]
+fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
+    let dir = test_dir();
+    let path = dir.join("unterminated.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"u","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // The final line is complete JSON with NO terminal newline: the row
+    // must fold it (TS snapshotSessionInfo's tornTail - the legacy
+    // str::lines oracle yields it too), without consuming it.
+    let tail = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}).to_string();
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(tail.as_bytes()).unwrap();
+    }
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.name.as_deref(), Some("tail-name"));
+    assert_fold_matches(&path);
+    // Completing the line folds it into the consumed prefix exactly once.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.name.as_deref(), Some("tail-name"));
+}
+
+#[test]
+fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
+    let dir = test_dir();
+    // Zero-usage sessions: a timestamped user message each (no assistant
+    // usage block, so accounted entries stay 0 - only the count cap can
+    // evict; the message also passes the modified_ms > 0 store guard).
+    for index in 0..(SESSION_SCAN_MAX_CACHED_STATES + 8) {
+        let path = dir.join(format!("zero-{index}.jsonl"));
+        append_rows(
+            &path,
+            &[
+                json!({"type":"session","id":format!("z{index}"),"timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+                json!({"type":"message","id":format!("zm{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"n","timestamp":1_790_110_000_000_u64}}),
+            ],
+        );
+        let info = read_session_info(&path).unwrap();
+        assert_eq!(info.message_count, 1);
+    }
+    // The cache really populated past the cap and stayed capped: LRU-first
+    // eviction dropped the earliest-written files, the latest stay resident.
+    let cache = super::session_info_cache().lock().unwrap();
+    assert_eq!(
+        super::SESSION_SCAN_MAX_CACHED_STATES,
+        cache.states.len(),
+        "the state count must sit exactly at the cap, got {}",
+        cache.states.len()
+    );
+    assert_eq!(cache.order.len(), cache.states.len());
+    assert!(!cache.states.contains_key(&dir.join("zero-0.jsonl")));
+    assert!(!cache.states.contains_key(&dir.join("zero-7.jsonl")));
+    assert!(cache.states.contains_key(&dir.join(format!(
+        "zero-{}.jsonl",
+        super::SESSION_SCAN_MAX_CACHED_STATES + 7
+    ))));
 }

@@ -368,9 +368,6 @@ impl PtyReader {
         while quiet < quiet_polls {
             let mut buffer = [0u8; 8192];
             match self.file.read(&mut buffer) {
-                // Both quiet: EOF means the master closed; a read error is
-                // treated the same (would-block noise), so neither resets
-                // the quiet window.
                 Ok(0) | Err(_) => quiet += 1,
                 Ok(n) => {
                     self.output.extend_from_slice(&buffer[..n]);

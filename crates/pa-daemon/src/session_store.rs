@@ -1155,12 +1155,219 @@ impl SessionInfoGeneration {
     }
 }
 
-fn session_info_cache(
-) -> &'static std::sync::Mutex<HashMap<PathBuf, (SessionInfoGeneration, SessionInfo)>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<PathBuf, (SessionInfoGeneration, SessionInfo)>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+/// TS `SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES`: the cross-file memory
+/// budget on retained per-assistant-message usage records. Whole-state
+/// LRU eviction can force a full catalog rescan every refresh, so keep
+/// large families (~2k sessions, 150k usage entries) and growth headroom
+/// resident (session-manager.ts).
+const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
+
+/// The cached-state count ceiling: files with no usage records never trip
+/// the usage budget, so the state count needs its own cap. The cap must
+/// sit well ABOVE a catalog refresh's working set (every saved session
+/// plus every passive child walks into the cache on one list; TS's design
+/// point is ~2k sessions resident) - a cap inside the working set would
+/// evict mid-walk and thrash every pass into a full rescan. 4096 keeps
+/// the ~2k families plus headroom while bounding unbounded-growth; eviction
+/// stays LRU-first (never the old clear-all).
+const SESSION_SCAN_MAX_CACHED_STATES: usize = 4096;
+
+/// TS `sessionScanStates` + `storeSessionScanState`'s accounting: the
+/// states map with its insertion order (JS Map iteration order — the LRU
+/// eviction walks from the front) and the retained-usage-entry counter.
+#[derive(Default)]
+struct SessionInfoScanCache {
+    states: HashMap<PathBuf, SessionScanState>,
+    /// Insertion order; a re-store moves a path to the back (LRU recency).
+    order: Vec<PathBuf>,
+    retained_usage_entries: usize,
+}
+
+impl SessionInfoScanCache {
+    /// TS `dropSessionScanState`.
+    fn drop_state(&mut self, path: &Path) {
+        if let Some(state) = self.states.remove(path) {
+            self.retained_usage_entries -= state.accounted_usage_entries;
+        }
+        self.order.retain(|p| p != path);
+    }
+
+    /// The unchanged-file hit re-stores in TS (`storeSessionScanState
+    /// (filePath, previous)`) — LRU recency without re-accounting.
+    fn touch(&mut self, path: &Path) {
+        if !self.states.contains_key(path) {
+            return;
+        }
+        self.order.retain(|p| p.as_path() != path);
+        self.order.push(path.to_path_buf());
+    }
+
+    /// TS `storeSessionScanState`: (re-)store with fresh accounting, then
+    /// evict insertion-order-first states until the budget holds.
+    fn store_state(&mut self, path: &Path, state: SessionScanState) {
+        self.drop_state(path);
+        let mut state = state;
+        state.accounted_usage_entries = state.acc.usage_scan.retained_entries();
+        self.retained_usage_entries += state.accounted_usage_entries;
+        self.order.push(path.to_path_buf());
+        self.states.insert(path.to_path_buf(), state);
+        while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
+            || self.states.len() > SESSION_SCAN_MAX_CACHED_STATES
+        {
+            let Some(front) = self.order.first().cloned() else {
+                break;
+            };
+            self.drop_state(&front);
+        }
+    }
+}
+
+fn session_info_cache() -> &'static std::sync::Mutex<SessionInfoScanCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SessionInfoScanCache>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(SessionInfoScanCache::default()))
+}
+
+/// TS `SESSION_SCAN_RESUME_TAIL_BYTES`: the trailing window of the consumed
+/// prefix a resumed scan verifies before trusting the cached fold state
+/// (`scannedPrefixIntact`). The product appends, so a same-identity,
+/// same-size rewrite is the aliasing risk the check covers.
+const SESSION_SCAN_RESUME_TAIL_BYTES: usize = 16;
+
+/// TS `SessionScanAccumulator`: the per-file fold state a resume continues
+/// from. The finished [`SessionInfo`] is derived from this; the cached state
+/// carries the accumulator so a grown file folds ONLY its appended entries.
+/// Clone is the snapshot fold's copy (TS `snapshotSessionInfo`).
+#[derive(Clone, Default)]
+struct SessionScanAccumulator {
+    header: Option<SessionHeader>,
+    name: Option<String>,
+    state: Option<String>,
+    model: Option<(String, String)>,
+    thinking_level: Option<String>,
+    message_count: usize,
+    first_message: String,
+    all_messages_text: String,
+    agent_status: Option<Value>,
+    last_activity_ms: Option<u64>,
+    usage_scan: crate::session_usage::UsageScan,
+}
+
+/// One cached scan state (TS `SessionScanState`): the generation the state
+/// was certified at, the fold accumulator, the consumed-prefix cursor, the
+/// resume tail, and the derived info.
+struct SessionScanState {
+    generation: SessionInfoGeneration,
+    acc: SessionScanAccumulator,
+    /// Bytes consumed through the end of the last complete line.
+    offset: u64,
+    /// The trailing window of the consumed prefix (TS `advanceScanTail`).
+    tail: [u8; SESSION_SCAN_RESUME_TAIL_BYTES],
+    info: Option<SessionInfo>,
+    /// Usage entries counted against the retained bound at the last store
+    /// (TS `accountedUsageEntries`).
+    accounted_usage_entries: usize,
+}
+
+impl SessionScanState {
+    fn fresh(generation: SessionInfoGeneration) -> Self {
+        Self {
+            generation,
+            acc: SessionScanAccumulator::default(),
+            offset: 0,
+            tail: [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES],
+            info: None,
+            accounted_usage_entries: 0,
+        }
+    }
+
+    /// The resume copy: the fold state travels, the derived info does not
+    /// (the appended entries rebuild it).
+    fn clone_for_resume(&self) -> Self {
+        Self {
+            generation: self.generation,
+            acc: SessionScanAccumulator {
+                header: self.acc.header.clone(),
+                name: self.acc.name.clone(),
+                state: self.acc.state.clone(),
+                model: self.acc.model.clone(),
+                thinking_level: self.acc.thinking_level.clone(),
+                message_count: self.acc.message_count,
+                first_message: self.acc.first_message.clone(),
+                all_messages_text: self.acc.all_messages_text.clone(),
+                agent_status: self.acc.agent_status.clone(),
+                last_activity_ms: self.acc.last_activity_ms,
+                usage_scan: self.acc.usage_scan.clone(),
+            },
+            offset: self.offset,
+            tail: self.tail,
+            info: None,
+            accounted_usage_entries: 0,
+        }
+    }
+
+    /// TS `seedRosterLedger`-side identity: the resume requires the same
+    /// file (dev/ino) with a grown-or-equal length.
+    fn same_file_identity(&self, generation: &SessionInfoGeneration) -> bool {
+        #[cfg(unix)]
+        {
+            self.generation.dev == generation.dev && self.generation.ino == generation.ino
+        }
+        // No dev/ino from std on this platform, so a grown file cannot be
+        // certified as the same inode: every grown file rescans whole (TS
+        // always has dev/ino from Node fs stats). An mtime-based identity
+        // would instead certify an in-place rewrite as a resume.
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// TS `advanceScanTail`: the consumed prefix's trailing window. A line at
+    /// least as long as the window keeps only its last bytes plus the
+    /// newline; a short line rolls into the previous window first.
+    fn advance_tail(&mut self, line: &[u8]) {
+        let keep = SESSION_SCAN_RESUME_TAIL_BYTES - 1;
+        let mut combined = Vec::with_capacity(SESSION_SCAN_RESUME_TAIL_BYTES + line.len() + 1);
+        if line.len() >= keep {
+            combined.extend_from_slice(&line[line.len() - keep..]);
+        } else {
+            combined.extend_from_slice(&self.tail);
+            combined.extend_from_slice(line);
+        }
+        combined.push(b'\n');
+        let start = combined
+            .len()
+            .saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES);
+        self.tail.copy_from_slice(&combined[start..]);
+    }
+
+    /// TS `scannedPrefixIntact`: the bytes just before the cursor match the
+    /// cached window, proving the resume starts where the cached fold left
+    /// off (a torn write or a rewrite that raced the scan is caught here).
+    /// Session files are append-only between whole-file rewrites; an
+    /// in-place interior edit that keeps the identity, growth, and this
+    /// window intact defeats the check on TS too - outside the writer
+    /// model (session-manager.ts: "In-place interior edits that defeat all
+    /// four are outside the writer model").
+    fn prefix_intact(&self, file: &fs::File) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.offset == 0 {
+            return true;
+        }
+        let window = SESSION_SCAN_RESUME_TAIL_BYTES as u64;
+        let start = self.offset.saturating_sub(window);
+        let len = (self.offset - start) as usize;
+        let mut read_back = vec![0u8; len];
+        let mut cursor = file;
+        if cursor.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        if cursor.read_exact(&mut read_back).is_err() {
+            return false;
+        }
+        read_back.as_slice() == &self.tail[self.tail.len() - len..]
+    }
 }
 
 /// The listing fold only needs message metadata after the search corpus is full.
@@ -1219,186 +1426,52 @@ struct SessionInfoEntry {
     usage: Option<crate::session_usage::ScanUsage>,
 }
 
+/// Read a session file's list metadata (TS `readSessionInfo` over the
+/// resumable per-file scan states): an unchanged file answers from the
+/// cached fold, a grown file folds ONLY its appended entries after the
+/// prefix-tail check, and a rewritten file rescans from the top.
 pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
-    let file = fs::File::open(path).ok()?;
+    let mut file = fs::File::open(path).ok()?;
     let generation = SessionInfoGeneration::from_metadata(&file.metadata().ok()?);
-    if cfg!(unix)
-        && fs::metadata(path)
-            .ok()
-            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
-    {
-        if let Ok(cache) = session_info_cache().lock() {
-            if let Some((cached_generation, info)) = cache.get(path) {
-                if *cached_generation == generation {
-                    return Some(info.clone());
+
+    // The unchanged case answers from the cache; the grown case resumes.
+    let mut state = {
+        let mut cache = session_info_cache().lock().ok()?;
+        match cache.states.get(path) {
+            Some(cached) if cached.generation == generation => {
+                let info = cached.info.clone();
+                cache.touch(path);
+                return info;
+            }
+            Some(cached)
+                if cached.same_file_identity(&generation)
+                    && generation.len > cached.generation.len =>
+            {
+                if cached.prefix_intact(&file) {
+                    cached.clone_for_resume()
+                } else {
+                    SessionScanState::fresh(generation)
                 }
             }
+            _ => SessionScanState::fresh(generation),
         }
-    }
-    let mut header: Option<SessionHeader> = None;
-    let mut name = None;
-    let mut state = None;
-    let mut model = None;
-    let mut thinking_level = None;
-    let mut message_count = 0usize;
-    let mut first_message = String::new();
-    let mut all_messages_text = String::new();
-    let mut agent_status: Option<Value> = None;
-    let mut usage_scan = crate::session_usage::UsageScan::default();
-    let mut last_activity_ms: Option<u64> = None;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).ok()? == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<SessionInfoEntry>(trimmed) else {
-            continue;
-        };
-        match entry.type_.as_str() {
-            "session" => {
-                let parsed: SessionHeader = serde_json::from_str(trimmed).ok()?;
-                header = Some(parsed);
-            }
-            "session_info" => {
-                name = entry
-                    .name
-                    .as_ref()
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|n| !n.is_empty())
-                    .map(str::to_string);
-            }
-            "session_state" => {
-                if let Some(status) = entry
-                    .state
-                    .as_ref()
-                    .and_then(|s| s.get("status"))
-                    .and_then(Value::as_str)
-                {
-                    state = Some(normalize_state_status(status));
-                }
-            }
-            "model_change" => {
-                model = Some((
-                    entry.provider.as_ref()?.as_str()?.to_string(),
-                    entry.model_id.as_ref()?.as_str()?.to_string(),
-                ));
-            }
-            "thinking_level_change" => {
-                if let Some(level) = entry
-                    .thinking_level
-                    .as_ref()
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|level| !level.is_empty())
-                {
-                    thinking_level = Some(level.to_string());
-                }
-            }
-            "agent_status" => agent_status = entry.status,
-            "child_usage_attributed" => {
-                usage_scan.fold_child_attribution(
-                    entry.target_id.as_deref(),
-                    entry.child_usage.map(Usage::from),
-                    entry.aggregate_usage.map(Usage::from),
-                );
-            }
-            "compaction" | "branch_summary" => {
-                usage_scan.fold_summarization(entry.usage.map(Usage::from));
-            }
-            "message" => {
-                message_count += 1;
-                if let Some(message) = entry.message {
-                    let role = message.role.as_ref().and_then(Value::as_str);
-                    usage_scan.fold_message(&entry.id, role, message.usage.map(Usage::from));
-                    if role == Some("assistant") {
-                        if let (Some(provider), Some(model_id)) = (
-                            message.provider.as_ref().and_then(Value::as_str),
-                            message.model.as_ref().and_then(Value::as_str),
-                        ) {
-                            model = Some((provider.to_string(), model_id.to_string()));
-                        }
-                    }
-                    if matches!(role, Some("user" | "assistant")) {
-                        if let Some(timestamp) = message.timestamp.as_ref().and_then(Value::as_u64)
-                        {
-                            last_activity_ms = Some(last_activity_ms.unwrap_or(0).max(timestamp));
-                        }
-                    }
-                    if (role == Some("user") && first_message.is_empty())
-                        || (matches!(role, Some("user" | "assistant"))
-                            && all_messages_text.chars().count()
-                                < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
-                    {
-                        if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
-                            if let Some(message) = full.fields.get("message") {
-                                if role == Some("user") && first_message.is_empty() {
-                                    let text = message_text(message);
-                                    if !text.is_empty() {
-                                        first_message = text;
-                                    }
-                                }
-                                if matches!(role, Some("user" | "assistant")) {
-                                    append_capped_search_text(
-                                        &mut all_messages_text,
-                                        &message_text(message),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let usage = usage_scan.summary();
-    let header = header?;
-    let modified_ms = last_activity_ms.unwrap_or(0);
-    let modified = if modified_ms > 0 {
-        crate::util::iso_from_unix_ms(modified_ms)
-    } else {
-        crate::util::iso_from_unix_ms(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64),
-        )
     };
-    let info = SessionInfo {
-        path: path.to_path_buf(),
-        id: header.id,
-        cwd: header.cwd,
-        name,
-        state,
-        model,
-        thinking_level,
-        parent_session_path: header.parent_session,
-        rlm_depth: header.rlm_depth.unwrap_or(0) as u32,
-        created: header.timestamp,
-        modified,
-        message_count,
-        first_message: if first_message.is_empty() {
-            "(no messages)".to_string()
-        } else {
-            first_message
-        },
-        all_messages_text,
-        agent_status,
-        usage,
-        deleted_descendant_usage: None,
-    };
+    // Position the shared cursor at the resume point. A fresh state rewinds
+    // to byte 0: `prefix_intact` leaves the cursor at the old consumed end
+    // (its tail-window read), and a fresh scan started there would miss the
+    // session header. TS restarts its stream at `state.offset` every scan.
+    if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
+        return None;
+    }
+    let mut reader = std::io::BufReader::new(&mut file);
+    let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
+    let info = state.build_info(path, Some(&torn_tail))?;
     // A concurrent append/replacement must never certify stale metadata.
     // The legacy no-timestamp fallback is now(), not a durable file value.
+    let modified_ms = state.acc.last_activity_ms.unwrap_or(0);
     if cfg!(unix)
         && modified_ms > 0
-        && reader
-            .get_ref()
+        && file
             .metadata()
             .ok()
             .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
@@ -1406,14 +1479,219 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             .ok()
             .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
     {
+        state.generation = generation;
+        state.info = Some(info.clone());
         if let Ok(mut cache) = session_info_cache().lock() {
-            if cache.len() > 512 {
-                cache.clear();
-            }
-            cache.insert(path.to_path_buf(), (generation, info.clone()));
+            cache.store_state(path, state);
         }
     }
     Some(info)
+}
+
+impl SessionScanState {
+    /// Fold lines from the cursor (TS `scanSessionLines`): a complete line
+    /// advances the cursor and the tail; an unterminated final line is
+    /// never consumed (it may still be an in-progress append) and is
+    /// returned as the snapshot-only torn tail. `None` = the abort arm.
+    fn scan_from_cursor(
+        &mut self,
+        reader: &mut std::io::BufReader<&mut fs::File>,
+        size: u64,
+    ) -> Option<String> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let consumed = std::io::BufRead::read_line(reader, &mut line).ok()?;
+            if consumed == 0 {
+                break;
+            }
+            let complete = line.ends_with('\n');
+            if !complete && (self.offset + consumed as u64) >= size {
+                // A torn trailing line: not folded here, the cursor stays
+                // put so the completed line folds on the next scan; the
+                // caller folds it into the current snapshot only.
+                return Some(line);
+            }
+            if complete {
+                line.pop();
+            }
+            fold_scan_entry(&mut self.acc, &line)?;
+            self.offset += consumed as u64;
+            self.advance_tail(line.as_bytes());
+            if !complete {
+                break;
+            }
+        }
+        Some(String::new())
+    }
+
+    /// Derive the listing row (the tail of the old full scan). A non-empty
+    /// torn tail folds into a SNAPSHOT copy of the accumulator (TS
+    /// `snapshotSessionInfo`): the valid unterminated final line reaches
+    /// the row, while the consumed prefix - the resumable state - stays
+    /// untouched for the scan that sees the terminating newline.
+    fn build_info(&self, path: &Path, torn: Option<&str>) -> Option<SessionInfo> {
+        let snapshot;
+        let acc = match torn.filter(|tail| !tail.trim().is_empty()) {
+            Some(tail) => {
+                let mut snap = self.acc.clone();
+                fold_scan_entry(&mut snap, tail)?;
+                snapshot = snap;
+                &snapshot
+            }
+            None => &self.acc,
+        };
+        let usage = acc.usage_scan.summary();
+        let header = acc.header.as_ref()?;
+        let modified_ms = acc.last_activity_ms.unwrap_or(0);
+        let modified = if modified_ms > 0 {
+            crate::util::iso_from_unix_ms(modified_ms)
+        } else {
+            crate::util::iso_from_unix_ms(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64),
+            )
+        };
+        Some(SessionInfo {
+            path: path.to_path_buf(),
+            id: header.id.clone(),
+            cwd: header.cwd.clone(),
+            name: acc.name.clone(),
+            state: acc.state.clone(),
+            model: acc.model.clone(),
+            thinking_level: acc.thinking_level.clone(),
+            parent_session_path: header.parent_session.clone(),
+            rlm_depth: header.rlm_depth.unwrap_or(0) as u32,
+            created: header.timestamp.clone(),
+            modified,
+            message_count: acc.message_count,
+            first_message: if acc.first_message.is_empty() {
+                "(no messages)".to_string()
+            } else {
+                acc.first_message.clone()
+            },
+            all_messages_text: acc.all_messages_text.clone(),
+            agent_status: acc.agent_status.clone(),
+            usage,
+            // Ledger-derived (`withPassiveRlmDescendantInfos`), never the
+            // file scan's: the listing arm attaches it from the spawn
+            // ledger's deleted-descendant bucket.
+            deleted_descendant_usage: None,
+        })
+    }
+}
+
+/// Fold one complete line into the scan state (the old scan-loop body).
+/// `None` = the abort arm (a `model_change` without its model identity).
+fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(());
+    }
+    let Ok(entry) = serde_json::from_str::<SessionInfoEntry>(trimmed) else {
+        return Some(());
+    };
+    match entry.type_.as_str() {
+        "session" => {
+            let parsed: SessionHeader = serde_json::from_str(trimmed).ok()?;
+            acc.header = Some(parsed);
+        }
+        "session_info" => {
+            acc.name = entry
+                .name
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string);
+        }
+        "session_state" => {
+            if let Some(status) = entry
+                .state
+                .as_ref()
+                .and_then(|s| s.get("status"))
+                .and_then(Value::as_str)
+            {
+                acc.state = Some(normalize_state_status(status));
+            }
+        }
+        "model_change" => {
+            acc.model = Some((
+                entry.provider.as_ref()?.as_str()?.to_string(),
+                entry.model_id.as_ref()?.as_str()?.to_string(),
+            ));
+        }
+        "thinking_level_change" => {
+            if let Some(level) = entry
+                .thinking_level
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|level| !level.is_empty())
+            {
+                acc.thinking_level = Some(level.to_string());
+            }
+        }
+        "agent_status" => acc.agent_status = entry.status,
+        "child_usage_attributed" => {
+            acc.usage_scan.fold_child_attribution(
+                entry.target_id.as_deref(),
+                entry.child_usage.map(Usage::from),
+                entry.aggregate_usage.map(Usage::from),
+            );
+        }
+        "compaction" | "branch_summary" => {
+            acc.usage_scan
+                .fold_summarization(entry.usage.map(Usage::from));
+        }
+        "message" => {
+            acc.message_count += 1;
+            if let Some(message) = entry.message {
+                let role = message.role.as_ref().and_then(Value::as_str);
+                acc.usage_scan
+                    .fold_message(&entry.id, role, message.usage.map(Usage::from));
+                if role == Some("assistant") {
+                    if let (Some(provider), Some(model_id)) = (
+                        message.provider.as_ref().and_then(Value::as_str),
+                        message.model.as_ref().and_then(Value::as_str),
+                    ) {
+                        acc.model = Some((provider.to_string(), model_id.to_string()));
+                    }
+                }
+                if matches!(role, Some("user" | "assistant")) {
+                    if let Some(timestamp) = message.timestamp.as_ref().and_then(Value::as_u64) {
+                        acc.last_activity_ms =
+                            Some(acc.last_activity_ms.unwrap_or(0).max(timestamp));
+                    }
+                }
+                if (role == Some("user") && acc.first_message.is_empty())
+                    || (matches!(role, Some("user" | "assistant"))
+                        && acc.all_messages_text.chars().count()
+                            < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
+                {
+                    if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
+                        if let Some(message) = full.fields.get("message") {
+                            if role == Some("user") && acc.first_message.is_empty() {
+                                let text = message_text(message);
+                                if !text.is_empty() {
+                                    acc.first_message = text;
+                                }
+                            }
+                            if matches!(role, Some("user" | "assistant")) {
+                                append_capped_search_text(
+                                    &mut acc.all_messages_text,
+                                    &message_text(message),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Some(())
 }
 
 /// List every valid session file in a directory, most recently modified first
