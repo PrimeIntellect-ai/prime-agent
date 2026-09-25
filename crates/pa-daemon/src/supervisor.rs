@@ -1690,6 +1690,16 @@ impl Supervisor {
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
                         let _ = events.send((ClientRouting::Broadcast, payload));
+                    } else if outbound_type == "model_catalog_changed" {
+                        // A worker's background catalog refresh changed
+                        // the served snapshot: every client re-fetches
+                        // (the sessions' pickers fold the fresh catalog
+                        // through their stable update path — no flicker).
+                        // Rust-only extension: the no-stall picker-open
+                        // refresh returns the validated snapshot instantly
+                        // and lands the fresh catalog through this
+                        // broadcast.
+                        let _ = events.send((ClientRouting::Broadcast, payload));
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);

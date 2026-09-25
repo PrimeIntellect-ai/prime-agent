@@ -587,6 +587,22 @@ impl OutboundFrame {
             seq: 0,
         }
     }
+
+    /// `model_catalog_changed`: a background catalog refresh changed what
+    /// this worker would answer for `get_model_catalog` (Rust-only
+    /// extension over the TS daemon-mode protocol — TS awaits
+    /// `refreshModelCatalog` inside the request; the no-stall picker-open
+    /// refresh returns the validated snapshot instantly and lands the
+    /// fresh catalog through this broadcast instead). Every client
+    /// re-fetches; an open picker folds the catalog through its stable
+    /// update path, so the selection never flickers.
+    pub(crate) fn model_catalog_changed() -> Self {
+        OutboundFrame {
+            payload: br#"{"type":"model_catalog_changed"}"#.to_vec(),
+            outbound_type: "model_catalog_changed",
+            seq: 0,
+        }
+    }
 }
 
 /// The worker's outbound event pump: one sequence-stamped broadcast stream
@@ -4010,60 +4026,6 @@ impl Worker {
         };
         let stats = crate::session_stats::session_stats(store, self.engine.model_context_window());
         response_success(None, "get_session_stats", Some(stats))
-    }
-
-    /// `get_model_catalog` (TS daemon-mode `get_model_catalog` →
-    /// `session.modelRegistry.refreshModelCatalog`): refresh the registry —
-    /// the live Prime Inference catalog fetch plus the private-model
-    /// entitlements — then return the full catalog and the providers with
-    /// configured auth. The fetch itself runs in the background inside the
-    /// refresh (the first response after a daemon boot can still show the
-    /// disk-cache/bundled snapshot; the client refreshes again when the
-    /// menu is open, exactly like TS).
-    async fn handle_get_model_catalog(&self) -> DaemonResponse {
-        if let Err(response) = self.require_created("get_model_catalog") {
-            return response;
-        }
-        let agent_dir = self.config.agent_dir.clone();
-        let auth = pa_core::auth::AuthStorage::create(&agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-        let available = registry.refresh_available_models().await;
-        let configured_providers: Vec<String> = {
-            let mut providers: Vec<String> = available
-                .iter()
-                .map(|model| model.provider.clone())
-                .collect();
-            providers.sort();
-            providers.dedup();
-            providers
-        };
-        let available_keys: std::collections::HashSet<String> = available
-            .iter()
-            .map(|model| format!("{}/{}", model.provider, model.id))
-            .collect();
-        // The catalog keeps every model except private Prime Inference
-        // models the current credentials do not authorize.
-        let models: Vec<&pa_types::ai::Model> = registry
-            .get_all()
-            .iter()
-            .filter(|model| {
-                !pa_core::models::is_private_prime_inference_model(model)
-                    || available_keys.contains(&format!("{}/{}", model.provider, model.id))
-            })
-            .collect();
-        let models: Vec<Value> = models
-            .into_iter()
-            .map(|model| serde_json::to_value(model).unwrap_or(Value::Null))
-            .collect();
-        response_success(
-            None,
-            "get_model_catalog",
-            Some(json!({
-                "models": models,
-                "configuredProviders": configured_providers,
-            })),
-        )
     }
 
     fn handle_get_messages(&self) -> DaemonResponse {

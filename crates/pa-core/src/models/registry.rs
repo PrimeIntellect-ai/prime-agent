@@ -501,13 +501,33 @@ impl ModelRegistry {
     /// plus `refreshPrimeInferenceModels`) is awaited so the resolved
     /// catalog reflects it as soon as the call returns.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
+        self.refresh_available_models_forced(false).await
+    }
+
+    /// [`ModelRegistry::refresh_available_models`] with the refresh
+    /// trigger's gating — the daemon's background catalog refresh (the
+    /// picker-open and auth-change triggers): forced triggers (startup,
+    /// auth change) skip the hourly catalog gate, the picker-open trigger
+    /// keeps it. The private-authorization refresh rides along with its
+    /// own fingerprint-and-TTL gating either way.
+    pub async fn refresh_available_models_with_trigger(
+        &mut self,
+        trigger: pa_models::RefreshTrigger,
+    ) -> Vec<Model> {
+        self.refresh_available_models_forced(trigger.forced()).await
+    }
+
+    /// The awaited refresh body (TS `refreshModelCatalog`'s awaited chain):
+    /// reload, the gated-or-forced chain fetch, the model reload, the
+    /// private-authorization refresh, then the auth-filtered catalog.
+    async fn refresh_available_models_forced(&mut self, force: bool) -> Vec<Model> {
         let previous_ids = self.authorized_private_ids.clone();
         let previous_team = self.authorized_team_id.clone();
         let previous_models = self.authorized_private_models.clone();
         self.refresh();
         let credentials = self.prime_credentials();
         self.catalog
-            .refresh_with_credentials(false, credentials.as_ref())
+            .refresh_with_credentials(force, credentials.as_ref())
             .await;
         self.load_models();
         self.refresh_private_prime_inference_authorization(
