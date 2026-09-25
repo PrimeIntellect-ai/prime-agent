@@ -670,6 +670,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             .keep_recent_tokens
             .unwrap_or(crate::session_engine::compaction::DEFAULT_KEEP_RECENT_TOKENS),
     });
+    // TS #2411: the session's summarizer passes (compaction summaries;
+    // branch summaries route through the same context at the daemon seam)
+    // resolve their model through the `auxiliaryModel` setting with the
+    // session model as fallback, so their one-off prompts stay off the
+    // session's prompt-cache prefix.
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd,
+            agent_dir: config.agent_dir.clone(),
+        },
+    );
     // The kernel-state probe behind the post-compaction `ipython_state`
     // notice (TS `AgentSession._ipythonKernelProvisioner`): the engine's
     // provisioner is the session's kernel whether it added the `ipython`
