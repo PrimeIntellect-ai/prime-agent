@@ -207,7 +207,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "wall-clock probe on a real sessions dir (PA_ROSTER_BENCH_DIR): cargo test -p pa-daemon --release -- --ignored roster_scan_wall_clock --nocapture"]
+    // A wall-clock probe, not a correctness test: it only prints timings of a
+    // real sessions dir (PA_ROSTER_BENCH_DIR), so it runs on demand with
+    // `cargo test -p pa-daemon --release -- --ignored roster_scan_wall_clock --nocapture`.
+    #[ignore = "wall-clock probe, not a correctness test: prints timings of a real sessions dir (PA_ROSTER_BENCH_DIR)"]
     fn roster_scan_wall_clock() {
         let dir = match std::env::var_os("PA_ROSTER_BENCH_DIR") {
             Some(dir) => PathBuf::from(dir),
