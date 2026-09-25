@@ -6404,6 +6404,7 @@ impl SessionUi {
             RunsViewAction::None => {}
         }
         self.dirty = true;
+        Ok(())
     }
 
     /// The dock's goal row opens the read-only goal panel (the
