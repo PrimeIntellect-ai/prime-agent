@@ -210,7 +210,7 @@ pub struct AgentsViewLink {
 
 impl AgentsViewLink {
     async fn connect(socket_path: &std::path::Path) -> Result<Self> {
-        let (client, events) = DaemonClient::connect(socket_path).await?;
+        let (client, events) = DaemonClient::connect_with_retry(socket_path).await?;
         Ok(Self { client, events })
     }
 

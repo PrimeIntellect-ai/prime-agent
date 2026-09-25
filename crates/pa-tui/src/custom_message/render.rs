@@ -60,10 +60,12 @@ pub(crate) fn markdown_rows(
 /// TS `agentMessageSummaryLine` (`◆ <label> · <participant>[ · <preview>]`)
 /// with a SANCTIONED DIVERGENCE (Kevin directive 2026-09-24): the row's
 /// icon is the `✉` mail envelope — the a2a rows read as agent mail — where
-/// the TS binary still renders the `◆` diamond. The TS side is expected
-/// to adopt the same glyph. The accent icon, the muted label, then the
-/// participant (and the preview when present) joined by the dim `·`
-/// separators.
+/// the TS binary still renders the `◆` diamond (in the accent color; the
+/// TS side is expected to adopt the same glyph). The icon renders green
+/// (the operator's 2026-09-24 directive: "mail envelope glyph GREEN not
+/// purple") — the Success color, the palette's green. The muted label,
+/// then the participant (and the preview when present) joined by the dim
+/// `·` separators.
 pub(crate) fn agent_message_summary_line(
     direction: AgentMessageDirection,
     participant: &str,
@@ -71,7 +73,7 @@ pub(crate) fn agent_message_summary_line(
     theme: &Theme,
 ) -> Line {
     let mut line: Line = vec![
-        Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Accent)),
+        Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Success)),
         Span::raw(" "),
         Span::styled(
             direction.label().to_string(),
@@ -335,13 +337,13 @@ mod tests {
             header.trim_end(),
             " \u{2709} Agent message received \u{b7} from child model-probe \u{b7} ready"
         );
-        // Colors: accent envelope, muted label, dim participant, preview,
-        // and the separators.
-        let accent = theme().fg_style(ThemeColor::Accent);
+        // Colors: green envelope (the operator's 2026-09-24 directive),
+        // muted label, dim participant, preview, and the separators.
+        let green = theme().fg_style(ThemeColor::Success);
         let muted = theme().fg_style(ThemeColor::Muted);
         let dim = theme().fg_style(ThemeColor::Dim);
         assert_eq!(rows[1][0], Span::styled(" ".to_string(), Style::default()));
-        assert_eq!(rows[1][1], Span::styled("\u{2709}".to_string(), accent));
+        assert_eq!(rows[1][1], Span::styled("\u{2709}".to_string(), green));
         assert_eq!(
             rows[1][3],
             Span::styled("Agent message received".to_string(), muted)
