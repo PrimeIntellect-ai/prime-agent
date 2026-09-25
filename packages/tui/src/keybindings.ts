@@ -1,4 +1,4 @@
-import { type KeyId, matchesKey } from "./keys.js";
+import { type KeyId, matchesKey, matchesOptionComposedKey } from "./keys.js";
 
 /**
  * Global keybinding registry.
@@ -243,10 +243,11 @@ export class KeybindingsManager {
 		}
 	}
 
-	matches(data: string, keybinding: Keybinding): boolean {
+	matches(data: string, keybinding: Keybinding, options: { optionComposed?: boolean } = {}): boolean {
 		const keys = this.keysById.get(keybinding) ?? [];
 		for (const key of keys) {
 			if (matchesKey(data, key)) return true;
+			if (options.optionComposed && matchesOptionComposedKey(data, key)) return true;
 		}
 		return false;
 	}

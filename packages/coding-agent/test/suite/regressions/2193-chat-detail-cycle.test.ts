@@ -95,7 +95,7 @@ function assertMode(mode: ModeControls, detail: "overview" | "details" | "all"):
 	expect(text).toContain("Agent message received");
 }
 describe("conversation detail cycle", () => {
-	test("cycles a reopened saved chat without changing messages or JSONL", async () => {
+	test("keeps the chosen detail level for the next chat without changing messages or JSONL", async () => {
 		harness = await createHarness({
 			tools,
 			persistSession: true,
@@ -135,17 +135,19 @@ describe("conversation detail cycle", () => {
 		assertMode(mode, "details");
 		cycle(mode);
 		assertMode(mode, "all");
-		cycle(mode);
-		assertMode(mode, "overview");
 		mode.defaultEditor.handleInput("\x10");
-		assertMode(mode, "overview");
+		assertMode(mode, "all");
 		await mode.renderSessionContext(context, { clearChat: true });
-		assertMode(mode, "overview");
-		cycle(mode);
-		assertMode(mode, "details");
+		assertMode(mode, "all");
 		expect(JSON.stringify(context.messages)).toBe(source);
 		expect(readFileSync(sessionFile, "utf8")).toBe(savedTrace);
-		expect(harness.settingsManager.getGlobalSettings()).toMatchObject({ hideThinkingBlock: false });
+		expect(harness.settingsManager.getGlobalSettings()).toMatchObject({
+			hideThinkingBlock: false,
+			chatDetail: "all",
+		});
+		const next = createMode(harness);
+		await next.renderSessionContext(context);
+		assertMode(next, "all");
 	});
 	test("keeps full shell notifications at their arrival position through live and reopened detail cycles", async () => {
 		const code = "h = bash('printf done')\nh";
