@@ -1510,7 +1510,15 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        self.cost_usd = data.get("cost").and_then(Value::as_f64);
+        // The top bar's spend is the FULL session+subagents total
+        // (`totalCost`, the /context root totalUsage's fold): the TS
+        // active-region `cost` drops pre-compaction spend, which reads
+        // as an inaccurate title after every compaction. Older daemons
+        // without the field fall back to the TS shape.
+        self.cost_usd = data
+            .get("totalCost")
+            .and_then(Value::as_f64)
+            .or_else(|| data.get("cost").and_then(Value::as_f64));
         self.dirty = true;
     }
 
