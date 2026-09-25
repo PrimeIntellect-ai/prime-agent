@@ -282,6 +282,7 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            configured: false,
         };
         Box::pin(async move { vec![row] })
     }
