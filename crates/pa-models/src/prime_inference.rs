@@ -183,6 +183,11 @@ pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
 /// the api key with a domain-separation prefix (`privatePrimeAuthorizationFingerprint`
 /// in the TS reference). The api key is the MAC key, never a hashed password:
 /// the fingerprint stays stable for disk cache reuse without leaking it.
+///
+/// # Panics
+///
+/// Panics if the HMAC context cannot be built from the api key, which
+/// happens only for keys longer than SHA-256's 64-byte block size.
 pub fn scope_key(api_key: &str, team_id: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("HMAC accepts any key length");
@@ -271,6 +276,11 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
 
 /// Parse the Prime Inference `/models` payload. Entries with unusable data
 /// drop silently; duplicate ids reject the whole payload.
+///
+/// # Errors
+///
+/// Fails when the payload carries no `data` array, on a duplicate model
+/// id, or when every entry was dropped and `allow_empty` is false.
 pub fn parse_prime_inference_model_catalog(
     value: &serde_json::Value,
     allow_empty: bool,
@@ -408,6 +418,11 @@ fn default_compat() -> ModelCompat {
 
 /// Build the live model list from fetched entries against the compiled
 /// templates. `None` means the coverage gate rejected the result.
+///
+/// # Panics
+///
+/// Panics if a `ThinkingFormat` fails to serialize into JSON; the format
+/// is a plain string enum, so this cannot happen.
 pub fn build_prime_inference_models(
     bundled: &[Model],
     entries: &[PrimeInferenceEntry],
