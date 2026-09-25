@@ -459,6 +459,13 @@ fn clicking_a_transcript_link_opens_it() {
         HeadlessStep::Mouse(press(link_col + 1, link_row + 1)),
         HeadlessStep::Mouse(release(link_col + 1, link_row + 1)),
     ]);
+    // Release containment: a press on the link whose release lands
+    // elsewhere (a terminal reporting only press/release) never opens it.
+    let slipped_off = run_plan(vec![
+        HeadlessStep::WaitMs(1500),
+        HeadlessStep::Mouse(press(link_col + 1, link_row + 1)),
+        HeadlessStep::Mouse(release(link_col + 1, link_row + 3)),
+    ]);
     pa_tui::hyperlinks::set_hyperlinks_override(None);
     assert_eq!(
         opened.2,
@@ -467,6 +474,11 @@ fn clicking_a_transcript_link_opens_it() {
         press(link_col + 1, link_row + 1),
         release(link_col + 1, link_row + 1),
         opened.0
+    );
+    assert!(
+        slipped_off.2.is_empty(),
+        "a release off the link never opens it: {:#?}",
+        slipped_off.2
     );
 }
 

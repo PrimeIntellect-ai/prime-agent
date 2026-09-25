@@ -6114,10 +6114,20 @@ impl SessionUi {
         {
             return;
         }
-        let url = self
-            .fullscreen_pressed_hyperlink
-            .clone()
-            .or_else(|| view.frame_link_at(row, col));
+        // Release containment (the region rule, applied to links): the
+        // hyperlink captured at the press opens only when the release
+        // lands on the SAME link — a press-and-release that moved off the
+        // label never launches it. A clean press that captured no link
+        // still honors the release position's link (TS's
+        // `pressedHyperlink ?? hyperlinkAt(release)` re-check).
+        let url = match (
+            self.fullscreen_pressed_hyperlink.clone(),
+            view.frame_link_at(row, col),
+        ) {
+            (Some(pressed), Some(release)) if pressed == release => Some(pressed),
+            (None, Some(release)) => Some(release),
+            _ => None,
+        };
         if let Some(url) = url {
             self.open_link(&url);
             self.track_click("open_link");
