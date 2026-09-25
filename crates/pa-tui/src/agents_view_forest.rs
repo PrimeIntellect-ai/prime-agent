@@ -1123,6 +1123,14 @@ fn scan_flatten_exposed(
             }
         }
     }
+    // Emit's path rule mirrors here: a row reached through a running
+    // line's expansion never expands its own inactive line (see
+    // `emit`), so a stale `expanded_inactive` entry for such a row is
+    // inert — processing it would mark lines whose content never
+    // renders, stranding the subtree. The inactive scan skips those
+    // rows entirely.
+    let on_running_path =
+        scan_running_path_rows(base, children_by_parent, expanded_running);
     let mut exposed_running: HashSet<String> = HashSet::new();
     let mut exposed_inactive: HashSet<String> = HashSet::new();
     for index in 0..base.len() {
@@ -1135,7 +1143,9 @@ fn scan_flatten_exposed(
                 }
             }
         }
-        if expanded_inactive.contains(&base[index].identity) {
+        if expanded_inactive.contains(&base[index].identity)
+            && !on_running_path.contains(&base[index].identity)
+        {
             for child in children_by_parent.get(&index).into_iter().flatten() {
                 let child_inactive = base[*child]
                     .descendant_count
@@ -1147,6 +1157,57 @@ fn scan_flatten_exposed(
         }
     }
     (exposed_running, exposed_inactive)
+}
+
+/// The rows the emit walk reaches through a running line's expansion:
+/// every expanded running line's running children — direct and through
+/// the running flatten — recursively (a running-path row's own running
+/// line still expands). `emit` never expands such a row's inactive
+/// line, so the exposure scan ignores their `expanded_inactive`
+/// entries. An explicit work stack drives the walk — the flatten legs
+/// and the expansion recursion both ride it, never the call stack.
+fn scan_running_path_rows(
+    base: &[BaseRow],
+    children_by_parent: &HashMap<usize, Vec<usize>>,
+    expanded_running: &HashSet<String>,
+) -> HashSet<String> {
+    let mut on_running_path: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<usize> = (0..base.len())
+        .filter(|index| expanded_running.contains(&base[*index].identity))
+        .collect();
+    while let Some(index) = frontier.pop() {
+        for child in children_by_parent.get(&index).into_iter().flatten() {
+            if base[*child].section == Section::Running {
+                if on_running_path.insert(base[*child].identity.clone())
+                    && expanded_running.contains(&base[*child].identity)
+                {
+                    frontier.push(*child);
+                }
+            } else if base[*child].running_subagent_count > 0 {
+                // The running flatten: the hidden ancestor's running
+                // descendants render on the running path too.
+                let mut stack = vec![*child];
+                while let Some(ancestor) = stack.pop() {
+                    for descendant in children_by_parent
+                        .get(&ancestor)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if base[*descendant].section == Section::Running {
+                            if on_running_path.insert(base[*descendant].identity.clone())
+                                && expanded_running.contains(&base[*descendant].identity)
+                            {
+                                frontier.push(*descendant);
+                            }
+                        } else if base[*descendant].running_subagent_count > 0 {
+                            stack.push(*descendant);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    on_running_path
 }
 
 /// One session row's rendered fields (the display-side slice the layout
