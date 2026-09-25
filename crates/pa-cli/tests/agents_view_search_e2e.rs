@@ -3,7 +3,7 @@
 //! the headless agents-view plan typing queries and asserting the redesigned
 //! picker contract (Kevin's 2026-09-23 directive): queries match the
 //! session NAME, the durable session ID, and the CWD — never first
-//! messages, transcript text, recap summaries, or file paths — and hits
+//! messages, transcript text, or file paths — and hits
 //! render as one flat, relevance-ranked list. `PA_SEARCH_FRAMES_DIR`
 //! dumps every frame for before/after evidence captures.
 #![cfg(unix)]

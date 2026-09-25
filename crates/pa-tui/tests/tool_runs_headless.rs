@@ -470,12 +470,17 @@ fn replayed_runs_condense_with_the_received_message_in_place() {
         "the wire timestamps carry the honest wall clock (63s - 18s): {all}"
     );
     assert!(
-        all.contains("Agent message received \u{b7} \u{2190} parent fleet"),
-        "the received row keeps its place (the #2752 directional glyph): {all}"
+        all.contains("Agent message \u{b7} \u{2193} fleet"),
+        "the received row keeps its place (the viewer-relative arrow): {all}"
     );
+    // The collapsed rows carry no body preview (the operator's 2026-09-25
+    // directive): Ctrl+O opens the agent-message bodies — the receipt's
+    // expanded body rides this plan's window (the received row's body
+    // sits above the scrolled window; the render.rs and view.rs unit
+    // tests cover it directly).
     assert!(
-        all.contains("steering note"),
-        "the received message's content stays visible: {all}"
+        all.contains("\u{2570}\u{2500} a queued receipt"),
+        "the agent-message bodies open on Ctrl+O: {all}"
     );
     // The three cards before the message render their own rows.
     assert!(

@@ -4274,6 +4274,14 @@ class Battery:
         # separately.
         text = text.replace("◆ Agent message", "<AMICON> Agent message")
         text = text.replace("✉ Agent message", "<AMICON> Agent message")
+        # The label/participant divergence (the operator's 2026-09-25
+        # directive): the Rust rows render the shared `Agent message`
+        # label with the viewer-relative arrow plus the counterpart name
+        # (received ↓, sent/queued ↑); the TS rows keep the direction
+        # word plus the `from/to <role> <name>` participant. The summary
+        # row is its own line, so the whole composition canonicalizes to
+        # one marker per side; the f15 flow asserts each side's exact row.
+        text = re.sub(r"<AMICON> Agent message[^\n]*", "<AMICON><AMROW>", text)
         return text
 
 
@@ -4466,9 +4474,13 @@ class Battery:
         """agent_message send/receive: the icon-decorated rows in both
         directions — the received row in the receiver's transcript, the sent
         summary row inside the sender's ipython cell — with participant
-        labels and the expanded preview body (the icon diverges by
-        directive: ts renders the ◆ diamond, rust the ✉ mail envelope —
-        the Kevin-directed 2026-09-24 divergence). Two sibling daemon
+        labels and the expanded preview body (the shape diverges by
+        directive: ts renders the ◆ diamond with the direction word and
+        the `from/to <role> <name>` participant; rust renders the ✉ mail
+        envelope — the Kevin-directed 2026-09-24 divergence — with the
+        shared `Agent message` label, the viewer-relative ↓/↑ arrow, and
+        the counterpart name only, no collapsed preview — the operator's
+        2026-09-25 directive). Two sibling daemon
         sessions exchange one message each way through their kernels."""
         flow = "f15_a2a"
         reply = "f15 a2a turn reply"
@@ -4519,33 +4531,44 @@ class Battery:
                 {"type": "prompt_and_wait", "activeSessionId": id_a, "message": "f15 send the sibling message to b"},
             )
             wire_a.close()
-            received = B.tmux_wait_text(tui, "Agent message received|f15 a2a payload", timeout=120)
+            wait_a = (
+                "Agent message received|f15 a2a payload"
+                if side.name == "ts"
+                else "Agent message \u00b7 \u2193|f15 a2a payload"
+            )
+            received = B.tmux_wait_text(tui, wait_a, timeout=120)
             side.evidence(flow, "01-received.txt", received)
             settled = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "02-received-settled.txt", settled)
             frames[side.name]["received"] = settled
-            # The received row's icon diverges by directive (Kevin,
-            # 2026-09-24): the TS side keeps the ◆ diamond; the Rust side
-            # renders the ✉ mail envelope (the a2a rows read as agent
-            # mail).
-            icon_a = "◆" if side.name == "ts" else "✉"
-            if icon_a + " Agent message received" in settled:
+            # The received row's shape diverges by directive: the TS side
+            # keeps the ◆ diamond with the `Agent message received ·
+            # from …` participant (the baseline); the Rust side renders
+            # the ✉ mail envelope (the a2a rows read as agent mail —
+            # Kevin directive 2026-09-24) with the shared `Agent
+            # message` label, the viewer-relative ↓ arrow, and the
+            # counterpart name only (operator directive 2026-09-25).
+            if side.name == "ts":
+                row_a = "◆ Agent message received"
+            else:
+                row_a = "✉ Agent message \u00b7 \u2193"
+            if row_a in settled:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: a sibling agent message renders the '{icon_a} Agent message received' row with participant label",
+                    f"{side.name}: a sibling agent message renders the '{row_a.strip()}' row with the participant",
                     gap=False,
                 )
-            elif "Agent message received" in settled:
+            elif "Agent message" in settled:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: the received agent-message row renders the wrong icon (expected '{icon_a}')",
+                    f"{side.name}: the received agent-message row renders the wrong shape (expected '{row_a.strip()}')",
                     evidence=side.root / flow / "02-received-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the delivered sibling message shows no 'Agent message received' row",
+                    f"{side.name}: the delivered sibling message shows no agent-message row",
                     evidence=side.root / flow / "02-received-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
@@ -4564,32 +4587,43 @@ class Battery:
                 ]
             )
             self.tui_send(tui, "f15 send the sibling message back to a")
-            sent = B.tmux_wait_text(tui, "Agent message sent|Agent message queued", timeout=120)
+            wait_b = (
+                "Agent message sent|Agent message queued"
+                if side.name == "ts"
+                else "Agent message \u00b7 \u2191"
+            )
+            sent = B.tmux_wait_text(tui, wait_b, timeout=120)
             side.evidence(flow, "03-sent.txt", sent)
             settled2 = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "04-sent-settled.txt", settled2)
             frames[side.name]["sent"] = settled2
-            # The sent/queued receipt rows share the same summary line (and
-            # its icon divergence): TS ◆ diamond, Rust ✉ envelope.
-            icon_b = "◆" if side.name == "ts" else "✉"
-            if (icon_b + " Agent message sent" in settled2
-                    or icon_b + " Agent message queued" in settled2):
+            # The sent/queued receipt rows share the same summary line
+            # (and its per-side shape): TS keeps the ◆ diamond with the
+            # direction word; Rust renders the ✉ envelope with the
+            # shared `Agent message` label and the viewer-relative ↑
+            # arrow — delivered and queued fold into one row shape (the
+            # operator's 2026-09-25 directive).
+            if side.name == "ts":
+                rows_b = ("◆ Agent message sent", "◆ Agent message queued")
+            else:
+                rows_b = ("✉ Agent message \u00b7 \u2191",)
+            if any(row in settled2 for row in rows_b):
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell renders the '{icon_b} Agent message sent/queued' summary row with the participant label",
+                    f"{side.name}: the sender's ipython cell renders the sent/queued agent-message summary row with the participant",
                     gap=False,
                 )
-            elif "Agent message sent" in settled2 or "Agent message queued" in settled2:
+            elif "Agent message" in settled2:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: the sent agent-message row renders the wrong icon (expected '{icon_b}')",
+                    f"{side.name}: the sent agent-message row renders the wrong shape (expected one of {rows_b})",
                     evidence=side.root / flow / "04-sent-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell shows no 'Agent message sent/queued' row",
+                    f"{side.name}: the sender's ipython cell shows no sent/queued agent-message row",
                     evidence=side.root / flow / "04-sent-settled.txt",
                     lane=FLOW_LANES[flow],
                 )

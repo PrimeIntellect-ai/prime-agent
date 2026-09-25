@@ -14,10 +14,132 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config;
 use crate::mode::RunOptions;
+use pa_core::session::discovery::{resolve_session_path, ResolvedSession};
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, UiMode};
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
+
+/// The startup-model resolution inputs (TS `findInitialModel`'s chain),
+/// captured at task construction: the onboarding flow re-resolves the
+/// model state at its own boundaries — the branch (TS
+/// `isOnboardingModelReady` at flow start) and the completion gate (TS
+/// re-reads `getOnboardingState` before `markOnboardingShown`) — because
+/// the flow's own sign-in can change the answer.
+#[derive(Clone)]
+struct StartupModelProbe {
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    cli_provider: Option<String>,
+    cli_model: Option<String>,
+    /// The `--models` scope pattern list, resolved against the fresh
+    /// catalog on every probe.
+    models: Option<Vec<String>>,
+    is_continuing: bool,
+    /// An explicit `--api-key` counts as configured auth (it rides the
+    /// resolved model's provider as a runtime key).
+    api_key: Option<String>,
+}
+
+impl StartupModelProbe {
+    /// The resolution (TS `findInitialModel` + `isOnboardingModelReady`):
+    /// the startup model, and whether it carries configured auth.
+    fn resolve(&self) -> (Option<pa_types::ai::Model>, bool) {
+        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
+        // Sync resolution on a fresh registry must adopt the on-disk private
+        // authorization cache before `get_available` (same rule as the daemon
+        // create path).
+        registry.load_private_authorization_from_cache();
+        let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
+        let available: Vec<pa_types::ai::Model> =
+            registry.get_available().into_iter().cloned().collect();
+        let scoped = self
+            .models
+            .as_deref()
+            .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
+            .unwrap_or_default();
+        let startup_model =
+            pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
+                cli_provider: self.cli_provider.as_deref(),
+                cli_model: self.cli_model.as_deref(),
+                scoped_models: &scoped,
+                is_continuing: self.is_continuing,
+                default_provider: settings.get_default_provider(),
+                default_model_id: settings.get_default_model(),
+                all_models: &all,
+                available_models: &available,
+            });
+        let ready = match &startup_model {
+            Some(model) => registry.has_configured_auth(model) || self.api_key.is_some(),
+            None => false,
+        };
+        (startup_model, ready)
+    }
+
+    /// The completion telemetry's category columns (TS
+    /// `captureOnboardingCompleted`): the resolved startup model's
+    /// provider category and the credential source's auth category.
+    /// The storage's status candidates cover stored, environment, and
+    /// stale credentials; a model the storage cannot explain is ready
+    /// through a models.json provider key (the registry's request-auth
+    /// resolves it) or the `--api-key` flag (a runtime key the daemon
+    /// installs — the flag is the client's evidence). Best-effort — a
+    /// resolution failure reports the unknown columns.
+    fn telemetry_categories(&self) -> (String, String) {
+        use pa_core::auth::AuthSource;
+        let Some(model) = self.resolve().0 else {
+            return ("none".to_string(), "unknown".to_string());
+        };
+        let provider_category =
+            pa_core::session_engine::telemetry::provider_category(Some(&model.provider));
+        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
+        let status = auth.get_auth_status(&model.provider);
+        let credential = auth.get_all().credential(&model.provider);
+        let auth_category = match status.source {
+            // TS `telemetryAuthCategory`: the stored credential reports
+            // its type.
+            Some(AuthSource::Stored) => credential.as_ref().map_or_else(
+                || "stored".to_string(),
+                |credential| credential.credential_type().to_string(),
+            ),
+            Some(AuthSource::Runtime) => "runtime_api_key".to_string(),
+            Some(AuthSource::Environment) => "environment".to_string(),
+            Some(AuthSource::PrimeCli) => "prime_cli".to_string(),
+            Some(AuthSource::ModelsJsonKey | AuthSource::ModelsJsonCommand) => {
+                "models_json".to_string()
+            }
+            Some(AuthSource::Fallback) => "fallback".to_string(),
+            Some(AuthSource::Stale) => "stale".to_string(),
+            None => {
+                // The `--api-key` flag rides as a runtime key the daemon
+                // installs; the registry's request-auth resolves a
+                // models.json provider key only when one actually
+                // resolves (`ok` alone is not evidence of a key).
+                if self.api_key.is_some() {
+                    "runtime_api_key".to_string()
+                } else {
+                    let mut registry = pa_core::models::ModelRegistry::create(
+                        auth,
+                        self.agent_dir.join("models.json"),
+                    );
+                    if registry
+                        .get_api_key_and_headers(&model, None)
+                        .api_key
+                        .is_some()
+                    {
+                        "models_json".to_string()
+                    } else {
+                        "none".to_string()
+                    }
+                }
+            }
+        };
+        (auth_category, provider_category)
+    }
+}
 
 /// Persistence for the first-run onboarding answers: the global settings
 /// file (TS `setAgentTracesEnabled` / `markOnboardingShown` + flush).
@@ -29,6 +151,9 @@ struct SettingsOnboardingSink {
     /// flow right away; a fresh home answers the question, a home with a
     /// standing choice completes silently).
     created_at: std::time::Instant,
+    /// The startup-model probe (the completion telemetry's category
+    /// columns: the resolved startup model and its auth source).
+    probe: StartupModelProbe,
 }
 
 impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
@@ -50,10 +175,11 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): a fresh home answers the
-        // question and a standing-choice home completes silently, so the
-        // outcome is always success and no auth/provider step runs
-        // (auth_category `none`). Best-effort like all telemetry.
+        // `onboarding completed` (schema v1): the marker writes only on a
+        // completed flow, so the outcome is always success; the auth and
+        // provider categories read the resolved startup model (TS
+        // `captureOnboardingCompleted`'s `getCurrentModel` + auth status
+        // columns). Best-effort like all telemetry.
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
@@ -63,84 +189,63 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
                 serde_json::Value::from(self.created_at.elapsed().as_millis() as u64),
             );
             properties.set("outcome", serde_json::Value::from("success"));
-            properties.set("auth_category", serde_json::Value::from("none"));
-            properties.set("provider_category", serde_json::Value::from("unknown"));
+            let (auth_category, provider_category) = self.probe.telemetry_categories();
+            properties.set("auth_category", serde_json::Value::from(auth_category));
+            properties.set(
+                "provider_category",
+                serde_json::Value::from(provider_category),
+            );
             client.track("onboarding completed", properties);
         }
         Ok(())
     }
 }
 
-/// TS `shouldRunOnboarding` + `isOnboardingModelReady`: first run is defined
-/// by the settings flag alone; the task mounts only when the startup model
-/// resolves and has configured auth (no login sequence). The phase then
-/// asks the trace question once on a fresh home, while a home that already
-/// carries a trace choice (a provisioned or copied config) completes
-/// silently with the standing choice. The startup model
-/// follows the TS `findInitialModel` chain —
-/// explicit flags, the `--models` scope, the saved settings default, the
-/// featured default, the first available model — so a flagless launch with
-/// a configured default mounts the task exactly like TS. The TS non-ready
-/// path (sign-in + provider picker) is not ported yet: a first launch that
-/// resolves no usable model skips the notice.
-fn onboarding_task(options: &RunOptions) -> Option<pa_tui::interactive::OnboardingTask> {
+/// TS `shouldRunOnboarding`: first launch is defined by the settings flag
+/// alone — credentials found on disk (a Prime CLI token, an API key in
+/// the environment) never skip the flow, they only make the sign-in step
+/// instant. The task carries the startup model state (the resolved model
+/// is TS `getCurrentModel` at flow time; the readiness probe decides the
+/// branch and gates the completion marker), and the provider auth surface
+/// the full flow signs in through. The startup model follows the TS
+/// `findInitialModel` chain — explicit flags, the `--models` scope, the
+/// saved settings default, the featured default, the first available
+/// model.
+fn onboarding_task(
+    options: &RunOptions,
+    provider_auth: Option<pa_tui::provider_auth::ProviderAuthCommandsHandle>,
+) -> Option<pa_tui::interactive::OnboardingTask> {
     let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     if settings.get_onboarding_shown() {
         return None;
     }
-    if !startup_model_ready(options, &settings) {
-        return None;
-    }
+    let probe = StartupModelProbe {
+        cwd: config.cwd.clone(),
+        agent_dir: config.agent_dir.clone(),
+        cli_provider: config.provider.clone(),
+        cli_model: config.model.clone(),
+        models: config.models.clone(),
+        // A fork launch resolves the startup model as a continuation
+        // (#2806): the copy holds the source's rows.
+        is_continuing: options.session.resume.is_some()
+            || options.session.continue_recent
+            || options.session.fork.is_some(),
+        api_key: config.api_key.clone(),
+    };
+    let (current_model, _) = probe.resolve();
+    let readiness_probe = probe.clone();
     Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(SettingsOnboardingSink {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe,
         }),
+        model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),
+        current_model,
+        provider_auth,
     })
-}
-
-/// TS `isOnboardingModelReady` for the startup model: the resolved model
-/// must have configured auth (auth storage, an environment credential, or
-/// the models.json provider key). An explicit `--api-key` rides the
-/// resolved model's provider as a runtime key, so it counts too.
-fn startup_model_ready(
-    options: &RunOptions,
-    settings: &pa_core::settings::SettingsManager,
-) -> bool {
-    let config = &options.config;
-    let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    // Sync resolution on a fresh registry must adopt the on-disk private
-    // authorization cache before `get_available` (same rule as the daemon
-    // create path).
-    registry.load_private_authorization_from_cache();
-    let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
-    let available: Vec<pa_types::ai::Model> =
-        registry.get_available().into_iter().cloned().collect();
-    let scoped = config
-        .models
-        .as_deref()
-        .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
-        .unwrap_or_default();
-    let is_continuing = options.session.resume.is_some() || options.session.continue_recent;
-    let startup_model =
-        pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
-            cli_provider: config.provider.as_deref(),
-            cli_model: config.model.as_deref(),
-            scoped_models: &scoped,
-            is_continuing,
-            default_provider: settings.get_default_provider(),
-            default_model_id: settings.get_default_model(),
-            all_models: &all,
-            available_models: &available,
-        });
-    match startup_model {
-        Some(model) => registry.has_configured_auth(&model) || config.api_key.is_some(),
-        None => false,
-    }
 }
 
 /// `tui scroll used` / `tui exit` adoption telemetry: a one-shot client per
@@ -483,9 +588,11 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         // session for the cwd (the notice names it) so the user confirms
         // what continues instead of a blind newest-resume.
         let continue_view = continue_recent_view(options, tui_options.onboarding.is_some());
-        let agents_view = options.session.resume_bare
-            || (options.agents_view_requested && tui_options.onboarding.is_none())
-            || continue_view.is_some();
+        let agents_view = should_open_agents_view(
+            options,
+            tui_options.onboarding.is_some(),
+            continue_view.is_some(),
+        );
         if agents_view {
             let (anchor, notice) = continue_view.map_or((None, None), |view| {
                 (Some(view.session_id), Some(view.notice))
@@ -697,14 +804,6 @@ fn build_tui_options(
     prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>>,
 ) -> Result<InteractiveOptions> {
     let config = &options.config;
-    if options.session.fork.is_some() {
-        // A fork must copy the target session into a new file before the
-        // daemon can open it; wiring the copy is tracked with session-queue
-        // work. Refuse instead of silently resuming the original file.
-        return Err(anyhow!(
-            "session forking is not wired into the daemon yet; use --resume to reopen the session"
-        ));
-    }
     let session_dir = options
         .session
         .session_dir
@@ -724,7 +823,14 @@ fn build_tui_options(
     // Test seam: a scripted faux daemon session (same contract as the print
     // runtime). Verification harness only; never set by the product.
     let script_path = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").map(PathBuf::from);
-    let session = session_selection(&options.session, &session_dir)?;
+    // TS `createSessionManager`'s flag order (fork -> resume -> create):
+    // a fork copies its source into a fresh file client-side, and the
+    // daemon opens the fork — never the source — through the create
+    // `sessionPath` (TS `getInteractiveDaemonSessionPath`).
+    let session = match &options.session.fork {
+        Some(selector) => fork_startup_selection(selector, &config.cwd, session_dir.as_deref())?,
+        None => session_selection(&options.session, &session_dir)?,
+    };
     // The chat markdown code-block indent reads the effective settings on
     // startup (TS `getCodeBlockIndent` -> `getMarkdownThemeWithSettings`).
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -755,6 +861,13 @@ fn build_tui_options(
     let default_thinking_level = settings
         .get_default_thinking_level()
         .map(|level| level.model_level().wire_name().to_string());
+    // `/login` + `/logout`: the provider auth flows (the API-key store,
+    // the MCP device flow, the Prime Inference login, the provider
+    // catalog) — one handle serves the commands and the onboarding flow's
+    // sign-in steps.
+    let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
+        crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
+    ));
     Ok(InteractiveOptions {
         code_block_indent,
         tree_filter_mode,
@@ -792,9 +905,11 @@ fn build_tui_options(
             config.agent_dir.clone(),
         )),
         version: crate::config::version().to_string(),
-        // The startup-model chain (PR lane): the task is built from the full
-        // run options so the resolved startup model gates the notice.
-        onboarding: onboarding_task(options),
+        // TS `shouldRunOnboarding`: the settings flag alone mounts the
+        // task; the carried startup-model state decides the branch and
+        // gates the completion marker, and the auth handle serves the
+        // not-ready branch's sign-in steps.
+        onboarding: onboarding_task(options, Some(provider_auth.clone())),
         // Only Some(true) rides the wire (TS `telemetryDisabled`).
         telemetry_disabled: config.telemetry_disabled.then_some(true),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
@@ -817,12 +932,7 @@ fn build_tui_options(
         )),
         // `/login` + `/logout`: the provider auth flows (the API-key store,
         // the MCP device flow, the provider catalog).
-        provider_auth: Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
-            std::sync::Arc::new(crate::provider_login::ProviderAuth::new(
-                config.cwd.clone(),
-                config.agent_dir.clone(),
-            )),
-        )),
+        provider_auth: Some(provider_auth),
         telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
@@ -856,6 +966,70 @@ fn session_selection(
         return Ok(resolve_resume_selector(selector, dir));
     }
     Ok(SessionSelection::New)
+}
+
+/// TS `createSessionManager`'s fork arm for the interactive launch: resolve
+/// the selector, copy the source into a fresh session file client-side
+/// ([`pa_core::session::manager::SessionManager::fork_from`], the same
+/// copy print mode uses), and hand the daemon the fork — never the source —
+/// as the create `sessionPath` (TS `getInteractiveDaemonSessionPath`). Every
+/// resolution shape forks: a GLOBAL session is exactly what `--fork` is for
+/// (a different project's session copied into this cwd). No daemon-active
+/// guard applies: the copy reads the source and writes a brand-new file, so
+/// a session a live worker already hosts forks fine (TS parity).
+///
+/// # Errors
+///
+/// Returns the TS startup failures: a selector that matches nothing (with
+/// the browse hint), and the `forkFrom` contract failures (an empty or
+/// headerless source file). A leading `~` in the selector expands against
+/// the home dir ([`crate::config::expand_tilde_path`]), the resume
+/// selector's convention.
+fn fork_startup_selection(
+    selector: &str,
+    cwd: &Path,
+    session_dir: Option<&Path>,
+) -> Result<SessionSelection> {
+    let default_dir = config::get_agent_dir().join("sessions");
+    let dir = session_dir.unwrap_or(&default_dir);
+    let expanded = config::expand_tilde_path(selector);
+    let selector = expanded.to_string_lossy();
+    let resolved = resolve_session_path(&selector, cwd, dir)
+        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
+    let source = match resolved {
+        ResolvedSession::Path(path)
+        | ResolvedSession::Local(path)
+        | ResolvedSession::Global { path, .. } => path,
+    };
+    let forked = pa_core::session::manager::SessionManager::fork_from(&source, cwd, dir)
+        .map_err(anyhow::Error::msg)?;
+    let fork_file = forked
+        .get_session_file()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow!(
+                "Cannot fork: the forked session file is missing: {}",
+                source.display()
+            )
+        })?;
+    Ok(SessionSelection::Resume(fork_file))
+}
+
+/// TS `shouldOpenAgentsViewForDaemonInteractive`: a selector, continuation,
+/// or fork opens its target session directly instead of the agents view.
+/// The selector (`--resume <id>`) and `--continue` launches never reach the
+/// view with `--fork` anyway (the shared flag validation refuses the
+/// combination at startup), so only the explicit `agents` request needs the
+/// guard; bare `--resume` still opens the view, as does a `--continue` with
+/// a saved candidate.
+fn should_open_agents_view(
+    options: &RunOptions,
+    onboarding_pending: bool,
+    continue_view: bool,
+) -> bool {
+    options.session.resume_bare
+        || (options.agents_view_requested && !onboarding_pending && options.session.fork.is_none())
+        || continue_view
 }
 
 /// The `--continue` launch's agents-view target: the newest saved session
@@ -1368,7 +1542,7 @@ mod tests {
         let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent);
         settings.set_onboarding_shown(true).expect("set flag");
         let options = run_options(dir.path());
-        assert!(onboarding_task(&options).is_none());
+        assert!(onboarding_task(&options, None).is_none());
         // Back to a first run for the readiness checks below.
         settings.set_onboarding_shown(false).expect("reset flag");
 
@@ -1401,17 +1575,33 @@ mod tests {
             .set_default_model_and_provider("onboard-test".into(), "m1".into())
             .expect("saved default");
         let options = run_options(dir.path());
-        assert!(onboarding_task(&options).is_some());
+        let task = onboarding_task(&options, None).expect("the ready home mounts the flow");
+        assert!(
+            (task.model_ready)(),
+            "the configured default model is ready (the question flow)"
+        );
 
-        // Explicit flags that resolve to a provider without configured auth
-        // leave the model not ready: no onboarding task. TS `validateConfig`
-        // requires an "apiKey" for custom providers, but a `!command` key
-        // that fails resolves to nothing (TS `resolveConfigValue`), so the
-        // provider stays unauthenticated.
+        // Explicit flags that resolve to a provider without configured
+        // auth mount the task too (TS `shouldRunOnboarding`: the flag
+        // alone), carrying the not-ready branch — the full sign-in flow,
+        // not the question. TS `validateConfig` requires an "apiKey" for
+        // custom providers, but a `!command` key that fails resolves to
+        // nothing (TS `resolveConfigValue`), so the provider stays
+        // unauthenticated.
         let mut options = run_options(dir.path());
         options.config.provider = Some("onboard-naked".into());
         options.config.model = Some("m2".into());
-        assert!(onboarding_task(&options).is_none());
+        let task = onboarding_task(&options, None).expect("the flag alone mounts the flow");
+        assert!(
+            !(task.model_ready)(),
+            "the naked provider leaves the model not ready (the full flow)"
+        );
+        assert!(
+            task.current_model
+                .as_ref()
+                .is_some_and(|model| model.id == "m2"),
+            "the resolved startup model rides the task (TS getCurrentModel)"
+        );
     }
 
     /// The product sink's persistence over the real settings files: a
@@ -1439,6 +1629,15 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe: StartupModelProbe {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                cli_provider: None,
+                cli_model: None,
+                models: None,
+                is_continuing: false,
+                api_key: None,
+            },
         };
         assert!(
             !sink.onboarding_shown(),
@@ -1478,6 +1677,15 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe: StartupModelProbe {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                cli_provider: None,
+                cli_model: None,
+                models: None,
+                is_continuing: false,
+                api_key: None,
+            },
         };
         assert!(
             !sink.onboarding_shown(),
@@ -1556,5 +1764,369 @@ mod tests {
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "  ");
+    }
+
+    /// A session with one user/assistant exchange, written the same shape
+    /// `SessionManager::persisted` + appends produce. Returns the file and
+    /// its session id.
+    fn seed_session(
+        session_dir: &std::path::Path,
+        cwd: &std::path::Path,
+        user_text: &str,
+    ) -> (std::path::PathBuf, String) {
+        use pa_types::ai::{AssistantMessage, StopReason, Usage, UserContent, UserMessage};
+        use pa_types::session::AgentMessage;
+        let mut session = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
+        session
+            .append_message(AgentMessage::User(UserMessage {
+                // The block shape a real run writes (the print runtime's
+                // `content[0].text` rows), so the copy assertions read the
+                // same shape the shipped sessions carry.
+                content: UserContent::Blocks(vec![pa_types::ai::UserContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: user_text.to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )]),
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .expect("write user message");
+        session
+            .append_message(AgentMessage::Assistant(AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "the answer".to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-x".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .expect("write assistant message");
+        let id = session.get_session_id().to_string();
+        (
+            session
+                .get_session_file()
+                .expect("session file")
+                .to_path_buf(),
+            id,
+        )
+    }
+
+    fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("read session file")
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()
+            .expect("valid session entries")
+    }
+
+    #[test]
+    fn fork_startup_selection_copies_the_source_under_a_fresh_header() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &cwd, "original question");
+        let before = std::fs::read(&source).expect("read source");
+
+        let selection =
+            fork_startup_selection(&id, &cwd, Some(&session_dir)).expect("fork startup");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+
+        // A new file in the session dir, never the source.
+        assert!(fork.is_file(), "the fork file landed on disk");
+        assert_ne!(fork, &source, "the fork is a new session file");
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork lives in the session dir"
+        );
+        // Fresh header: new id, the source as parentSession, the target
+        // cwd (TS `forkFrom`'s new header).
+        let fork_entries = read_jsonl(fork);
+        let header = &fork_entries[0];
+        assert_eq!(header["type"], "session");
+        assert_ne!(header["id"].as_str(), Some(id.as_str()));
+        assert_eq!(
+            header["parentSession"].as_str(),
+            Some(source.display().to_string().as_str()),
+            "the fork header parents at the source"
+        );
+        assert_eq!(
+            header["cwd"].as_str(),
+            Some(cwd.display().to_string().as_str())
+        );
+        // The branch copied: the source's exchange rides the fork.
+        let texts: Vec<&str> = fork_entries
+            .iter()
+            .filter(|entry| entry["type"] == "message")
+            .filter_map(|entry| entry["message"]["content"][0]["text"].as_str())
+            .collect();
+        assert!(texts.contains(&"original question"), "texts: {texts:?}");
+        assert!(texts.contains(&"the answer"), "texts: {texts:?}");
+        // The source keeps its rows untouched (the copy never rewrites it).
+        let after = std::fs::read(&source).expect("read source");
+        assert_eq!(before, after, "the source file is unchanged");
+    }
+
+    #[test]
+    fn fork_startup_selection_imports_a_global_session_into_this_cwd() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let other_project = dir.path().join("other-project");
+        let this_project = dir.path().join("this-project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&other_project).expect("other project");
+        std::fs::create_dir_all(&this_project).expect("this project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &other_project, "global question");
+        let before = std::fs::read(&source).expect("read source");
+
+        let selection = fork_startup_selection(&id, &this_project, Some(&session_dir))
+            .expect("a GLOBAL session is exactly what --fork is for");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["cwd"].as_str(),
+            Some(this_project.display().to_string().as_str()),
+            "the fork adopts the TARGET cwd"
+        );
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(source.display().to_string().as_str())
+        );
+        let after = std::fs::read(&source).expect("read source");
+        assert_eq!(before, after, "the source file is unchanged");
+    }
+
+    #[test]
+    fn fork_startup_selection_reports_the_ts_contracts() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+
+        // An empty source file: the `forkFrom` failure contract.
+        let empty = session_dir.join("empty.jsonl");
+        std::fs::write(&empty, "").expect("write empty file");
+        let error =
+            fork_startup_selection(empty.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
+                .expect_err("an empty source cannot fork");
+        assert!(
+            error.to_string().contains(&format!(
+                "Cannot fork: source session file is empty or invalid: {}",
+                empty.display()
+            )),
+            "unexpected error: {error:#}"
+        );
+
+        // A source file with only an unreadable row: the loader finalizes
+        // it to zero entries (the pa-core `forkFrom` contract).
+        let torn = session_dir.join("torn.jsonl");
+        std::fs::write(&torn, "{\"type\":\"message\"}\n").expect("write torn file");
+        let error =
+            fork_startup_selection(torn.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
+                .expect_err("a source with no readable rows cannot fork");
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot fork: source session file is empty or invalid: "),
+            "unexpected error: {error:#}"
+        );
+
+        // A parseable but headerless source file: the loader finalizes it
+        // to zero entries (the pa-core `forkFrom` contract the manager's
+        // own test asserts), so the failure is the empty-or-invalid one —
+        // never a half-copied fork.
+        let headerless = session_dir.join("headerless.jsonl");
+        std::fs::write(
+            &headerless,
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
+        )
+        .expect("write headerless file");
+        let error = fork_startup_selection(
+            headerless.to_str().expect("utf8 path"),
+            &cwd,
+            Some(&session_dir),
+        )
+        .expect_err("a headerless source cannot fork");
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot fork: source session file is empty or invalid: "),
+            "unexpected error: {error:#}"
+        );
+
+        // An unknown selector: the TS startup failure with the browse hint.
+        let error = fork_startup_selection("does-not-exist", &cwd, Some(&session_dir))
+            .expect_err("an unknown selector cannot fork");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("No session found matching 'does-not-exist'"),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("Open prime-agent and press left-arrow to browse sessions."),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn fork_startup_selection_expands_a_tilde_selector() {
+        // The resume selector's convention: a leading `~` resolves against
+        // the home dir, so forking a home-located session by that path
+        // opens it instead of erroring on a nonexistent relative path.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &project, "tilde question");
+        let home_sessions = home.join("sessions");
+        std::fs::create_dir_all(&home_sessions).expect("home sessions dir");
+        let home_file = home_sessions.join(format!("{id}.jsonl"));
+        std::fs::rename(&source, &home_file).expect("move the source under home");
+        let _env = crate::config::env_lock();
+        let previous_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        let selector = format!("~/sessions/{id}.jsonl");
+        let selection = fork_startup_selection(&selector, &project, Some(&session_dir));
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let selection = selection.expect("the tilde selector forks");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+        assert_ne!(fork, &home_file, "the fork is a new session file");
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork lands in the requested session dir"
+        );
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(home_file.display().to_string().as_str()),
+            "the fork header parents at the tilde-resolved source"
+        );
+    }
+
+    #[test]
+    fn fork_startup_selection_rejects_a_fifo_source_without_hanging() {
+        // A FIFO with no writer blocks the copy's read forever; the guard
+        // rejects it before any open, so the launch errors instead.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let project = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let fifo = session_dir.join("pipe.jsonl");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        let error = fork_startup_selection(
+            fifo.to_str().expect("utf8 path"),
+            &project,
+            Some(&session_dir),
+        )
+        .expect_err("a FIFO source cannot fork");
+        assert!(
+            error.to_string().contains(&format!(
+                "Cannot fork: source session file is not a regular file: {}",
+                fifo.display()
+            )),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn build_tui_options_opens_a_fork_as_the_startup_session() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &cwd, "interactive question");
+
+        let mut options = run_options_for_continue(dir.path());
+        options.config.cwd = cwd;
+        options.config.agent_dir = dir.path().join("agent");
+        options.session.fork = Some(id);
+        options.session.session_dir = Some(session_dir.clone());
+        let tui = build_tui_options(&options, dir.path().join("d.sock"), Default::default())
+            .expect("the interactive launch forks instead of refusing");
+
+        let SessionSelection::Resume(fork) = &tui.session else {
+            panic!(
+                "the fork opens as a resume of the forked file, got {:?}",
+                tui.session
+            );
+        };
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork honors --session-dir"
+        );
+        assert_ne!(fork, &source, "the fork is a new session file");
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(source.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn a_fork_launch_never_opens_the_agents_view() {
+        // TS `shouldOpenAgentsViewForDaemonInteractive`: `--fork` opens its
+        // target directly — even alongside an explicit `agents` request.
+        let mut options = run_options_for_continue(std::path::Path::new("/does/not/matter"));
+        options.agents_view_requested = true;
+        assert!(
+            should_open_agents_view(
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
+            ),
+            "an explicit agents request still opens the view"
+        );
+        options.session.resume_bare = true;
+        assert!(
+            should_open_agents_view(
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
+            ),
+            "a bare --resume still opens the view"
+        );
+        options.session.resume_bare = false;
+        options.session.fork = Some("source".to_string());
+        assert!(
+            !should_open_agents_view(
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
+            ),
+            "a fork opens its target, never the agents view"
+        );
+        assert!(
+            should_open_agents_view(
+                &options, /*onboarding_pending*/ false, /*continue_view*/ true,
+            ),
+            "a --continue with a saved candidate still opens the view"
+        );
     }
 }
