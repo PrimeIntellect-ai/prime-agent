@@ -394,8 +394,10 @@ fn spawn_delete_dispatch(
                     .data
                     .as_ref()
                     .and_then(|data| data.get("ok").or(Some(data)))
-                    .map(serde_json::Value::to_string)
-                    .unwrap_or_else(|| "nothing changed".to_string());
+                    .map_or_else(
+                        || "nothing changed".to_string(),
+                        serde_json::Value::to_string,
+                    );
                 format!("{} did not change anything: {summary}", action.fail_word())
             }
             Ok(response) => {
@@ -1064,8 +1066,7 @@ impl AgentsViewMode {
         // `stopAgentForDeletion` keys on the session's existence); a
         // saved-only row deletes its file.
         match row.kind {
-            RowKind::SubagentSummary => None,
-            RowKind::Subagent => None,
+            RowKind::SubagentSummary | RowKind::Subagent => None,
             RowKind::Agent => {
                 if let Some(active_session_id) = active_session_id {
                     Some(DeleteAction::StopAgent {
@@ -1099,7 +1100,7 @@ impl AgentsViewMode {
                 saved
                     .get("path")
                     .and_then(Value::as_str)
-                    .map_or(true, |saved_path| saved_path != path)
+                    .is_none_or(|saved_path| saved_path != path)
             });
             self.rebuild_rows();
         }
@@ -1115,7 +1116,7 @@ impl AgentsViewMode {
                 saved
                     .get("path")
                     .and_then(Value::as_str)
-                    .map_or(true, |path| !self.deleted_saved_paths.contains(path))
+                    .is_none_or(|path| !self.deleted_saved_paths.contains(path))
             })
             .collect();
         self.saved_fetch_failed = false;
