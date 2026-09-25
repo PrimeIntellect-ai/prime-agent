@@ -518,13 +518,14 @@ async fn drive_onboarding_pane(
             }
             Renderer::Headless { .. } => drive.renderer.render_headless_pane(view),
         }
-        let Some(mut screen) = view.onboarding.take() else {
+        let Some(mut pane) = view.onboarding.take() else {
             unreachable!("the pane mounts at the top of every iteration");
         };
         tokio::select! {
             maybe_input = drive.ui_rx.recv() => {
                 if let Some(UiInput::Key(key)) = maybe_input {
                     let Some(key_id) = crate::keys::key_event_to_id(&key) else {
+                        screen = pane;
                         continue;
                     };
                     // The onboarding exit keys include Ctrl+C (`app.clear`):
@@ -534,14 +535,14 @@ async fn drive_onboarding_pane(
                     if key_id == "ctrl+c" {
                         drive.exit_guard.note_ctrl_c_handled();
                     }
-                    match screen.handle_key(&key_id, &drive.keybindings) {
+                    match pane.handle_key(&key_id, &drive.keybindings) {
                         Some(decision) => {
-                            return Ok((screen, PaneOutcome::Decision(decision)));
+                            return Ok((pane, PaneOutcome::Decision(decision)));
                         }
                         None => {}
                     }
                 } else if let Some(UiInput::Paste(text)) = maybe_input {
-                    screen.handle_paste(&text);
+                    pane.handle_paste(&text);
                 }
             }
             // The login flows drive the mounted dialog through the
@@ -549,7 +550,7 @@ async fn drive_onboarding_pane(
             // the pane-owned panel).
             maybe_request = drive.auth_panel_rx.recv() => {
                 if let Some(request) = maybe_request {
-                    screen.apply_auth_request(request);
+                    pane.apply_auth_request(request);
                 }
             }
             settled = async {
@@ -558,14 +559,16 @@ async fn drive_onboarding_pane(
                     None => std::future::pending().await,
                 }
             } => {
-                return Ok((screen, PaneOutcome::Flow(settled)));
+                return Ok((pane, PaneOutcome::Flow(settled)));
             }
             // The field animates behind the flow panels until dismissal
             // (TS ANIMATION_INTERVAL_MS).
             _ = tokio::time::sleep(Duration::from_millis(120)) => {
-                screen.tick();
+                pane.tick();
             }
         }
+        // Hand the pane back for the next draw (the non-deciding arms).
+        screen = pane;
     }
 }
 
@@ -649,7 +652,8 @@ async fn run_onboarding_phase(
         PaneOutcome::Exit => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
         PaneOutcome::Decision(
-            crate::onboarding::OnboardingDecision::Selected(_)
+            crate::onboarding::OnboardingDecision::Exit
+            | crate::onboarding::OnboardingDecision::Selected(_)
             | crate::onboarding::OnboardingDecision::Cancelled
             | crate::onboarding::OnboardingDecision::Pick(_),
         )

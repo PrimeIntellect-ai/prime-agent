@@ -9,7 +9,7 @@
 
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::search_field_plain_row;
-use crate::onboarding::wrap_words;
+use crate::onboarding::{highlight_wash, wrap_words, OnboardingDecision};
 use crate::onboarding_choice::OnboardingChoice;
 use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
@@ -116,7 +116,8 @@ impl ProviderPicker {
             if self.selected == 0 {
                 return Some(ProviderPick::Continue);
             }
-            let item = self.filtered().get(self.selected - 1)?;
+            let filtered = self.filtered();
+            let item = filtered.get(self.selected - 1)?;
             return Some(ProviderPick::Provider(item.id.clone()));
         }
         if kb.matches(key, "tui.select.cancel") {
