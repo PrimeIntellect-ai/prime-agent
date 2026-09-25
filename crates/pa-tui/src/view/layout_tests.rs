@@ -652,3 +652,131 @@ fn a_glue_push_after_a_user_row_folds_at_its_own_slot() {
         "the paused selection keeps its content across the append"
     );
 }
+
+#[test]
+fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
+    // Four real calls plus an unmatched wire result: the orphan keeps
+    // its standalone card row (it is not a call) and breaks the run -
+    // the group never reaches the condensing threshold.
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..4 {
+        view.push(crate::session::TranscriptItem::ToolCall {
+            id: format!("c{index}"),
+            name: "bash".to_string(),
+            arguments: r#"{"command": "echo done"}"#.to_string(),
+            timestamp: 1,
+        });
+        view.push(crate::session::TranscriptItem::ToolResult {
+            tool_call_id: format!("c{index}"),
+            tool_name: "bash".to_string(),
+            text: "done".to_string(),
+            content: Vec::new(),
+            details: serde_json::Value::Null,
+            is_error: false,
+            timestamp: 2,
+        });
+    }
+    view.push(crate::session::TranscriptItem::ToolResult {
+        tool_call_id: "orphan".to_string(),
+        tool_name: "bash".to_string(),
+        text: "orphan output".to_string(),
+        content: Vec::new(),
+        details: serde_json::Value::Null,
+        is_error: false,
+        timestamp: 3,
+    });
+    let runs = view.condensed_runs();
+    assert!(
+        runs.is_empty(),
+        "the orphan breaks the run: no condensed block ({runs:?})"
+    );
+    let frame = view.render_frame(80, 30);
+    let rendered: Vec<String> = frame
+        .iter()
+        .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("orphan output")),
+        "the orphan's own row renders: {rendered:?}"
+    );
+}
+
+#[test]
+fn an_assistant_growth_folds_at_its_own_slot() {
+    // [T x5 (one block), ASSISTANT(text), tail rows...]: the window
+    // pauses with a selection on the tail rows, then the assistant
+    // STREAMS (a block grows - the glue boundary never crosses). The
+    // growth folds at the assistant's own slot, exactly like every
+    // other self-contained mutation; the fold used to ride through the
+    // earlier run's start, treating the streamed rows as inserted
+    // above the selection's content, so the copy jumped mid-answer.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "echo done"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..5 {
+        view.push_entry(card(&format!("a{index}")));
+    }
+    view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+        blocks: vec![
+            MessageBlock::Thinking("a thought".into()),
+            MessageBlock::Text("the answer".into()),
+        ],
+        has_tool_calls: false,
+        streaming: true,
+        error: None,
+        aborted: false,
+    })));
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    view.render_frame(80, 12);
+    view.scroll_by(-6);
+    let frame = view.render_frame(80, 12);
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("original"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    let expected = row_text(&frame, row).trim_end().to_string();
+    // The streaming grow: the answer gains a block.
+    view.prepare_entry_mutation(5);
+    if let ChatEntry::Assistant(message) = &mut view.chat[5] {
+        message
+            .blocks
+            .push(MessageBlock::Text("grown words\nmore words".into()));
+    }
+    view.mark_entry_stale(5);
+    view.render_frame(80, 12);
+    view.render_frame(80, 12);
+    assert_eq!(
+        view.end_active_selection(),
+        Some(expected),
+        "the paused selection keeps its content while the answer streams"
+    );
+}

@@ -210,10 +210,13 @@ pub struct AgentView {
     sparse_mutation: Option<(usize, usize)>,
     /// The condensed tool runs' suffix capture for one in-place mutation
     /// (the `prepare_entry_mutation`/`mark_entry_stale` pair): the
-    /// affected run's start index and the suffix's row count before the
-    /// mutation, so the block's row-count change folds into the sparse
-    /// window's tail bookkeeping through the run's owning index.
-    runs_prepare: Option<(usize, usize)>,
+    /// affected run's start index, the suffix's row count before the
+    /// mutation, and — for an assistant only — its pre-mutation glue
+    /// state. The block's row-count change folds into the sparse
+    /// window's tail bookkeeping through the run's owning index, except
+    /// an assistant mutation that keeps the glue boundary (a streaming
+    /// grow), which folds at the entry's own slot.
+    runs_prepare: Option<(usize, usize, Option<bool>)>,
     sparse_entries: std::collections::BTreeSet<usize>,
     /// The condensed tool runs (a purely render-time grouping, never
     /// stored): one slot per chat entry. Rebuilt from the earliest
@@ -592,6 +595,9 @@ impl AgentView {
                 started: true,
                 ended_ms: (*timestamp > 0).then_some(*timestamp),
                 result: Some(view),
+                // An orphan keeps its own standalone row: it never
+                // joins a condensed run (it is not a call).
+                unmatched_result: true,
                 ..Default::default()
             })));
             return;
@@ -644,8 +650,15 @@ impl AgentView {
             if assistant || crate::tool_runs::is_run_glue(&self.chat[index]) {
                 let start = self.member_start(index);
                 let before = self.suffix_rows(start, self.layout_width);
+                // An assistant's mutation can cross the glue boundary
+                // (the merge and split), so the run-aware suffix
+                // capture covers both sides; its pre-mutation glue
+                // state rides along - the stale pass folds a streaming
+                // grow that keeps the boundary at the entry's own
+                // slot (the earlier run's block never moved).
+                let was_glue = assistant.then(|| crate::tool_runs::is_run_glue(&self.chat[index]));
                 self.sparse_mutation = None;
-                self.runs_prepare = Some((start, before));
+                self.runs_prepare = Some((start, before, was_glue));
                 return;
             }
             let rows = self.count_entry_rows(index, self.layout_width);
@@ -675,10 +688,20 @@ impl AgentView {
         // The sparse-window fold: a glue-or-tool mutation folded its run's
         // whole suffix (the block's change included) through the run's
         // owning index; any other mutation folds its own rows.
-        if let Some((start, before)) = self.runs_prepare.take() {
+        if let Some((start, before, was_glue)) = self.runs_prepare.take() {
             if self.layout_width > 0 {
                 let after = self.suffix_rows(start, self.layout_width);
-                self.sparse_tail_delta(after as isize - before as isize, start);
+                // An assistant that kept its glue state only grew its
+                // own rows (the streaming case): fold at the entry's
+                // own slot, exactly like every other self-contained
+                // mutation. A boundary flip (the merge/split) or a
+                // glue card's state change folds through the run's
+                // owning index - the block's shape moved there.
+                let fold = match was_glue {
+                    Some(was) if crate::tool_runs::is_run_glue(&self.chat[index]) == was => index,
+                    _ => start,
+                };
+                self.sparse_tail_delta(after as isize - before as isize, fold);
             }
         } else if let Some((pending, before)) = self.sparse_mutation.take() {
             if pending == index && self.layout_width > 0 {
@@ -2952,7 +2975,7 @@ mod tests {
             view.frame_cursor().is_some(),
             "the editor surface draws the cursor"
         );
-        view.runs_view = Some(crate::runs_view::RunsView::new(24, &runs));
+        view.runs_view = Some(crate::runs_view::RunsView::new(24, &view.chat, &runs));
         assert!(
             view.frame_cursor().is_none(),
             "the open runs pane suppresses the hardware cursor"

@@ -6363,6 +6363,7 @@ impl SessionUi {
         let runs = view.condensed_runs();
         view.runs_view = Some(RunsView::new(
             picker_viewport_rows(view.terminal_rows()),
+            &view.chat,
             &runs,
         ));
         self.dirty = true;

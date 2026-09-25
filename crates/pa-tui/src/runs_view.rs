@@ -64,20 +64,35 @@ pub struct RunsView {
     /// The detail region's rendered height from the last paint (the key
     /// loop's scroll math walks the same window the pane rendered).
     detail_region_rows: std::cell::Cell<usize>,
+    /// The detail region's max scroll offset from the last paint (the
+    /// region's rows minus its height): Up saturates here, so Down
+    /// answers immediately at the top instead of draining overshoot.
+    detail_max_scroll: std::cell::Cell<usize>,
+    /// The runs count the last reconcile saw: the pane CLOSES only on
+    /// the transition to empty (a run vanished). A pane opened with no
+    /// runs keeps its empty state and waits for the first live run -
+    /// status churn never kills it.
+    last_runs_len: usize,
 }
 
 impl RunsView {
     /// Build the view over the transcript's condensed runs, cursor on
-    /// the newest run (the one the transcript tail is showing).
-    pub fn new(viewport_rows: usize, runs: &[ToolRun]) -> Self {
+    /// the newest run (the one the transcript tail is showing), the
+    /// cursor's stable identity seeded from the chat.
+    pub fn new(viewport_rows: usize, chat: &[ChatEntry], runs: &[ToolRun]) -> Self {
         RunsView {
             mode: Mode::List,
             selected: runs.last().map(|run| run.start),
-            selected_key: None,
+            selected_key: runs
+                .last()
+                .and_then(|run| crate::tool_runs::run_key(chat, *run))
+                .map(str::to_string),
             detail_key: None,
             scroll_from_end: 0,
             viewport_rows,
             detail_region_rows: std::cell::Cell::new(0),
+            detail_max_scroll: std::cell::Cell::new(0),
+            last_runs_len: runs.len(),
         }
     }
 
@@ -148,7 +163,13 @@ impl RunsView {
                 // The scroll measures the lift off the newest rows (0 =
                 // bottom-anchored), so Up - a negative delta - must
                 // INCREASE it: older content sits above the newest row.
-                self.scroll_from_end = self.scroll_from_end.saturating_add_signed(-delta);
+                // The lift saturates at the last paint's max offset, so
+                // Down always answers immediately (never draining
+                // overshoot first).
+                self.scroll_from_end = self
+                    .scroll_from_end
+                    .saturating_add_signed(-delta)
+                    .min(self.detail_max_scroll.get());
             }
         }
     }
@@ -165,10 +186,12 @@ impl RunsView {
 
     /// The runs changed (a live run grew or split, or a resync rebuild
     /// shifted the chat): keep the cursor and the open detail on a
-    /// surviving run and return `Close` when none remain. A rebuild can
-    /// leave an old start pointing at nothing or at another run's
-    /// slot, so the survived run re-finds itself by its stable
-    /// first-card id first (the position walk stays the fallback).
+    /// surviving run. The stable first-card id wins even when the old
+    /// start still names a run - a rebuild can land a DIFFERENT run on
+    /// the same start, and the position walk stays only the fallback.
+    /// The pane closes only on the TRANSITION to empty (its run
+    /// vanished); a pane opened with no runs keeps its empty state and
+    /// waits for the first live run.
     pub fn reconcile(&mut self, chat: &[ChatEntry], runs: &[ToolRun]) -> Option<RunsViewAction> {
         let by_key = |key: Option<&str>| {
             key.and_then(|key| {
@@ -177,32 +200,34 @@ impl RunsView {
                     .map(|run| run.start)
             })
         };
-        if let Some(start) = self.selected {
+        if let Some(start) = by_key(self.selected_key.as_deref()) {
+            self.selected = Some(start);
+        } else if let Some(start) = self.selected {
             if !runs.iter().any(|run| run.start == start) {
-                self.selected = by_key(self.selected_key.as_deref())
-                    .or_else(|| {
-                        runs.iter()
-                            .map(|run| run.start)
-                            .filter(|run_start| *run_start <= start)
-                            .max()
-                    })
+                self.selected = runs
+                    .iter()
+                    .map(|run| run.start)
+                    .filter(|run_start| *run_start <= start)
+                    .max()
                     .or_else(|| runs.first().map(|run| run.start));
             }
         } else if let Some(run) = runs.last() {
             self.selected = Some(run.start);
         }
         if let Mode::Detail { start } = self.mode {
-            if !runs.iter().any(|run| run.start == start) {
-                if let Some(start) = by_key(self.detail_key.as_deref()) {
-                    self.mode = Mode::Detail { start };
-                } else {
-                    self.mode = Mode::List;
-                    self.scroll_from_end = 0;
-                }
+            let stays = runs.iter().any(|run| run.start == start)
+                || by_key(self.detail_key.as_deref()).is_some();
+            if !stays {
+                self.mode = Mode::List;
+                self.scroll_from_end = 0;
+            } else if let Some(keyed) = by_key(self.detail_key.as_deref()) {
+                self.mode = Mode::Detail { start: keyed };
             }
         }
         self.refresh_keys(chat, runs);
-        (runs.is_empty()).then_some(RunsViewAction::Close)
+        let close = runs.is_empty() && self.last_runs_len > 0;
+        self.last_runs_len = runs.len();
+        close.then_some(RunsViewAction::Close)
     }
 
     /// Cache the pointed-at runs' stable ids (the selected run's and
@@ -369,13 +394,20 @@ impl RunsView {
             lines.push(marker_row(view, width, "\u{2026}"));
         }
         lines.extend(rows[show..(show + content).min(rows.len())].iter().cloned());
-        while lines.len() < DETAIL_FRAME_ROWS + height - usize::from(more_bottom) {
+        // The pad tops the region up to the frame rows that PRECEDE the
+        // footer (rule, header, blank): the footer's own blank and hint
+        // are DETAIL_FRAME_ROWS' last two, so counting them here pads
+        // the region two rows past the viewport and the truncate below
+        // cuts the hint away.
+        while lines.len() < DETAIL_FRAME_ROWS - 2 + height - usize::from(more_bottom) {
             lines.push(Vec::new());
         }
         if more_bottom {
             lines.push(marker_row(view, width, "\u{2193}"));
         }
         self.detail_region_rows.set(height);
+        self.detail_max_scroll
+            .set(rows.len().saturating_sub(height));
         lines.extend(pane_footer(&view.theme, width, &self.detail_hint(kb)));
         lines.truncate(self.viewport_rows.max(1));
         lines

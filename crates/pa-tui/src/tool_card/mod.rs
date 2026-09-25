@@ -27,6 +27,10 @@ pub struct ToolCallCard {
     pub id: String,
     pub name: String,
     pub args: Value,
+    /// A result that matched no pending call (an orphan replayed from
+    /// the wire): renders as its own standalone card and never joins a
+    /// condensed run.
+    pub unmatched_result: bool,
     /// `tool_execution_start` seen (live only; replayed cards infer it from
     /// the result).
     pub started: bool,

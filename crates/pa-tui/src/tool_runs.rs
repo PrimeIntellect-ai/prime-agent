@@ -64,12 +64,14 @@ pub enum RunSlot {
 }
 
 /// Whether one entry renders nothing in the collapsed view: a tool card
-/// always renders; an assistant message is run glue when the overview
-/// hides all of its blocks and it raises no error or abort row (the
-/// hidden thinking the operator's trigger allows between calls).
+/// always renders (an orphan result card excluded - it keeps its own
+/// standalone row and breaks runs like any other entry); an assistant
+/// message is run glue when the overview hides all of its blocks and it
+/// raises no error or abort row (the hidden thinking the operator's
+/// trigger allows between calls).
 pub fn is_run_glue(entry: &ChatEntry) -> bool {
     match entry {
-        ChatEntry::Tool(_) => true,
+        ChatEntry::Tool(card) => !card.unmatched_result,
         ChatEntry::Assistant(message) => {
             !message.aborted
                 && message.error.is_none()
@@ -458,15 +460,21 @@ impl ToolRuns {
 
 /// The maximal tool run starting at `start` (a tool entry), scanning over
 /// zero-row assistant glue between cards; `None` when `start` is not a
-/// run member at all.
+/// run member at all (an orphan result card seeds nothing - it keeps
+/// its standalone row).
 fn scan_run(chat: &[ChatEntry], start: usize) -> Option<ToolRun> {
-    if !matches!(chat[start], ChatEntry::Tool(_)) {
-        return None;
+    match &chat[start] {
+        ChatEntry::Tool(card) if !card.unmatched_result => {}
+        _ => return None,
     }
     let mut end = start + 1;
     let mut calls = 1;
     while end < chat.len() {
         match &chat[end] {
+            // An orphan result card keeps its standalone row: it is not
+            // a call, so it BREAKS the run like any other self-rendering
+            // entry (never a member, never counted).
+            ChatEntry::Tool(card) if card.unmatched_result => break,
             ChatEntry::Tool(_) => {
                 calls += 1;
                 end += 1;
