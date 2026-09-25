@@ -1155,8 +1155,6 @@ fn scan_flatten_exposed(
     expanded_running: &HashSet<String>,
     expanded_inactive: &HashSet<String>,
 ) -> (HashSet<String>, HashSet<String>) {
-    let mut exposed_running: HashSet<String> = HashSet::new();
-    let mut exposed_inactive: HashSet<String> = HashSet::new();
     /// The running-path scan: record the skipped non-running ancestor,
     /// then recurse through its non-running children that own running
     /// descendants (running children render in full — their own lines
@@ -1191,6 +1189,8 @@ fn scan_flatten_exposed(
             }
         }
     }
+    let mut exposed_running: HashSet<String> = HashSet::new();
+    let mut exposed_inactive: HashSet<String> = HashSet::new();
     for index in 0..base.len() {
         if expanded_running.contains(&base[index].identity) {
             for child in children_by_parent.get(&index).into_iter().flatten() {
