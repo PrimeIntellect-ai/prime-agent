@@ -1,0 +1,1 @@
+- Added ACP `session/load`, which reopens a saved session and replays its transcript before responding.

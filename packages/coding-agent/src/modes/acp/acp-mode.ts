@@ -9,6 +9,7 @@ import { VERSION } from "../../config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { normalizeSessionId } from "../../core/session-id.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnection,
@@ -19,7 +20,7 @@ import type {
 	AgentConnectionState,
 } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
-import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
+import { type AcpEventMappingState, acpUpdatesForSessionEvent, acpUpdatesForTranscript } from "./acp-events.js";
 import { resolveAcpMcpServers } from "./acp-mcp.js";
 import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
@@ -209,13 +210,13 @@ class AcpUpdateProducer {
 		});
 	}
 
-	commitSessionNewResponse(): void {
+	openAdmission(): void {
 		if (this.admissionClosed) return;
 		this.admissionOpen = true;
 		this.releaseAdmission();
 	}
 
-	failSessionNewAdmission(): void {
+	failAdmission(): void {
 		if (this.admissionOpen || this.admissionClosed) return;
 		this.admissionClosed = true;
 		this.releaseAdmission();
@@ -551,7 +552,7 @@ export async function runAcpModeWithConnection(
 	let session: AcpSessionEntry | undefined;
 	let closedInputPause: AgentConnectionSessionInputPause | undefined;
 	let closedInputPauseKey: string | undefined;
-	let sessionNewInFlight = false;
+	let sessionAdmissionInFlight = false;
 	let sessionCloseInFlight = false;
 	let sessionCloseTask: Promise<void> | undefined;
 	let bound = false;
@@ -568,6 +569,29 @@ export async function runAcpModeWithConnection(
 			await entry.producer.publish({ sessionUpdate: "config_option_update", configOptions }, 0, "event");
 		}
 		return configOptions;
+	};
+
+	const releaseAdmissionInputPause = async (
+		entry: AcpSessionEntry,
+		pause: AgentConnectionSessionInputPause,
+	): Promise<void> => {
+		try {
+			await pause.release();
+			if (entry.inputPause === pause) {
+				entry.inputPause = undefined;
+				entry.inputPauseKey = undefined;
+			}
+			if (closedInputPause === pause) {
+				closedInputPause = undefined;
+				closedInputPauseKey = undefined;
+			}
+			entry.inputPauseRelease?.resolve();
+			entry.inputPauseRelease = undefined;
+		} catch (error) {
+			entry.stopFailure = error instanceof Error ? error.message : String(error);
+			entry.inputPauseRelease?.reject(error);
+			entry.inputPauseRelease = undefined;
+		}
 	};
 
 	const baseStream =
@@ -587,7 +611,7 @@ export async function runAcpModeWithConnection(
 	const failPendingSessionNewResponse = (): void => {
 		const admission = pendingSessionNewResponse;
 		pendingSessionNewResponse = undefined;
-		admission?.producer.failSessionNewAdmission();
+		admission?.producer.failAdmission();
 		admission?.entry.inputPauseRelease?.reject(new Error("ACP session/new response was not delivered"));
 	};
 	type AcpStreamMessage = typeof baseStream.writable extends WritableStream<infer TMessage> ? TMessage : never;
@@ -609,24 +633,9 @@ export async function runAcpModeWithConnection(
 					const admission = pendingSessionNewResponse;
 					pendingSessionNewResponse = undefined;
 					if (admission.inputPause) {
-						try {
-							await admission.inputPause.release();
-							if (admission.entry.inputPause === admission.inputPause) {
-								admission.entry.inputPause = undefined;
-								admission.entry.inputPauseKey = undefined;
-							}
-							if (closedInputPause === admission.inputPause) {
-								closedInputPause = undefined;
-								closedInputPauseKey = undefined;
-							}
-							admission.entry.inputPauseRelease?.resolve();
-							admission.entry.inputPauseRelease = undefined;
-						} catch (error) {
-							admission.entry.stopFailure = error instanceof Error ? error.message : String(error);
-							admission.entry.inputPauseRelease?.reject(error);
-						}
+						await releaseAdmissionInputPause(admission.entry, admission.inputPause);
 					}
-					admission.producer.commitSessionNewResponse();
+					admission.producer.openAdmission();
 				}
 			},
 			async close() {
@@ -731,12 +740,159 @@ export async function runAcpModeWithConnection(
 			});
 	};
 
+	const admitSession = async (input: {
+		sessionId: string;
+		requestedCwd: string | undefined;
+		mcpServers: readonly acp.McpServer[];
+		client: { notify(method: unknown, params: unknown): Promise<unknown> };
+		/** Set for `session/new`, whose updates must wait for the response write. */
+		responseRequestId: unknown | undefined;
+	}): Promise<{ entry: AcpSessionEntry; cwdMismatch: { requested: string; actual: string } | undefined }> => {
+		// prime-agent's cwd is fixed at startup by the session it was launched
+		// with, so a client-supplied cwd cannot be adopted after the fact.
+		// Report the real cwd back in `_meta` rather than failing the request or
+		// letting the client assume a directory the agent is not using.
+		const actualCwd = await connection
+			.getState()
+			.then((state) => state.cwd)
+			.catch(() => undefined);
+		if (!actualCwd && input.mcpServers.some((server) => "command" in server)) {
+			throw acp.RequestError.invalidParams({ reason: "Could not resolve the ACP session cwd for stdio MCP" });
+		}
+		await replaceAcpMcpServers(input.mcpServers, actualCwd ?? "");
+		let cwdMismatch: { requested: string; actual: string } | undefined;
+		if (
+			typeof input.requestedCwd === "string" &&
+			input.requestedCwd.length > 0 &&
+			actualCwd &&
+			!sameCwd(input.requestedCwd, actualCwd)
+		) {
+			cwdMismatch = { requested: input.requestedCwd, actual: actualCwd };
+		}
+		// Install the listener before fetching the snapshot. Child updates can arrive
+		// while the snapshot request is in flight; the connection remains the
+		// authoritative source used when quiescence is emitted below.
+		const producer = new AcpUpdateProducer(input.sessionId, input.client);
+		let inputPauseRelease: AcpInputPauseRelease | undefined;
+		if (closedInputPause) {
+			let resolve!: () => void;
+			let reject!: (error: unknown) => void;
+			const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+				resolve = resolvePromise;
+				reject = rejectPromise;
+			});
+			void promise.catch(() => undefined);
+			inputPauseRelease = { promise, resolve, reject };
+		}
+		const entry: AcpSessionEntry = {
+			id: input.sessionId,
+			configOptions: [],
+			models: [],
+			abort: undefined,
+			cancelling: false,
+			cancelTask: undefined,
+			stopFailure: undefined,
+			inputPause: closedInputPause,
+			inputPauseKey: closedInputPauseKey,
+			inputPauseRelease,
+			pendingTerminal: undefined,
+			promptTask: undefined,
+			resolvePromptTask: undefined,
+			unsubscribe: undefined,
+			producer,
+		};
+		// Subscribe for the session lifetime, not per prompt turn: prime-agent
+		// subagents are fire-and-forget and keep reporting after the spawning turn
+		// ends, so a turn-scoped subscription would drop their updates. One
+		// mapping state per session keeps streaming bash output correlated with
+		// the run that produced it.
+		const mappingState: AcpEventMappingState = {};
+		const observedChildren = new Map<string, unknown>();
+		const unsubscribe = connection.subscribe((event) => {
+			if (
+				event.type === "session_replaced" ||
+				event.type === "session_resynced" ||
+				(event.type === "session_event" &&
+					["thinking_level_changed", "auto_retry_start", "auto_retry_end", "agent_end"].includes(event.event.type))
+			) {
+				void enqueueConfig(() => refreshConfig(entry)).catch(() => undefined);
+			}
+			// Heartbeats are connection-scoped, including if one races a prompt.
+			// They therefore intentionally use origin turn 0.
+			if (event.type === "heartbeats_changed") {
+				void producer.publish(
+					{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({ heartbeatsChanged: true }) },
+					0,
+					"event",
+				);
+				return;
+			}
+			if (event.type !== "session_event") return;
+			if (event.event.type === "rlm_child_update") {
+				observedChildren.set(event.event.child.id, event.event.child);
+			}
+			const turnId = producer.turnForEvent(event.event);
+			for (const update of acpUpdatesForSessionEvent(event.event, mappingState)) {
+				void producer.publish(update, turnId, "event");
+			}
+		});
+		try {
+			// Reconcile after subscribing so updates cannot be lost while the snapshot
+			// request is in flight. Do not turn a failed read into an empty roster.
+			const initialSnapshot = await connection.getInitialSnapshot();
+			// Optional picker discovery must not prevent session attachment.
+			try {
+				entry.models = await connection.getAvailableModels();
+			} catch {
+				entry.models = [];
+			}
+			entry.configOptions = sessionConfigOptions(
+				await connection.getState().catch(() => initialSnapshot.state),
+				entry.models,
+			);
+			for (const child of initialSnapshot.children ?? []) {
+				if (observedChildren.has(child.id)) continue;
+				observedChildren.set(child.id, child);
+				const event = { type: "rlm_child_update", child } as const;
+				const turnId = producer.turnForEvent(event);
+				for (const update of acpUpdatesForSessionEvent(event, mappingState)) {
+					void producer.publish(update, turnId, "event");
+				}
+			}
+		} catch (error) {
+			producer.failAdmission();
+			unsubscribe();
+			if (closedInputPause) {
+				await releaseAdmissionInputPause(entry, closedInputPause);
+			}
+			await clearAcpMcpServers().catch(() => undefined);
+			throw error;
+		}
+		entry.unsubscribe = unsubscribe;
+		session = entry;
+		if (input.responseRequestId === undefined) {
+			// session/load must replay history before its response returns, so its
+			// producer opens admission here instead of after the response write.
+			producer.openAdmission();
+		} else {
+			// The stream wrapper opens this gate after the exact response has
+			// written. Buffered subscription updates retain producer order.
+			pendingSessionNewResponse = {
+				requestId: input.responseRequestId,
+				producer: entry.producer,
+				entry,
+				inputPause: closedInputPause,
+			};
+		}
+		return { entry, cwdMismatch };
+	};
+
 	const handle = acp
 		.agent({ name: "prime-agent" })
 		.onRequest("initialize", async () => ({
 			protocolVersion: acp.PROTOCOL_VERSION,
 			agentCapabilities: {
-				loadSession: false,
+				loadSession: true,
 				promptCapabilities: { image: true, embeddedContext: true },
 				...(supportsMcpServers ? { mcpCapabilities: { http: true } } : {}),
 				// Advertise close so a client knows it can release the session (and
@@ -752,13 +908,13 @@ export async function runAcpModeWithConnection(
 			// Reserve the single-session slot before the first await. Otherwise two
 			// concurrent requests can both pass the empty-slot check while cwd or
 			// snapshot reads are in flight, then overwrite each other's session.
-			if (session || sessionNewInFlight || sessionCloseInFlight) {
+			if (session || sessionAdmissionInFlight || sessionCloseInFlight) {
 				throw new Error(
 					"prime-agent ACP mode hosts one session per connection; " +
 						"start another prime-agent process for a second session",
 				);
 			}
-			sessionNewInFlight = true;
+			sessionAdmissionInFlight = true;
 			try {
 				const params = ctx.params as acp.NewSessionRequest;
 				const mcpServers = params.mcpServers ?? [];
@@ -771,147 +927,92 @@ export async function runAcpModeWithConnection(
 					await options.bindHeadlessExtensions?.();
 					bound = true;
 				}
-				// prime-agent's cwd is fixed at startup by the session it was launched
-				// with, so a client-supplied cwd cannot be adopted after the fact.
-				// Report the real cwd back in `_meta` rather than failing the request or
-				// letting the client assume a directory the agent is not using.
-				const requestedCwd = params.cwd;
-				const actualCwd = await connection
-					.getState()
-					.then((state) => state.cwd)
-					.catch(() => undefined);
-				if (!actualCwd && mcpServers.some((server) => "command" in server)) {
-					throw acp.RequestError.invalidParams({ reason: "Could not resolve the ACP session cwd for stdio MCP" });
-				}
-				await replaceAcpMcpServers(mcpServers, actualCwd ?? "");
-				let cwdMismatch: { requested: string; actual: string } | undefined;
-				if (
-					typeof requestedCwd === "string" &&
-					requestedCwd.length > 0 &&
-					actualCwd &&
-					!sameCwd(requestedCwd, actualCwd)
-				) {
-					cwdMismatch = { requested: requestedCwd, actual: actualCwd };
-				}
-				const sessionId = randomUUID();
-				// Install the listener before fetching the snapshot. Child updates can arrive
-				// while the snapshot request is in flight; the connection remains the
-				// authoritative source used when quiescence is emitted below.
-				const producer = new AcpUpdateProducer(sessionId, ctx.client);
-				let inputPauseRelease: AcpInputPauseRelease | undefined;
-				if (closedInputPause) {
-					let resolve!: () => void;
-					let reject!: (error: unknown) => void;
-					const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-						resolve = resolvePromise;
-						reject = rejectPromise;
-					});
-					void promise.catch(() => undefined);
-					inputPauseRelease = { promise, resolve, reject };
-				}
-				const entry: AcpSessionEntry = {
-					id: sessionId,
-					configOptions: [],
-					models: [],
-					abort: undefined,
-					cancelling: false,
-					cancelTask: undefined,
-					stopFailure: undefined,
-					inputPause: closedInputPause,
-					inputPauseKey: closedInputPauseKey,
-					inputPauseRelease,
-					pendingTerminal: undefined,
-					promptTask: undefined,
-					resolvePromptTask: undefined,
-					unsubscribe: undefined,
-					producer,
-				};
-				// Subscribe for the session lifetime, not per prompt turn: prime-agent
-				// subagents are fire-and-forget and keep reporting after the spawning turn
-				// ends, so a turn-scoped subscription would drop their updates. One
-				// mapping state per session keeps streaming bash output correlated with
-				// the run that produced it.
-				const mappingState: AcpEventMappingState = {};
-				const observedChildren = new Map<string, unknown>();
-				const unsubscribe = connection.subscribe((event) => {
-					if (
-						event.type === "session_replaced" ||
-						event.type === "session_resynced" ||
-						(event.type === "session_event" &&
-							["thinking_level_changed", "auto_retry_start", "auto_retry_end", "agent_end"].includes(
-								event.event.type,
-							))
-					) {
-						void enqueueConfig(() => refreshConfig(entry)).catch(() => undefined);
-					}
-					// Heartbeats are connection-scoped, including if one races a prompt.
-					// They therefore intentionally use origin turn 0.
-					if (event.type === "heartbeats_changed") {
-						void producer.publish(
-							{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({ heartbeatsChanged: true }) },
-							0,
-							"event",
-						);
-						return;
-					}
-					if (event.type !== "session_event") return;
-					if (event.event.type === "rlm_child_update") {
-						observedChildren.set(event.event.child.id, event.event.child);
-					}
-					const turnId = producer.turnForEvent(event.event);
-					for (const update of acpUpdatesForSessionEvent(event.event, mappingState)) {
-						void producer.publish(update, turnId, "event");
-					}
+				// Reuse the persisted session id so a client can load it later. The id
+				// is opaque; fall back to a fresh id only when no session is attached.
+				const sessionId = (await connection.getState().catch(() => undefined))?.sessionId ?? randomUUID();
+				const { entry, cwdMismatch } = await admitSession({
+					sessionId,
+					requestedCwd: params.cwd,
+					mcpServers,
+					client: ctx.client,
+					responseRequestId: ctx.requestId,
 				});
-				try {
-					// Reconcile after subscribing so updates cannot be lost while the snapshot
-					// request is in flight. Do not turn a failed read into an empty roster.
-					const initialSnapshot = await connection.getInitialSnapshot();
-					// Optional picker discovery must not prevent session attachment.
-					try {
-						entry.models = await connection.getAvailableModels();
-					} catch {
-						entry.models = [];
-					}
-					entry.configOptions = sessionConfigOptions(
-						await connection.getState().catch(() => initialSnapshot.state),
-						entry.models,
-					);
-					for (const child of initialSnapshot.children ?? []) {
-						if (observedChildren.has(child.id)) continue;
-						observedChildren.set(child.id, child);
-						const event = { type: "rlm_child_update", child } as const;
-						const turnId = producer.turnForEvent(event);
-						for (const update of acpUpdatesForSessionEvent(event, mappingState)) {
-							void producer.publish(update, turnId, "event");
-						}
-					}
-				} catch (error) {
-					producer.failSessionNewAdmission();
-					unsubscribe();
-					await clearAcpMcpServers().catch(() => undefined);
-					throw error;
-				}
-				// Claim the single-session slot only once the subscription and snapshot are
-				// ready, so a failed setup cannot leave it occupied and unusable.
-				entry.unsubscribe = unsubscribe;
-				session = entry;
-				const response = {
+				return {
 					sessionId,
 					configOptions: entry.configOptions,
 					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
 				};
-				// The stream wrapper commits this gate after this exact response has
-				// written. Buffered subscription updates retain producer order.
-				pendingSessionNewResponse = {
-					requestId: ctx.requestId,
-					producer: entry.producer,
-					entry,
-					inputPause: closedInputPause,
-				};
-				return response;
 			} finally {
-				sessionNewInFlight = false;
+				sessionAdmissionInFlight = false;
+			}
+		})
+		.onRequest("session/load", async (ctx: any) => {
+			if (session || sessionAdmissionInFlight || sessionCloseInFlight) {
+				throw new Error(
+					"prime-agent ACP mode hosts one session per connection; " +
+						"start another prime-agent process for a second session",
+				);
+			}
+			sessionAdmissionInFlight = true;
+			try {
+				const params = ctx.params as acp.LoadSessionRequest;
+				const mcpServers = params.mcpServers ?? [];
+				if (mcpServers.length > 0 && !supportsMcpServers) {
+					throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
+				}
+				if (!bound) {
+					await options.bindHeadlessExtensions?.();
+					bound = true;
+				}
+				const selector = normalizeSessionId(params.sessionId);
+				const saved = (await connection.listSavedSessions("all")).find(
+					(candidate) => normalizeSessionId(candidate.id) === selector,
+				);
+				if (!saved) {
+					throw acp.RequestError.invalidParams({ reason: `Unknown ACP session: ${params.sessionId}` });
+				}
+				const switched = await connection.switchSession(
+					saved.path,
+					params.cwd ? { cwdOverride: params.cwd } : undefined,
+				);
+				if (switched.cancelled) {
+					throw acp.RequestError.invalidParams({ reason: `Could not load ACP session: ${params.sessionId}` });
+				}
+				const { entry, cwdMismatch } = await admitSession({
+					sessionId: params.sessionId,
+					requestedCwd: params.cwd,
+					mcpServers,
+					client: ctx.client,
+					responseRequestId: undefined,
+				});
+				// The pause this admission owns, captured before any await so a racing
+				// close cannot swap in a pause this handler does not own.
+				const admissionPause = entry.inputPauseRelease ? entry.inputPause : undefined;
+				try {
+					for (const update of acpUpdatesForTranscript(await connection.getMessages())) {
+						if (!(await entry.producer.publish(update, 0, "event"))) {
+							throw new Error("ACP session closed during load replay");
+						}
+					}
+					await entry.producer.drain();
+					if (admissionPause) {
+						await releaseAdmissionInputPause(entry, admissionPause);
+						if (entry.stopFailure) throw new Error(`ACP session load failed: ${entry.stopFailure}`);
+					}
+				} catch (error) {
+					entry.unsubscribe?.();
+					if (session === entry) session = undefined;
+					if (admissionPause) await releaseAdmissionInputPause(entry, admissionPause);
+					await entry.producer.close().catch(() => undefined);
+					await clearAcpMcpServers().catch(() => undefined);
+					throw error;
+				}
+				return {
+					configOptions: entry.configOptions,
+					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
+				};
+			} finally {
+				sessionAdmissionInFlight = false;
 			}
 		})
 		.onRequest("session/set_config_option", async (ctx) => {

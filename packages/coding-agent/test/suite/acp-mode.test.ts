@@ -199,6 +199,83 @@ function connectAcpClient(connection: any, options: ClientHarnessOptions = {}): 
 }
 
 describe("ACP mode end to end", () => {
+	it("loads a persisted session and replays its transcript before the response", async () => {
+		const connection = fakeAcpConnection();
+		const savedTranscript = [
+			{ role: "user", content: "hello", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "hi there" }],
+				usage: {},
+				stopReason: "stop",
+				timestamp: 2,
+			},
+		];
+		let currentTranscript: unknown[] = [{ role: "user", content: "previous session", timestamp: 0 }];
+		connection.getAvailableModels = async () => [];
+		connection.getMessages = async () => currentTranscript;
+		connection.listSavedSessions = async () => [
+			{
+				path: "/tmp/prime-agent-session",
+				id: "abc-123",
+				cwd: process.cwd(),
+				created: new Date(),
+				modified: new Date(),
+				messageCount: 2,
+				firstMessage: "hello",
+				allMessagesText: "hello",
+			},
+			{
+				path: "/tmp/prime-agent-cancel",
+				id: "cancel-me",
+				cwd: process.cwd(),
+				created: new Date(),
+				modified: new Date(),
+				messageCount: 0,
+				firstMessage: "",
+				allMessagesText: "",
+			},
+		];
+		const switched: string[] = [];
+		connection.switchSession = async (sessionPath: string) => {
+			switched.push(sessionPath);
+			if (sessionPath === "/tmp/prime-agent-cancel") return { cancelled: true };
+			currentTranscript = savedTranscript;
+			return { cancelled: false };
+		};
+		const { client, updates, close } = connectAcpClient(connection);
+		try {
+			const init = (await client.request("initialize", {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: {},
+			})) as acp.InitializeResponse;
+			expect(init.agentCapabilities?.loadSession).toBe(true);
+
+			await expect(
+				client.request("session/load", { sessionId: "missing", cwd: process.cwd(), mcpServers: [] }),
+			).rejects.toMatchObject({ code: -32602 });
+			await expect(
+				client.request("session/load", { sessionId: "cancel-me", cwd: process.cwd(), mcpServers: [] }),
+			).rejects.toMatchObject({ code: -32602 });
+
+			const loaded = (await client.request("session/load", {
+				sessionId: "abc-123",
+				cwd: process.cwd(),
+				mcpServers: [],
+			})) as acp.LoadSessionResponse;
+			expect(loaded.configOptions).toEqual([]);
+			expect(switched).toEqual(["/tmp/prime-agent-cancel", "/tmp/prime-agent-session"]);
+			// Replay is the loaded transcript, delivered before the response returns.
+			const replayed = updates.map((item) => item.update);
+			expect(replayed.some((update) => update.content?.text === "hi there")).toBe(true);
+			expect(replayed.some((update) => update.content?.text === "previous session")).toBe(false);
+
+			await expect(client.request("session/new", { cwd: process.cwd(), mcpServers: [] })).rejects.toThrow();
+		} finally {
+			close();
+		}
+	});
+
 	it("advertises model and effort pickers and applies unambiguous ACP selections (#2455)", async () => {
 		const harness = await createHarness({
 			models: [

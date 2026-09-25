@@ -1,4 +1,5 @@
-import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessageEvent, ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import type { PrimeAgentIpythonMeta, PrimeAgentSessionMeta } from "./acp-meta.js";
 import { primeAgentMeta } from "./acp-meta.js";
@@ -312,6 +313,139 @@ export function acpUpdatesForSessionEvent(
 		default:
 			return [];
 	}
+}
+
+function userMessageUpdates(content: string | readonly (TextContent | ImageContent)[]): AcpSessionUpdate[] {
+	return typeof content === "string"
+		? content.length > 0
+			? [{ sessionUpdate: "user_message_chunk", content: textContent(content) }]
+			: []
+		: content.flatMap((block): AcpSessionUpdate[] => {
+				if (block.type === "text" && block.text.length > 0) {
+					return [{ sessionUpdate: "user_message_chunk", content: textContent(block.text) }];
+				}
+				return block.type === "image"
+					? [
+							{
+								sessionUpdate: "user_message_chunk",
+								content: { type: "image", data: block.data, mimeType: block.mimeType },
+							},
+						]
+					: [];
+			});
+}
+
+function assistantMessageUpdates(
+	message: Extract<AgentMessage, { role: "assistant" }>,
+	messageId: string,
+): AcpSessionUpdate[] {
+	return message.content.flatMap((block): AcpSessionUpdate[] => {
+		if (block.type === "text" && block.text.length > 0) {
+			return [{ sessionUpdate: "agent_message_chunk", messageId, content: textContent(block.text) }];
+		}
+		if (block.type === "thinking" && block.thinking.length > 0) {
+			return [{ sessionUpdate: "agent_thought_chunk", messageId, content: textContent(block.thinking) }];
+		}
+		if (block.type === "toolCall") {
+			const cell = block.name === IPYTHON_TOOL_NAME ? ipythonCellSource(block.arguments) : undefined;
+			return [
+				{
+					sessionUpdate: "tool_call",
+					toolCallId: block.id,
+					title: block.name === IPYTHON_TOOL_NAME ? "Python cell" : block.name,
+					kind: acpToolKind(block.name),
+					status: "in_progress" satisfies AcpToolStatus,
+					rawInput: cell !== undefined ? { code: cell } : block.arguments,
+				},
+			];
+		}
+		return [];
+	});
+}
+
+function toolResultMessageUpdates(message: Extract<AgentMessage, { role: "toolResult" }>): AcpSessionUpdate[] {
+	const text = message.content.flatMap((block): unknown[] =>
+		block.type === "text" && block.text.length > 0 ? [{ type: "content", content: textContent(block.text) }] : [],
+	);
+	const rich = message.toolName === IPYTHON_TOOL_NAME ? ipythonRichOutput(message) : undefined;
+	return [
+		{
+			sessionUpdate: "tool_call_update",
+			toolCallId: message.toolCallId,
+			status: (message.isError ? "failed" : "completed") satisfies AcpToolStatus,
+			...(text.length > 0 ? { content: text } : {}),
+			...(rich ? { _meta: primeAgentMeta({ ipython: rich }) } : {}),
+		},
+	];
+}
+
+/** Bash runs outside the tool-call lifecycle, so replay synthesizes a tool call keyed by position. */
+function bashExecutionUpdates(
+	message: Extract<AgentMessage, { role: "bashExecution" }>,
+	index: number,
+): AcpSessionUpdate[] {
+	const toolCallId = `prime-agent-replay-bash-${index}`;
+	return [
+		{
+			sessionUpdate: "tool_call",
+			toolCallId,
+			title: message.command,
+			kind: "execute" satisfies AcpToolKind,
+			status: "in_progress" satisfies AcpToolStatus,
+			rawInput: { command: message.command },
+		},
+		{
+			sessionUpdate: "tool_call_update",
+			toolCallId,
+			status: (message.cancelled || message.exitCode !== 0 ? "failed" : "completed") satisfies AcpToolStatus,
+			...(message.output.length > 0 ? { content: [{ type: "content", content: textContent(message.output) }] } : {}),
+		},
+	];
+}
+
+function compactionSummaryUpdate(message: Extract<AgentMessage, { role: "compactionSummary" }>): AcpSessionUpdate[] {
+	return [
+		{
+			sessionUpdate: "session_info_update",
+			_meta: primeAgentMeta({ compaction: { tokensBefore: message.tokensBefore, summary: message.summary } }),
+		},
+	];
+}
+
+/**
+ * Replay a persisted transcript as ACP updates for `session/load`, which must
+ * deliver the conversation history before its response. It mirrors the live
+ * mapping for the message kinds it covers; transcript entries ACP has no
+ * representation for (branch summaries, extension messages) are skipped.
+ */
+export function acpUpdatesForTranscript(messages: readonly AgentMessage[]): AcpSessionUpdate[] {
+	const updates: AcpSessionUpdate[] = [];
+	let assistantSequence = 0;
+	let bashSequence = 0;
+	for (const message of messages) {
+		switch (message.role) {
+			case "user":
+				updates.push(...userMessageUpdates(message.content));
+				break;
+			case "assistant":
+				assistantSequence += 1;
+				updates.push(...assistantMessageUpdates(message, `prime-agent-replay-assistant-${assistantSequence}`));
+				break;
+			case "toolResult":
+				updates.push(...toolResultMessageUpdates(message));
+				break;
+			case "bashExecution":
+				bashSequence += 1;
+				updates.push(...bashExecutionUpdates(message, bashSequence));
+				break;
+			case "compactionSummary":
+				updates.push(...compactionSummaryUpdate(message));
+				break;
+			default:
+				break;
+		}
+	}
+	return updates;
 }
 
 const BASH_TOOL_CALL_PREFIX = "prime-agent-bash";

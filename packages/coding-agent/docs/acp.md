@@ -20,6 +20,7 @@ Use ACP mode when something external needs to *drive* a session interactively: p
 |---|---|
 | `initialize` | Returns protocol version, capabilities, and agent info. |
 | `session/new` | Creates the session. One session per connection. |
+| `session/load` | Reopens a saved session and replays its history. |
 | `session/set_config_option` | Changes the model or reasoning effort and returns all current options. |
 | `session/prompt` | Runs one turn and resolves with a stop reason. |
 | `session/cancel` | Notification; aborts the addressed session's turn. |
@@ -28,6 +29,8 @@ Use ACP mode when something external needs to *drive* a session interactively: p
 One session per connection is a deliberate limit: Prime Agent's underlying session is fixed at process startup, so a second concurrent session would silently share its conversation, working directory, and model. A second `session/new` is refused rather than pretending to isolate. Start another process for a second session.
 
 Likewise `session/prompt` refuses a concurrent turn while one is running, and the working directory cannot be changed after startup — a client-supplied `cwd` that differs from the agent's real one is reported back in `_meta` rather than silently ignored.
+
+`session/new` returns the persisted session id, so a client can reopen that session later with `session/load`. Loading switches the process to the saved session and replays its transcript as `session/update` notifications before the response returns; `session/prompt` then continues from that history. The one-session-per-connection and fixed-cwd rules still apply.
 
 ## Model and reasoning effort pickers
 

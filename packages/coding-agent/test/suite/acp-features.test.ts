@@ -490,10 +490,17 @@ describe("ACP mode preserves prime-agent features", () => {
 		await expect(harness.session.prompt("post-close activity")).rejects.toThrow("session input admission is paused");
 		expect(fixture.updates.length).toBe(afterClose);
 
-		// Closing frees the single-session slot, so a new session is accepted.
+		// Closing frees the single-session slot, so a new session is accepted. The
+		// ACP id is the persisted session id, so re-admitting the same backing
+		// session returns the same id; prove the session is usable instead.
 		const next = await fixture.agent.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
 		expect(next.sessionId).toBeTruthy();
-		expect(next.sessionId).not.toBe(fixture.sessionId);
+		// The ACP id is the persisted session id, so a load can resolve it later.
+		expect(next.sessionId).toBe(harness.session.sessionId);
+		await fixture.agent.request("session/prompt", {
+			sessionId: next.sessionId,
+			prompt: [{ type: "text", text: "two" }],
+		});
 
 		// Closing an unknown session is an error, not a silent no-op.
 		await expect(fixture.agent.request("session/close", { sessionId: "nope" })).rejects.toThrow();
