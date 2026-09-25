@@ -64,10 +64,15 @@ pub use crate::session_scan::list_sessions;
 /// straight from the stream and the catch-all collects the remaining keys
 /// in source order. The derived flatten this replaces buffered every row
 /// through a second content generation on load - the dominant allocation
-/// cost of opening a large session - while accepting exactly the same
-/// rows (a non-object line, or one missing `type`/`id`/`timestamp`, fails
-/// both ways; `parentId` is absent-tolerant; every other key, whatever
-/// its shape, lands in `fields` verbatim).
+/// cost of opening a large session - with one acceptance difference: a
+/// DUPLICATE envelope key (`{"type":"a","type":"b"}`) made the derive
+/// reject the row, while this visitor is last-wins - more accepting, and
+/// closer to the TS `JSON.parse` loader the port tracks (a real session
+/// file never carries duplicate keys; both shapes keep `fields`
+/// verbatim). Everything else matches the derive: a non-object line, or
+/// one missing `type`/`id`/`timestamp`, fails both ways; `parentId` is
+/// absent-tolerant; every other key, whatever its shape, lands in
+/// `fields` verbatim.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
