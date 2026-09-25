@@ -291,6 +291,17 @@ impl AgentView {
                 &self.theme,
                 width,
             ));
+            // The live streamed-summary block (the operator's "stream
+            // the compacted summary" feature): under the loader row, the
+            // expanded view renders the summary as the compaction model
+            // generates it — one delta at a time — nested on the branch
+            // grammar like the expanded summary row that settles it.
+            tail.extend(crate::compaction_row::render_compaction_stream(
+                compaction,
+                self.detail.tool_output_expanded(),
+                &self.theme,
+                width,
+            ));
         } else if let Some(working) = &self.working {
             tail.extend(render_loader(working, self.pulse_frame, &self.theme, width));
         }
