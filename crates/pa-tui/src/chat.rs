@@ -8,7 +8,6 @@
 mod geometry;
 pub(crate) use geometry::{assistant_row_count, user_block_row_count};
 
-use crate::osc133::RowMarkers;
 use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::str_width;

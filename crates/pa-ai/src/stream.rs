@@ -3,10 +3,12 @@
 
 use std::sync::Arc;
 
+use serde_json::Map;
+
 use crate::event_stream::AssistantMessageEventStream;
 use crate::providers::simple_options::default_request_max_tokens;
 use crate::registry::{ensure_builtins, get_api_provider};
-use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
+use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions, Usage};
 use crate::utils_inner::ProviderError;
 
 fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, ProviderError> {

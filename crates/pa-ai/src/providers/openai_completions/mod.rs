@@ -19,7 +19,7 @@ use crate::providers::simple_options::build_base_options;
 use crate::registry::Provider;
 use crate::types::{
     AssistantContent, AssistantMessage, CacheRetention, Context, Model, ModelExt,
-    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Usage,
+    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Usage, UsageCost,
 };
 
 mod convert;

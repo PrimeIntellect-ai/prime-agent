@@ -10,6 +10,8 @@
 //! message/tool conversion and payload assembly in [`convert`], and the SSE
 //! streaming core in [`stream`].
 
+use serde_json::Map;
+
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,

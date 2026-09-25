@@ -12,7 +12,6 @@ use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
 use pa_types::session::FileEntry;
 use ratatui::style::{Modifier, Style};
-use serde_json::Map;
 
 /// Tree filter modes (TS `FilterMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

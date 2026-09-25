@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use serde_json::Map;
+
 use super::*;
 use crate::event_stream::AssistantMessageEventExt;
 use crate::registry::get_api_provider;

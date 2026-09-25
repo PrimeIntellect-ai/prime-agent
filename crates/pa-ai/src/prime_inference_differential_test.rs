@@ -12,7 +12,7 @@
 //! tests/differential/run.sh
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::providers::openai_completions::{stream_openai_completions, OpenAICompletionsOptions};
 use crate::types::{AssistantContent, Model, StopReason, StreamOptions};

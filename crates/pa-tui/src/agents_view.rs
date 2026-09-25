@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use pa_types::daemon::DaemonCommand;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{

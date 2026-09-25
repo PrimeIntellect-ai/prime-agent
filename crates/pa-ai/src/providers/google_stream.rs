@@ -6,7 +6,7 @@
 //! retention, function-call tool calls, finish-reason mapping, and usage
 //! accounting.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
 use crate::models::calculate_cost;
@@ -15,7 +15,7 @@ use crate::providers::google_shared::{
 };
 use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, ThinkingContent, ToolCall,
-    Usage,
+    Usage, UsageCost,
 };
 
 /// Streaming state shared by the Gemini and Vertex providers.

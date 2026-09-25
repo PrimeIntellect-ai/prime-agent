@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use futures::Stream;
+use serde_json::Map;
 
 pub use crate::types::{AssistantContent, AssistantMessage, AssistantMessageEvent, StopReason};
 

@@ -4,7 +4,7 @@
 //! JSON summaries (the wire forms the supervisor serves), mirroring the TS
 //! agents-view state module; the view module owns input and painting.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use pa_types::daemon::agent_roster::AgentRosterStatus;
 use serde_json::Value;

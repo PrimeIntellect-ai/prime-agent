@@ -18,7 +18,7 @@ use pa_types::daemon::{
     DaemonErrorInfo, DaemonProtocolInfo, DaemonResponse, DAEMON_PROTOCOL_NAME,
     DAEMON_PROTOCOL_VERSION,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 

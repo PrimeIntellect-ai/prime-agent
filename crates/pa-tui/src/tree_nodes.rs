@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use pa_types::session::FileEntry;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// One wire flat node: the full entry plus its active label.
 #[derive(Debug, Clone, PartialEq)]

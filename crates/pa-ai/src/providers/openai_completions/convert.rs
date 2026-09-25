@@ -8,7 +8,7 @@ use crate::providers::openai_completions::{decode_reasoning_details, ResolvedCom
 use crate::providers::transform_messages::transform_messages_with_normalizer;
 use crate::types::{
     AssistantContent, Context, MessageExt, Model, ModelInput, StopReason, TextContent,
-    ThinkingContent, Tool, ToolCall, Usage, UserMessageContent, UserOrToolContent,
+    ThinkingContent, Tool, ToolCall, Usage, UsageCost, UserMessageContent, UserOrToolContent,
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 

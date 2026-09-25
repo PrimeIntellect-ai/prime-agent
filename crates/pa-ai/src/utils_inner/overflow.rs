@@ -5,6 +5,8 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
+use serde_json::Map;
+
 use crate::types::{AssistantContent, AssistantMessage, StopReason};
 
 fn overflow_patterns() -> &'static Vec<Regex> {

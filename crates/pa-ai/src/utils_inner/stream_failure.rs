@@ -3,9 +3,11 @@
 //! into a generic string before it is logged and persisted.
 //! Ported from `packages/ai/src/utils/stream-failure.ts`.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
+use serde_json::Map;
 
 use crate::types::AssistantMessage;
 use crate::utils::diagnostics::{

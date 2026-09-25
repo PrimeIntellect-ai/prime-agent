@@ -7,6 +7,8 @@
 //! friendly errors, and service-tier pricing. The stream processing itself is
 //! the shared Responses processor ([`crate::providers::openai_responses_shared`]).
 
+use std::collections::HashMap;
+
 use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_env_api_key;

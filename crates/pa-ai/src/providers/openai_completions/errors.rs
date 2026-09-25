@@ -5,6 +5,8 @@
 //! the TS provider surfaces verbatim — unlike the anthropic/responses
 //! providers, which classify through `formatStreamFailureMessage`.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::utils_inner::stream_failure::{ProviderError, ProviderHttpError};

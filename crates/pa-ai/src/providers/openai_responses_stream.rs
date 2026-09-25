@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
 use crate::models::calculate_cost;
@@ -24,7 +24,7 @@ pub use crate::providers::openai_responses_hooks::{
 use crate::providers::openai_responses_shared::encode_text_signature_v1;
 use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, TextSignaturePhase,
-    ThinkingContent, ToolCall, Usage,
+    ThinkingContent, ToolCall, Usage, UsageCost,
 };
 use crate::utils_inner::json_parse::parse_streaming_json;
 use crate::utils_inner::stream_failure::{

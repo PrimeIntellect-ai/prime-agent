@@ -8,6 +8,7 @@
 //! for local gateways, Claude adaptive vs budget-based thinking, and
 //! GovCloud-safe request fields.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde_json::{json, Value};

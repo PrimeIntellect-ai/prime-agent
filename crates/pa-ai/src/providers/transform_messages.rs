@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Map;
+
 use crate::types::{
     AssistantContent, AssistantMessage, Message, Model, ModelExt, StopReason, TextContent,
     ToolCall, ToolResultMessage, UserMessage, UserMessageContent, UserOrToolContent,

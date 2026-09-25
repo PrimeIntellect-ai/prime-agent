@@ -526,6 +526,7 @@ fn header_mode(
     tokens: &mut Vec<(String, Scope)>,
 ) -> Option<usize> {
     let mut i = at + keyword_len;
+    let gap_start = i;
     while code[i..].starts_with(|c: char| c.is_whitespace()) && !code[i..].starts_with('\n') {
         i += 1;
     }
