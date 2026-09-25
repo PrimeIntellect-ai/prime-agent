@@ -3337,14 +3337,17 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
-        let primary_state: std::cell::RefCell<
-            Option<(
-                pa_types::ai::Model,
-                pa_agent::types::ThinkingLevel,
-                Option<String>,
-                std::collections::HashMap<String, String>,
-            )>,
-        > = std::cell::RefCell::new(None);
+        // The failover-captured primary target state (TS `_backupModel`):
+        // the model, its thinking level, and its resolved request auth,
+        // restored when the turn settles back onto the primary.
+        struct FailoverPrimary {
+            model: pa_types::ai::Model,
+            thinking_level: pa_agent::types::ThinkingLevel,
+            api_key: Option<String>,
+            headers: std::collections::HashMap<String, String>,
+        }
+        let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
+            std::cell::RefCell::new(None);
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -3437,15 +3440,15 @@ impl AgentSessionEngine {
                         // settles.
                         if primary.is_none() {
                             let request_auth = self.resolve_request_auth(&model);
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                request_auth.api_key,
-                                request_auth
+                            *primary = Some(FailoverPrimary {
+                                model: model.clone(),
+                                thinking_level: map_thinking_level(self.effective_thinking()),
+                                api_key: request_auth.api_key,
+                                headers: request_auth
                                     .headers
                                     .map(|headers| headers.into_iter().collect())
                                     .unwrap_or_default(),
-                            ));
+                            });
                         }
                     }
                     let next = next.clone();
@@ -3492,12 +3495,12 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((
-                            primary_model,
+                        let Some(FailoverPrimary {
+                            model: primary_model,
                             thinking_level,
-                            primary_api_key,
-                            primary_headers,
-                        )) = primary
+                            api_key: primary_api_key,
+                            headers: primary_headers,
+                        }) = primary
                         else {
                             return Ok(None);
                         };
