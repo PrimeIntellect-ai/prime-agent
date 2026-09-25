@@ -217,7 +217,7 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
 mod tests {
     use std::collections::HashMap;
 
-    use pa_ai::oauth::{CodexHttpResponse, ProviderHttpRequest};
+    use pa_ai::oauth::{CodexHttpResponse, ProviderHttpRequest, ProviderHttpResponse};
 
     use super::*;
 

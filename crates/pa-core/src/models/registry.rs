@@ -446,7 +446,7 @@ impl ModelRegistry {
                 pa_ai::oauth::get_github_copilot_base_url(Some(&access), enterprise_url.as_deref());
             for model in &mut self.models {
                 if model.provider == crate::auth::GITHUB_COPILOT_PROVIDER_ID {
-                    model.base_url = base_url.clone();
+                    model.base_url.clone_from(&base_url);
                 }
             }
         }
