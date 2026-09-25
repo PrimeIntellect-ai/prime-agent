@@ -31,20 +31,13 @@ struct Toast {
 }
 
 impl Toast {
-    fn fresh(text: String) -> Self {
+    fn new(text: String) -> Self {
         let now = Instant::now();
         Toast {
             text,
             repeats: 1,
             expires_at: expiry(now),
         }
-    }
-
-    /// A repeat of the toast's action: the window resets and the repeat
-    /// count climbs (the count bump the label renders).
-    fn refresh(&mut self) {
-        self.expires_at = expiry(Instant::now());
-        self.repeats += 1;
     }
 
     /// The overlay label: the second and later repeats of the same action
@@ -60,15 +53,6 @@ impl Toast {
         } else {
             self.text.clone()
         }
-    }
-
-    /// Fast-forward the expiry by `age` (test hook: expiry without a
-    /// wall-clock wait; an expiry already too close to the monotonic
-    /// clock's start lands at `now`, which reads as expired).
-    #[cfg(test)]
-    fn age_by(&mut self, age: Duration) {
-        let now = Instant::now();
-        self.expires_at = self.expires_at.checked_sub(age).unwrap_or(now);
     }
 }
 
@@ -103,10 +87,11 @@ impl Toasts {
             .rposition(|toast| toast.text == text && toast.expires_at > now)
         {
             let mut toast = self.entries.remove(index);
-            toast.refresh();
+            toast.expires_at = expiry(Instant::now());
+            toast.repeats += 1;
             self.entries.push(toast);
         } else {
-            self.entries.push(Toast::fresh(text));
+            self.entries.push(Toast::new(text));
         }
         while self.entries.len() > TOAST_STACK_LIMIT {
             self.entries.remove(0);
@@ -134,8 +119,9 @@ impl Toasts {
     /// monotonic clock's start lands at `now`, which reads as expired).
     #[cfg(test)]
     pub(crate) fn age_by(&mut self, age: Duration) {
+        let now = Instant::now();
         for toast in &mut self.entries {
-            toast.age_by(age);
+            toast.expires_at = toast.expires_at.checked_sub(age).unwrap_or(now);
         }
     }
 }
