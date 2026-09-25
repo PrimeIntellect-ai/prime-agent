@@ -2789,8 +2789,12 @@ mod tests {
         // Any other key clears the arm.
         mode.handle_key("down");
         assert!(mode.pending_delete.is_none(), "another key clears the arm");
-        // Re-arm and execute on the same row.
-        mode.handle_key("up");
+        // Re-select the child, then arm and execute on the same row.
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
         mode.handle_key("ctrl+x");
         mode.handle_key("ctrl+x");
         let action = mode.take_delete_action().expect("the executed dispatch");
@@ -2861,16 +2865,15 @@ mod tests {
             .expect("the child row");
         mode.selected = child_index;
         mode.handle_key("ctrl+x");
-        let frame = mode.render_list(120, 8);
-        let hint = frame
+        let hint = mode
+            .render_hints(120)
             .iter()
-            .map(|line| {
-                line.iter()
-                    .map(|span| span.content.as_str())
-                    .collect::<String>()
-            })
-            .find(|row| row.contains("again to stop"))
-            .expect("the confirm hint row");
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to stop"),
+            "the confirm hint row: {hint}"
+        );
         assert!(
             hint.contains("again to stop"),
             "the live row reads stop: {hint}"
