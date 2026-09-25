@@ -76,7 +76,6 @@ impl Drop for Supervisor {
 /// review's reply is delayed past the whole settle (the heavyweight
 /// phase the completion path must never wait on).
 struct StallMock {
-    requests: Arc<Mutex<Vec<Value>>>,
     turn_requests: Arc<Mutex<Vec<Instant>>>,
     turn_bodies: Arc<Mutex<Vec<Value>>>,
     review_request_at: Arc<Mutex<Option<Instant>>>,
@@ -128,7 +127,6 @@ impl StallMock {
             }
         });
         StallMock {
-            requests,
             turn_requests,
             turn_bodies,
             review_request_at,
@@ -310,7 +308,7 @@ fn serve(
     let index = {
         let mut turns = turn_requests.lock().expect("turn lock");
         turns.push(Instant::now());
-        turn_bodies.lock().expect("turn lock").push(body.clone());
+        turn_bodies.lock().expect("turn lock").push(body);
         turns.len() - 1
     };
     let crossing_index = FATTENING_TURNS + 1;
