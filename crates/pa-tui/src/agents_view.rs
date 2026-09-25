@@ -2758,6 +2758,13 @@ async fn run_agents_view_surface(
         });
     }
     let opened = mode.opened.take();
+    // A handoff retires the watchdog before the drain wait: the reader
+    // keeps observing Ctrl+C through that window, and a double-press
+    // must not force-quit a process that is merely switching views —
+    // the retirement never affects the in-flight dispatches.
+    if handing_off {
+        exit_guard.cancel();
+    }
     // An in-flight stop-or-delete dispatch settles before the connection
     // closes (bounded): an exit right after the second ctrl+x must not
     // drop the request on the floor (the loop's client close would take
@@ -2778,12 +2785,6 @@ async fn run_agents_view_surface(
     // deadline covers only the leaves that end this process.
     if terminal_exit {
         exit_guard.arm_for_exit();
-    }
-    // A handoff retires the watchdog: the process keeps going. A
-    // selection-less exit ends the process, where the deadline dies
-    // with it — or fires if it wedged.
-    if handing_off {
-        exit_guard.cancel();
     }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
