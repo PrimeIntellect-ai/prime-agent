@@ -2519,8 +2519,7 @@ impl SessionUi {
             .await
             .map_err(|_| {
                 anyhow!(
-                    "timed out after {}ms waiting for the Prime Agent daemon response",
-                    UI_REQUEST_TIMEOUT_MS
+                    "timed out after {UI_REQUEST_TIMEOUT_MS}ms waiting for the Prime Agent daemon response"
                 )
             })
             .and_then(|result| result.map(|_| ()));
