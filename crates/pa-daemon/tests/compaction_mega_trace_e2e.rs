@@ -39,7 +39,7 @@ impl Drop for Supervisor {
 }
 
 /// An OpenAI-compatible SSE mock: every request is answered with the
-/// scripted reply; the crossing turn (request index FATTENING_TURNS
+/// scripted reply; the crossing turn (request index `FATTENING_TURNS`
 /// plus one) reports the over-threshold usage so the post-turn
 /// threshold check fires a compaction over the fattened session.
 struct MegaMock {
