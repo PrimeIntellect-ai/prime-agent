@@ -501,13 +501,14 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     harness.write(b"\r");
     harness.wait_from(mark, "Enter API key:", "the API-key prompt");
     harness.write(b"sk-fake\r");
-    // Ratatui's diff paints changed cells word by word (the fast scripted
-    // flow settles inside one frame), so the wait pins the login status's
-    // first word — "Saved" appears only in the settled login row.
-    harness.wait_from(mark, "Saved", "the settled login status");
 
-    // The sign-in automatically applies the parked model: the switch's
-    // `Model:` status row lands after the login's own status row.
+    // The sign-in automatically applies the parked model. The login's
+    // status row and the switch's `Model:` row are back-to-back TS
+    // `showStatus` notes — the model note rewrites the login note in
+    // place (the last-wins rule), so the pty only ever carries the
+    // final row: the `Model:` retry landing is itself the proof the
+    // login succeeded (the retry fires only on the parked provider's
+    // successful login).
     harness.wait_from(mark, "Model: glm-5.3-fast", "the automatic model retry");
 
     // The old dead-end refusal never appeared: the daemon rejection the
