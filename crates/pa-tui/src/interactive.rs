@@ -1085,45 +1085,43 @@ async fn run_onboarding_phase(
             // rows, so it would dead-end the available rows; the picker
             // keeps the unavailable ones inert).
             _ => {
-                {
-                    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                        panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-                            "Login to {}",
-                            row.name
-                        ))),
-                        heading: None,
-                    });
-                    let panel = session.auth_panel_handle();
-                    let service_cancel = panel.cancel_signal();
-                    let provider_id = row.id.clone();
-                    let row = row.clone();
-                    let service_auth = provider_auth.clone();
-                    let provider_login = OnboardingFlowTask::spawn(
-                        async move { service_auth.0.login_on_panel(&row, panel).await },
-                        service_cancel,
-                    );
-                    let (login_screen, outcome) =
-                        drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login))
-                            .await?;
-                    screen = login_screen;
-                    match outcome {
-                        PaneOutcome::InputClosed => return Ok(false),
-                        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
-                            return Ok(true)
-                        }
-                        PaneOutcome::Flow(result) => {
-                            let outcome = result.unwrap_or_else(|_| {
-                                crate::provider_auth::ProviderAuthOutcome::Error(
-                                    "the provider login task failed".to_string(),
-                                )
-                            });
-                            session
-                                .apply_auth_outcome(outcome, &provider_id, view)
-                                .await;
-                        }
-                        PaneOutcome::Decision(_) => {
-                            unreachable!("the login dialog yields no decisions")
-                        }
+                screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                    panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
+                        "Login to {}",
+                        row.name
+                    ))),
+                    heading: None,
+                });
+                let panel = session.auth_panel_handle();
+                let service_cancel = panel.cancel_signal();
+                let provider_id = row.id.clone();
+                let row = row.clone();
+                let service_auth = provider_auth.clone();
+                let provider_login = OnboardingFlowTask::spawn(
+                    async move { service_auth.0.login_on_panel(&row, panel).await },
+                    service_cancel,
+                );
+                let (login_screen, outcome) =
+                    drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login))
+                        .await?;
+                screen = login_screen;
+                match outcome {
+                    PaneOutcome::InputClosed => return Ok(false),
+                    PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
+                        return Ok(true)
+                    }
+                    PaneOutcome::Flow(result) => {
+                        let outcome = result.unwrap_or_else(|_| {
+                            crate::provider_auth::ProviderAuthOutcome::Error(
+                                "the provider login task failed".to_string(),
+                            )
+                        });
+                        session
+                            .apply_auth_outcome(outcome, &provider_id, view)
+                            .await;
+                    }
+                    PaneOutcome::Decision(_) => {
+                        unreachable!("the login dialog yields no decisions")
                     }
                 }
             }

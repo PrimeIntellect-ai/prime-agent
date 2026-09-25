@@ -156,7 +156,7 @@ impl ProviderPicker {
     pub fn handle_paste(&mut self, text: &str) {
         // A paste is external bytes: the control-sequence scrub (OSC
         // clipboard writes and friends) runs before the query renders.
-        self.search.paste(crate::menu_panel::scrub_controls(text));
+        self.search.paste(&crate::menu_panel::scrub_controls(text));
         self.selected = self.selected.min(self.filtered().len());
         self.scroll_top = 0;
     }
