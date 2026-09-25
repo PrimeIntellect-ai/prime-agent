@@ -3865,7 +3865,8 @@ impl Supervisor {
         let scan = tokio::task::spawn_blocking(move || {
             crate::session_scan::list_sessions_with(&dir, |index, total, info| {
                 if scope_current && info.cwd != scan_cwd {
-                    return;
+                    // The row is out of scope, but the scan itself goes on.
+                    return true;
                 }
                 let row = saved_session_row(info);
                 let mut item = json!({
@@ -3887,7 +3888,11 @@ impl Supervisor {
                 if let Some(active_session_id) = scan_active_session_id.as_deref() {
                     progress["activeSessionId"] = json!(active_session_id);
                 }
-                let _ = stream_rows.send((vec![item, progress], false));
+                // A failed send is the connection loop's death notice (its
+                // receiver is gone): the remaining folds serve nobody, so
+                // the callback stops the scan (the response travels the
+                // same dead channel and drops with it).
+                stream_rows.send((vec![item, progress], false)).is_ok()
             })
         });
         let mut infos = match scan.await {

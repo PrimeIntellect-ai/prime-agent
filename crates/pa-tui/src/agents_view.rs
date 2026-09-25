@@ -2612,6 +2612,15 @@ async fn run_agents_view_surface(
     let mut catalog_request = (!mode.saved_catalog_loaded).then(|| {
         spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone())
     });
+    // TS `start()`'s open-time settle (`armSavedSearchFetch` followed by
+    // `resolveMissingSelectionAnchor`): a carried catalog arms no fetch,
+    // so no terminal load ever arrives to settle the entry anchor's wait -
+    // resolve it now. The anchor's row either landed from the carry's
+    // rebuild above or the catalog already settled without it; an armed
+    // fetch keeps the wait (its load settles it).
+    if catalog_request.is_none() {
+        mode.end_anchor_wait();
+    }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
     // The saved-catalog stream's open batch window: the first buffered row
@@ -2842,6 +2851,29 @@ async fn run_agents_view_surface(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     for dispatch in delete_dispatches {
         let _ = tokio::time::timeout_at(deadline, dispatch).await;
+    }
+    // An in-flight delete's result (sent before its dispatch resolved, or
+    // still queued behind the exit) applies before the link snapshots the
+    // catalog: the carried rows must not resurrect the deleted path in
+    // the next view run, which skips its own fetch behind a loaded
+    // catalog.
+    while let Ok(input) = ui_rx.try_recv() {
+        if let UiInput::DeleteResult {
+            message,
+            deleted_saved_path,
+        } = input
+        {
+            mode.delete_result(message, deleted_saved_path);
+        }
+    }
+    for input in std::mem::take(&mut pending) {
+        if let UiInput::DeleteResult {
+            message,
+            deleted_saved_path,
+        } = input
+        {
+            mode.delete_result(message, deleted_saved_path);
+        }
     }
     // The force-quit deadline arms only after the drain: the drain
     // window is bounded, so it never wedges, and the watchdog then

@@ -385,3 +385,77 @@ async fn the_carried_catalog_paints_the_first_frame_and_skips_the_refetch() {
 
     let _ = server.join();
 }
+
+/// A carried catalog settles the entry anchor AT OPEN (TS `start()`'s
+/// `armSavedSearchFetch` followed by `resolveMissingSelectionAnchor`): the
+/// next view run arms no fetch, so no terminal load ever arrives to settle
+/// the wait - an anchor whose row is absent from the carry (and the
+/// roster) would otherwise park Enter behind the loading hint forever.
+#[tokio::test]
+async fn a_carried_catalog_settles_the_entry_anchor_at_open() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("agents-view.sock");
+    let mock = MockSupervisor::bind(&socket);
+    let saved_requests = Arc::clone(&mock.saved_requests);
+    let server = std::thread::spawn(move || mock.serve());
+
+    // Run one loads the catalog and opens a row, handing the link back.
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            AgentsStep::WaitSettle { timeout_ms: 2500 },
+            AgentsStep::Key("enter".to_string()),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let run = pa_tui::agents_view::run_agents_view(
+        view_options(&socket, Some("s2")),
+        AgentsViewUiMode::Headless(plan),
+        None,
+    )
+    .await
+    .expect("the first agents view run");
+    assert!(run.outcome.selection.is_some(), "run one opened a row");
+    let link = run.link.expect("the opening run hands its link back");
+
+    // Run two: anchored on a session the carried catalog does NOT carry
+    // (and the roster never did). The open-time settle ends the wait, so
+    // Enter opens the default row instead of arming the hint - and the
+    // loaded catalog never re-fetches behind it.
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            AgentsStep::Key("enter".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 600 },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let run_two = pa_tui::agents_view::run_agents_view(
+        view_options(&socket, Some("ghost-01")),
+        AgentsViewUiMode::Headless(plan),
+        Some(link),
+    )
+    .await
+    .expect("the second agents view run");
+
+    assert_eq!(
+        run_two.outcome.selection,
+        Some(SessionSelection::Attach("s1-live".to_string())),
+        "the settled anchor opens the default row, never a hint"
+    );
+    let frames_text = run_two.outcome.frames.join("\n");
+    assert!(
+        !frames_text.contains("Still loading sessions"),
+        "the open-time settle never arms the loading hint: {frames_text}"
+    );
+    {
+        let requests = saved_requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the carried catalog never re-fetches (run one's only): {requests:?}"
+        );
+    }
+
+    let _ = server.join();
+}

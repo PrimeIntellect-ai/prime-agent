@@ -83,7 +83,7 @@ fn roster_session_info(path: &Path) -> Option<SessionInfo> {
 /// loaded multi-core box (425ms vs 137ms over 1412 files), so the fold stays
 /// the loop the scan replaced.
 pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
-    list_sessions_with(session_dir, |_, _, _| {})
+    list_sessions_with(session_dir, |_, _, _| true)
 }
 
 /// [`list_sessions`] with the saved-catalog stream's per-file callback (TS
@@ -94,9 +94,10 @@ pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
 /// runs first, so the scan order (newest first) is known before any fold:
 /// the stream's first row is the newest session (the agents view's entry
 /// anchor), where TS streams readdir order and only sorts at the end.
+/// `false` stops the scan (the stream consumer is gone).
 pub fn list_sessions_with(
     session_dir: &Path,
-    mut on_row: impl FnMut(usize, usize, &SessionInfo),
+    mut on_row: impl FnMut(usize, usize, &SessionInfo) -> bool,
 ) -> Vec<SessionInfo> {
     let Ok(read) = fs::read_dir(session_dir) else {
         return Vec::new();
@@ -115,7 +116,12 @@ pub fn list_sessions_with(
     let mut infos = Vec::new();
     for (index, (path, _)) in files.into_iter().enumerate() {
         if let Some(info) = roster_session_info(&path) {
-            on_row(index, total, &info);
+            // `false` stops the scan: the stream consumer is gone (the
+            // connection loop dropped its channel), so the remaining
+            // folds serve nobody - the scan returns the rows it has.
+            if !on_row(index, total, &info) {
+                break;
+            }
             infos.push(info);
         }
     }
@@ -310,6 +316,7 @@ mod tests {
         let mut seen: Vec<(usize, usize, Option<String>)> = Vec::new();
         let rows = list_sessions_with(&dir, |index, total, info| {
             seen.push((index, total, info.name.clone()));
+            true
         });
         assert_eq!(rows.len(), 3);
         assert_eq!(seen.len(), 3, "every row emitted as its fold completes");
@@ -334,5 +341,22 @@ mod tests {
             ],
             "the emission order is newest first: {seen:?}"
         );
+    }
+
+    /// The callback's `false` stops the scan (the stream consumer is
+    /// gone): the rows folded so far return, the rest never fold.
+    #[test]
+    fn list_sessions_with_stops_when_the_consumer_stops() {
+        let dir = temp_dir();
+        write_session(&dir, "/repo/a", Some("first"), 1);
+        write_session(&dir, "/repo/b", Some("second"), 1);
+        write_session(&dir, "/repo/c", Some("third"), 1);
+        let mut emitted = 0usize;
+        let rows = list_sessions_with(&dir, |_, _, _| {
+            emitted += 1;
+            emitted < 2
+        });
+        assert_eq!(emitted, 2, "the scan stops at the consumer's false");
+        assert_eq!(rows.len(), 1, "only the emitted row returns: {rows:?}");
     }
 }
