@@ -125,28 +125,27 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 "
     );
     if !interrupt.is_empty() {
-        let _ = write!(hotkeys, "| `{interrupt}` | Interrupt current operation |\n");
+        let _ = writeln!(hotkeys, "| `{interrupt}` | Interrupt current operation |");
     }
     if !shortcuts_key.is_empty() {
-        let _ = write!(hotkeys, "| `{shortcuts_key}` | Show quick shortcuts |\n");
+        let _ = writeln!(hotkeys, "| `{shortcuts_key}` | Show quick shortcuts |");
     }
-    let _ = write!(
+    let _ = writeln!(
         hotkeys,
         r"| `{exit}` | Exit (when editor is empty) |
 | `{select_model}` | Open model selector |
-| `{expand_tools}` | Cycle overview → thinking + diffs → all output |
-"
+| `{expand_tools}` | Cycle overview → thinking + diffs → all output |"
     );
     // The condensed runs pane has no fixed affordance when the user
     // disabled its binding (an empty key renders as a blank column, like
     // the interrupted row above).
     if !condensed_runs.is_empty() {
-        let _ = write!(
+        let _ = writeln!(
             hotkeys,
-            "| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |\n"
+            "| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |"
         );
     }
-    let _ = write!(
+    let _ = writeln!(
         hotkeys,
         r"| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
 | `{external_editor}` | Edit message in external editor |
@@ -165,8 +164,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{viewport_follow}` | Scroll to bottom and follow output |
 | mouse wheel | Scroll transcript |
 | mouse drag | Select and copy text |
-| mouse click on link | Open link in browser |
-"
+| mouse click on link | Open link in browser |"
     );
     hotkeys
 }

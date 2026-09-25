@@ -10,7 +10,7 @@
 //! headless source is the verifier seam: it exercises the identical
 //! attach/submit/stream/render path without a TTY.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;

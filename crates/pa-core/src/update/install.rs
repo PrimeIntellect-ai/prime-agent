@@ -134,7 +134,7 @@ fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
     let target_text = std::fs::read_link(&launcher)
         .with_context(|| format!("read the {} launcher at {}", link, launcher.display()))?;
     let target = parse_release_link(&target_text).ok_or_else(|| {
-        anyhow!("launcher {link} does not target a managed release: {target_text}")
+        anyhow!("launcher {link} does not target a managed release: {}", target_text.display())
     })?;
     let release_dir = root.join("releases").join(release_directory_name(&target));
     let executable = release_dir.join("prime-agent");

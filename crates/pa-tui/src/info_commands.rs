@@ -9,6 +9,7 @@
 //! line, spans carrying their theme color so the view resolves them at
 //! render time.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
@@ -728,14 +729,15 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
     }
     let mut header = format!("  {}", pad_end("agent", label_width),);
     if show_models {
-        header.push_str(&format!("  {}", pad_end("model", model_width)));
+        let _ = write!(header, "  {}", pad_end("model", model_width));
     }
-    header.push_str(&format!(
+    let _ = write!(
+        header,
         "  {}  {}  {}",
         pad_start("tokens", token_width),
         pad_start("cost", cost_width),
         "context"
-    ));
+    );
     lines.push(vec![dim(header)]);
     for (index, row) in rows.iter().enumerate() {
         let label_space = label_width

@@ -605,7 +605,7 @@ mod tests {
             provider: "faux".to_string(),
             base_url: "http://localhost".to_string(),
             reasoning: false,
-            cost: pa_types::ai::UsageCost::default(),
+            cost: pa_agent::types::UsageCost::default(),
             context_window: 100_000,
             max_tokens: 1_000,
         }
@@ -638,7 +638,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 50,
-                cost: pa_types::ai::UsageCost::default(),
+                cost: pa_agent::types::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
@@ -1154,7 +1154,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 130,
-            cost: pa_types::ai::UsageCost::default(),
+            cost: pa_agent::types::UsageCost::default(),
         };
         session.append_message(assistant).unwrap();
         session
