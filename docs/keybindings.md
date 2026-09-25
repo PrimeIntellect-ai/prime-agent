@@ -24,10 +24,10 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 
 What reaches the app depends on the terminal, not on Prime Agent:
 
-- **Ctrl+Home/End and Ctrl+Up/Down** are sent by common Linux terminals (GNOME Terminal, xterm, Konsole) and by every terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, alacritty).
+- **Ctrl+Home/End and Ctrl+Up/Down** are sent by common Linux terminals (GNOME Terminal, xterm, Konsole) and by every terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, alacritty). On macOS, Ctrl+Up/Down stay reserved by Mission Control until you remap or disable those system shortcuts.
 - **`super+` keys are the macOS Cmd keys.** They arrive only from terminals that report the kitty keyboard protocol (Prime Agent enables it when the terminal answers its query). A terminal that keeps Cmd+Arrow for its own shortcuts or its scrollback never sends it to the app: stock macOS Terminal and iTerm2 do exactly that, so do not expect Cmd+Up/Down to work there without a terminal-side mapping.
 - **macOS Terminal.app** reserves Home/End/Cmd+Home/End for its own scrollback; nothing reaches the app until you add profile key mappings (Settings → Profiles → Keyboard), for example Home → `\033[H`, End → `\033[F`, Cmd+Up → `\033[1;9A`, Cmd+Down → `\033[1;9B`.
-- **iTerm2** ships with Home/End/Cmd+Arrow doing nothing. The "Natural Text Editing" preset (Profiles → Keys → Key Mappings) maps Cmd+Left/Right to line start/end and Option+Left/Right to word motion; a custom key mapping with "Send Escape Sequences" `[1;9A` / `[1;9B` makes Cmd+Up/Down jump to the document start/end in the prompt editor and the first/last item in the agents view. Ctrl+Up/Down and the Option keys work without any mapping.
+- **iTerm2** ships with Home/End/Cmd+Arrow doing nothing. The "Natural Text Editing" preset (Profiles → Keys → Key Mappings) maps Cmd+Left/Right to line start/end and Option+Left/Right to word motion; a custom key mapping with "Send Escape Sequences" `[1;9A` / `[1;9B` makes Cmd+Up/Down jump to the document start/end in the prompt editor and the first/last item in the agents view. Ctrl+Up/Down require disabling or remapping macOS's Mission Control shortcuts, while the Option keys work without any mapping.
 - In the **agents view**, `home`/`end` jump the list to the first/last row; the search field keeps `ctrl+a`/`ctrl+e` for its own line ends. In every prompt editor, `home`/`end` stay line start/end.
 
 ## All Actions
