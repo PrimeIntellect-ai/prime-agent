@@ -139,9 +139,8 @@ async fn probe_uncommitted_changes(
         .await;
     match result {
         Ok(Some(0)) => {}
-        Ok(_) => return Ok(None),
         Err(err) if err.to_string() == "aborted" => return Err(err),
-        Err(_) => return Ok(None),
+        Ok(_) | Err(_) => return Ok(None),
     }
     Ok(Some(
         output
@@ -257,14 +256,13 @@ pub async fn execute_bash(
     on_update: Option<OnUpdate>,
 ) -> anyhow::Result<ToolExecutionResult> {
     let default_ops;
-    let ops: &dyn BashOperations = match &options.operations {
-        Some(ops) => ops.as_ref(),
-        None => {
-            default_ops = LocalBashOperations {
-                shell_path: options.shell_path.clone(),
-            };
-            &default_ops
-        }
+    let ops: &dyn BashOperations = if let Some(ops) = &options.operations {
+        ops.as_ref()
+    } else {
+        default_ops = LocalBashOperations {
+            shell_path: options.shell_path.clone(),
+        };
+        &default_ops
     };
     let command_prefix = options.command_prefix.as_deref();
     let spawn_hook = options.spawn_hook.as_ref();
@@ -283,7 +281,7 @@ pub async fn execute_bash(
     {
         let mut probes: Vec<(BashSpawnContext, bool)> = Vec::new();
         let mut seen_probes: HashSet<String> = HashSet::new();
-        let user_command_start = command_prefix.map(|p| p.len() + 1).unwrap_or(0);
+        let user_command_start = command_prefix.map_or(0, |p| p.len() + 1);
         for index in discard_indices {
             let target = resolve_discard_probe_target(&resolved_command, index, user_command_start);
             match target {

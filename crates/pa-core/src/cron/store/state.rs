@@ -298,8 +298,9 @@ pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T)
             // unlocked write is never silent: a concurrent writer may be
             // mutating the same state file.
             tracing::warn!(
-                error = failure.as_ref().map(ToString::to_string).unwrap_or_else(
-                    || "lock still held after retries".to_string()
+                error = failure.as_ref().map_or_else(
+                    || "lock still held after retries".to_string(),
+                    ToString::to_string,
                 ),
                 path = %path.display(),
                 "cron jobs state lock not acquired; running unlocked"

@@ -123,8 +123,7 @@ pub fn convert_messages(
                             if block.get("type").and_then(|value| value.as_str()) == Some("text") {
                                 block["text"]
                                     .as_str()
-                                    .map(|text| !text.trim().is_empty())
-                                    .unwrap_or(false)
+                                    .is_some_and(|text| !text.trim().is_empty())
                             } else {
                                 true
                             }
@@ -310,13 +309,10 @@ pub fn convert_tools(
 
 pub(crate) fn map_stop_reason(reason: &str) -> Result<StopReason, String> {
     match reason {
-        "end_turn" => Ok(StopReason::Stop),
+        "end_turn" | "pause_turn" | "stop_sequence" => Ok(StopReason::Stop),
         "max_tokens" => Ok(StopReason::Length),
         "tool_use" => Ok(StopReason::ToolUse),
-        "refusal" => Ok(StopReason::Error),
-        "pause_turn" => Ok(StopReason::Stop),
-        "stop_sequence" => Ok(StopReason::Stop),
-        "sensitive" => Ok(StopReason::Error),
+        "refusal" | "sensitive" => Ok(StopReason::Error),
         other => Err(format!("Unhandled stop reason: {other}")),
     }
 }

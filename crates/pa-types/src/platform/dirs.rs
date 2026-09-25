@@ -60,9 +60,7 @@ pub fn agent_dir() -> Option<PathBuf> {
 /// through (TS `expandTildePath`: `~foo` is not an expansion).
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        return home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(path));
+        return home_dir().map_or_else(|| PathBuf::from(path), |home| home.join(rest));
     }
     if path == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(path));
