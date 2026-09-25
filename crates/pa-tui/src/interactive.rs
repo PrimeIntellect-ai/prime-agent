@@ -970,7 +970,10 @@ async fn run_onboarding_phase(
             .filter(|row| seen.insert(row.id.clone()))
             .map(|row| crate::onboarding_flow::ProviderPickerOption {
                 id: row.id.clone(),
-                name: row.name.clone(),
+                // A custom provider's name is user-controlled bytes (an
+                // unknown provider falls back to its id): the control
+                // scrub runs before any row renders it.
+                name: crate::menu_panel::scrub_controls(&row.name),
                 connected: row.configured,
                 available: row.available,
             })
@@ -1021,6 +1024,7 @@ async fn run_onboarding_phase(
                 });
                 let panel = session.auth_panel_handle();
                 let prompt_cancel = panel.cancel_signal();
+                let prompt_cancel_body = prompt_cancel.clone();
                 let provider_id = row.id.clone();
                 let row = row.clone();
                 let prompt_auth = provider_auth.clone();
@@ -1028,7 +1032,9 @@ async fn run_onboarding_phase(
                     async move {
                         // TS `showApiKeyLoginDialog`: the submitted key
                         // stores through the composition root; a cancel is
-                        // silent.
+                        // silent. A pane exit after the submit marks the
+                        // signal — the login (the credential write) never
+                        // runs once the pane is gone.
                         match panel
                             .paste_prompt(
                                 crate::onboarding_flow::API_KEY_PROMPT,
@@ -1041,8 +1047,10 @@ async fn run_onboarding_phase(
                             )
                             .await
                         {
-                            Some(api_key) => prompt_auth.0.login(&row, Some(&api_key)).await,
-                            None => crate::provider_auth::ProviderAuthOutcome::Cancelled,
+                            Some(api_key) if !prompt_cancel_body.cancelled() => {
+                                prompt_auth.0.login(&row, Some(&api_key)).await
+                            }
+                            _ => crate::provider_auth::ProviderAuthOutcome::Cancelled,
                         }
                     },
                     prompt_cancel,
@@ -1070,12 +1078,14 @@ async fn run_onboarding_phase(
                     }
                 }
             }
-            // An `mcp:` service row runs its panel-driven flow (the MCP
-            // device flow); the other terminal rows are the unported
-            // subscription stubs — the error row is the whole flow,
-            // exactly like the `/login` selector's path.
+            // A terminal-flow row runs its panel-driven flow through the
+            // mounted auth panel — the MCP device flow, the ported codex
+            // subscription OAuth: the `/login` selector's panel path
+            // (the non-panel body answers the silent cancel for OAuth
+            // rows, so it would dead-end the available rows; the picker
+            // keeps the unavailable ones inert).
             _ => {
-                if row.id.starts_with("mcp:") {
+                {
                     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
                         panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
                             "Login to {}",
@@ -1115,9 +1125,6 @@ async fn run_onboarding_phase(
                             unreachable!("the login dialog yields no decisions")
                         }
                     }
-                } else {
-                    let outcome = provider_auth.0.login(row, None).await;
-                    session.apply_auth_outcome(outcome, &row.id, view).await;
                 }
             }
         }
