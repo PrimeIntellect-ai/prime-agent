@@ -3,6 +3,7 @@
 pub(crate) mod manager;
 pub(crate) mod prime_inference;
 pub(crate) mod prime_traces;
+pub(crate) mod provider_oauth;
 pub(crate) mod resolve_config_value;
 pub(crate) mod storage;
 pub(crate) mod types;
@@ -20,6 +21,7 @@ pub use prime_traces::{
     PrimeAgentTracesCallbacks, PrimeAgentTracesLoginOptions, PrimeAgentTracesLoginSource,
     PrimeAuthInfo, PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_AGENT_TRACES_PROVIDER_NAME,
 };
+pub use provider_oauth::{ProviderOAuth, OPENAI_CODEX_PROVIDER_ID};
 pub use storage::{
     parse_storage_data, AuthStorageBackend, FileAuthStorageBackend, InMemoryAuthStorageBackend,
 };
