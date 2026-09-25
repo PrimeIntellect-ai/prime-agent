@@ -19,6 +19,15 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fullReadCounter = vi.hoisted(() => ({ suffix: undefined as string | undefined, count: 0 }));
+const uuidQueue = vi.hoisted(() => ({ queued: [] as string[] }));
+vi.mock("crypto", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("crypto")>();
+	return {
+		...actual,
+		// Only queued ids are substituted, so the rest of the file keeps real uuids.
+		randomUUID: (() => uuidQueue.queued.shift() ?? actual.randomUUID()) as typeof actual.randomUUID,
+	};
+});
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
@@ -879,5 +888,28 @@ describe("migrateSessionEntries", () => {
 		expect(first!.id).toBe("abc12345");
 		expect(second!.id).toBe("def67890");
 		expect(second!.parentId).toBe("abc12345");
+	});
+
+	it("does not hand out an id the migration already used", () => {
+		const entries = [
+			{ type: "session", id: "sess-1", timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", timestamp: "2025-01-01T00:00:01Z", message: { role: "user", content: "hi", timestamp: 1 } },
+			{ type: "message", timestamp: "2025-01-01T00:00:02Z", message: assistant },
+		] as unknown as FileEntry[];
+		// Migration ids are a uuid sliced to eight characters. A repeat joins two
+		// points of the parent chain, and the leaf-to-root walk in
+		// buildSessionContext then loops until it runs out of array length, so the
+		// migration has to skip an id it already assigned.
+		uuidQueue.queued.push("aaaaaaaa-0000-4000-8000-000000000000");
+		uuidQueue.queued.push("aaaaaaaa-1111-4000-8000-000000000001");
+		uuidQueue.queued.push("bbbbbbbb-2222-4000-8000-000000000002");
+
+		migrateSessionEntries(entries);
+
+		const [, first, second] = entries as unknown as Array<Record<string, unknown>>;
+		expect(first!.id).toBe("aaaaaaaa");
+		expect(second!.id).toBe("bbbbbbbb");
+		expect(second!.parentId).toBe(first!.id);
+		expect(uuidQueue.queued).toEqual([]);
 	});
 });

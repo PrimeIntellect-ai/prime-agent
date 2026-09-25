@@ -352,6 +352,10 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 		entry.id = generateId(ids);
 		entry.parentId = prevId;
 		prevId = entry.id;
+		// generateId only avoids the ids this set holds, and an empty set let a
+		// repeated short id through: one repeat is enough to cycle the leaf-to-root
+		// walk in buildSessionContext.
+		ids.add(entry.id);
 
 		if (entry.type === "compaction") {
 			const comp = entry as CompactionEntry & { firstKeptEntryIndex?: number };
@@ -469,9 +473,14 @@ export function buildSessionContext(
 	}
 
 	// push+reverse, not unshift-per-entry: unshift is O(n), making this O(n^2) on long sessions.
+	// A repeated id joins two points of the chain, so the walk stops at the first
+	// id it already visited: without that stop a cyclic chain grows `path` until
+	// V8 refuses the array length, as branchEntries already guards for.
 	const path: SessionEntry[] = [];
+	const seen = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
-	while (current) {
+	while (current && !seen.has(current.id)) {
+		seen.add(current.id);
 		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
