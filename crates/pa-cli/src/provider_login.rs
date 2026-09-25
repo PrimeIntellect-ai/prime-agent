@@ -369,9 +369,19 @@ impl ProviderAuthCommands for ProviderAuth {
     fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
         let provider = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || provider.anthropic_subscription_warning_blocking())
-                .await
-                .unwrap_or(None)
+            // The lookup is warning-only (TS ignores auth lookup failures
+            // the same way), so a hung `!command` credential must not pin
+            // the session surface: the TS resolution caps command
+            // execution at 10s (`execSyncHidden`/`spawnSyncHidden`
+            // `timeout: 10000`), and the check resolves no-warning at the
+            // same bound.
+            let lookup = tokio::task::spawn_blocking(move || {
+                provider.anthropic_subscription_warning_blocking()
+            });
+            match tokio::time::timeout(std::time::Duration::from_secs(10), lookup).await {
+                Ok(joined) => joined.unwrap_or(None),
+                Err(_) => None,
+            }
         })
     }
 
