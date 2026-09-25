@@ -543,8 +543,8 @@ mod tests {
         selector.handle_key("right", &kb());
         assert_eq!(selector.search.value(), "l");
         // The rows stay one flat list, whatever their category field
-        /// carries (the login hook supplies providers only; logout lists
-        /// every stored credential).
+        // carries (the login hook supplies providers only; logout lists
+        // every stored credential).
         assert_eq!(selector.providers.len(), 2);
     }
 
