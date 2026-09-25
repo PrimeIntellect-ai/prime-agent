@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ai::{
-    AssistantMessage, ServiceTier, ToolResultMessage, Usage, UserContent, UserMessage,
+    AssistantContentBlock, AssistantMessage, AssistantMessageDiagnostic, ImageContent,
+    ServiceTier, StopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
+    UserContent, UserContentBlock, UserMessage,
 };
 use crate::JsonMap;
 
@@ -547,11 +549,294 @@ impl From<KnownFileEntry> for FileEntry {
     }
 }
 
+/// Cold-load fast path for `message` entries.
+///
+/// A large session is dominated by `message` rows, and the tagged mirror pays
+/// a second full buffering generation per row (the internally-tagged flatten
+/// clones the entry, then the message, then every content block). This path
+/// builds the same value field-by-field from the already-parsed JSON map,
+/// cloning each payload exactly once into its final owner. It is strictly
+/// conservative: anything it does not recognize without ambiguity returns
+/// `None` and the tagged mirror decides, so acceptance (which rows degrade
+/// to [`FileEntry::Unknown`], and how every `rest` catch-all is partitioned)
+/// stays byte-identical to the derived path.
+fn message_entry_fast(value: &Value) -> Option<FileEntry> {
+    let map = value.as_object()?;
+    if map.get("type")?.as_str()? != "message" {
+        return None;
+    }
+    let message = message_entry_message(map.get("message")?)?;
+    let base = message_entry_base(map)?;
+    Some(FileEntry::Message { message, base })
+}
+
+/// [`EntryBase`] from the entry map: the envelope fields plus the catch-all
+/// of every key the entry payload does not claim.
+fn message_entry_base(map: &JsonMap) -> Option<EntryBase> {
+    let id = match map.get("id") {
+        // `id` carries no `#[serde(default)]`; its absence defers to the
+        // mirror instead of guessing the derived Option semantics.
+        None | Some(Value::Null) => return None,
+        Some(Value::String(id)) => Some(id.clone()),
+        Some(_) => return None,
+    };
+    let parent_id = catch_all_string(map.get("parentId"))?;
+    let timestamp = catch_all_string(map.get("timestamp"))?;
+    let rest = rest_of(map, &["type", "message", "id", "parentId", "timestamp"]);
+    Some(EntryBase {
+        id,
+        parent_id,
+        timestamp,
+        rest,
+    })
+}
+
+/// An optional string field: absent or null is `None`, anything but a string
+/// defers to the mirror.
+fn catch_all_string(value: Option<&Value>) -> Option<Option<String>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    }
+}
+
+/// A required string field: absent or non-string defers to the mirror.
+fn required_string(map: &JsonMap, key: &str) -> Option<String> {
+    map.get(key)?.as_str().map(str::to_string)
+}
+
+/// The unclaimed keys of `map`, in source order.
+fn rest_of(map: &JsonMap, claimed: &[&str]) -> JsonMap {
+    let mut rest = JsonMap::new();
+    for (key, value) in map {
+        if !claimed.contains(&key.as_str()) {
+            rest.insert(key.clone(), value.clone());
+        }
+    }
+    rest
+}
+
+/// The [`AgentMessage`] roles a large session is made of; other roles defer
+/// to the mirror, which produces the exact derived value.
+fn message_entry_message(value: &Value) -> Option<AgentMessage> {
+    let map = value.as_object()?;
+    match map.get("role")?.as_str()? {
+        "user" => Some(AgentMessage::User(user_message_fast(map)?)),
+        "assistant" => Some(AgentMessage::Assistant(assistant_message_fast(map)?)),
+        "toolResult" => Some(AgentMessage::ToolResult(tool_result_message_fast(map)?)),
+        _ => None,
+    }
+}
+
+/// An optional field of a derived shape, parsed through the mirror's own
+/// derive: absent or null is `None`, a mismatch defers to the mirror.
+fn optional_deserialize<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Option<Option<T>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => serde_json::from_value(value.clone()).ok().map(Some),
+    }
+}
+
+/// An optional boolean field.
+fn catch_all_bool(value: Option<&Value>) -> Option<Option<bool>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::Bool(flag)) => Some(Some(*flag)),
+        Some(_) => None,
+    }
+}
+
+fn user_message_fast(map: &JsonMap) -> Option<UserMessage> {
+    let content = match map.get("content")? {
+        Value::String(text) => UserContent::Text(text.clone()),
+        Value::Array(blocks) => UserContent::Blocks(user_content_blocks_fast(blocks)?),
+        _ => return None,
+    };
+    let timestamp = map.get("timestamp")?.as_u64()?;
+    Some(UserMessage {
+        content,
+        timestamp,
+        rest: rest_of(map, &["role", "content", "timestamp"]),
+    })
+}
+
+fn user_content_blocks_fast(blocks: &[Value]) -> Option<Vec<UserContentBlock>> {
+    blocks.iter().map(user_content_block_fast).collect()
+}
+
+fn user_content_block_fast(block: &Value) -> Option<UserContentBlock> {
+    let map = block.as_object()?;
+    match map.get("type").and_then(Value::as_str) {
+        Some("text") => Some(UserContentBlock::Text(text_content_fast(map)?)),
+        Some("image") => Some(UserContentBlock::Image(image_content_fast(map)?)),
+        // A missing or unknown tag stays verbatim, like the derived catch-all.
+        _ => Some(UserContentBlock::Raw(block.clone())),
+    }
+}
+
+fn text_content_fast(map: &JsonMap) -> Option<TextContent> {
+    let text = map.get("text")?.as_str()?.to_string();
+    let text_signature = catch_all_string(map.get("textSignature"))?;
+    Some(TextContent {
+        text,
+        text_signature,
+        rest: rest_of(map, &["type", "text", "textSignature"]),
+    })
+}
+
+fn image_content_fast(map: &JsonMap) -> Option<ImageContent> {
+    let data = map.get("data")?.as_str()?.to_string();
+    let mime_type = map.get("mimeType")?.as_str()?.to_string();
+    Some(ImageContent {
+        data,
+        mime_type,
+        rest: rest_of(map, &["type", "data", "mimeType"]),
+    })
+}
+
+fn thinking_content_fast(map: &JsonMap) -> Option<ThinkingContent> {
+    let thinking = map.get("thinking")?.as_str()?.to_string();
+    let thinking_signature = catch_all_string(map.get("thinkingSignature"))?;
+    let redacted = catch_all_bool(map.get("redacted"))?;
+    Some(ThinkingContent {
+        thinking,
+        thinking_signature,
+        redacted,
+        rest: rest_of(
+            map,
+            &["type", "thinking", "thinkingSignature", "redacted"],
+        ),
+    })
+}
+
+fn tool_call_fast(map: &JsonMap) -> Option<ToolCall> {
+    let id = map.get("id")?.as_str()?.to_string();
+    let name = map.get("name")?.as_str()?.to_string();
+    let arguments = map.get("arguments")?.as_object()?.clone();
+    let thought_signature = catch_all_string(map.get("thoughtSignature"))?;
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+        thought_signature,
+        rest: rest_of(map, &["type", "id", "name", "arguments", "thoughtSignature"]),
+    })
+}
+
+fn assistant_blocks_fast(blocks: &[Value]) -> Option<Vec<AssistantContentBlock>> {
+    blocks.iter().map(assistant_block_fast).collect()
+}
+
+fn assistant_block_fast(block: &Value) -> Option<AssistantContentBlock> {
+    let map = block.as_object()?;
+    // The derived tagged form rejects unknown block kinds; deferring keeps
+    // such rows degrading to Unknown exactly like the mirror.
+    match map.get("type")?.as_str()? {
+        "text" => Some(AssistantContentBlock::Text(text_content_fast(map)?)),
+        "thinking" => Some(AssistantContentBlock::Thinking(thinking_content_fast(map)?)),
+        "toolCall" => Some(AssistantContentBlock::ToolCall(tool_call_fast(map)?)),
+        _ => None,
+    }
+}
+
+fn assistant_message_fast(map: &JsonMap) -> Option<AssistantMessage> {
+    let content = assistant_blocks_fast(map.get("content")?.as_array()?)?;
+    let api = required_string(map, "api")?;
+    let provider = required_string(map, "provider")?;
+    let model = required_string(map, "model")?;
+    let response_model = catch_all_string(map.get("responseModel"))?;
+    let response_id = catch_all_string(map.get("responseId"))?;
+    let diagnostics =
+        optional_deserialize::<Vec<AssistantMessageDiagnostic>>(map.get("diagnostics"))?;
+    let usage = serde_json::from_value::<Usage>(map.get("usage")?.clone()).ok()?;
+    let stop_reason = serde_json::from_value::<StopReason>(map.get("stopReason")?.clone()).ok()?;
+    let stop_reason_raw = catch_all_string(map.get("stopReasonRaw"))?;
+    let error_message = catch_all_string(map.get("errorMessage"))?;
+    let timestamp = map.get("timestamp")?.as_u64()?;
+    Some(AssistantMessage {
+        content,
+        api,
+        provider,
+        model,
+        response_model,
+        response_id,
+        diagnostics,
+        usage,
+        stop_reason,
+        stop_reason_raw,
+        error_message,
+        timestamp,
+        rest: rest_of(
+            map,
+            &[
+                "role",
+                "content",
+                "api",
+                "provider",
+                "model",
+                "responseModel",
+                "responseId",
+                "diagnostics",
+                "usage",
+                "stopReason",
+                "stopReasonRaw",
+                "errorMessage",
+                "timestamp",
+            ],
+        ),
+    })
+}
+
+fn tool_result_message_fast(map: &JsonMap) -> Option<ToolResultMessage> {
+    let tool_call_id = required_string(map, "toolCallId")?;
+    // `#[serde(default)]`: an absent name loads as empty, never null.
+    let tool_name = match map.get("toolName") {
+        None => String::new(),
+        Some(Value::String(name)) => name.clone(),
+        Some(_) => return None,
+    };
+    let content = user_content_blocks_fast(map.get("content")?.as_array()?)?;
+    let details = match map.get("details") {
+        None | Some(Value::Null) => None,
+        Some(details) => Some(details.clone()),
+    };
+    let is_error = map.get("isError")?.as_bool()?;
+    let timestamp = map.get("timestamp")?.as_u64()?;
+    Some(ToolResultMessage {
+        tool_call_id,
+        tool_name,
+        content,
+        details,
+        is_error,
+        timestamp,
+        rest: rest_of(
+            map,
+            &[
+                "role",
+                "toolCallId",
+                "toolName",
+                "content",
+                "details",
+                "isError",
+                "timestamp",
+            ],
+        ),
+    })
+}
+
 impl<'de> Deserialize<'de> for FileEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        // Known kinds parse through the tagged mirror; anything else degrades
-        // to the verbatim `Unknown` entry instead of failing the load.
+        // `message` rows (the bulk of a large session) take the single-pass
+        // fast path; everything else - and any shape the fast path does not
+        // recognize - goes through the tagged mirror below, which keeps
+        // acceptance byte-identical: known kinds parse through the mirror,
+        // anything else degrades to the verbatim `Unknown` entry instead of
+        // failing the load.
+        if let Some(entry) = message_entry_fast(&value) {
+            return Ok(entry);
+        }
         match KnownFileEntry::deserialize(&value) {
             Ok(entry) => Ok(FileEntry::from(entry)),
             Err(_) => match value {
@@ -668,6 +953,64 @@ mod tests {
         let out = serde_json::to_string(&entry(json)).expect("serialize entry");
         let reparsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(original, reparsed, "round trip changed the value: {out}");
+    }
+
+    /// The mirror value the load path produced before the `message` fast
+    /// path existed (and still produces for every non-`message` row).
+    fn mirror_entry(value: &Value) -> Option<FileEntry> {
+        match KnownFileEntry::deserialize(value) {
+            Ok(entry) => Some(FileEntry::from(entry)),
+            Err(_) => match value {
+                Value::Object(rest) => Some(FileEntry::Unknown { rest }),
+                _ => None,
+            },
+        }
+    }
+
+    #[test]
+    fn message_fast_path_matches_tagged_mirror() {
+        let rows = [
+            // Fixture-shaped rows: user / assistant / toolResult with
+            // thinking, text, tool-call, usage, and alias stop reasons.
+            r#"{"type":"message","id":"a1","parentId":"h0","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"user","content":"please do task number 1","timestamp":1789584016603}}"#,
+            r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"task 1: run"},{"type":"text","text":"Running."}],"toolCalls":[{"id":"call_000001","name":"ipython","arguments":{"code":"print(1)"}}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"tool_calls","timestamp":1789584016604}}"#,
+            r#"{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"toolResult","toolCallId":"call_000001","content":[{"type":"text","text":"OK"}],"isError":false,"timestamp":1789584016605}}"#,
+            r#"{"type":"message","id":"a4","parentId":null,"timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"user","content":[{"type":"text","text":"blocks"}],"timestamp":1789584016606}}"#,
+            r#"{"type":"message","id":"a5","parentId":"a4","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c","name":"ipython","arguments":{"code":"1"},"thoughtSignature":"sig"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"stop","errorMessage":null,"timestamp":1789584016607}}"#,
+            r#"{"type":"message","id":"a6","parentId":"a5","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"toolResult","toolCallId":"c","toolName":"ipython","content":[{"text":"bare"}],"details":{"x":1},"isError":true,"timestamp":1789584016608}}"#,
+            // A row the fast path defers: roles it does not model.
+            r#"{"type":"message","id":"a7","parentId":"a6","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"custom","customType":"note","timestamp":1789584016609}}"#,
+            // Rows both paths must reject identically into Unknown.
+            r#"{"type":"message","id":"a8","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"text","text":"x"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","stopReason":"stop","timestamp":1789584016610}}"#,
+            r#"{"type":"message","id":"a9","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"future_block","text":"x"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"stop","timestamp":1789584016611}}"#,
+            r#"{"type":"message","id":"a10","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"text","text":42}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"stop","timestamp":1789584016612}}"#,
+            r#"{"type":"message","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"user","content":"no id","timestamp":1}}"#,
+            r#"{"type":"message","id":"a11","timestamp":42,"message":{"role":"user","content":"numeric entry timestamp","timestamp":1}}"#,
+            // Unknown kinds stay verbatim; non-objects stay errors.
+            r#"{"type":"future_kind","id":"f1","parentId":"p1","timestamp":"2026-01-01T00:00:00.000Z"}"#,
+            r#"{"type":"session","id":"s","version":3,"timestamp":"2026-09-16T18:40:16.600Z","cwd":"/tmp","rlmDepth":0}"#,
+            r#""scalar""#,
+            r#"42"#,
+        ];
+        for row in rows {
+            let value: Value = serde_json::from_str(row).unwrap_or_else(|_| panic!("parse {row}"));
+            let fast = message_entry_fast(&value);
+            let mirror = mirror_entry(&value);
+            // The fast path never invents a value the mirror would not
+            // produce; rows it does not take defer to the mirror.
+            if fast.is_some() {
+                assert_eq!(fast, mirror, "fast path diverged from the mirror for {row}");
+            }
+            // End-to-end deserialization always equals the mirror's value.
+            let deserialized = serde_json::from_str::<FileEntry>(row);
+            assert_eq!(deserialized.ok(), mirror, "FileEntry diverged for {row}");
+        }
+    }
+
+    #[test]
+    fn message_fast_path_round_trips() {
+        assert_roundtrips(r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"run"},{"type":"text","text":"Running.","textSignature":"sig"}],"toolCalls":[{"id":"call_000001","name":"ipython","arguments":{"code":"print(1)"}}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"tool_calls","timestamp":1789584016604,"vendorExtra":{"z":1}}}"#);
+        assert_roundtrips(r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-09-16T18:40:16.600Z","entryExtra":true,"message":{"role":"user","content":[{"type":"text","text":"blocks","extra":1}],"timestamp":1789584016603,"userExtra":true}}"#);
     }
 
     #[test]

@@ -59,7 +59,16 @@ pub use crate::session_scan::list_sessions;
 
 /// One stored entry: message lifecycle, bookkeeping, or a custom record.
 /// Fields beyond the entry envelope are preserved as raw JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserialization is a single-pass map walk: the envelope fields parse
+/// straight from the stream and the catch-all collects the remaining keys
+/// in source order. The derived flatten this replaces buffered every row
+/// through a second content generation on load - the dominant allocation
+/// cost of opening a large session - while accepting exactly the same
+/// rows (a non-object line, or one missing `type`/`id`/`timestamp`, fails
+/// both ways; `parentId` is absent-tolerant; every other key, whatever
+/// its shape, lands in `fields` verbatim).
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
     #[serde(rename = "type")]
@@ -70,6 +79,55 @@ pub struct SessionEntry {
     pub timestamp: String,
     #[serde(flatten)]
     pub fields: Value,
+}
+
+impl<'de> Deserialize<'de> for SessionEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SessionEntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SessionEntryVisitor {
+            type Value = SessionEntry;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a session entry object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut type_ = None;
+                let mut id = None;
+                let mut parent_id = None;
+                let mut timestamp = None;
+                let mut fields = serde_json::Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => type_ = Some(map.next_value()?),
+                        "id" => id = Some(map.next_value()?),
+                        "parentId" => parent_id = Some(map.next_value()?),
+                        "timestamp" => timestamp = Some(map.next_value()?),
+                        other => {
+                            let value = map.next_value::<Value>()?;
+                            fields.insert(other.to_string(), value);
+                        }
+                    }
+                }
+                let missing = |field: &str| {
+                    <A::Error as serde::de::Error>::missing_field(field)
+                };
+                Ok(SessionEntry {
+                    type_: type_.ok_or_else(|| missing("type"))?,
+                    id: id.ok_or_else(|| missing("id"))?,
+                    parent_id: parent_id.unwrap_or_default(),
+                    timestamp: timestamp.ok_or_else(|| missing("timestamp"))?,
+                    fields: Value::Object(fields),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(SessionEntryVisitor)
+    }
 }
 
 impl SessionEntry {
@@ -361,10 +419,21 @@ impl SessionFile {
             window: None,
             lease: None,
         };
-        for line in window.metadata_entries().iter().chain(window.raw_entries()) {
-            let Ok(entry) = serde_json::from_str(line) else {
+        // The retained ids fall out of the parse the loop already runs; a
+        // second parse of every retained row (the old `retained_ids`
+        // collection) was the most expensive redundant pass on a cold open.
+        let mut retained_ids = std::collections::HashSet::new();
+        for line in window.metadata_entries() {
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
                 return Self::open(path);
             };
+            file.push_index(entry);
+        }
+        for line in window.raw_entries() {
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
+                return Self::open(path);
+            };
+            retained_ids.insert(entry.id.clone());
             file.push_index(entry);
         }
         // The window keeps the retained-target attributions as metadata and
@@ -388,15 +457,7 @@ impl SessionFile {
             boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
-            retained_ids: window
-                .raw_entries()
-                .iter()
-                .filter_map(|raw| {
-                    serde_json::from_str::<SessionEntry>(raw)
-                        .ok()
-                        .map(|entry| entry.id)
-                })
-                .collect(),
+            retained_ids,
             older_path_stats: window.older_path_stats().clone(),
         });
         Ok(file)
@@ -1856,6 +1917,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-daemon-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn session_entry_single_pass_matches_the_loaded_shape() {
+        // The envelope parses straight; every other key lands in `fields`
+        // verbatim in source order, whatever its shape.
+        let line = r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"user","content":"hi","timestamp":1},"extra":null}"#;
+        let entry: SessionEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(entry.type_, "message");
+        assert_eq!(entry.id, "a2");
+        assert_eq!(entry.parent_id.as_deref(), Some("a1"));
+        assert_eq!(entry.timestamp, "2026-09-16T18:40:16.600Z");
+        let expected = json!({"message": {"role": "user", "content": "hi", "timestamp": 1}, "extra": null});
+        assert_eq!(entry.fields, expected);
+        let keys: Vec<&str> = entry.fields.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["message", "extra"]);
+        // Absent `parentId` stays None; missing required fields fail.
+        let line = r#"{"type":"session_state","id":"s1","timestamp":"t","state":{"status":"archived"}}"#;
+        let entry: SessionEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(entry.parent_id, None);
+        assert!(serde_json::from_str::<SessionEntry>(r#"{"id":"x"}"#).is_err());
+        assert!(serde_json::from_str::<SessionEntry>(r#"{"type":"x","id":"y"}"#).is_err());
+        assert!(serde_json::from_str::<SessionEntry>(r#""scalar""#).is_err());
+        assert!(serde_json::from_str::<SessionEntry>(r#"null"#).is_err());
+        // Null `parentId` is None, not an error.
+        let entry: SessionEntry =
+            serde_json::from_str(r#"{"type":"x","id":"y","parentId":null,"timestamp":"t"}"#)
+                .unwrap();
+        assert_eq!(entry.parent_id, None);
+        // A round trip keeps the durable row byte-shape.
+        let out = serde_json::to_string(&entry).unwrap();
+        assert_eq!(out, r#"{"type":"x","id":"y","parentId":null,"timestamp":"t"}"#);
     }
 
     /// The captured-attribution fixture: real devbox session rows
