@@ -67,6 +67,10 @@ impl AgentView {
     /// settled agent message per streaming delta, the dogfood CPU spin.
     pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
         match entry {
+            ChatEntry::Status { .. } | ChatEntry::User { .. } => true,
+            ChatEntry::SlashCommand { .. } => true,
+            ChatEntry::CompactionSummary { .. } => true,
+            ChatEntry::SkillInvocation(_) => true,
             // Spacing-driven rows (agent messages, shell completions, tool
             // cards) lean on the conversation-spacing scan over PRECEDING
             // entries; the scan result is stored with the cached rows, and
@@ -143,7 +147,6 @@ impl AgentView {
             ChatEntry::BashExecution(card) => !card.suppress_leading_space,
             ChatEntry::Assistant(_) => preceded_by_tool_activity,
             ChatEntry::Status { .. }
-            | ChatEntry::SlashCommandResult { .. }
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
             | ChatEntry::CustomPanel(_)

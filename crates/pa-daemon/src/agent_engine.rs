@@ -2400,6 +2400,14 @@ impl SessionEngine for AgentSessionEngine {
         let entries = request.entries;
         let custom_instructions = request.custom_instructions;
         let replace_instructions = request.replace_instructions;
+        // TS #2411: the branch summary resolves its model through the
+        // `auxiliaryModel` setting (the session model above is the
+        // fallback), so its one-off prompt stays off the session's
+        // prompt-cache prefix.
+        let auxiliary = pa_core::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: self.cwd(),
+            agent_dir: self.config.agent_dir.clone(),
+        };
         let run = async {
             pa_core::session_engine::branch_summarization::generate_branch_summary(
                 &entries,
@@ -2409,6 +2417,7 @@ impl SessionEngine for AgentSessionEngine {
                     custom_instructions: custom_instructions.as_deref(),
                     replace_instructions,
                     reserve_tokens,
+                    auxiliary: Some(&auxiliary),
                 },
             )
             .await

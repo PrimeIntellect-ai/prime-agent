@@ -777,9 +777,8 @@ pub struct McpServerStatus {
 }
 
 /// One `/mcp` connections-view row (the daemon's `get_mcp_connections`
-/// response): the roster entry plus the tool listing the kernel reported
-/// for it. `tools` is `None` when the listing was unavailable (no kernel,
-/// session busy) or the server failed; `error` carries the failure text.
+/// response): the roster entry with its connected state, display kind,
+/// transport, and whether it surfaces through the generic kernel API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpConnectionEntry {
