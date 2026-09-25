@@ -173,15 +173,15 @@ async fn apply_in_process_config(
 ) -> Result<Vec<SessionConfigOption>, ConfigOptionError> {
     match (config_id, value) {
         ("model", Some(value)) => {
-            let current = mode.current_model().await;
-            let current_value = current
-                .as_ref()
-                .map(|model| model_value(&model.provider, &model.id));
-            if current_value.as_deref() == Some(value) {
-                // The current model re-selected: refresh only, no discovery
-                // (a resync during a discovery outage still answers).
+            // The no-op check reads the agent's live model (TS
+            // `getState().model`): the current model re-selected refreshes
+            // only, no discovery (a resync during a discovery outage
+            // still answers).
+            let live = session.agent().state().await;
+            if model_value(&live.model.provider, &live.model.id) == value {
                 return Ok(refresh_in_process_config(session, config, mode).await);
             }
+            let current = mode.current_model().await;
             // Discover the available models (TS `getAvailableModels`): the
             // registry the composition resolved against. Discovery failures
             // are the handler's "try again later" invalid-params.
