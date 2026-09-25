@@ -107,7 +107,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
         return Ok(exit_code);
     }
     let config = &options.config;
-    let engine = build_headless_engine_parts(options).await?;
+    let engine = build_headless_engine_parts(options, "print").await?;
     let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
         engine: std::sync::Arc::new(engine.engine),
         actual_cwd: config.cwd.clone(),
@@ -187,7 +187,7 @@ fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
-    let parts = build_headless_engine_parts(options).await?;
+    let parts = build_headless_engine_parts(options, "rpc").await?;
     // The CLI `--goal` seed rides the first session like the print mode.
     if let Some(goal) = &config.initial_goal {
         parts
@@ -269,11 +269,11 @@ fn rpc_engine_factory(
                 }
             };
             if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-                return build_faux_engine_with(&options, &script, Some(manager))
+                return build_faux_engine_with(&options, &script, Some(manager), "rpc")
                     .await
                     .map(pa_daemon::rpc::session::RpcEngineHandle::from);
             }
-            build_headless_engine_with(&options, Some(manager))
+            build_headless_engine_with(&options, Some(manager), "rpc")
                 .await
                 .map(pa_daemon::rpc::session::RpcEngineHandle::from)
         })
@@ -312,7 +312,7 @@ fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
-    let headless = build_headless_engine(options).await?;
+    let headless = build_headless_engine(options, "print").await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed (TS constructor seeding): a fresh root branch
     // starts the goal and queues its continuation context as the first
@@ -344,12 +344,15 @@ struct HeadlessEngine {
     provider_target: std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>,
 }
 
-async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEngine, String> {
+async fn build_headless_engine_parts(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<HeadlessEngine, String> {
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        return build_faux_engine_parts(options, &script).await;
+        return build_faux_engine_parts(options, &script, execution_mode).await;
     }
     let session_manager = select_session_manager(options)?;
-    build_headless_engine_with(options, session_manager).await
+    build_headless_engine_with(options, session_manager, execution_mode).await
 }
 
 /// The session-manager selection every engine build shares
@@ -370,6 +373,7 @@ fn select_session_manager(
 async fn build_headless_engine_with(
     options: &RunOptions,
     session_manager: Option<pa_core::session::manager::SessionManager>,
+    execution_mode: &str,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
 
@@ -402,7 +406,7 @@ async fn build_headless_engine_with(
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
         pa_core::session_engine::telemetry::TelemetryWiring {
             client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
-            execution_mode: Some("print".to_string()),
+            execution_mode: Some(execution_mode.to_string()),
             now: None,
         }
     });
@@ -497,8 +501,11 @@ async fn build_headless_engine_with(
 }
 
 /// The engine alone (callers that do not drive session commands).
-async fn build_headless_engine(options: &RunOptions) -> Result<HeadlessEngine, String> {
-    build_headless_engine_parts(options).await
+async fn build_headless_engine(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<HeadlessEngine, String> {
+    build_headless_engine_parts(options, execution_mode).await
 }
 
 /// The session header line: the session file's `type: "session"` entry in
@@ -1090,9 +1097,10 @@ async fn run_prompts_and_emit(
 async fn build_faux_engine_parts(
     options: &RunOptions,
     script: &str,
+    execution_mode: &str,
 ) -> Result<HeadlessEngine, String> {
     let session_manager = select_session_manager(options)?;
-    build_faux_engine_with(options, script, session_manager).await
+    build_faux_engine_with(options, script, session_manager, execution_mode).await
 }
 
 /// The faux assembly over one session-manager selection (the RPC mode's
@@ -1101,6 +1109,9 @@ async fn build_faux_engine_with(
     options: &RunOptions,
     script: &str,
     session_manager: Option<pa_core::session::manager::SessionManager>,
+    // The faux harness installs no product telemetry, so the execution
+    // mode label carries through the real path only.
+    _execution_mode: &str,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
     let script: serde_json::Value = serde_json::from_str(script)
