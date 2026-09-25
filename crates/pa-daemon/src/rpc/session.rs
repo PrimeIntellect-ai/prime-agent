@@ -242,12 +242,9 @@ impl RpcSession {
         // Subscribe the replacement BEFORE publishing the handle: a
         // prompt dispatched the instant the handle lands finds the
         // subscription attached, so the turn's first events never drop.
-        let subscription = Self::engine_subscription(
-            &replacement.engine,
-            &self.pending_outputs,
-            &self.writer,
-        )
-        .await;
+        let subscription =
+            Self::engine_subscription(&replacement.engine, &self.pending_outputs, &self.writer)
+                .await;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }

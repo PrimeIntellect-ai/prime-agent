@@ -377,8 +377,8 @@ async fn build_headless_engine_parts_with_lease(
 ) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
     let (session_manager, lease) = select_session_manager_with_lease(options)?;
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        let engine = build_faux_engine_with(options, &script, session_manager, execution_mode)
-            .await?;
+        let engine =
+            build_faux_engine_with(options, &script, session_manager, execution_mode).await?;
         return Ok((engine, lease));
     }
     let engine = build_headless_engine_with(options, session_manager, execution_mode).await?;
@@ -700,7 +700,10 @@ fn build_session_manager_with_lease(
             | ResolvedSession::Local(path)
             | ResolvedSession::Global { path, .. } => path,
         };
-        return Ok((SessionManager::fork_from(&source, &cwd, &session_dir)?, None));
+        return Ok((
+            SessionManager::fork_from(&source, &cwd, &session_dir)?,
+            None,
+        ));
     }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.

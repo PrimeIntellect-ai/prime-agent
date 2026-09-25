@@ -85,9 +85,9 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
-            Box::pin(async move {
-                stream_once(model, api_key, service_tier, headers, context, options)
-            })
+            Box::pin(
+                async move { stream_once(model, api_key, service_tier, headers, context, options) },
+            )
         },
     )
 }
@@ -131,7 +131,9 @@ fn stream_once(
             session_id: options.session_id.clone(),
             on_payload: None,
             on_response: None,
-            headers,
+            // StreamOptions carries a plain map; the target's ordered
+            // (BTreeMap) resolution converts here.
+            headers: headers.map(|headers| headers.into_iter().collect()),
             metadata: None,
             timeout_ms: None,
         },

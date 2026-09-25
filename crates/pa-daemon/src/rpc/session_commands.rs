@@ -451,7 +451,10 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
         None,
         &state.agent_dir,
         &session_file,
-        output_path.as_deref().map(|path| path.display().to_string()).as_deref(),
+        output_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .as_deref(),
     )
     .map_err(|error| format!("{error:#}"))?;
     Ok(ResponseData::Present(json!({ "path": path })))
