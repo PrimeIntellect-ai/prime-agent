@@ -147,6 +147,15 @@ pub fn is_truthy_env_flag(value: Option<&str>) -> bool {
     }
 }
 
+/// The env-mutating tests serialize on one lock (the client_traces
+/// convention): both HOME mutators in this crate's test binary take it.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +183,7 @@ mod tests {
 
     #[test]
     fn expands_tilde() {
+        let _env = env_lock();
         std::env::set_var("HOME", "/home/tester");
         assert_eq!(expand_tilde_path("~"), PathBuf::from("/home/tester"));
         assert_eq!(

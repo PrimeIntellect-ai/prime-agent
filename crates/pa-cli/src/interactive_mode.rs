@@ -1870,6 +1870,7 @@ mod tests {
         std::fs::create_dir_all(&home_sessions).expect("home sessions dir");
         let home_file = home_sessions.join(format!("{id}.jsonl"));
         std::fs::rename(&source, &home_file).expect("move the source under home");
+        let _env = crate::config::env_lock();
         let previous_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &home);
         let selector = format!("~/sessions/{id}.jsonl");
