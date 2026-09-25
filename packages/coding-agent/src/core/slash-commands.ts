@@ -215,7 +215,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "speed",
-		description: "Toggle footer readout of model output tok/sec (latest response and session average)",
+		description: "Toggle top bar readout of model output tok/sec (latest response and session average)",
 		argumentHint: "[on|off]",
 		takesArgument: true,
 	},

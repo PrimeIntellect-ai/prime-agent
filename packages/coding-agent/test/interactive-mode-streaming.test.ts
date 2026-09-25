@@ -9,6 +9,7 @@ import type { AssistantMessageComponent } from "../src/modes/interactive/compone
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
+import { TopBar } from "../src/modes/interactive/components/top-bar.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -156,44 +157,63 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 	describe("speed display tok/sec tracking", () => {
-		const speedLine = (footer: FooterComponent) => stripAnsi(footer.render(200).join("\n"));
+		// The readout belongs to the top bar: the top bar below reads the same
+		// speedText field the constructor's getSpeedText wiring reads.
+		type SpeedThis = { speedText?: string };
+		const topBarLine = (bar: TopBar) => stripAnsi(bar.render(80).join("\n"));
 		const makeSpeedThis = (enabled = true) => {
 			const fakeThis = createFakeInteractiveModeThis();
+			const state = fakeThis as unknown as SpeedThis;
+			const topBar = new TopBar({
+				getChatName: () => "demo",
+				getCostUsd: () => 1.42,
+				getSpeedText: () => state.speedText,
+			});
 			const footer = new FooterComponent({ getGitBranch: () => null } as ReadonlyFooterDataProvider);
-			footer.setSpeedEnabled(enabled);
 			Object.assign(fakeThis as Record<string, unknown>, { footer, speedDisplayEnabled: enabled });
-			return { fakeThis, footer };
+			return { fakeThis, state, topBar, footer };
 		};
 		const speedPrototype = InteractiveMode.prototype as unknown as {
 			handleEvent(this: Record<string, unknown>, event: AgentConnectionSessionEvent): Promise<void>;
 			recordSpeedSample(this: Record<string, unknown>, message: AssistantMessage): void;
 		};
 		afterEach(() => vi.restoreAllMocks());
-		test("records output tok/s per completed assistant message with a session average", async () => {
-			const { fakeThis, footer } = makeSpeedThis();
+		test("records output tok/s per completed assistant message on the top bar line", async () => {
+			const { fakeThis, topBar, footer } = makeSpeedThis();
 			const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
 			const first = createAssistantMessage("first", { ...EMPTY_USAGE, output: 100, totalTokens: 100 });
 			now.mockReturnValue(3_000);
 			await speedPrototype.handleEvent.call(fakeThis, { type: "message_end", message: first });
-			expect(speedLine(footer)).toBe("50.0 tok/s");
+			// One row: readout, name, and spend share the top bar line.
+			expect(topBar.render(80)).toHaveLength(1);
+			expect(topBarLine(topBar)).toContain("50.0 tok/s");
+			expect(topBarLine(topBar)).toContain("demo  $1.42");
 			const second = createAssistantMessage("second", { ...EMPTY_USAGE, output: 300, totalTokens: 300 });
 			now.mockReturnValue(5_500);
 			await speedPrototype.handleEvent.call(fakeThis, { type: "message_end", message: second });
-			expect(speedLine(footer)).toBe("120 tok/s · avg 88.9");
+			expect(topBarLine(topBar)).toContain("120 tok/s · avg 88.9");
+			// Moved, not copied: the footer renders no readout and kept no speed setters.
+			expect(footer.render(200)).toEqual([]);
+			expect((footer as unknown as Record<string, unknown>).setSpeedText).toBeUndefined();
 		});
-		test.each<[string, boolean, number, number, string, Record<string, unknown>]>([
-			["zero output tokens", true, 0, 2_000, "9.9 tok/s", { timestamp: 1_000 }],
-			["zero duration", true, 100, 0, "9.9 tok/s", {}],
-			["aborted message", true, 50, 2_000, "9.9 tok/s", { stopReason: "aborted", timestamp: 1_000 }],
-			["stripped usage and timestamp", true, 100, 2_000, "9.9 tok/s", { usage: undefined, timestamp: undefined }],
-			["display disabled", false, 100, 2_000, "", {}],
-		])("skips the sample when %s", (_label, enabled, output, durationMs, expected, overrides) => {
-			const { fakeThis, footer } = makeSpeedThis(enabled);
-			footer.setSpeedText("9.9 tok/s");
+		test.each<[string, boolean, number, number, Record<string, unknown>]>([
+			["zero output tokens", true, 0, 2_000, { timestamp: 1_000 }],
+			["zero duration", true, 100, 0, {}],
+			["aborted message", true, 50, 2_000, { stopReason: "aborted", timestamp: 1_000 }],
+			["stripped usage and timestamp", true, 100, 2_000, { usage: undefined, timestamp: undefined }],
+			["display disabled", false, 100, 2_000, {}],
+		])("skips the sample when %s", (_label, enabled, output, durationMs, overrides) => {
+			const { fakeThis, state, topBar } = makeSpeedThis(enabled);
+			// A readout on screen when a sample is skipped must survive the skip.
+			if (enabled) state.speedText = "9.9 tok/s";
 			vi.spyOn(Date, "now").mockReturnValue(1_000 + durationMs);
 			const message = Object.assign(createAssistantMessage("partial", { ...EMPTY_USAGE, output }), overrides);
 			speedPrototype.recordSpeedSample.call(fakeThis, message);
-			expect(speedLine(footer)).toBe(expected);
+			if (enabled) {
+				expect(topBarLine(topBar)).toContain("9.9 tok/s");
+			} else {
+				expect(topBarLine(topBar)).not.toContain("tok/s");
+			}
 		});
 	});
 });

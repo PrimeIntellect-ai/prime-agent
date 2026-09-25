@@ -1,0 +1,1 @@
+- Changed the `/speed` tok/sec readout to render on the top bar line beside the chat name and spend instead of in the footer.

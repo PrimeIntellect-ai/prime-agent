@@ -22,6 +22,34 @@ describe("TopBar", () => {
 		expect(stripAnsi(line)).toBe("        demo");
 	});
 
+	it("leads the line with the speed readout, keeping the name and spend on that row", () => {
+		const bar = new TopBar({
+			getChatName: () => "demo",
+			getCostUsd: () => 1.42,
+			getSpeedText: () => "120 tok/s · avg 88.9",
+		});
+		const [line] = bar.render(60);
+		expect(stripAnsi(line)).toBe(`120 tok/s · avg 88.9${" ".repeat(8)}demo  $1.42`);
+	});
+
+	it("keeps the name clear of the speed readout on narrow terminals", () => {
+		const bar = new TopBar({
+			getChatName: () => "demo",
+			getCostUsd: () => undefined,
+			getSpeedText: () => "long-name-speed",
+		});
+		expect(stripAnsi(bar.render(24)[0])).toBe(`long-name-speed  demo`);
+	});
+
+	it("renders the plain name and spend when the speed readout is off", () => {
+		const bar = new TopBar({
+			getChatName: () => "demo",
+			getCostUsd: () => 1.42,
+			getSpeedText: () => undefined,
+		});
+		expect(stripAnsi(bar.render(21)[0])).toBe("        demo  $1.42");
+	});
+
 	it("collapses embedded newlines so the bar stays a single row", () => {
 		const bar = new TopBar({ getChatName: () => "line1\nline2" });
 		const lines = bar.render(21);
@@ -41,6 +69,17 @@ describe("TopBar", () => {
 	it("returns a blank line when the chat name is empty", () => {
 		const bar = new TopBar({ getChatName: () => undefined });
 		expect(bar.render(21)).toEqual([""]);
+	});
+
+	it("still shows the speed readout when the chat name is empty", () => {
+		// A session launched from a path with no basename (POSIX `/`) has no name;
+		// the readout must not disappear with it.
+		const bar = new TopBar({
+			getChatName: () => undefined,
+			getCostUsd: () => 1.42,
+			getSpeedText: () => "120 tok/s · avg 88.9",
+		});
+		expect(stripAnsi(bar.render(40)[0])).toBe("120 tok/s · avg 88.9");
 	});
 
 	it("truncates to the terminal width", () => {

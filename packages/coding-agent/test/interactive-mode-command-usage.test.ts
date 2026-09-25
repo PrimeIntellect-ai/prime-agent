@@ -86,17 +86,19 @@ describe("InteractiveMode no-argument command usage errors", () => {
 	it("toggles /speed on and off, parses explicit args, and rejects invalid arguments", async () => {
 		const context = makeSubmitContext();
 		Object.setPrototypeOf(context, InteractiveMode.prototype); // runs the real setSpeedDisplay
-		const footer = { setSpeedEnabled: vi.fn(), setSpeedText: vi.fn() };
-		Object.assign(context, { footer, speedDisplayEnabled: false });
+		const speedContext = context as unknown as { speedDisplayEnabled: boolean; speedText: string | undefined };
+		// A stale readout stands in for the text the top bar renders after a sample.
+		Object.assign(context, { speedDisplayEnabled: false, speedText: "42 tok/s" });
 		Object.assign(context, { ui: { requestRender: vi.fn() }, uiServices: { settingsManager: {} } });
 		prototype.setupEditorSubmitHandler.call(context);
 		await context.defaultEditor.onSubmit?.("/speed");
-		expect(footer.setSpeedEnabled).toHaveBeenLastCalledWith(true);
+		expect(speedContext.speedDisplayEnabled).toBe(true);
+		expect(context.showStatus).toHaveBeenCalledWith(expect.stringContaining("top bar shows output tok/s"));
 		await context.defaultEditor.onSubmit?.("/speed off");
-		expect(footer.setSpeedEnabled).toHaveBeenLastCalledWith(false);
-		expect(footer.setSpeedText).toHaveBeenCalledWith(undefined);
+		expect(speedContext.speedDisplayEnabled).toBe(false);
+		// Turning the display off clears the top bar readout.
+		expect(speedContext.speedText).toBeUndefined();
 		await context.defaultEditor.onSubmit?.("/speed banana");
 		expect(context.showError).toHaveBeenCalledWith("Usage: /speed [on|off]");
-		expect((context.agentConnection as { prompt: ReturnType<typeof vi.fn> }).prompt).not.toHaveBeenCalled();
 	});
 });

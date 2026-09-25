@@ -1243,6 +1243,8 @@ export class InteractiveMode {
 	private speedDisplayEnabled = false;
 	// Accumulated output-token/duration totals; allocated on the first recorded sample.
 	private speedStats: { tokens: number; durationMs: number; samples: number } | undefined;
+	// Latest tok/sec readout rendered by the top bar; undefined while /speed is off.
+	private speedText: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
@@ -1509,6 +1511,7 @@ export class InteractiveMode {
 			// session's spend to the new chat.
 			getCostUsd: () =>
 				this.topBarCost.sessionId === this.connectionState?.sessionId ? this.topBarCost.total : undefined,
+			getSpeedText: () => this.speedText,
 		});
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
@@ -3412,9 +3415,11 @@ export class InteractiveMode {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		// Sessions are independent: a rebind (new/resume/switch) restarts tok/sec stats
-		// and clears the readout left over from the previous session.
+		// and clears the readout left over from the previous session. The field is
+		// cleared directly: partial-mode harnesses skip the constructor, so that
+		// spot cannot assume the class methods resolve on `this`.
 		this.speedStats = undefined;
-		this.footer?.setSpeedText?.(undefined);
+		this.speedText = undefined;
 		void this.rosterBar?.dispose();
 		this.rosterBar = undefined;
 		if (this.localSessionHost) {
@@ -8051,29 +8056,39 @@ export class InteractiveMode {
 		);
 	}
 
-	/** /speed on/off: toggles the footer tok/sec readout for this session. */
+	/** /speed on/off: toggles the top bar tok/sec readout for this session. */
 	private setSpeedDisplay(enabled: boolean): void {
 		this.speedDisplayEnabled = enabled;
 		if (!enabled) {
 			this.resetSpeedStats();
 		}
-		this.footer.setSpeedEnabled(enabled);
 		this.showStatus(
 			enabled
-				? "Speed display on — footer shows output tok/s per model response and a session average"
+				? "Speed display on — top bar shows output tok/s per model response and a session average"
 				: "Speed display off",
 		);
 		this.ui.requestRender();
 	}
 
-	/** Clears per-session tok/sec stats and the footer readout; keeps the display flag. */
+	/** Clears per-session tok/sec stats and the top bar readout; keeps the display flag. */
 	private resetSpeedStats(): void {
 		this.speedStats = undefined;
-		this.footer.setSpeedText(undefined);
+		this.setSpeedText(undefined);
 	}
 
 	/**
-	 * Updates the footer tok/sec readout from a completed assistant message:
+	 * Publishes the top bar's tok/sec readout (undefined clears it) and repaints,
+	 * the same refresh flow the top bar cost uses.
+	 */
+	private setSpeedText(text: string | undefined): void {
+		this.speedText = text;
+		// Partial-mode test harnesses skip the constructor, so the renderer can be
+		// absent; the readout is cosmetic and must not break an event flow.
+		this.ui?.requestRender();
+	}
+
+	/**
+	 * Updates the top bar tok/sec readout from a completed assistant message:
 	 * output tokens over the wall-clock span from the message timestamp (set at
 	 * provider stream start) to this message_end arrival. Timestamps keep the span
 	 * true even when buffered session events replay back-to-back on attach.
@@ -8098,7 +8113,7 @@ export class InteractiveMode {
 			tokensPerSecond >= 100 ? tokensPerSecond.toFixed(0) : tokensPerSecond.toFixed(1);
 		const last = formatRate(outputTokens / (durationMs / 1000));
 		const average = formatRate(this.speedStats.tokens / (this.speedStats.durationMs / 1000));
-		this.footer.setSpeedText(this.speedStats.samples > 1 ? `${last} tok/s · avg ${average}` : `${last} tok/s`);
+		this.setSpeedText(this.speedStats.samples > 1 ? `${last} tok/s · avg ${average}` : `${last} tok/s`);
 	}
 
 	private toggleToolOutputExpansion(): void {
