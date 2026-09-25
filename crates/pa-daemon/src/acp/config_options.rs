@@ -283,7 +283,7 @@ mod tests {
             model("other", "m2", "M Two", false),
         ];
         let options = session_config_options(
-            Some(current.clone()),
+            Some(current),
             "medium",
             &levels(&["off", "medium", "high"]),
             &models,
@@ -331,8 +331,7 @@ mod tests {
         // A discovered model with the same (provider, id): the current
         // model replaces the discovered entry in place (TS `Map.set`).
         let models = vec![model("faux", "shared", "Discovered Name", false)];
-        let options =
-            session_config_options(Some(current.clone()), "off", &levels(&["off"]), &models);
+        let options = session_config_options(Some(current), "off", &levels(&["off"]), &models);
         assert_eq!(options[0].options.len(), 1);
         assert_eq!(options[0].options[0].name, "Live Name (faux)");
         // Non-reasoning current model: no effort option.
