@@ -183,7 +183,18 @@ async fn apply_in_process_config(
                 // (a resync during a discovery outage still answers).
                 return Ok(refresh_in_process_config(session, config, mode).await);
             }
-            let models = discover_models(mode).await?;
+            // Discover the available models (TS `getAvailableModels`): the
+            // registry the composition resolved against. Discovery failures
+            // are the handler's "try again later" invalid-params.
+            let models = tokio::task::spawn_blocking({
+                let agent_dir = Arc::clone(&mode.agent_dir);
+                move || discover_available_models(&agent_dir)
+            })
+            .await
+            .map_err(|_| ConfigOptionError::Internal("model discovery task failed".to_string()))?
+            .map_err(|_| {
+                ConfigOptionError::invalid_params("Model discovery is unavailable; try again later")
+            })?;
             let model = models
                 .iter()
                 .find(|model| model_value(&model.provider, &model.id) == value)
@@ -212,23 +223,6 @@ async fn apply_in_process_config(
             "Invalid configuration option: {config_id}"
         ))),
     }
-}
-
-/// Discover the available models (TS `getAvailableModels`): the registry
-/// the composition resolved against. Discovery failures are the handler's
-/// "try again later" invalid-params.
-async fn discover_models(
-    mode: &AcpModeState,
-) -> Result<Vec<pa_types::ai::Model>, ConfigOptionError> {
-    tokio::task::spawn_blocking({
-        let agent_dir = Arc::clone(&mode.agent_dir);
-        move || discover_available_models(&agent_dir)
-    })
-    .await
-    .map_err(|_| ConfigOptionError::Internal("model discovery task failed".to_string()))?
-    .map_err(|_| {
-        ConfigOptionError::invalid_params("Model discovery is unavailable; try again later")
-    })
 }
 
 /// The model's supported thinking levels as wire names (TS
