@@ -582,6 +582,64 @@ mod tests {
             assert_eq!(value_crossing, wire_crossing);
         }
     }
+
+    /// The live-context crossing after #2810: the rebuilds hand session
+    /// rows (user, assistant, tool result, and the session-only roles
+    /// that ride the loop as loop `Custom` rows — custom, branch
+    /// summary, compaction summary, bash execution) to the agent loop.
+    /// The buffered crossing must match the `to_value`/`from_value`
+    /// crossing row for row, roles included.
+    #[test]
+    fn wire_cross_matches_value_crossing_for_session_rows() {
+        use pa_types::session::AgentMessage as SessionMessage;
+
+        let session_rows = vec![
+            SessionMessage::User(pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("plain".to_string()),
+                timestamp: 1,
+                rest: Default::default(),
+            }),
+            SessionMessage::Custom(pa_types::session::CustomMessage {
+                custom_type: "note".to_string(),
+                content: pa_types::ai::UserContent::Text("a note".to_string()),
+                display: true,
+                details: None,
+                timestamp: 2,
+                rest: Default::default(),
+            }),
+            SessionMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
+                summary: "branch story".to_string(),
+                from_id: "u0".to_string(),
+                timestamp: 3,
+            }),
+            SessionMessage::CompactionSummary(pa_types::session::CompactionSummaryMessage {
+                summary: "compacted story".to_string(),
+                tokens_before: 999,
+                retained_message_count: Some(3),
+                custom_instructions: None,
+                harness_digest: None,
+                timestamp: 4,
+            }),
+            SessionMessage::BashExecution(pa_types::session::BashExecutionMessage {
+                command: "echo hi".to_string(),
+                output: "hi".to_string(),
+                exit_code: Some(0),
+                cancelled: false,
+                truncated: false,
+                full_output_path: None,
+                timestamp: 5,
+                exclude_from_context: None,
+            }),
+        ];
+
+        for row in &session_rows {
+            let value_crossing: Option<pa_agent::types::AgentMessage> =
+                serde_json::from_value(serde_json::to_value(row).unwrap()).ok();
+            let wire_crossing: Option<pa_agent::types::AgentMessage> = cross_wire(row);
+            assert_eq!(value_crossing.is_some(), wire_crossing.is_some());
+            assert_eq!(value_crossing, wire_crossing);
+        }
+    }
     /// The retry-outcome row (SANCTIONED DIVERGENCE, operator ruling
     /// 2026-09-23): one durable line per episode — the recovered and
     /// exhausted texts, the structured details — and never model context.
