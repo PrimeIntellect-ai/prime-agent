@@ -1006,23 +1006,173 @@ pub struct Model {
     pub compat: Option<ModelCompat>,
 }
 
-/// TS `supportsFastMode`: the fast-mode (priority) service tier exists on
-/// gpt-5.4/5.5/5.6 models served over the OpenAI Responses APIs. Shared by
-/// the surfaces that gate the `/fast` command on model eligibility (the TS
-/// product keeps the same function in the shared AI package).
+/// TS `supportsServiceTier` over the eligibility fields: whether a
+/// provider accepts (and honors) a requested service tier. The
+/// Model-typed [`supports_service_tier`] delegates here so the surfaces
+/// that only hold the connection-state model metadata (provider, api, id)
+/// share one predicate.
+pub fn supports_service_tier_fields(
+    provider: &str,
+    api: &str,
+    model_id: &str,
+    tier: ServiceTier,
+) -> bool {
+    if tier == ServiceTier::Default {
+        return true;
+    }
+    // OpenRouter accepts top-level service_tier (flex|priority) for every
+    // model, routes to matching tier endpoints where they exist, and bills
+    // by the tier that actually served the request:
+    // https://openrouter.ai/docs/guides/features/service-tiers
+    if provider == "openrouter" && api == "openai-completions" {
+        return matches!(tier, ServiceTier::Flex | ServiceTier::Priority);
+    }
+    let openai_responses = provider == "openai" && api == "openai-responses";
+    let codex_responses = provider == "openai-codex" && api == "openai-codex-responses";
+    if !openai_responses && !codex_responses {
+        return false;
+    }
+    // "auto" defers the tier choice to OpenAI and is valid for every model
+    // there; "scale" is entitlement-gated, so pass it through for callers
+    // that have it.
+    if matches!(tier, ServiceTier::Auto | ServiceTier::Scale) {
+        return true;
+    }
+    let eligible_id = model_id == "gpt-5.4"
+        || model_id == "gpt-5.5"
+        || model_id == "gpt-5.6"
+        || model_id == "gpt-6-astra"
+        || model_id.starts_with("gpt-5.6-");
+    if tier == ServiceTier::Priority {
+        return eligible_id;
+    }
+    // Flex processing is an API-key feature; the ChatGPT (Codex OAuth)
+    // backend has no flex tier.
+    tier == ServiceTier::Flex && eligible_id && openai_responses
+}
+
+/// TS `supportsServiceTier`: whether a model's provider accepts (and
+/// honors) a requested service tier. The single eligibility predicate
+/// behind the `/tier` command, the settings row, and the `/fast` toggle
+/// (the TS product keeps the same function in the shared AI package).
+pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
+    supports_service_tier_fields(&model.provider, &model.api, &model.id, tier)
+}
+
+/// TS `clampServiceTier`: clamp a requested tier to `default` when the
+/// model does not support it. An absent model (a session with no resolved
+/// model) clamps every non-default tier, exactly like the TS
+/// `model == null` arm; an unset (`null`) preference passes through.
+pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
+    match tier {
+        None | Some(ServiceTier::Default) => tier,
+        Some(tier) => model
+            .is_some_and(|model| supports_service_tier(model, tier))
+            .then_some(tier)
+            .or(Some(ServiceTier::Default)),
+    }
+}
+
+/// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`):
+/// the fast-mode (priority) tier exists on the eligible ids served over
+/// the OpenAI Responses APIs. Shared by the surfaces that gate the `/fast`
+/// command on model eligibility.
 pub fn supports_fast_mode(model: &Model) -> bool {
-    let eligible_id = model.id == "gpt-5.4"
-        || model.id == "gpt-5.5"
-        || model.id == "gpt-5.6"
-        || model.id.starts_with("gpt-5.6-");
-    eligible_id
-        && ((model.provider == "openai-codex" && model.api == "openai-codex-responses")
-            || (model.provider == "openai" && model.api == "openai-responses"))
+    supports_service_tier(model, ServiceTier::Priority)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal model for the tier-eligibility predicate (TS #2144's
+    /// gating tests run the same provider/api/id combinations).
+    fn tier_model(provider: &str, api: &str, id: &str) -> Model {
+        let zero_cost = || ModelCost {
+            input: JsNumber(0.0),
+            output: JsNumber(0.0),
+            cache_read: JsNumber(0.0),
+            cache_write: JsNumber(0.0),
+        };
+        Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: api.to_string(),
+            provider: provider.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: Vec::new(),
+            cost: zero_cost(),
+            context_window: 0,
+            max_tokens: 0,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn service_tier_eligibility_matches_ts() {
+        use ServiceTier::*;
+        // `default` is always accepted (it means no tier request at all).
+        for (provider, api, id) in [
+            ("anthropic", "anthropic-messages", "claude-fable-5"),
+            ("openrouter", "openai-completions", "openai/gpt-5.5"),
+            ("openai", "openai-responses", "gpt-5.5"),
+        ] {
+            let model = tier_model(provider, api, id);
+            assert!(supports_service_tier(&model, Default));
+        }
+        // OpenRouter accepts flex/priority for every completions model and
+        // nothing else.
+        let openrouter = tier_model("openrouter", "openai-completions", "openai/qwen-4.9");
+        assert!(supports_service_tier(&openrouter, Flex));
+        assert!(supports_service_tier(&openrouter, Priority));
+        assert!(!supports_service_tier(&openrouter, Auto));
+        assert!(!supports_service_tier(&openrouter, Scale));
+        // The Responses APIs take auto/scale everywhere, priority on the
+        // eligible ids (gpt-6-astra joined the list with #2144), and flex
+        // only on the API-key (openai) backend's eligible ids.
+        let codex = tier_model("openai-codex", "openai-codex-responses", "gpt-5.5");
+        assert!(supports_service_tier(&codex, Auto));
+        assert!(supports_service_tier(&codex, Scale));
+        assert!(supports_service_tier(&codex, Priority));
+        assert!(!supports_service_tier(&codex, Flex));
+        let codex_astra = tier_model("openai-codex", "openai-codex-responses", "gpt-6-astra");
+        assert!(supports_service_tier(&codex_astra, Priority));
+        let openai = tier_model("openai", "openai-responses", "gpt-5.4");
+        assert!(supports_service_tier(&openai, Flex));
+        let codex_ineligible = tier_model("openai-codex", "openai-codex-responses", "gpt-5.1");
+        assert!(!supports_service_tier(&codex_ineligible, Priority));
+        // Completions models outside OpenRouter never take a tier.
+        let direct = tier_model("openai", "openai-completions", "gpt-5.5");
+        assert!(!supports_service_tier(&direct, Priority));
+        // supportsFastMode is the priority question — and #2144 makes the
+        // OpenRouter completions models fast-mode-eligible too (their
+        // priority tier is accepted).
+        assert!(supports_fast_mode(&codex));
+        assert!(supports_fast_mode(&openrouter));
+        assert!(!supports_fast_mode(&codex_ineligible));
+    }
+
+    #[test]
+    fn clamp_service_tier_degrades_unsupported_requests() {
+        use ServiceTier::*;
+        let openai = tier_model("openai", "openai-responses", "gpt-5.5");
+        let other = tier_model("anthropic", "anthropic-messages", "claude-fable-5");
+        assert_eq!(clamp_service_tier(Some(&openai), Some(Flex)), Some(Flex));
+        assert_eq!(clamp_service_tier(Some(&other), Some(Flex)), Some(Default));
+        assert_eq!(
+            clamp_service_tier(Some(&other), Some(Priority)),
+            Some(Default)
+        );
+        // An absent model clamps every non-default tier (TS `model == null`).
+        assert_eq!(clamp_service_tier(None, Some(Priority)), Some(Default));
+        // Default and an unset preference pass through untouched.
+        assert_eq!(clamp_service_tier(None, Some(Default)), Some(Default));
+        assert_eq!(clamp_service_tier(None, None), None);
+    }
 
     fn rt<T: serde::Serialize + for<'de> Deserialize<'de>>(json: &str) -> String {
         let parsed: T = serde_json::from_str(json).expect("deserialize");

@@ -19,17 +19,29 @@ use crate::worker::Worker;
 /// The queue-mode wire vocabulary (TS `AgentConnectionQueueMode`).
 const QUEUE_MODES: &[&str] = &["all", "one-at-a-time"];
 
-/// TS `supportsFastMode`: the fast-mode (priority) tier exists on
-/// gpt-5.4/5.5/5.6 models served over the responses APIs.
-pub(crate) fn supports_fast_mode(model_id: &str) -> bool {
-    let eligible = model_id == "gpt-5.4"
-        || model_id == "gpt-5.5"
-        || model_id == "gpt-5.6"
-        || model_id.starts_with("gpt-5.6-");
-    // The provider check needs the full model; this worker-side helper is
-    // keyed on the model id only (the eligible ids are exclusive to the
-    // responses providers), matching the TS eligibility list.
-    eligible
+/// TS `supportsServiceTier` as the worker sees it: the engine's resolved
+/// model metadata (provider, api, id) against the shared pa-types
+/// eligibility fields. A session without a resolved model supports only
+/// the `default` tier, exactly like the TS `model == null` arm.
+pub(crate) fn engine_supports_service_tier(
+    engine: &dyn crate::engine::SessionEngine,
+    tier: ServiceTier,
+) -> bool {
+    let model = engine.model_metadata();
+    model
+        .as_ref()
+        .and_then(|model| {
+            Some(pa_types::ai::supports_service_tier_fields(
+                model.get("provider")?.as_str()?,
+                model.get("api")?.as_str()?,
+                model.get("id")?.as_str()?,
+                tier,
+            ))
+        })
+        // A session without a resolved model still accepts `default` (TS
+        // `supportsServiceTier` answers the default tier true for any
+        // model, including none).
+        .unwrap_or(tier == ServiceTier::Default)
 }
 
 /// The wire name of a service tier (the serde lowercase form).
@@ -43,28 +55,20 @@ pub(crate) fn service_tier_wire_name(tier: ServiceTier) -> &'static str {
     }
 }
 
-/// TS `_getEffectiveServiceTier`: a `priority` request on a model without
-/// fast mode degrades to `default`; every other tier passes through.
-/// `None` (the settings default "auto") passes as `Auto`.
+/// TS `_getEffectiveServiceTier` (#2144's `clampServiceTier`): a tier the
+/// current model does not support degrades to `default`. An unset
+/// (`null`) preference passes through; `None` on the wire reads as `auto`
+/// (see [`service_tier_wire_name`]).
 pub(crate) fn effective_service_tier(
     tier: Option<ServiceTier>,
-    fast_mode: bool,
+    engine: &dyn crate::engine::SessionEngine,
 ) -> Option<ServiceTier> {
     match tier {
-        Some(ServiceTier::Priority) if !fast_mode => Some(ServiceTier::Default),
-        other => other,
+        None | Some(ServiceTier::Default) => tier,
+        Some(tier) => engine_supports_service_tier(engine, tier)
+            .then_some(tier)
+            .or(Some(ServiceTier::Default)),
     }
-}
-
-/// The model's fast-mode support as the worker sees it (the engine's
-/// resolved model metadata, when there is one).
-fn engine_fast_mode(engine: &dyn crate::engine::SessionEngine) -> bool {
-    let model = engine.model_metadata();
-    model
-        .as_ref()
-        .and_then(|model| model.get("id"))
-        .and_then(Value::as_str)
-        .is_some_and(supports_fast_mode)
 }
 
 impl Worker {
@@ -76,6 +80,9 @@ impl Worker {
         if let Err(response) = self.require_created("cycle_model") {
             return response;
         }
+        // Same serialization as `set_model`: the cycle's model switch and
+        // tier re-clamp run under the replacement gate.
+        let _replacement_gate = self.replacement_gate.lock().await;
         let backward = payload.get("direction").and_then(Value::as_str) == Some("backward");
         let (scoped, current) = {
             let core = self.core.lock().unwrap();
@@ -236,7 +243,7 @@ impl Worker {
                 self.engine
                     .effective_thinking_level()
                     .unwrap_or_else(|| "off".to_string()),
-                effective_service_tier(core.service_tier, engine_fast_mode(self.engine.as_ref()))
+                effective_service_tier(core.service_tier, self.engine.as_ref())
                     .unwrap_or(ServiceTier::Auto),
             )
         };
@@ -253,27 +260,59 @@ impl Worker {
     }
 
     /// Re-clamp the effective service tier for the engine's current model
-    /// (TS `_clampServiceTierForModel` on a model switch): a `priority`
-    /// preference on a model without fast mode degrades to `default` and
-    /// the `service_tier_changed` session event follows the flip.
-    fn clamp_service_tier_for_model(&self) {
-        let (previous, fast_mode) = {
-            let core = self.core.lock().unwrap();
-            (
-                effective_service_tier(core.service_tier, true).unwrap_or(ServiceTier::Auto),
-                engine_fast_mode(self.engine.as_ref()),
-            )
+    /// (TS `_clampServiceTierForModel` on a model switch, #2144's
+    /// `clampServiceTier`): a preference the switched-to model does not
+    /// support degrades to `default`. The engine's request slot ALWAYS
+    /// follows the model switch (TS sets `agent.state.serviceTier` on
+    /// every switch — skipping the write would strand the slot on the
+    /// previous model's clamp after switching back to a capable model);
+    /// the `service_tier_changed` event fires only when the ACTIVE tier
+    /// moves. The stored preference keeps the requested tier, so switching
+    /// back to (or resuming on) a capable model re-applies it.
+    pub(crate) fn clamp_service_tier_for_model(&self) {
+        // The core preference/active pair and the engine's request slot move
+        // together under one lock: worker commands dispatch concurrently,
+        // so a model switch's clamp must never expose a window where the
+        // active tier and the provider target disagree.
+        let (changed, clamped) = {
+            let mut core = self.core.lock().unwrap();
+            let clamped = effective_service_tier(core.service_tier, self.engine.as_ref());
+            let previous_active = core.active_service_tier;
+            core.active_service_tier = clamped;
+            self.engine.configure_service_tier(clamped);
+            (clamped != previous_active, clamped)
         };
-        let effective = effective_service_tier(Some(previous), fast_mode).unwrap_or(previous);
-        if effective != previous {
-            // The engine's request slot must follow the clamp, or requests
-            // keep the previous tier after cycling to a model without it.
-            self.engine.configure_service_tier(Some(effective));
+        if changed {
             self.emit_worker_event(json!({
                 "type": "service_tier_changed",
-                "serviceTier": service_tier_wire_name(effective),
+                "serviceTier": service_tier_wire_name(clamped.unwrap_or(ServiceTier::Auto)),
             }));
         }
+    }
+
+    /// The replacement sessions (`new_session` / `switch_session` /
+    /// `import_jsonl` / `fork`) re-seed the service tier like a create
+    /// (TS `createAgentSession` over the moved-to file): the file's
+    /// `service_tier_change` row when it has one, else the settings
+    /// default, then the active tier re-clamps against the restored
+    /// model (the clamp's configure + event contract).
+    pub(crate) fn reseed_service_tier_for_replacement(&self) {
+        let (restored, cwd) = {
+            let core = self.core.lock().unwrap();
+            let restored = core.store.as_ref().and_then(|store| {
+                store
+                    .has_service_tier()
+                    .then(|| store.restored_settings().service_tier)
+            });
+            (restored, core.cwd.clone())
+        };
+        let default_tier = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir)
+            .get_default_service_tier();
+        {
+            let mut core = self.core.lock().unwrap();
+            core.service_tier = restored.unwrap_or(Some(default_tier));
+        }
+        self.clamp_service_tier_for_model();
     }
 
     /// `set_scoped_models { scopedModels }` (TS
@@ -369,15 +408,22 @@ impl Worker {
         response_success(None, "cycle_thinking_level", Some(json!({ "level": next })))
     }
 
-    /// `set_service_tier { serviceTier }` (TS `session.setServiceTier`):
-    /// record the preference, the durable `service_tier_change` row on a
-    /// change, the settings default (when the model supports fast mode),
-    /// and the `service_tier_changed` event on an effective change. An
+    /// `set_service_tier { serviceTier }` (TS `session.setServiceTier`,
+    /// #2144 semantics): the preference and the durable `service_tier_change`
+    /// row keep the REQUESTED tier (only the active state clamps), so
+    /// switching to (or resuming on) a capable model re-applies it; the
+    /// settings default persists only when the model supports the tier; and
+    /// the `service_tier_changed` event follows an effective change. An
     /// unchanged request answers success without side effects.
-    pub(crate) fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) async fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_service_tier") {
             return response;
         }
+        // Worker commands dispatch concurrently: the tier mutation runs
+        // under the replacement gate so a session swap's re-seed (TS
+        // `createAgentSession` reading the moved-to file) can never
+        // interleave with a user's in-flight tier change.
+        let _replacement_gate = self.replacement_gate.lock().await;
         let Some(tier) = payload
             .get("serviceTier")
             .cloned()
@@ -391,34 +437,35 @@ impl Worker {
                 None,
             );
         };
-        let fast_mode = engine_fast_mode(self.engine.as_ref());
-        let effective = effective_service_tier(Some(tier), fast_mode).unwrap_or(tier);
+        let effective = effective_service_tier(Some(tier), self.engine.as_ref()).unwrap_or(tier);
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
             let preference = core.service_tier;
-            let previous_effective =
-                effective_service_tier(preference, fast_mode).unwrap_or(ServiceTier::Auto);
+            let previous_active = core.active_service_tier;
             core.service_tier = Some(tier);
-            let effective_changed = previous_effective != effective;
+            core.active_service_tier = Some(effective);
+            let effective_changed = previous_active != Some(effective);
             let preference_changed = preference != Some(tier);
             let mut cwd = core.cwd.clone();
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
                     // The same durable row the creation prefix writes (TS
-                    // `appendServiceTierChange`).
-                    let _ = store
-                        .persist_entry("service_tier_change", json!({ "serviceTier": effective }));
+                    // `appendServiceTierChange(serviceTier)` — the
+                    // REQUESTED tier, not the clamped one).
+                    let _ =
+                        store.persist_entry("service_tier_change", json!({ "serviceTier": tier }));
                 }
                 cwd.clone_from(&core.cwd);
             }
             (preference_changed, effective_changed, cwd)
         };
         self.engine.configure_service_tier(Some(effective));
-        if preference_changed && fast_mode {
-            // TS persists the default only when the model keeps fast mode.
+        if preference_changed && engine_supports_service_tier(self.engine.as_ref(), tier) {
+            // TS persists the default only when the model supports the
+            // tier (#2144: `supportsServiceTier(this.model, serviceTier)`).
             let mut settings =
                 pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
-            let _ = settings.set_default_service_tier(effective);
+            let _ = settings.set_default_service_tier(tier);
         }
         if effective_changed {
             self.emit_worker_event(json!({
@@ -812,9 +859,10 @@ mod tests {
         assert_eq!(response.data, Some(Value::Null));
     }
 
-    /// `set_service_tier` records the durable row on change (the priority
-    /// request clamps to `default` without fast mode), and an unchanged
-    /// request records nothing more.
+    /// `set_service_tier` records the durable row on change (the row keeps
+    /// the REQUESTED tier while an unsupported request clamps to `default`
+    /// in the active state — TS #2144), and an unchanged request records
+    /// nothing more.
     #[tokio::test]
     async fn set_service_tier_records_the_durable_row() {
         let worker = created_worker().await;
@@ -830,10 +878,12 @@ mod tests {
                         .entries()
                         .iter()
                         .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
+                        .map(|entry| entry.fields.clone())
+                        .collect::<Vec<serde_json::Value>>()
                 })
+                .unwrap_or_default()
         };
-        let baseline = tier_rows(&worker);
+        let baseline = tier_rows(&worker).len();
         let response = worker
             .dispatch(
                 "set_service_tier",
@@ -841,7 +891,8 @@ mod tests {
             )
             .await;
         assert!(response.success, "failed: {response:?}");
-        // The scripted engine reports no model: priority clamps to default.
+        // The scripted engine reports no model: priority clamps to default
+        // in the active state...
         let state = worker
             .dispatch(
                 "get_connection_state",
@@ -849,17 +900,14 @@ mod tests {
             )
             .await;
         assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
-        let rows = {
-            let core = worker.core.lock().unwrap();
-            core.store.as_ref().map_or(0, |store| {
-                store
-                    .entries()
-                    .iter()
-                    .filter(|entry| entry.type_ == "service_tier_change")
-                    .count()
-            })
-        };
-        assert_eq!(rows, baseline + 1, "one new preference row");
+        // ...but the durable row keeps the requested tier, so resuming on
+        // a capable model re-applies it.
+        let rows = tier_rows(&worker);
+        assert_eq!(rows.len(), baseline + 1, "one new preference row");
+        assert_eq!(
+            rows.last().and_then(|row| row.get("serviceTier")),
+            Some(&json!("priority"))
+        );
         // An unchanged request is a no-op success (no new row).
         let response = worker
             .dispatch(
@@ -868,17 +916,22 @@ mod tests {
             )
             .await;
         assert!(response.success);
-        let rows = {
-            let core = worker.core.lock().unwrap();
-            core.store.as_ref().map_or(0, |store| {
-                store
-                    .entries()
-                    .iter()
-                    .filter(|entry| entry.type_ == "service_tier_change")
-                    .count()
-            })
-        };
-        assert_eq!(rows, baseline + 1);
+        assert_eq!(tier_rows(&worker).len(), baseline + 1);
+        // A `flex` preference clamps the same way (the scripted engine
+        // reports no model) and records its own requested tier.
+        let response = worker
+            .dispatch(
+                "set_service_tier",
+                &json!({ "activeSessionId": "switch-session", "serviceTier": "flex" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let rows = tier_rows(&worker);
+        assert_eq!(rows.len(), baseline + 2);
+        assert_eq!(
+            rows.last().and_then(|row| row.get("serviceTier")),
+            Some(&json!("flex"))
+        );
         let response = worker
             .dispatch(
                 "set_service_tier",
@@ -886,6 +939,48 @@ mod tests {
             )
             .await;
         assert!(!response.success);
+    }
+
+    /// The replacement re-seed restores the moved-to file's tier
+    /// preference (else the settings default) and re-clamps the active
+    /// tier against the restored model (no model on the scripted engine:
+    /// the active tier degrades to `default`).
+    #[tokio::test]
+    async fn replacement_reseed_restores_the_tier_preference() {
+        let worker = created_worker().await;
+        // No durable row and the settings default "default": the reseed
+        // keeps the default preference.
+        worker.reseed_service_tier_for_replacement();
+        let (preference, active) = {
+            let core = worker.core.lock().unwrap();
+            (core.service_tier, core.active_service_tier)
+        };
+        assert_eq!(preference, Some(ServiceTier::Default));
+        assert_eq!(active, Some(ServiceTier::Default));
+        // A moved-to file carrying its own tier row re-seeds the
+        // preference; the active tier still clamps against the
+        // model-less engine.
+        {
+            let mut core = worker.core.lock().unwrap();
+            if let Some(store) = core.store.as_mut() {
+                let _ = store
+                    .persist_entry("service_tier_change", json!({ "serviceTier": "priority" }));
+            }
+        }
+        worker.reseed_service_tier_for_replacement();
+        let (preference, active) = {
+            let core = worker.core.lock().unwrap();
+            (core.service_tier, core.active_service_tier)
+        };
+        assert_eq!(preference, Some(ServiceTier::Priority));
+        assert_eq!(active, Some(ServiceTier::Default));
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
     }
 
     /// `set_transport` persists the settings value; an unknown transport

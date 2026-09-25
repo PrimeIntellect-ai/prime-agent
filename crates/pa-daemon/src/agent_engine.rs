@@ -2227,6 +2227,7 @@ impl SessionEngine for AgentSessionEngine {
         Some(json!({
             "id": model.id,
             "name": model.name,
+            "api": model.api,
             "provider": model.provider,
             "reasoning": model.reasoning,
         }))

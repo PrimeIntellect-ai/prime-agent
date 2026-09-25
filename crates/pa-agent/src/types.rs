@@ -24,6 +24,18 @@ pub enum ThinkingLevel {
     Max,
 }
 
+/// TS `ServiceTier` (pi-ai): the requested provider service tier. The
+/// wire names match the shared AI package's (serde lowercase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+}
+
 /// How tool calls from one assistant message are executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolExecutionMode {

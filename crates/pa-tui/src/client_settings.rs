@@ -56,6 +56,12 @@ pub trait ClientSettings: Send + Sync {
     /// `treeFilterMode` (`default`/`no-tools`/`user-only`/`labeled-only`/`all`).
     fn tree_filter_mode(&self) -> String;
     fn set_tree_filter_mode(&self, mode: &str) -> Result<()>;
+    /// `defaultServiceTier` (TS `getDefaultServiceTier`, default
+    /// "default"): the wire name of the persisted default tier — the
+    /// settings row's bound value.
+    fn default_service_tier(&self) -> String;
+    /// TS `settingsManager.setDefaultServiceTier` — persists the wire name.
+    fn set_default_service_tier(&self, tier: &str) -> Result<()>;
     /// `warnings.anthropicExtraUsage` (TS default true).
     fn warnings_anthropic_extra_usage(&self) -> bool;
     fn set_warnings_anthropic_extra_usage(&self, enabled: bool) -> Result<()>;

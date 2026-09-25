@@ -66,6 +66,11 @@ pub struct ChromeState {
     pub tray_depth: Option<u32>,
     /// Thinking effort suffix rendered as `model:effort` in the tray.
     pub thinking_suffix: Option<String>,
+    /// The session's effective service tier as its wire name (TS
+    /// `connectionState.serviceTier`): the tray badge after the model —
+    /// `fast` for priority, the tier name for any other non-default tier.
+    /// `None` (or `default`) renders no badge.
+    pub service_tier: Option<String>,
     /// Startup warning (tmux keyboard setup), rendered as a status row.
     pub tmux_notice: Option<String>,
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
@@ -437,6 +442,19 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
             right.push(Span::styled(" \u{00b7} ".to_string(), dim));
         }
         right.push(Span::styled(label, dim));
+    }
+    // TS footer badge (#2144): `fast` for the priority tier, the tier name
+    // for any other non-default tier.
+    let tier_badge = match state.service_tier.as_deref() {
+        Some("priority") => Some("fast"),
+        Some(tier) if tier != "default" => Some(tier),
+        _ => None,
+    };
+    if let Some(badge) = tier_badge {
+        if !right.is_empty() {
+            right.push(Span::styled(" \u{00b7} ".to_string(), dim));
+        }
+        right.push(Span::styled(badge.to_string(), dim));
     }
     if let Some(context) = &state.context {
         if !right.is_empty() {
@@ -993,6 +1011,34 @@ mod tests {
         assert!(text.starts_with("\u{2190} manage"));
         assert!(text.contains("faux-1 \u{00b7} 6.1k (5%)"));
         assert_eq!(str_width(&text), 120);
+    }
+
+    /// The tray's tier badge (TS footer badge, #2144): `fast` for the
+    /// priority tier, the tier name for any other non-default tier, and
+    /// nothing for `default` or an unset tier.
+    #[test]
+    fn tray_service_tier_badge_follows_the_ts_shape() {
+        let state = |tier: Option<&str>| ChromeState {
+            model_id: Some("gpt-5.5".to_string()),
+            service_tier: tier.map(str::to_string),
+            ..Default::default()
+        };
+        let badge = |tier: Option<&str>| {
+            let line = render_tray(&state(tier), &theme(), 120);
+            line.iter().map(|s| s.content.as_str()).collect::<String>()
+        };
+        assert!(
+            badge(Some("priority")).contains("gpt-5.5 \u{00b7} fast"),
+            "priority renders the fast token"
+        );
+        assert!(
+            badge(Some("flex")).contains("gpt-5.5 \u{00b7} flex"),
+            "a non-default tier renders its name"
+        );
+        for tier in [Some("default"), None] {
+            let text = badge(tier);
+            assert!(!text.contains(" \u{00b7} "), "{tier:?} renders no badge");
+        }
     }
 
     /// The tray (the line below the prompt bar) never carries the goal

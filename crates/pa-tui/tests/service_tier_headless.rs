@@ -1,16 +1,19 @@
-//! Headless e2e for the `/nightly` command (TS `interactive-mode.ts`
-//! 5455-5484): the status arm resolves the effective channel from the
-//! running version when no preferred channel is set, the usage error keeps
-//! the TS wording, and the off arm pins the channel through the settings
-//! seam (a stub seam: the write lands in memory; the persisted wire form is
-//! covered by the pa-cli seam round-trip test).
+//! Headless e2e for the `/tier` service-tier command (TS #2144's UX half):
+//! a mock supervisor serves one attached session with an OpenRouter
+//! completions model, and the plan drives the command through the same
+//! editor submit path a user's keystrokes take.
+//!
+//! Verifies the TS parity contract: `/tier` without an argument reports the
+//! current tier and the available ones; a tier the model does not support
+//! errors with the available list; a supported tier applies through the
+//! daemon `set_service_tier` switch and reports the applied tier; and the
+//! tray badge shows the non-default tier (`fast` for priority).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
-use anyhow::Result;
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
@@ -21,6 +24,25 @@ struct MockSupervisor {
     listener: UnixListener,
 }
 
+/// The OpenRouter catalog entry as the daemon's `get_model_catalog` answer
+/// carries it: completions API, so flex and priority are both eligible for
+/// the model. The same json seeds `InteractiveOptions::model_catalog` (the
+/// composition-root snapshot the picker serves before the fetch lands).
+fn openrouter_model_value() -> Value {
+    json!({
+        "id": "openai/gpt-5.5",
+        "name": "OpenAI: GPT-5.5",
+        "api": "openai-completions",
+        "provider": "openrouter",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "reasoning": true,
+        "input": ["text"],
+        "cost": { "input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 0 },
+        "contextWindow": 272_000,
+        "maxTokens": 128_000
+    })
+}
+
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
         MockSupervisor {
@@ -28,8 +50,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
+    /// Serve one connection: attach an OpenRouter-model session, answer
+    /// `set_service_tier`, and report the applied tier on `get_state`.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -82,17 +104,54 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
-                "get_session_stats" => {
+                "set_service_tier" => {
+                    // The daemon arm answers success with no data; the
+                    // follow-up get_state read reports the applied tier.
                     write_json(
                         &mut writer,
                         &json!({
                             "type": "response",
                             "id": id,
-                            "command": "get_session_stats",
+                            "command": "set_service_tier",
+                            "success": true,
+                            "data": {},
+                        }),
+                    );
+                }
+                "get_model_catalog" => {
+                    // The startup fetch (interactive.rs `spawn_model_catalog_refresh`)
+                    // replaces the composition-root catalog with the daemon's
+                    // answer; serve the same OpenRouter entry the eligibility
+                    // reads run against.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_model_catalog",
                             "success": true,
                             "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
+                                "models": [openrouter_model_value()],
+                                "configuredProviders": ["openrouter"],
+                            },
+                        }),
+                    );
+                }
+                "get_state" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_state",
+                            "success": true,
+                            "data": {
+                                "activeSessionId": "s1",
+                                "sessionId": "sess-1",
+                                "serviceTier": "flex",
+                                "steeringMode": "one-at-a-time",
+                                "model": { "id": "openai/gpt-5.5", "provider": "openrouter" },
+                                "isStreaming": false,
                             },
                         }),
                     );
@@ -132,7 +191,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result: one empty session.
+/// The slim attach result: one session on an OpenRouter completions model
+/// (the catalog entry the eligibility predicate reads).
 fn attach_data(id: &str) -> Value {
     json!({
         "type": "response",
@@ -149,8 +209,8 @@ fn attach_data(id: &str) -> Value {
                     "activeSessionId": "s1",
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
-                    "sessionName": "nightly session",
-                    "model": null,
+                    "sessionName": "tier session",
+                    "model": { "id": "openai/gpt-5.5", "provider": "openrouter" },
                     "isStreaming": false,
                     "isCompacting": false,
                     "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
@@ -166,142 +226,11 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence, and the channel pair
-/// resolves like the composition root (the version infers when unset).
-#[derive(Default)]
-struct StubSettings {
-    update_channel: std::sync::Mutex<Option<String>>,
-}
-
-impl pa_tui::client_settings::ClientSettings for StubSettings {
-    fn theme(&self) -> Option<String> {
-        None
-    }
-    fn set_theme(&self, _theme: &str) -> Result<()> {
-        Ok(())
-    }
-    fn fullscreen(&self) -> bool {
-        true
-    }
-    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_images(&self) -> bool {
-        true
-    }
-    fn set_show_images(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn clear_on_shrink(&self) -> bool {
-        false
-    }
-    fn set_clear_on_shrink(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_terminal_progress(&self) -> bool {
-        false
-    }
-    fn set_show_terminal_progress(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn image_auto_resize(&self) -> bool {
-        true
-    }
-    fn set_image_auto_resize(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn block_images(&self) -> bool {
-        false
-    }
-    fn set_block_images(&self, _blocked: bool) -> Result<()> {
-        Ok(())
-    }
-    fn enable_skill_commands(&self) -> bool {
-        true
-    }
-    fn set_enable_skill_commands(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn enable_builtin_skills(&self) -> bool {
-        true
-    }
-    fn set_enable_builtin_skills(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_hardware_cursor(&self) -> bool {
-        false
-    }
-    fn set_show_hardware_cursor(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn editor_padding_x(&self) -> u64 {
-        0
-    }
-    fn set_editor_padding_x(&self, _padding: u64) -> Result<()> {
-        Ok(())
-    }
-    fn autocomplete_max_visible(&self) -> u64 {
-        5
-    }
-    fn set_autocomplete_max_visible(&self, _max_visible: u64) -> Result<()> {
-        Ok(())
-    }
-    fn quiet_startup(&self) -> bool {
-        false
-    }
-    fn set_quiet_startup(&self, _quiet: bool) -> Result<()> {
-        Ok(())
-    }
-    fn idle_eviction_minutes(&self) -> String {
-        "90".to_string()
-    }
-    fn set_idle_eviction_minutes(&self, _value: &str) -> Result<()> {
-        Ok(())
-    }
-    fn mermaid_rendering_mode(&self) -> String {
-        "streaming".to_string()
-    }
-    fn set_mermaid_rendering_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tree_filter_mode(&self) -> String {
-        "user-only".to_string()
-    }
-    fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn default_service_tier(&self) -> String {
-        "default".to_string()
-    }
-    fn set_default_service_tier(&self, _tier: &str) -> Result<()> {
-        Ok(())
-    }
-    fn warnings_anthropic_extra_usage(&self) -> bool {
-        true
-    }
-    fn set_warnings_anthropic_extra_usage(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn update_channel(&self) -> Option<String> {
-        self.update_channel.lock().expect("channel lock").clone()
-    }
-    fn set_update_channel(&self, channel: &str) -> Result<()> {
-        *self.update_channel.lock().expect("channel lock") = Some(channel.to_string());
-        Ok(())
-    }
-    fn effective_update_channel(&self, version: &str) -> String {
-        if let Some(channel) = self.update_channel() {
-            return channel;
-        }
-        // The inference TS resolveUpdateChannel applies: a -beta*
-        // prerelease reads nightly, anything else stable.
-        if version.contains("-beta") {
-            "nightly".to_string()
-        } else {
-            "stable".to_string()
-        }
-    }
+/// The composition-root catalog seed (the options snapshot).
+fn openrouter_catalog() -> Vec<pa_types::ai::Model> {
+    serde_json::from_value(openrouter_model_value())
+        .map(|model| vec![model])
+        .expect("catalog model")
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {
@@ -311,7 +240,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_dir: None,
         script_path: None,
         model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
+        model_catalog: openrouter_catalog(),
         model_configured_providers: Default::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
@@ -336,10 +265,12 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: Default::default(),
         session_has_children: false,
-        client_settings: Some(std::sync::Arc::new(StubSettings::default())),
+        client_settings: None,
     }
 }
 
+/// Run the headless plan against a fresh mock supervisor and return the
+/// captured frames.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -363,42 +294,52 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/nightly status` reports the inferred channel (the headless harness
-/// has no settings seam, so no preferred channel is set) and the running
-/// version; a bad argument gets the TS usage error.
+/// `/tier` reports the current tier with the available ones; an
+/// unsupported tier errors with the available list; a supported tier
+/// applies through the daemon switch, reports the applied tier, and the
+/// tray badge shows it.
 #[test]
-fn nightly_status_and_usage_error_render_the_ts_wording() {
+fn tier_command_shows_applies_and_rejects() {
+    // The leading settle (the sibling harnesses' pattern): the attach
+    // must land its model + provider before the first submit reads them.
     let steps = vec![
-        HeadlessStep::Submit("/nightly status".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("/tier".to_string()),
         HeadlessStep::WaitMs(200),
-        HeadlessStep::Submit("/nightly maybe".to_string()),
+        HeadlessStep::Submit("/tier scale".to_string()),
         HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/tier flex".to_string()),
+        HeadlessStep::WaitMs(300),
     ];
     let frames = run_plan(steps);
     assert!(!frames.is_empty(), "frames were captured");
     let all = frames.join("\n");
+    // No argument: the current tier with the model's available tiers.
     assert!(
-        all.contains("Updates follow the stable channel (inferred from the running version). v0.0.0 installed."),
-        "the status note rendered:\n{all}"
+        all.contains("Service tier: default (available: default, flex, priority)"),
+        "the show note rendered:\n{all}"
+    );
+    // `scale` is not a user-facing choice: the TS error names the tier and
+    // lists the available ones (the rendered row wraps the list at the
+    // frame width, so the assertion stays on the single-line head).
+    assert!(
+        all.contains("Service tier 'scale' is not available for the current model"),
+        "the unsupported error rendered:\n{all}"
     );
     assert!(
-        all.contains("Usage: /nightly [on|off|status]"),
-        "the usage error rendered:\n{all}"
+        all.contains("Available: default, flex,"),
+        "the error lists the available tiers:\n{all}"
     );
-}
-
-/// `/nightly off` pins the channel through the settings seam and renders
-/// the TS stable-pin note.
-#[test]
-fn nightly_off_renders_the_stable_pin_note() {
-    let steps = vec![
-        HeadlessStep::Submit("/nightly off".to_string()),
-        HeadlessStep::WaitMs(200),
-    ];
-    let frames = run_plan(steps);
-    let all = frames.join("\n");
+    // `flex` applies through the daemon switch; the state refresh reports
+    // the applied tier and the tray badge shows it.
     assert!(
-        all.contains("Updates now follow the stable channel. Run /update to install the latest stable release."),
-        "the stable-pin note rendered:\n{all}"
+        all.contains("Service tier: flex"),
+        "the applied-tier note rendered:\n{all}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("openai/gpt-5.5 \u{00b7} flex")),
+        "the tray badge rendered the applied tier:\n{all}"
     );
 }

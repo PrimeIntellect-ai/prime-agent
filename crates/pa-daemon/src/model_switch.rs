@@ -28,6 +28,12 @@ impl Worker {
         if let Err(response) = self.require_created("set_model") {
             return response;
         }
+        // Worker commands dispatch concurrently: a model switch (its
+        // durable row, the engine target, and the tier re-clamp) runs
+        // under the replacement gate so a session swap's model restore and
+        // tier re-seed can never interleave with it (one session, one
+        // mutation at a time).
+        let _replacement_gate = self.replacement_gate.lock().await;
         let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
             return response_failure(None, "set_model", "set_model requires a provider", None);
         };
@@ -105,6 +111,11 @@ impl Worker {
                 None,
             );
         }
+        // TS `session.setModel` re-clamps the tier for the switched model
+        // (`_clampServiceTierForModel`): a preference the new model does
+        // not support degrades to `default` and the
+        // `service_tier_changed` event follows the flip.
+        self.clamp_service_tier_for_model();
         // The switched model (and any level the switch clamps) reaches the
         // roster surfaces immediately: the TS `set_model` daemon handler
         // schedules a roster flush after the switch, so the agents view's

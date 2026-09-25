@@ -305,6 +305,10 @@ pub(crate) struct SessionUi {
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
     service_tier: Option<String>,
+    /// The current model's provider (TS `getCurrentModel()` keeps the full
+    /// model): the eligibility lookups over the TUI-side catalog disambiguate
+    /// same-id entries across providers with it.
+    current_model_provider: Option<String>,
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
@@ -348,8 +352,10 @@ pub(crate) struct SessionUi {
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     /// Snapshot chat entries to fold into the view on the next rebuild.
     pending_snapshot: Option<Vec<ChatEntry>>,
-    /// Snapshot labels (model) for the next rebuild.
-    pending_model: Option<String>,
+    /// Snapshot labels (model) for the next rebuild: `Some(None)` clears
+    /// the label (a session that reports no model), `None` leaves the
+    /// chrome untouched (a rebuild outside the attach flow).
+    pending_model: Option<Option<String>>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -683,6 +689,7 @@ impl SessionUi {
                 .as_ref()
                 .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
+            current_model_provider: None,
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
@@ -976,6 +983,8 @@ impl SessionUi {
         self.session_id = reconstructed.session_id;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
+        self.current_model_provider
+            .clone_from(&reconstructed.model_provider);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -1004,7 +1013,7 @@ impl SessionUi {
         self.bash_activities = serde_json::json!({"activities": []});
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
         self.spawn_bash_activity_refresh();
-        self.pending_model = reconstructed.model_id;
+        self.pending_model = Some(reconstructed.model_id);
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1297,8 +1306,12 @@ impl SessionUi {
             }
         }
         if let Some(model) = self.pending_model.take() {
-            view.chrome.model_id = Some(model);
+            view.chrome.model_id = model;
         }
+        // The tray badge mirrors the session-scoped tier on every rebuild:
+        // an attach that reports no tier clears the previous session's
+        // badge instead of leaving it stranded.
+        view.chrome.service_tier.clone_from(&self.service_tier);
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -1377,7 +1390,7 @@ impl SessionUi {
             view.working = None;
         }
         view.follow();
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         self.dirty = true;
     }
 
@@ -3281,6 +3294,12 @@ impl SessionUi {
                 }
                 self.handle_fast_command(view).await;
             }
+            // `/tier [tier]` (TS `handleTierCommand`): show or set the
+            // session service tier.
+            "tier" => {
+                self.track_command_used("tier");
+                self.handle_tier_command(view, &resolved.args).await;
+            }
             // `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): view or set
             // the per-chat recursive depth limit.
             "rlm-max-depth" => {
@@ -4317,6 +4336,12 @@ impl SessionUi {
             .iter()
             .map(ToString::to_string)
             .collect();
+        // TS `settingsManager.getDefaultServiceTier() ?? "default"` — the
+        // settings row's bound value.
+        values.default_service_tier = settings
+            .as_ref()
+            .map(|settings| settings.default_service_tier())
+            .unwrap_or_else(|| "default".to_string());
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
         self.dirty = true;
@@ -4343,6 +4368,7 @@ impl SessionUi {
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
+            crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
                 // TS `onThemePreview`: switch live without persisting.
                 view.theme = crate::app::load_theme(&name);
@@ -4540,6 +4566,65 @@ impl SessionUi {
                 )
                 .await;
             }
+            "default-service-tier" => {
+                // TS `onDefaultServiceTierChange`: persist the default tier
+                // (the settings seam — new sessions start on it), then apply
+                // it to the running session through the same daemon tier
+                // switch `/tier` uses (the serialized change queue); the
+                // status row reports what the session actually applied.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_default_service_tier(value) {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(
+                    value.to_string(),
+                )) {
+                    Ok(tier) => tier,
+                    Err(error) => {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                };
+                let switched = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::SetServiceTier {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            service_tier: Some(tier),
+                            rest: Default::default(),
+                        },
+                    )
+                    .await;
+                if let Err(error) = switched {
+                    self.error_row(&format!("{error:#}"), view);
+                    return;
+                }
+                // The status row reports what the session actually applied
+                // (TS `formatStatus(state.serviceTier)`); a state read that
+                // fails or omits the tier shows no success row (the
+                // `service_tier_changed` event refreshes the local tier
+                // when it lands).
+                let Some(state) = self.connection_state(view).await else {
+                    return;
+                };
+                let Some(applied) = state
+                    .get("serviceTier")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                self.service_tier = Some(applied.clone());
+                view.chrome.service_tier = Some(applied.clone());
+                self.update_model_eligibility_filters(view);
+                self.note(
+                    &format!("Default service tier: {value} (session: {applied})"),
+                    view,
+                );
+            }
             "mermaid-rendering" => {
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_mermaid_rendering_mode(value) {
@@ -4619,17 +4704,27 @@ impl SessionUi {
     // /fullscreen, /reload)
     // ------------------------------------------------------------------
 
-    /// The catalog entry for the current model (the `/fast` eligibility
-    /// check needs the provider and api, not just the id).
+    /// The catalog entry for the current model (the `/fast` and `/tier`
+    /// eligibility checks need the provider and api, not just the id).
+    /// When the current provider is known (the session state reports it),
+    /// a same-id entry from another provider never wins the lookup.
     fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
         let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
+        match self.current_model_provider.as_deref() {
+            Some(provider) => self
+                .model_catalog
+                .iter()
+                .find(|model| model.id == model_id && model.provider == provider),
+            None => self.model_catalog.iter().find(|model| model.id == model_id),
+        }
     }
 
-    /// Recompute the `/fast` autocomplete filter (TS
+    /// Recompute the model-eligibility autocomplete state (TS
     /// `getAvailableCommands` drops `/fast` when the current model is not
-    /// fast-mode-eligible): call after every point the model id can move.
-    fn update_fast_filter(&self, view: &mut AgentView) {
+    /// fast-mode-eligible; TS `getArgumentCompletions` for `/tier` lists
+    /// the tiers the current model supports with the current one marked):
+    /// call after every point the model id or the session tier can move.
+    fn update_model_eligibility_filters(&self, view: &mut AgentView) {
         let eligible = self
             .current_model_entry(view)
             .is_some_and(pa_types::ai::supports_fast_mode);
@@ -4638,14 +4733,68 @@ impl SessionUi {
             hidden.insert("fast".to_string());
         }
         view.editor.set_autocomplete_hidden_commands(hidden);
+        view.editor
+            .set_autocomplete_argument_completions("tier", self.tier_completion_items(view));
+    }
+
+    /// TS `getAvailableServiceTiers` (the `/tier` choices; `scale` is not
+    /// a user-facing choice): `default` plus the tiers the current model
+    /// supports, in the TS order.
+    fn available_service_tiers(&self, view: &AgentView) -> Vec<&'static str> {
+        let Some(model) = self.current_model_entry(view) else {
+            return vec!["default"];
+        };
+        let mut tiers = vec!["default"];
+        for tier in [
+            pa_types::ai::ServiceTier::Flex,
+            pa_types::ai::ServiceTier::Priority,
+            pa_types::ai::ServiceTier::Auto,
+        ] {
+            if pa_types::ai::supports_service_tier(model, tier) {
+                tiers.push(match tier {
+                    pa_types::ai::ServiceTier::Flex => "flex",
+                    pa_types::ai::ServiceTier::Priority => "priority",
+                    pa_types::ai::ServiceTier::Auto => "auto",
+                    _ => unreachable!("the loop names every choice"),
+                });
+            }
+        }
+        tiers
+    }
+
+    /// TS `getServiceTierCompletions`: the `/tier` argument items — the
+    /// available tiers with their descriptions, the current one marked.
+    fn tier_completion_items(&self, view: &AgentView) -> Vec<crate::autocomplete::CompletionItem> {
+        let current = self.service_tier.as_deref().unwrap_or("default");
+        self.available_service_tiers(view)
+            .into_iter()
+            .map(|tier| {
+                // The one descriptions owner: the settings row's submenu
+                // exports the TS `SERVICE_TIER_OPTIONS` table.
+                let description = crate::settings_menu::service_tier_description(tier);
+                let description = if tier == current {
+                    format!("{description} (current)")
+                } else {
+                    description.to_string()
+                };
+                crate::autocomplete::CompletionItem {
+                    value: tier.to_string(),
+                    label: tier.to_string(),
+                    description: Some(description),
+                    argument_hint: None,
+                    source_tag: None,
+                }
+            })
+            .collect()
     }
 
     /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
-    /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
-    /// dispatch is the only submission path and awaits to completion, so
-    /// toggles cannot interleave.
+    /// The TS queue (`serviceTierChangeQueue`) serializes tier changes
+    /// across `/fast`, `/tier`, and the settings row; here the dispatch
+    /// is the only submission path and awaits to completion, so changes
+    /// cannot interleave.
     async fn handle_fast_command(&mut self, view: &mut AgentView) {
-        const UNAVAILABLE: &str = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
+        const UNAVAILABLE: &str = "Current model does not support fast mode (priority tier)";
         let eligible = self
             .current_model_entry(view)
             .is_some_and(pa_types::ai::supports_fast_mode);
@@ -4689,11 +4838,82 @@ impl SessionUi {
                 self.service_tier = Some(tier.to_string());
             }
         }
+        // The tray badge and the `/tier` completions follow the applied
+        // tier (the `fast` token for priority).
+        view.chrome.service_tier.clone_from(&self.service_tier);
+        self.update_model_eligibility_filters(view);
         let on = self.service_tier.as_deref() == Some("priority");
         self.note(
             &format!("Fast mode: {}", if on { "on" } else { "off" }),
             view,
         );
+    }
+
+    /// `/tier [tier]` (TS `handleTierCommand`): without an argument report
+    /// the current tier and the available ones; a tier the model does not
+    /// support errors with the available list; a supported one applies
+    /// through the same daemon tier switch as `/fast` (TS
+    /// `enqueueServiceTierChange`) and reports the applied tier.
+    async fn handle_tier_command(&mut self, view: &mut AgentView, args: &str) {
+        let tiers = self.available_service_tiers(view);
+        let requested = args.trim().to_lowercase();
+        if requested.is_empty() {
+            let current = self.service_tier.as_deref().unwrap_or("default");
+            self.note(
+                &format!("Service tier: {current} (available: {})", tiers.join(", ")),
+                view,
+            );
+            return;
+        }
+        if !tiers.contains(&requested.as_str()) {
+            self.error_row(
+                &format!(
+                    "Service tier '{requested}' is not available for the current model. Available: {}",
+                    tiers.join(", ")
+                ),
+                view,
+            );
+            return;
+        }
+        let Ok(tier) =
+            serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(requested.clone()))
+        else {
+            self.error_row(&format!("Unknown service tier: {requested}"), view);
+            return;
+        };
+        let switched = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::SetServiceTier {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    service_tier: Some(tier),
+                    rest: Default::default(),
+                },
+            )
+            .await;
+        if let Err(error) = switched {
+            self.error_row(&format!("{error:#}"), view);
+            return;
+        }
+        // The status row reports what the session actually applied (TS
+        // `formatStatus(state.serviceTier)`); a state read that fails or
+        // omits the tier shows no success row — the stale local tier must
+        // not report an apply that did not confirm.
+        let Some(state) = self.connection_state(view).await else {
+            return;
+        };
+        let Some(applied) = state
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.service_tier = Some(applied.clone());
+        view.chrome.service_tier = Some(applied.clone());
+        self.update_model_eligibility_filters(view);
+        self.note(&format!("Service tier: {applied}"), view);
     }
 
     /// `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): a missing
@@ -5917,7 +6137,7 @@ impl SessionUi {
                 }
             }
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         Ok(())
     }
 
@@ -6920,7 +7140,7 @@ impl SessionUi {
                 self.model_configured_providers.clone(),
             );
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         self.dirty = true;
     }
 
@@ -6984,6 +7204,7 @@ impl SessionUi {
                 // so `/new` sessions start on it too (TS settings default).
                 self.model_selection.provider = Some(provider.to_string());
                 self.model_selection.model = Some(model_id.to_string());
+                self.current_model_provider = Some(provider.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
             }
@@ -7083,6 +7304,18 @@ impl SessionUi {
                 .and_then(Value::as_str)
                 .map_or_else(|| picked_model_id.to_string(), str::to_string);
             view.chrome.model_id = Some(model_id);
+            // The provider PATCHES, never resets: a state without the
+            // model's provider keeps the switched-to provider the apply
+            // path already stored (the id keeps the picked model as its
+            // fallback the same way), so the eligibility pair stays
+            // consistent.
+            if let Some(provider) = data
+                .get("model")
+                .and_then(|model| model.get("provider"))
+                .and_then(Value::as_str)
+            {
+                self.current_model_provider = Some(provider.to_string());
+            }
             self.dirty = true;
         }
     }
@@ -8278,9 +8511,12 @@ impl SessionUi {
                 self.dirty = true;
             }
             // `service_tier_changed`: keep the local tier state current (TS
-            // patches the connection state; `/fast` reads it).
+            // patches the connection state; `/fast` reads it) and the tray
+            // badge with it (the `fast` token for priority).
             TurnUpdate::ServiceTierChanged { tier } => {
-                self.service_tier = Some(tier);
+                self.service_tier = Some(tier.clone());
+                view.chrome.service_tier = Some(tier);
+                self.update_model_eligibility_filters(view);
                 self.dirty = true;
             }
             TurnUpdate::CustomRow(entry) => {

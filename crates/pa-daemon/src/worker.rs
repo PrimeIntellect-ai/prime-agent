@@ -87,7 +87,7 @@ impl KillCloseReason {
         }
     }
 }
-use crate::setting_switches::{effective_service_tier, supports_fast_mode};
+use crate::setting_switches::effective_service_tier;
 use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
 
 /// TS-parity worker environment variables (`daemon-worker-protocol.ts`).
@@ -437,6 +437,12 @@ pub(crate) struct SessionCore {
     /// `None` is the settings default "auto"). The effective tier clamps
     /// `priority` to `default` on models without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
+    /// The ACTIVE tier the engine's request slot carries (the TS
+    /// `agent.state.serviceTier`): the preference clamped to the current
+    /// model. Diverges from `service_tier` only while the current model
+    /// does not support the requested tier; every model switch re-clamps
+    /// and updates it.
+    pub(crate) active_service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
     /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
     /// (every queued steer co-delivers as ONE turn at the next
@@ -521,6 +527,7 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
@@ -981,6 +988,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
@@ -1960,7 +1968,7 @@ impl Worker {
             "cycle_model" => self.handle_cycle_model(payload).await,
             "set_scoped_models" => self.handle_set_scoped_models(payload),
             "cycle_thinking_level" => self.handle_cycle_thinking_level().await,
-            "set_service_tier" => self.handle_set_service_tier(payload),
+            "set_service_tier" => self.handle_set_service_tier(payload).await,
             "set_transport" => self.handle_set_transport(payload),
             "set_steering_mode" => self.handle_set_queue_mode("set_steering_mode", payload),
             "set_follow_up_mode" => self.handle_set_queue_mode("set_follow_up_mode", payload),
@@ -2490,8 +2498,13 @@ impl Worker {
                 settings.get_compaction_enabled(),
             )
         };
-        self.engine
-            .configure_service_tier(restored_tier.unwrap_or(Some(service_tier)));
+        // TS `createAgentSession` clamps the session's ACTIVE tier to the
+        // model's support (`clampServiceTier(model, preference)`); the
+        // stored preference below keeps the requested tier, so resuming on
+        // a capable model re-applies it (#2144).
+        let configured_tier = restored_tier.unwrap_or(Some(service_tier));
+        let clamped_tier = effective_service_tier(configured_tier, self.engine.as_ref());
+        self.engine.configure_service_tier(clamped_tier);
         // The abort supervision's terminal record (the supervisor declared
         // a wedged run aborted and injected it into this create replay):
         // the rebuilt transcript discloses the abort with the same
@@ -2557,7 +2570,8 @@ impl Worker {
                 agent_engine.clear_session_closed();
             }
             core.auto_compaction_enabled = auto_compaction_enabled;
-            core.service_tier = restored_tier.unwrap_or(Some(service_tier));
+            core.service_tier = configured_tier;
+            core.active_service_tier = clamped_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
@@ -4342,11 +4356,6 @@ impl Worker {
     pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
         let store = core.store.as_ref();
         let model = self.engine.model_metadata();
-        let model_fast_mode = model
-            .as_ref()
-            .and_then(|model| model.get("id"))
-            .and_then(Value::as_str)
-            .is_some_and(supports_fast_mode);
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -4357,10 +4366,10 @@ impl Worker {
                 .engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            // The effective tier: the preference clamped to the model's
-            // fast-mode support (`priority` degrades to `default`).
+            // The effective tier: the tracked ACTIVE tier (the preference
+            // clamped to the model's support at create/set/switch time).
             service_tier: crate::setting_switches::service_tier_wire_name(
-                effective_service_tier(core.service_tier, model_fast_mode)
+                core.active_service_tier
                     .unwrap_or(pa_types::ai::ServiceTier::Auto),
             )
             .to_string(),
@@ -8903,6 +8912,7 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
