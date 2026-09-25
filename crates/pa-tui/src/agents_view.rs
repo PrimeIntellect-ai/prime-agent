@@ -1211,7 +1211,13 @@ impl AgentsViewMode {
         // border).
         let cap = budget.saturating_sub(3).max(1);
         if content.len() > cap {
-            content.truncate(cap.saturating_sub(1).max(1));
+            // One row of room carries the marker alone: a truncated
+            // refusal never renders without the indication.
+            if cap == 1 {
+                content.clear();
+            } else {
+                content.truncate(cap - 1);
+            }
             content.extend(crate::width::wrap_text(
                 "… the notice continues — a taller pane shows it whole",
                 inner,
@@ -1515,7 +1521,7 @@ impl AgentsViewMode {
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         if let Some(status) = status_override.or(self.status.as_deref()) {
-            return truncate_line(vec![theme.fg(ThemeColor::Error, status.clone())], width);
+            return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
         }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
