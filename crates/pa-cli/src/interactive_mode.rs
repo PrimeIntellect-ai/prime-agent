@@ -1825,7 +1825,7 @@ mod tests {
         let headerless = session_dir.join("headerless.jsonl");
         std::fs::write(
             &headerless,
-            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[]},\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
         )
         .expect("write headerless file");
         let error = fork_startup_selection(
