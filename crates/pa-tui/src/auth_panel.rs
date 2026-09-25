@@ -143,7 +143,7 @@ impl FlowCancel {
 
     /// The pane exits: mark the flow cancelled and wake every prompt
     /// that is waiting for an answer the exited pane can no longer give.
-    fn mark(&self) {
+    pub(crate) fn mark(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = self.wake.send(true);
     }
