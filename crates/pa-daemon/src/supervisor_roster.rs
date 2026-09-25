@@ -401,14 +401,13 @@ impl Supervisor {
                             .summary
                             .get("sessionFile")
                             .and_then(Value::as_str)
-                            .map(|file| {
+                            .is_some_and(|file| {
                                 parent_by_child
                                     .get(&canonical_session_path(Path::new(file)))
                                     .is_some_and(|parent| {
                                         family_descends_from(parent_by_child, parent, &roots)
                                     })
-                            })
-                            .unwrap_or(false);
+                            });
                     if !anchored {
                         roster.delete(&entry.agent_id);
                         removed.push(entry.agent_id.clone());

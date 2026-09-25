@@ -479,10 +479,8 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 pa_tui::auth_panel::PrimeTeamPick::Team(team) => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using team \"{}\".", team.name),
                 ),
-                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount => ProviderAuthOutcome::Status(
-                    format!("Saved API key for {name}. Using personal account."),
-                ),
-                pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
+                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount
+                | pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using personal account."),
                 ),
             }

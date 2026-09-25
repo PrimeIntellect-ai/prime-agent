@@ -3603,28 +3603,25 @@ impl SessionUi {
             }
             AuthSelectorAction::Login { provider, api_key } => {
                 view.provider_auth = None;
-                match api_key {
-                    // The panel-prompted key: store it (TS
-                    // `showApiKeyLoginDialog`'s save path, no panel
-                    // needed).
-                    Some(api_key) => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                // The panel-prompted key: store it (TS
+                // `showApiKeyLoginDialog`'s save path, no panel
+                // needed).
+                if let Some(api_key) = api_key {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                    self.apply_auth_outcome(outcome, view);
+                } else {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    if provider.id.starts_with("mcp:")
+                        || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    {
+                        self.start_provider_panel_login(&provider, auth, view);
+                    } else {
+                        // The unported OAuth subscription stubs: the
+                        // error row is the whole flow (nothing drives
+                        // the panel).
+                        let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, view);
-                    }
-                    None => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        if provider.id.starts_with("mcp:")
-                            || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        {
-                            self.start_provider_panel_login(&provider, auth, view);
-                        } else {
-                            // The unported OAuth subscription stubs: the
-                            // error row is the whole flow (nothing drives
-                            // the panel).
-                            let outcome = auth.0.login(&provider, None).await;
-                            self.apply_auth_outcome(outcome, view);
-                        }
                     }
                 }
             }

@@ -1715,8 +1715,8 @@ fn spawn_saved_catalog_fetch(
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
 ) -> String {
-    let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let client = client.clone();
     // The id rides the supervisor reader's `daemon_` namespace: the
     // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
     // the fetch too, or a dead connection leaves the long-running scan's
