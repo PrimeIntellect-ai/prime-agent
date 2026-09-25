@@ -400,6 +400,15 @@ pub enum HeadlessStep {
     SettleIdle,
     /// Hold until the current turn finishes (bounded by `timeout_ms`).
     WaitIdle { timeout_ms: u64 },
+    /// Hold until a frame rendered after this step contains `needle`
+    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
+    /// rows (side-question answers, streamed notices), which arrive on
+    /// the event cadence rather than a known wall-clock delay.
+    WaitRender { needle: String, timeout_ms: u64 },
+    /// Hold until the newest frame no longer contains `needle` (bounded by
+    /// `timeout_ms`): the verifier's condition wait for a surface closing
+    /// (the pane going away, a banner clearing).
+    WaitGone { needle: String, timeout_ms: u64 },
     /// Hold the plan for `ms` before the next step: the verifier's timing
     /// window (queue prompts deterministically inside a scripted
     /// `delayMs` hold, where the turn is provably busy).
@@ -604,6 +613,18 @@ enum UiInput {
     /// One materialized input-idle tick (the headless `SettleIdle` step).
     SettleIdle,
     WaitIdle {
+        timeout_ms: u64,
+    },
+    /// The headless `WaitRender` barrier's condition: a frame rendered
+    /// after arming must contain `needle`.
+    WaitRender {
+        needle: String,
+        timeout_ms: u64,
+    },
+    /// The headless `WaitGone` barrier's condition: the newest frame must
+    /// no longer contain `needle`.
+    WaitGone {
+        needle: String,
         timeout_ms: u64,
     },
     ScrollTop,
@@ -1188,6 +1209,13 @@ async fn run_interactive_surface(
     let mut running = true;
     let mut headless_done = false;
     let mut wait_idle_deadline: Option<Instant> = None;
+    // The headless render barrier's armed state: its deadline, and the
+    // frames captured at arming (the `WaitRender` condition scans only
+    // frames rendered after the barrier became the queue's head, so a
+    // needle that already scrolled out of an older frame still satisfies
+    // it; `WaitGone` checks only the newest frame).
+    let mut wait_render_deadline: Option<Instant> = None;
+    let mut wait_render_baseline: usize = 0;
     // Spec §10.2: the reconnect loop after a `daemon_closing` update frame.
     // Retry with backoff for up to RECONNECT_WINDOW; each attempt reads the
     // successor's hello (`update_resume`, §10.3) and reattaches by durable
@@ -1282,6 +1310,80 @@ async fn run_interactive_surface(
                 } else {
                     wait_idle_deadline = None;
                     pending.pop_front();
+                }
+            } else if let Some((needle, timeout_ms, present)) = match pending.front() {
+                Some(UiInput::WaitRender { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, true))
+                }
+                Some(UiInput::WaitGone { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, false))
+                }
+                _ => None,
+            } {
+                // The render barrier: `WaitRender` holds until a frame
+                // rendered after arming contains the needle (daemon-driven
+                // rows land on the loop's event/tick cadence, so this rides
+                // out any load latency instead of a fixed wall-clock
+                // window); `WaitGone` holds until the newest frame cleared
+                // it. Frames captured before the barrier reached the queue
+                // head never satisfy it — the baseline is recorded at
+                // arming and only subsequent frames count, except for the
+                // newest frame at arming time (the current state: a
+                // condition that already holds pops immediately instead of
+                // stalling on a repaint that may never come). Like the
+                // idle barrier it holds the whole queued batch behind it,
+                // and its timeout pops with a note (the note never embeds
+                // the needle: the note row renders into frames, and quoting
+                // the needle would make a timed-out wait satisfy the very
+                // condition that failed).
+                let current_state_ok = renderer.headless_frames().is_some_and(|frames| {
+                    frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str()) == present)
+                });
+                if wait_render_deadline.is_none() {
+                    if current_state_ok {
+                        pending.pop_front();
+                    } else {
+                        wait_render_baseline =
+                            renderer.headless_frames().map_or(0, <[String]>::len);
+                        wait_render_deadline =
+                            Some(Instant::now() + Duration::from_millis(timeout_ms));
+                        inputs_pending = false;
+                    }
+                } else {
+                    let satisfied = renderer.headless_frames().is_some_and(|frames| {
+                        if present {
+                            frames
+                                .get(wait_render_baseline..)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|frame| frame.contains(needle.as_str()))
+                        } else {
+                            !frames
+                                .last()
+                                .is_some_and(|frame| frame.contains(needle.as_str()))
+                        }
+                    });
+                    if satisfied {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                    } else if Instant::now() > wait_render_deadline.unwrap() {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                        session.note(
+                            if present {
+                                "timed out waiting for the headless render condition"
+                            } else {
+                                "timed out waiting for the headless render to clear"
+                            },
+                            &mut view,
+                        );
+                    } else {
+                        // The barrier holds the batch while the render
+                        // catches up.
+                        inputs_pending = false;
+                    }
                 }
             } else if let Some(input) = pending.pop_front() {
                 session.dirty = true;
@@ -1429,6 +1531,9 @@ async fn run_interactive_surface(
                         }
                     }
                     UiInput::HeadlessDone => headless_done = true,
+                    UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
+                        unreachable!("render barrier handled above")
+                    }
                     UiInput::ScrollTop => {
                         session.stop_selection_auto_scroll();
                         view.scroll_to_top();
@@ -2545,6 +2650,22 @@ impl Renderer {
                                     return;
                                 }
                             }
+                            HeadlessStep::WaitRender { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitRender { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            HeadlessStep::WaitGone { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitGone { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                             HeadlessStep::WaitMs(ms) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                             }
@@ -2715,6 +2836,15 @@ impl Renderer {
         let text = crate::app::render_frame_text(view, *width, *height).join("\n");
         if frames.last().map(String::as_str) != Some(text.as_str()) {
             frames.push(text);
+        }
+    }
+
+    /// The headless capture's frames (None on a terminal renderer): the
+    /// render barriers wait on these.
+    fn headless_frames(&self) -> Option<&[String]> {
+        match self {
+            Renderer::Headless { frames, .. } => Some(frames),
+            _ => None,
         }
     }
 

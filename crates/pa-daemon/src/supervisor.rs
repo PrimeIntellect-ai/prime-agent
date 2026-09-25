@@ -56,11 +56,24 @@ use crate::{socket, util};
 /// Worker connect budget: socket probes, connect, and the auth handshake
 /// all share this deadline from spawn time (TS `WORKER_CONNECT_TIMEOUT_MS`:
 /// 30s on Unix, 90s on Windows). A worker that never comes up fails the
-/// launch within this budget instead of hanging.
+/// launch within this budget instead of hanging. The budget is
+/// env-overridable (`WORKER_CONNECT_TIMEOUT_ENV`, ms) for environments
+/// whose worker boots need more headroom (e.g. parallel e2e runs on
+/// shared vCPUs); the default keeps the TS wire behavior.
 #[cfg(unix)]
-const WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
 #[cfg(not(unix))]
-const WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
+const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
+/// The auth handshake's minimum budget. Probes, connect, and auth share the
+/// connect deadline, but a probe phase that ate nearly all of it (a
+/// slow-booting worker under load) must not leave the auth route with
+/// crumbs: a worker that just proved life (the probe connected) gets at
+/// least this long to answer the handshake, so the launch fails with the
+/// connect-budget error only when the worker is genuinely wedged.
+const WORKER_AUTH_FLOOR_MS: u64 = 10_000;
+/// Overrides [`DEFAULT_WORKER_CONNECT_TIMEOUT_MS`] when set to a positive
+/// number of milliseconds (tests under parallel load use this seam).
+const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS";
 /// One socket probe attempt (TS `WORKER_CONNECT_PROBE_MS`).
 #[cfg(unix)]
 const WORKER_CONNECT_PROBE_MS: u64 = 500;
@@ -1685,15 +1698,16 @@ impl Supervisor {
         // Authenticate against the worker within the remaining connect
         // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
         // deadline).
+        // A worker whose probes ate the whole connect budget still proved
+        // it is alive (the socket answered), so the handshake always gets
+        // at least the auth floor — the floor, never the budget's crumbs,
+        // and a fully-spent budget included. The launch's failure mode
+        // stays the connect-budget error instead of a misleading route
+        // timeout on a worker that just came up.
         let auth_budget_ms = connect_deadline
             .saturating_duration_since(tokio::time::Instant::now())
-            .as_millis() as u64;
-        if auth_budget_ms == 0 {
-            return Err(anyhow!(
-                "session worker {} did not come up in time",
-                resident.worker_id
-            ));
-        }
+            .as_millis()
+            .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
         let response = self
             .route_command(
                 resident,
@@ -1708,7 +1722,19 @@ impl Supervisor {
                 }),
                 auth_budget_ms,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                // The handshake route's timeout is the connect budget
+                // running out, not a session command timing out: report the
+                // launch-budget failure so a loaded-box launch failure says
+                // what actually happened (never the generic route timeout
+                // text, which pointed triage at the wrong seam).
+                if error.to_string() == "Session worker timed out" {
+                    anyhow!("session worker {} did not come up in time", resident.worker_id)
+                } else {
+                    error
+                }
+            })?;
         if !response.success {
             return Err(anyhow!(
                 "worker authentication failed: {}",
@@ -4956,9 +4982,19 @@ async fn probe_worker_socket(
 }
 
 /// The shared worker-connect deadline: probes, connect, and auth must all
-/// fit inside one [`WORKER_CONNECT_TIMEOUT_MS`] budget from spawn time.
+/// fit inside one worker-connect budget from spawn time (the TS default,
+/// or the env override for load-heavy e2e environments). An override past
+/// the platform's representable range falls back to the default budget
+/// instead of panicking the deadline arithmetic.
 fn worker_connect_deadline() -> tokio::time::Instant {
-    tokio::time::Instant::now() + Duration::from_millis(WORKER_CONNECT_TIMEOUT_MS)
+    let timeout_ms = std::env::var(WORKER_CONNECT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_WORKER_CONNECT_TIMEOUT_MS);
+    let now = tokio::time::Instant::now();
+    now.checked_add(Duration::from_millis(timeout_ms))
+        .unwrap_or_else(|| now + Duration::from_millis(DEFAULT_WORKER_CONNECT_TIMEOUT_MS))
 }
 
 fn streamed_attach_lines(
