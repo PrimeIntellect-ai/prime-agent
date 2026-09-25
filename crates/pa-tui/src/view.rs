@@ -68,16 +68,19 @@ impl Default for ShareLoader {
 /// The run-shape inputs one in-place mutation can move (the
 /// `prepare_entry_mutation`/`mark_entry_stale` pair's capture): an
 /// assistant flips its glue state (a boundary flip merges or splits
-/// runs); an ipython card's parseable receipt count is a condensing
+/// runs); an ipython card's parseable receipt ids are a condensing
 /// threshold input (a result landing receipts can qualify a short
-/// run); a card with no receipt-bearing potential moves only its own
-/// rows - the run map's shape never changes for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// run, and a same-count id swap changes the dedupe); a card with no
+/// receipt-bearing potential moves only its own rows - the run map's
+/// shape never changes for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RunShapeInputs {
     /// The assistant's glue state before the mutation.
     AssistantGlue(bool),
-    /// The card's parseable receipt count before the mutation.
-    Receipts(usize),
+    /// The card's parseable receipt ids before the mutation (the
+    /// threshold's change detector: a count change OR a same-count id
+    /// swap re-derives the run map - the dedupe keys on ids).
+    Receipts(Vec<Option<String>>),
 }
 
 pub struct AgentView {
@@ -709,7 +712,7 @@ impl AgentView {
                 crate::tool_runs::is_run_glue(&self.chat[index]),
             )),
             Some(ChatEntry::Tool(card)) => Some(RunShapeInputs::Receipts(
-                crate::tool_runs::card_receipt_count(card),
+                crate::tool_runs::card_receipt_ids(card),
             )),
             _ => None,
         };
@@ -755,9 +758,9 @@ impl AgentView {
         let inputs = self.runs_shape.take();
         let rebuild = match self.chat.get(index) {
             Some(ChatEntry::Assistant(_)) => Some(self.member_start(index)),
-            Some(ChatEntry::Tool(card)) => match inputs {
+            Some(ChatEntry::Tool(card)) => match inputs.as_ref() {
                 Some(RunShapeInputs::Receipts(before))
-                    if crate::tool_runs::card_receipt_count(card) != before =>
+                    if crate::tool_runs::card_receipt_ids(card) != before.as_slice() =>
                 {
                     Some(self.member_start(index))
                 }
@@ -788,12 +791,18 @@ impl AgentView {
                         index
                     }
                     Some(RunShapeInputs::AssistantGlue(_)) => start,
-                    // A card inside a qualifying run moves the BLOCK's
-                    // rows (they live at the run's start); a solo card
-                    // (a short uncondensed sequence, or a standalone
-                    // card) moves only its own rows - the fold lands
-                    // there, never at the sequence's first card.
-                    Some(RunShapeInputs::Receipts(_)) | None => match self.run_map.slot(index) {
+                    // A receipt-bearing mutation reshapes the block at
+                    // the captured suffix start - a formed, dissolved,
+                    // or re-counted run moves its rows there (and the
+                    // standalone card's own start IS its index). A
+                    // bare arg/state mutation keeps the slot-based fold:
+                    // a member card moves the BLOCK's rows (they live at
+                    // the run's start); a solo card (a short uncondensed
+                    // sequence, or a standalone card) moves only its own
+                    // rows - the fold lands there, never at the
+                    // sequence's first card.
+                    Some(RunShapeInputs::Receipts(_)) => start,
+                    None => match self.run_map.slot(index) {
                         Some(
                             crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
                         ) => start,

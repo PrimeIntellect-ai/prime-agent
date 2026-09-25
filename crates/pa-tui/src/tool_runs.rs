@@ -182,12 +182,16 @@ fn card_receipts(card: &ToolCallCard) -> Vec<(Option<&str>, bool)> {
         .collect()
 }
 
-/// One card's parseable receipt count (the condensing threshold's
-/// in-place change detector: a result mutation can move a run's
-/// qualification only through this count, so the run map rebuilds
-/// exactly when it changed).
-pub fn card_receipt_count(card: &ToolCallCard) -> usize {
-    card_receipts(card).len()
+/// One card's parseable receipt ids, in record order (the run map's
+/// in-place change detector: a result mutation can move the run's
+/// qualification through the receipt count OR through a same-count id
+/// swap - the run's dedupe keys on ids - so the map re-derives when
+/// the captured ids change).
+pub fn card_receipt_ids(card: &ToolCallCard) -> Vec<Option<String>> {
+    card_receipts(card)
+        .into_iter()
+        .map(|(id, _)| id.map(str::to_string))
+        .collect()
 }
 
 /// Count one entry's agent-message notices into `notices`, deduping
@@ -411,7 +415,7 @@ fn count_text(summary: &RunSummary) -> String {
 
 /// The breakdown row's class text: `8 python \u{b7} 3 bash \u{b7} 2 agent
 /// messages sent`.
-pub fn class_text(summary: &RunSummary) -> String {
+fn class_text(summary: &RunSummary) -> String {
     summary
         .classes
         .iter()
