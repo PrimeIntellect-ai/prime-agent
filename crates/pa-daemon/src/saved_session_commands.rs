@@ -114,6 +114,9 @@ pub(crate) fn delete_session_file_after_file_removed(
     path: &Path,
     after_file_removed: &dyn Fn(&Path),
 ) -> Value {
+    // The delete unlinks the file by either leg: a cached append descriptor
+    // must not keep writing into the unlinked inode.
+    pa_core::session::window::invalidate_cached_append(path);
     let trash = StdCommand::new("trash").arg("--").arg(path).output();
     let removed_by_trash = match trash {
         Ok(output) => output.status.success() || !path.exists(),

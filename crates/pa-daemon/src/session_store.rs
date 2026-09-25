@@ -1001,8 +1001,13 @@ impl SessionFile {
             writer.flush()?;
             writer.get_ref().sync_all()?;
         }
-        pa_core::platform::rename_onto(&temp, path)
-            .with_context(|| format!("persist {}", path.display()))?;
+        let renamed = pa_core::platform::rename_onto(&temp, path);
+        if renamed.is_ok() {
+            // The rename replaced the file: cached append descriptors must
+            // not outlive the inode they point at.
+            pa_core::session::window::invalidate_cached_append(path);
+        }
+        renamed.with_context(|| format!("persist {}", path.display()))?;
         Ok(())
     }
 

@@ -1034,18 +1034,21 @@ impl SessionManager {
         if !self.persist {
             return Ok(());
         }
-        let mut content = String::new();
-        for (index, entry) in self.file_entries.iter().enumerate() {
-            if index > 0 {
-                content.push('\n');
-            }
-            content.push_str(&serialize_entry(entry));
-        }
-        content.push('\n');
         if let Some(parent) = session_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        atomic_write(session_file, &content)?;
+        // Stream the entries through the atomic write's buffer: the same
+        // newline-joined bytes land on disk without building the whole
+        // session as one in-memory string first.
+        atomic_write_with(session_file, |writer| {
+            for (index, entry) in self.file_entries.iter().enumerate() {
+                if index > 0 {
+                    writer.write_all(b"\n")?;
+                }
+                writer.write_all(serialize_entry(entry).as_bytes())?;
+            }
+            writer.write_all(b"\n")
+        })?;
         self.notify_persist_listeners();
         Ok(())
     }
@@ -1785,16 +1788,35 @@ fn resolve_session_rlm_depth(header: &SessionHeader, _session_path: &Path) -> u6
 /// destination (TS `writeFileAtomicSync`; the win32 destination-busy retry
 /// rides along in `rename_onto`).
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    atomic_write_with(path, |writer| writer.write_all(content.as_bytes()))
+}
+
+/// [`atomic_write`] over a streaming producer: the content never has to be
+/// materialized as one string first (a full-session rewrite streams through
+/// a buffer instead of doubling the file in memory), and the bytes on disk
+/// are identical to the whole-content form.
+fn atomic_write_with<F>(path: &Path, write: F) -> std::io::Result<()>
+where
+    F: FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+{
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
         let mut options = std::fs::OpenOptions::new();
         options.create(true).write(true).truncate(true);
         crate::platform::perms::set_private_mode(&mut options);
-        let mut file = options.open(&temp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
+        let file = options.open(&temp)?;
+        let mut writer = std::io::BufWriter::new(file);
+        write(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
     }
-    crate::platform::rename_onto(&temp, path)
+    let renamed = crate::platform::rename_onto(&temp, path);
+    if renamed.is_ok() {
+        // The rename replaced the file: any cached append descriptor for
+        // the old inode must not survive past this point.
+        super::window::invalidate_cached_append(path);
+    }
+    renamed
 }
 
 #[cfg(test)]

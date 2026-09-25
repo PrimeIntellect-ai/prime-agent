@@ -169,14 +169,19 @@ pub fn restore_session(
 
 /// Rename with a copy+delete fallback (rename fails across filesystems).
 fn move_file(source: &Path, destination: &Path) -> Result<()> {
-    if let Ok(()) = fs::rename(source, destination) {
+    // Either leg ends with the source path gone or the destination
+    // replaced: cached append descriptors for both paths are stale.
+    let outcome = if let Ok(()) = fs::rename(source, destination) {
         Ok(())
     } else {
         fs::copy(source, destination)
             .with_context(|| format!("copy {} -> {}", source.display(), destination.display()))?;
         fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
         Ok(())
-    }
+    };
+    pa_core::session::window::invalidate_cached_append(source);
+    pa_core::session::window::invalidate_cached_append(destination);
+    outcome
 }
 
 /// One candidate per valid session file directly under the sessions dir

@@ -121,12 +121,16 @@ pub(super) fn evict_live_snapshot(path: &Path) {
 pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     let temp = path.with_extension(format!("window-cache-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        serde_json::to_writer(&mut file, snapshot)?;
-        file.flush()?;
+        // One buffered flush instead of one write per serialized fragment:
+        // the sidecar is disposable, but the syscall storm (hundreds of
+        // single-byte writes per open) showed up on the cold-open path.
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, snapshot)?;
+        writer.flush()?;
         std::fs::rename(&temp, cache_path(path))
     })();
     if result.is_err() {
@@ -163,6 +167,55 @@ pub enum AppendOwnership {
     /// No runtime lease: append without publishing an incremental snapshot.
     Unleased,
 }
+/// Cached append-mode session descriptors (unix only): durable appends
+/// reuse one open file per path instead of paying open+close per row.
+/// Write and `fdatasync` still run on every append, so on-disk bytes and
+/// crash-safety are unchanged.
+fn append_handles() -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<File>>>> {
+    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<File>>>>> =
+        OnceLock::new();
+    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Open (or reuse) the append descriptor for `path`.
+///
+/// # Errors
+///
+/// Surfaces the open error unchanged: the first append to a missing file
+/// fails exactly as a per-call open would.
+#[cfg(unix)]
+fn cached_append_handle(path: &Path) -> io::Result<std::sync::Arc<Mutex<File>>> {
+    let mut handles = append_handles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(handle) = handles.get(path) {
+        return Ok(std::sync::Arc::clone(handle));
+    }
+    let file = std::fs::OpenOptions::new().append(true).open(path)?;
+    let handle = std::sync::Arc::new(Mutex::new(file));
+    handles.insert(path.to_owned(), std::sync::Arc::clone(&handle));
+    Ok(handle)
+}
+
+/// Drop `path`'s cached append descriptor (if any): the next append
+/// reopens by path. Every in-process replace or removal of a session file
+/// must invalidate here so appends land on the file that exists now, not
+/// an unlinked inode.
+pub fn invalidate_cached_append(path: &Path) {
+    if let Ok(mut handles) = append_handles().lock() {
+        handles.remove(path);
+    }
+}
+
+/// True when the descriptor's file was replaced (rename onto the path) or
+/// unlinked: POSIX drops the old inode's link count to zero, so one cheap
+/// fstat detects a stale descriptor cross-process.
+#[cfg(unix)]
+fn handle_unlinked(file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().map(|meta| meta.nlink() == 0).unwrap_or(true)
+}
+
 /// Append authoritative JSONL bytes. Only a caller holding the existing session
 /// lease may incrementally certify the cache. Rows must have fresh writer IDs.
 /// Cache failures never fail a successful durable append.
@@ -173,10 +226,51 @@ pub enum AppendOwnership {
 /// itself (open, write, flush, sync); a failed incremental cache
 /// certification is dropped, not surfaced.
 pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // One bounded reopen pass when the cached descriptor went stale
+        // (the file was replaced or unlinked since the last append); the
+        // append then lands on the file that exists now, as a per-call
+        // open always did.
+        for _ in 0..2 {
+            let handle = cached_append_handle(path)?;
+            let mut file = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !handle_unlinked(&file) {
+                return append_with(&mut file, path, bytes, ownership);
+            }
+            drop(file);
+            invalidate_cached_append(path);
+        }
+    }
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    file.sync_data()?;
+    append_with(&mut file, path, bytes, ownership)
+}
+
+/// Write-and-sync over an already-open append descriptor, then run the
+/// incremental snapshot certification.
+///
+/// # Errors
+///
+/// Surfaces the write or `fdatasync` error (a failed write also drops the
+/// cached descriptor so the next append reopens); a failed incremental
+/// cache certification is dropped, not surfaced.
+fn append_with(
+    file: &mut File,
+    path: &Path,
+    bytes: &[u8],
+    ownership: AppendOwnership,
+) -> io::Result<()> {
+    let written = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_data()
+    })();
+    if let Err(error) = written {
+        #[cfg(unix)]
+        invalidate_cached_append(path);
+        return Err(error);
+    }
     if ownership != AppendOwnership::SessionLeaseHeld || !bytes.ends_with(b"\n") {
         if let Ok(mut snapshots) = live_snapshots().lock() {
             snapshots.remove(path);

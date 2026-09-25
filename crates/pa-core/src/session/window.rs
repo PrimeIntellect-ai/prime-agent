@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::window_cache::{self, Generation, Snapshot};
-pub use super::window_cache::{append_cached, flush as flush_cache, AppendOwnership};
+pub use super::window_cache::{append_cached, flush as flush_cache, invalidate_cached_append, AppendOwnership};
 use pa_types::session::{FileEntry, SessionHeader};
 use serde::{Deserialize, Serialize};
 
