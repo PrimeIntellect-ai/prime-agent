@@ -562,9 +562,9 @@ mod tests {
     fn first_built_in_anthropic_model() -> (String, String) {
         let model = pa_ai::models_generated::get_models("anthropic")
             .first()
-            .expect("the generated catalog has anthropic models")
-            .clone();
-        (model.provider.clone(), model.id.clone())
+            .copied()
+            .expect("the generated catalog has anthropic models");
+        (model.provider.to_string(), model.id.to_string())
     }
 
     #[test]
