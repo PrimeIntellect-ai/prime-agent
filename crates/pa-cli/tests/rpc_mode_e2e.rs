@@ -6,7 +6,7 @@
 //! tree, name/stats), the TS in-process daemon-mode errors, and the
 //! lifecycle (stdin close settles and exits 0).
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 /// child process (its cwd), so it is held on the struct.
 struct RpcChild {
     child: Child,
-    stdin: std::process::ChildStdin,
+    /// `Some` while the pipe is open: the EOF tests take it (the drop
+    /// closes the child's stdin).
+    stdin: Option<std::process::ChildStdin>,
     lines: Receiver<String>,
     next_id: u64,
     /// Held (never read) so the child's cwd directory outlives the
@@ -61,7 +63,7 @@ impl RpcChild {
         });
         RpcChild {
             child,
-            stdin,
+            stdin: Some(stdin),
             lines,
             next_id: 0,
             _home: home,
@@ -72,8 +74,9 @@ impl RpcChild {
     fn send(&mut self, frame: Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().expect("stdin piped");
+        stdin.write_all(line.as_bytes()).unwrap();
+        stdin.flush().unwrap();
     }
 
     fn command(&mut self, command: &Value) -> String {
@@ -148,8 +151,9 @@ impl RpcChild {
     }
 
     fn drain_stderr(&mut self) {
-        if let Some(stderr) = self.spawn_stderr.take() {
-            let text = std::io::Read::to_string(stderr).unwrap_or_default();
+        if let Some(mut stderr) = self.spawn_stderr.take() {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
             if !text.is_empty() {
                 eprintln!("RPC child stderr: {text}");
             }
