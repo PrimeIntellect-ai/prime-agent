@@ -613,6 +613,10 @@ mod tests {
                 self.prompt_seen.lock().unwrap().clone(),
             )
         }
+
+        fn progress_log(&self) -> Vec<String> {
+            self.progress.lock().unwrap().clone()
+        }
     }
 
     impl PrimeLoginUi for ScriptedUi {
