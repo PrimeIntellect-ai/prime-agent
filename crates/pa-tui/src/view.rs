@@ -78,9 +78,6 @@ enum RunShapeInputs {
     AssistantGlue(bool),
     /// The card's parseable receipt count before the mutation.
     Receipts(usize),
-    /// No run-shape input moves (a card without receipt potential, or
-    /// an entry type that never mutates in place).
-    None,
 }
 
 pub struct AgentView {
@@ -224,13 +221,17 @@ pub struct AgentView {
     sparse_mutation: Option<(usize, usize)>,
     /// The condensed tool runs' suffix capture for one in-place mutation
     /// (the `prepare_entry_mutation`/`mark_entry_stale` pair): the
-    /// affected run's start index, the suffix's row count before the
-    /// mutation, and the mutation's run-shape inputs. The block's
-    /// row-count change folds into the sparse window's tail bookkeeping
-    /// through the run's owning index, except an assistant mutation
-    /// that keeps the glue boundary (a streaming grow), which folds at
-    /// the entry's own slot.
-    runs_prepare: Option<(usize, usize, RunShapeInputs)>,
+    /// affected run's start index and the suffix's row count before the
+    /// mutation. The block's row-count change folds into the sparse
+    /// window's tail bookkeeping through the run's owning index, except
+    /// an assistant mutation that keeps the glue boundary (a streaming
+    /// grow), which folds at the entry's own slot.
+    runs_prepare: Option<(usize, usize)>,
+    /// The run-shape input captured before one in-place mutation,
+    /// independent of the sparse-window fold above (a top-anchored
+    /// window folds nothing, but the run map still re-derives when the
+    /// input moves); `mark_entry_stale` consumes it.
+    runs_shape: Option<RunShapeInputs>,
     sparse_entries: std::collections::BTreeSet<usize>,
     /// The condensed tool runs (a purely render-time grouping, never
     /// stored): one slot per chat entry. Rebuilt from the earliest
@@ -380,6 +381,7 @@ impl AgentView {
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
             runs_prepare: None,
+            runs_shape: None,
             run_map: crate::tool_runs::ToolRuns::default(),
         }
     }
@@ -461,7 +463,7 @@ impl AgentView {
         self.entry_layout.push([None, None, None]);
         if let Some((start, before)) = captured {
             if self.run_map.append_tail(&self.chat) {
-                // The O(1) tail patch widened the owning run's extent:
+                // The in-place tail patch widened the owning run's extent:
                 // only its block's cached rows (at the start slot)
                 // re-render - the members' rows never left their empty
                 // caches, and the pushed slot has none yet.
@@ -682,6 +684,7 @@ impl AgentView {
         self.entry_heights.clear();
         self.run_map.rebuild_from(&self.chat, 0);
         self.runs_prepare = None;
+        self.runs_shape = None;
         self.md_caches.borrow_mut().clear();
         // A rebuilt transcript has no pending hold (TS
         // `resetCurrentSessionRenderState` clears `pendingBashComponents`).
@@ -695,6 +698,21 @@ impl AgentView {
     /// entry's rows, never the transcript). Top-anchored windows are
     /// absolute already and need nothing.
     pub fn prepare_entry_mutation(&mut self, index: usize) {
+        // The run-shape capture is independent of the sparse-window fold
+        // below: a top-anchored window folds nothing, but the run map
+        // still re-derives when the shape input moves (a result landing
+        // agent-message receipts can qualify a short run while the user
+        // is scrolled away), so `mark_entry_stale` reads this capture
+        // regardless of the window mode.
+        self.runs_shape = match self.chat.get(index) {
+            Some(ChatEntry::Assistant(_)) => Some(RunShapeInputs::AssistantGlue(
+                crate::tool_runs::is_run_glue(&self.chat[index]),
+            )),
+            Some(ChatEntry::Tool(card)) => Some(RunShapeInputs::Receipts(
+                crate::tool_runs::card_receipt_count(card),
+            )),
+            _ => None,
+        };
         if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
             // A glue-or-tool entry's mutation moves its run's block, not
             // just its own rows: capture the affected suffix so
@@ -709,26 +727,8 @@ impl AgentView {
             if assistant || crate::tool_runs::is_run_glue(&self.chat[index]) {
                 let start = self.member_start(index);
                 let before = self.suffix_rows(start, self.layout_width);
-                // An assistant's mutation can cross the glue boundary
-                // (the merge and split), so the run-aware suffix
-                // capture covers both sides; its pre-mutation glue
-                // state rides along - the stale pass folds a streaming
-                // grow that keeps the boundary at the entry's own
-                // slot (the earlier run's block never moved). A tool
-                // card's capture rides its receipt count: a result
-                // landing receipts can qualify a short run (the
-                // threshold counts them as items).
-                let inputs = match &self.chat[index] {
-                    ChatEntry::Assistant(_) => RunShapeInputs::AssistantGlue(
-                        crate::tool_runs::is_run_glue(&self.chat[index]),
-                    ),
-                    ChatEntry::Tool(card) => {
-                        RunShapeInputs::Receipts(crate::tool_runs::card_receipt_count(card))
-                    }
-                    _ => RunShapeInputs::None,
-                };
                 self.sparse_mutation = None;
-                self.runs_prepare = Some((start, before, inputs));
+                self.runs_prepare = Some((start, before));
                 return;
             }
             let rows = self.count_entry_rows(index, self.layout_width);
@@ -752,19 +752,17 @@ impl AgentView {
         // moves the condensing threshold (the receipts are items):
         // rebuild the run map's affected suffix so the grouping always
         // matches the entries it reads.
+        let inputs = self.runs_shape.take();
         let rebuild = match self.chat.get(index) {
             Some(ChatEntry::Assistant(_)) => Some(self.member_start(index)),
-            Some(ChatEntry::Tool(card)) => {
-                let inputs = self.runs_prepare.as_ref().map(|capture| capture.2);
-                match inputs {
-                    Some(RunShapeInputs::Receipts(before))
-                        if crate::tool_runs::card_receipt_count(card) != before =>
-                    {
-                        Some(self.member_start(index))
-                    }
-                    _ => None,
+            Some(ChatEntry::Tool(card)) => match inputs {
+                Some(RunShapeInputs::Receipts(before))
+                    if crate::tool_runs::card_receipt_count(card) != before =>
+                {
+                    Some(self.member_start(index))
                 }
-            }
+                _ => None,
+            },
             _ => None,
         };
         if let Some(start) = rebuild {
@@ -773,7 +771,7 @@ impl AgentView {
         // The sparse-window fold: a glue-or-tool mutation folded its run's
         // whole suffix (the block's change included) through the run's
         // owning index; any other mutation folds its own rows.
-        if let Some((start, before, inputs)) = self.runs_prepare.take() {
+        if let Some((start, before)) = self.runs_prepare.take() {
             if self.layout_width > 0 {
                 let after = self.suffix_rows(start, self.layout_width);
                 // An assistant that kept its glue state only grew its
@@ -784,18 +782,18 @@ impl AgentView {
                 // member card's state change folds through the run's
                 // owning index - the block's shape moved there.
                 let fold = match inputs {
-                    RunShapeInputs::AssistantGlue(was)
+                    Some(RunShapeInputs::AssistantGlue(was))
                         if crate::tool_runs::is_run_glue(&self.chat[index]) == was =>
                     {
                         index
                     }
-                    RunShapeInputs::AssistantGlue(_) => start,
+                    Some(RunShapeInputs::AssistantGlue(_)) => start,
                     // A card inside a qualifying run moves the BLOCK's
                     // rows (they live at the run's start); a solo card
                     // (a short uncondensed sequence, or a standalone
                     // card) moves only its own rows - the fold lands
                     // there, never at the sequence's first card.
-                    RunShapeInputs::Receipts(_) | RunShapeInputs::None => {
+                    Some(RunShapeInputs::Receipts(_)) | None => {
                         match self.run_map.slot(index) {
                             Some(
                                 crate::tool_runs::RunSlot::Start(_)
@@ -3410,6 +3408,72 @@ mod tests {
         assert!(
             after.contains("2 agent messages sent"),
             "the breakdown carries the receipt class: {after}"
+        );
+    }
+
+    #[test]
+    fn a_landing_receipt_qualifies_the_run_while_the_window_is_top_anchored() {
+        // The top-anchored window (the user scrolled up) folds nothing on
+        // a mutation, but the run-shape capture is independent of the
+        // sparse fold: a result landing agent-message receipts re-derives
+        // the run map immediately, and the block forms without waiting
+        // for the next tail push.
+        let mut view = condensed_view(Vec::new());
+        for index in 0..40 {
+            view.push_entry(crate::chat::ChatEntry::Status {
+                text: format!("row {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        let mut cell = settled_tool_card("cell0");
+        if let ChatEntry::Tool(card) = &mut cell {
+            card.name = "ipython".to_string();
+            card.args = serde_json::json!({"code": "print(1)"});
+        }
+        view.push_entry(cell);
+        view.push_entry(settled_tool_card("card1"));
+        let _ = view.render_frame(80, 12);
+        view.scroll_to_top();
+        assert!(
+            !view.sparse_window_is_tail_anchored(),
+            "the window holds the top, not the tail"
+        );
+        let frame = view.render_frame(80, 12);
+        let rendered: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(
+            rendered.iter().any(|row| row.contains("row 0")),
+            "the top-anchored frame holds the first rows: {rendered:?}"
+        );
+        let index = view.chat.len() - 2;
+        view.prepare_entry_mutation(index);
+        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+            card.result = Some(ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::json!({
+                    "sentAgentMessages": [
+                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" },
+                        { "id": "m2", "message": "b", "deliveryStatus": "delivered", "receiverRole": "parent" }
+                    ]
+                }),
+                is_error: false,
+            });
+        }
+        view.mark_entry_stale(index);
+        assert!(
+            view.run_map.run_at(index).is_some(),
+            "the block formed while the window was scrolled away"
+        );
+        assert!(
+            view.runs_shape.is_none(),
+            "the shape capture is consumed by the stale pass"
+        );
+        let after = transcript_text(&mut view, 80);
+        assert!(
+            after.contains("2 tool calls \u{b7} 2 agent messages"),
+            "the block renders with both kinds counted: {after}"
         );
     }
 

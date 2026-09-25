@@ -1001,8 +1001,8 @@ fn a_qualifying_tail_append_patches_the_map_incrementally() {
     for index in 0..5 {
         view.push_entry(card(&format!("c{index}")));
     }
-    // The sixth card lands through the O(1) path (the run owns the
-    // tail already).
+    // The sixth card lands through the in-place tail path (the run
+    // owns the tail already).
     view.push_entry(card("c5"));
     let mut fresh = crate::tool_runs::ToolRuns::default();
     fresh.rebuild_from(&view.chat, 0);

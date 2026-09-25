@@ -529,15 +529,17 @@ impl ToolRuns {
         }
     }
 
-    /// The O(1) tail append: the chat just grew by one run-member
+    /// The in-place tail append: the chat just grew by one run-member
     /// entry and nothing before it moved. When the pushed item extends
     /// a QUALIFYING run that already owns the tail (its last member is
     /// the immediately preceding entry), the map patches in place -
     /// the run's start widens its extent by the pushed item and the
-    /// pushed slot becomes a Member - instead of rescanning the run
-    /// from its first item (an N-item stream otherwise pays O(N²) in
-    /// the synchronous TUI update loop). A streamed card (no result
-    /// yet) and a receipt-free replayed card extend by one call; an
+    /// pushed slot becomes a Member - instead of rescanning the run's
+    /// items from its first one (`block_owner`'s backward walk still
+    /// costs the run's length in the worst case; an N-item stream
+    /// otherwise pays a full rescan per push in the synchronous TUI
+    /// update loop). A streamed card (no result yet) and a
+    /// receipt-free replayed card extend by one call; an
     /// agent-message notice extends by one message; every other shape
     /// - the threshold crossing, hidden-assistant glue that binds
     /// later, a receipt-carrying card (the run's dedupe needs the
