@@ -23,8 +23,7 @@ fn is_skippable_python_line(line: &str) -> bool {
 fn python_indent(line: &str) -> usize {
     re_once!(format!(r"^{S}*"))
         .find(line)
-        .map(|m| m.as_str().chars().count())
-        .unwrap_or(0)
+        .map_or(0, |m| m.as_str().chars().count())
 }
 
 fn python_call_pattern(inner: &str) -> bool {
@@ -134,9 +133,9 @@ fn python_preview_line(
     index: usize,
     paths: &std::collections::HashMap<String, String>,
 ) -> String {
-    let line = lines.get(index).map(String::as_str).unwrap_or("");
+    let line = lines.get(index).map_or("", String::as_str);
     if index > 0 && re_once!(format!(r"^{S}*(?:async{S}+def|def|class){S}+")).is_match(line) {
-        let previous = lines.get(index - 1).map(String::as_str).unwrap_or("");
+        let previous = lines.get(index - 1).map_or("", String::as_str);
         if re_once!(format!(r"^{S}*@")).is_match(js_trim(previous)) {
             return format!("{} {}", js_trim(previous), js_trim(line));
         }
@@ -295,7 +294,10 @@ fn scan_python_string_literal(
         let ch = code[i..].chars().next().expect("char boundary");
         if ch == '\\' && i + 1 < code.len() {
             let next = code[i + 1..].chars().next().expect("char boundary");
-            if !raw {
+            if raw {
+                value.push('\\');
+                value.push(next);
+            } else {
                 if is_unsupported_escape_char(next) {
                     unsupported_escape = true;
                 }
@@ -312,9 +314,6 @@ fn scan_python_string_literal(
                         value.push(other);
                     }
                 }
-            } else {
-                value.push('\\');
-                value.push(next);
             }
             i += 1 + next.len_utf8();
             continue;
@@ -373,12 +372,11 @@ pub fn python_statement_lines(code: &str) -> Vec<String> {
                 }
             }
             if scan.closed && line > start_line {
-                let column = scan.end - (code[..scan.end].rfind('\n').map(|p| p + 1).unwrap_or(0));
+                let column = scan.end - (code[..scan.end].rfind('\n').map_or(0, |p| p + 1));
                 let rest_start = scan.end;
                 let rest_end = code[rest_start..]
                     .find('\n')
-                    .map(|p| rest_start + p)
-                    .unwrap_or(code.len());
+                    .map_or(code.len(), |p| rest_start + p);
                 while lines.len() <= line {
                     lines.push(String::new());
                 }

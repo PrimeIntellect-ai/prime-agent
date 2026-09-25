@@ -492,7 +492,7 @@ impl ReplKernelManager {
         if !matches!(action, "list" | "tail" | "kill") {
             return Err(anyhow!("unknown bash activity action"));
         }
-        let requires_id = action != "list" && activity_id.map(str::trim).unwrap_or("").is_empty();
+        let requires_id = action != "list" && activity_id.map_or("", str::trim).is_empty();
         if requires_id {
             return Err(anyhow!(
                 "bash activity tail/kill requires string activityId"
@@ -514,14 +514,14 @@ impl ReplKernelManager {
                 .remove(&request_id);
             return Err(error);
         }
-        let fields = match tokio::time::timeout(Duration::from_secs(3), rx).await {
-            Ok(Ok(fields)) => fields,
-            _ => {
-                lock(&self.inner.guarded)
-                    .bash_activity_waiters
-                    .remove(&request_id);
-                return Err(anyhow!("Kernel bash activity request did not settle"));
-            }
+        let fields = if let Ok(Ok(fields)) = tokio::time::timeout(Duration::from_secs(3), rx).await
+        {
+            fields
+        } else {
+            lock(&self.inner.guarded)
+                .bash_activity_waiters
+                .remove(&request_id);
+            return Err(anyhow!("Kernel bash activity request did not settle"));
         };
         if fields.get("status").and_then(Value::as_str) != Some("ok") {
             return Err(anyhow!(

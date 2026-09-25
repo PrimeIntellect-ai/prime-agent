@@ -34,13 +34,15 @@ impl BundledAssets {
     pub fn package_dir() -> PathBuf {
         std::env::var_os("PI_PACKAGE_DIR")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(Path::to_path_buf))
-                    .unwrap_or_default()
-            })
+            .map_or_else(
+                || {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+                        .unwrap_or_default()
+                },
+                PathBuf::from,
+            )
     }
 
     /// Assets at the package root ([`BundledAssets::package_dir`]).

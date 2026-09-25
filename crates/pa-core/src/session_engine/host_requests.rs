@@ -23,10 +23,7 @@ pub fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
         "id": job.id,
         "status": status_name(job.status),
         "label": nullable_string(job.label.clone()),
-        "delivery_mode": job
-            .delivery_mode
-            .map(delivery_mode_name)
-            .unwrap_or("steer"),
+        "delivery_mode": job.delivery_mode.map_or("steer", delivery_mode_name),
         "instruction": job.prompt,
         "schedule": serde_json::to_value(&job.schedule).unwrap_or(Value::Null),
         "created_at": job.created_at,
@@ -294,8 +291,7 @@ pub fn handle_rlm_heartbeat_host_request(
                 response: json!({
                     "heartbeat": heartbeat
                         .as_ref()
-                        .map(rlm_heartbeat_host_response)
-                        .unwrap_or(Value::Null),
+                        .map_or(Value::Null, rlm_heartbeat_host_response),
                 }),
                 // TS wakes only when the update found the job.
                 mutation: heartbeat.map(|job| RlmHeartbeatMutation { job, drop_queued }),
@@ -310,8 +306,7 @@ pub fn handle_rlm_heartbeat_host_request(
                 response: json!({
                     "heartbeat": heartbeat
                         .as_ref()
-                        .map(rlm_heartbeat_host_response)
-                        .unwrap_or(Value::Null),
+                        .map_or(Value::Null, rlm_heartbeat_host_response),
                 }),
                 // TS `deleteRlmHeartbeatForState` always withdraws the
                 // queued fire of the deleted job.

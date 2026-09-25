@@ -12,14 +12,11 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
     Some(match provider {
         "amazon-bedrock" => "us.anthropic.claude-opus-4-6-v1",
         "anthropic" => "claude-opus-4-7",
-        "openai" => "gpt-5.4",
-        "azure-openai-responses" => "gpt-5.4",
+        "openai" | "azure-openai-responses" | "github-copilot" => "gpt-5.4",
         "openai-codex" => "gpt-5.5",
         "prime-inference" => PRIME_INFERENCE_DEFAULT_MODEL_ID,
         "deepseek" => "deepseek-v4-pro",
-        "google" => "gemini-3.1-pro-preview",
-        "google-vertex" => "gemini-3.1-pro-preview",
-        "github-copilot" => "gpt-5.4",
+        "google" | "google-vertex" => "gemini-3.1-pro-preview",
         "openrouter" => "moonshotai/kimi-k2.6",
         "vercel-ai-gateway" => "zai/glm-5.1",
         "xai" => "grok-4.20-0309-reasoning",
@@ -27,21 +24,16 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
         "cerebras" => "gpt-oss-120b",
         "zai" => "glm-5.3",
         "mistral" => "devstral-medium-latest",
-        "minimax" => "MiniMax-M2.7",
-        "minimax-cn" => "MiniMax-M2.7",
-        "moonshotai" => "kimi-k2.6",
-        "moonshotai-cn" => "kimi-k2.6",
+        "minimax" | "minimax-cn" => "MiniMax-M2.7",
+        "moonshotai" | "moonshotai-cn" | "opencode" | "opencode-go" => "kimi-k2.6",
         "huggingface" => "moonshotai/Kimi-K2.6",
         "fireworks" => "accounts/fireworks/models/kimi-k2p6",
-        "opencode" => "kimi-k2.6",
-        "opencode-go" => "kimi-k2.6",
         "kimi-coding" => "kimi-for-coding",
         "cloudflare-workers-ai" => "@cf/moonshotai/kimi-k2.6",
         "cloudflare-ai-gateway" => "claude-sonnet-4.5",
-        "xiaomi" => "mimo-v2.5-pro",
-        "xiaomi-token-plan-cn" => "mimo-v2.5-pro",
-        "xiaomi-token-plan-ams" => "mimo-v2.5-pro",
-        "xiaomi-token-plan-sgp" => "mimo-v2.5-pro",
+        "xiaomi" | "xiaomi-token-plan-cn" | "xiaomi-token-plan-ams" | "xiaomi-token-plan-sgp" => {
+            "mimo-v2.5-pro"
+        }
         _ => return None,
     })
 }
@@ -128,7 +120,7 @@ fn fuzzy_match_model<'a>(pattern: &str, available_models: &'a [Model]) -> Option
     }
     let (aliases, dated): (Vec<&Model>, Vec<&Model>) =
         matches.into_iter().partition(|model| is_alias(&model.id));
-    let pool = if !aliases.is_empty() { aliases } else { dated };
+    let pool = if aliases.is_empty() { dated } else { aliases };
     pool.into_iter().max_by(|a, b| a.id.cmp(&b.id))
 }
 
@@ -381,14 +373,13 @@ pub fn resolve_cli_model(
             .iter()
             .find(|model| model.provider.to_lowercase() == cli_provider.to_lowercase())
             .map(|model| model.provider.clone());
-        match canonical {
-            Some(p) => provider = Some(p),
-            None => {
-                result.error = Some(format!(
-                    "Unknown provider \"{cli_provider}\". Use \"prime-agent model list\" to see available providers/models."
-                ));
-                return result;
-            }
+        if let Some(p) = canonical {
+            provider = Some(p);
+        } else {
+            result.error = Some(format!(
+                "Unknown provider \"{cli_provider}\". Use \"prime-agent model list\" to see available providers/models."
+            ));
+            return result;
         }
     }
 

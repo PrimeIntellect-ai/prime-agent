@@ -246,10 +246,10 @@ pub(super) fn render_output(
 
     if let Some(error) = &details.error {
         start_output(&mut output_started, lines);
-        let traceback_text = if !error.traceback.is_empty() {
-            error.traceback.join("\n")
-        } else {
+        let traceback_text = if error.traceback.is_empty() {
             format_ipython_error_summary(error)
+        } else {
+            error.traceback.join("\n")
         };
         render_output_text(
             lines,

@@ -124,11 +124,10 @@ fn layout(
     lines: &mut RowOutput,
 ) {
     let code = cell_code(card).trim_end();
-    let details = card
-        .result
-        .as_ref()
-        .map(|result| IpythonDetails::parse(&result.details))
-        .unwrap_or_else(|| IpythonDetails::parse(&Value::Null));
+    let details = card.result.as_ref().map_or_else(
+        || IpythonDetails::parse(&Value::Null),
+        |result| IpythonDetails::parse(&result.details),
+    );
     let background = card
         .result
         .as_ref()
@@ -184,8 +183,7 @@ fn collapsed_line(
     let is_bash_cell = parse_ipython_bash_cell(code).is_some();
     let language_label = match (is_bash_cell, &preview.language) {
         (true, CodePreviewLanguage::Python) => "bash \u{00b7} python".to_string(),
-        (true, CodePreviewLanguage::Bash) => "bash".to_string(),
-        (false, CodePreviewLanguage::Bash) => "bash".to_string(),
+        (true | false, CodePreviewLanguage::Bash) => "bash".to_string(),
         (false, CodePreviewLanguage::Python) => "python".to_string(),
     };
 
@@ -251,9 +249,7 @@ fn collapsed_line(
 /// lines, output lines from the structured fields (edits show the diff, so
 /// their output counts zero).
 fn line_counts(card: &ToolCallCard, details: &IpythonDetails, code: &str) -> Option<String> {
-    let body = parse_ipython_bash_cell(code)
-        .map(|cell| cell.body)
-        .unwrap_or_else(|| code.to_string());
+    let body = parse_ipython_bash_cell(code).map_or_else(|| code.to_string(), |cell| cell.body);
     let input = body.lines().filter(|line| !line.trim().is_empty()).count();
     let has_diffs = !details.diffs.is_empty();
 

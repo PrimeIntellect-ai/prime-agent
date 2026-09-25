@@ -47,15 +47,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
@@ -478,10 +476,8 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 pa_tui::auth_panel::PrimeTeamPick::Team(team) => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using team \"{}\".", team.name),
                 ),
-                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount => ProviderAuthOutcome::Status(
-                    format!("Saved API key for {name}. Using personal account."),
-                ),
-                pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
+                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount
+                | pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using personal account."),
                 ),
             }
@@ -621,6 +617,7 @@ fn enter() -> pa_tui::interactive::HeadlessStep {
 /// headless capture holds the exact TS sequence).
 #[tokio::test]
 async fn tui_copy_emits_the_ts_osc52_sequence() {
+    use base64::Engine;
     // No platform clipboard tools in the verifier: the copy chain falls to
     // OSC 52 (the TS fallback when no tool copied).
     for var in [
@@ -695,7 +692,6 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
         "the usage error renders:\n{rendered}"
     );
     // The exact TS OSC 52 sequence for the scripted assistant text.
-    use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
     assert_eq!(
         outcome.clipboard_emissions,

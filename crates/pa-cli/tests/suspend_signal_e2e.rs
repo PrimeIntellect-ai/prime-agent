@@ -330,8 +330,7 @@ impl PtyReader {
         while quiet < quiet_polls {
             let mut buffer = [0u8; 8192];
             match self.file.read(&mut buffer) {
-                Ok(0) => quiet += 1,
-                Err(_) => quiet += 1,
+                Ok(0) | Err(_) => quiet += 1,
                 Ok(n) => {
                     self.output.extend_from_slice(&buffer[..n]);
                     quiet = 0;

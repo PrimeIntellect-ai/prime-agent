@@ -148,9 +148,7 @@ fn number_value(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
         Value::from(n as i64)
     } else {
-        serde_json::Number::from_f64(n)
-            .map(Value::Number)
-            .unwrap_or(Value::Null)
+        serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
     }
 }
 
@@ -205,12 +203,11 @@ fn check(schema: &Value, value: &Value, path: &str, errors: &mut Vec<(String, St
                     } else {
                         format!("{path}.{key}")
                     };
-                    match map.get(key) {
-                        Some(v) => check(sub_schema, v, &sub_path, errors),
-                        None => {
-                            // Optional properties are skipped, mirroring
-                            // standard JSON Schema.
-                        }
+                    if let Some(v) = map.get(key) {
+                        check(sub_schema, v, &sub_path, errors);
+                    } else {
+                        // Optional properties are skipped, mirroring
+                        // standard JSON Schema.
                     }
                 }
             }
@@ -306,7 +303,6 @@ fn type_name(value: &Value) -> &'static str {
 
 fn type_matches(ty: &str, value: &Value) -> bool {
     match ty {
-        "any" | "unknown" => true,
         "null" => value.is_null(),
         "boolean" => value.is_boolean(),
         "integer" => value.is_i64() || value.is_u64(),

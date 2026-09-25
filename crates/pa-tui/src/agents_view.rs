@@ -407,13 +407,12 @@ impl AgentsViewMode {
         // status message.
         let mut scope_active = false;
         let scoped = match &self.options.scope {
-            Some(scope) if !self.scope_dropped => match scope_to_subtree(&records, scope) {
-                Some(scoped) => {
+            Some(scope) if !self.scope_dropped => {
+                if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
                     self.scope_depth = scope_depth(&records, scope);
                     Some(scoped)
-                }
-                None => {
+                } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
                     self.status = Some(
@@ -421,7 +420,7 @@ impl AgentsViewMode {
                     );
                     None
                 }
-            },
+            }
             _ => None,
         };
         self.scope_active = scope_active;
@@ -1275,6 +1274,14 @@ impl AgentsViewMode {
     /// headings count top-level agents only (TS `getDisplayRowsForSection`
     /// / `countRowsBySection`).
     fn render_list(&mut self, width: usize, max_rows: usize) -> Vec<Line> {
+        /// One rendered display entry of the sectioned list (TS
+        /// `DisplayItem`): the spacer between section blocks, a section
+        /// heading, or one row.
+        enum DisplayItem<'a> {
+            Spacer,
+            Heading(Section),
+            Row(&'a AgentsViewRow),
+        }
         if max_rows == 0 {
             return Vec::new();
         }
@@ -1285,14 +1292,6 @@ impl AgentsViewMode {
                 "No sessions match your search."
             };
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
-        }
-        /// One rendered display entry of the sectioned list (TS
-        /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row.
-        enum DisplayItem<'a> {
-            Spacer,
-            Heading(Section),
-            Row(&'a AgentsViewRow),
         }
         let layout = build_layout(&self.rows, width);
         // The display-item sequence (TS `displayItems`): each non-empty
@@ -1315,9 +1314,7 @@ impl AgentsViewMode {
         // relevance-ordered run of hits (per-row icons carry the status),
         // not status section blocks. Without a query the sectioned
         // layout stays TS-identical.
-        if !self.query.trim().is_empty() {
-            display.extend(self.rows.iter().map(DisplayItem::Row));
-        } else {
+        if self.query.trim().is_empty() {
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -1336,6 +1333,8 @@ impl AgentsViewMode {
                     }
                 }
             }
+        } else {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
         }
         // The viewport (TS `renderSessionRows`): reserve the column header
         // and its spacer, center the slice on the selected row, and clip
@@ -1354,8 +1353,7 @@ impl AgentsViewMode {
             .position(
                 |item| matches!(item, DisplayItem::Row(row) if Some(row.identity.as_str()) == selected_identity),
             )
-            .map(|index| index as isize)
-            .unwrap_or(-1);
+            .map_or(-1, |index| index as isize);
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
@@ -1376,8 +1374,7 @@ impl AgentsViewMode {
                     let count = counts
                         .iter()
                         .find(|(count_section, _)| count_section == section)
-                        .map(|(_, count)| *count)
-                        .unwrap_or(0);
+                        .map_or(0, |(_, count)| *count);
                     vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
@@ -1834,14 +1831,13 @@ async fn open_roster_link(
     mpsc::UnboundedReceiver<DaemonClientEvent>,
     Vec<Value>,
 )> {
-    let (mut client, mut events) = match link {
-        Some(AgentsViewLink { client, events }) => (client, events),
-        None => {
-            let link = AgentsViewLink::connect(&options.socket_path)
-                .await
-                .with_context(|| "the agents view could not attach to the daemon")?;
-            (link.client, link.events)
-        }
+    let (mut client, mut events) = if let Some(AgentsViewLink { client, events }) = link {
+        (client, events)
+    } else {
+        let link = AgentsViewLink::connect(&options.socket_path)
+            .await
+            .with_context(|| "the agents view could not attach to the daemon")?;
+        (link.client, link.events)
     };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
@@ -1893,8 +1889,8 @@ fn spawn_saved_catalog_fetch(
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
 ) -> String {
-    let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let client = client.clone();
     // The id rides the supervisor reader's `daemon_` namespace: the
     // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
     // the fetch too, or a dead connection leaves the long-running scan's
@@ -2263,7 +2259,7 @@ async fn run_agents_view_surface(
             selected_row_identity: opened.as_ref().map(|row| row.selected_row_identity.clone()),
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
-            opened_has_children: opened.as_ref().map(|row| row.has_children).unwrap_or(false),
+            opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
