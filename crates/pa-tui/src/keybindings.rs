@@ -148,11 +148,19 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.cursorDocStart",
-        def!(&["ctrl+home", "super+up"], "Move to start of text", scope "editor"),
+        def!(
+            &["ctrl+home", "super+home", "super+up"],
+            "Move to start of text",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.cursorDocEnd",
-        def!(&["ctrl+end", "super+down"], "Move to end of text", scope "editor"),
+        def!(
+            &["ctrl+end", "super+end", "super+down"],
+            "Move to end of text",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.cursorParagraphUp",
@@ -298,6 +306,20 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     (
         "tui.select.pageDown",
         def!(&["pageDown"], "Selection page down"),
+    ),
+    (
+        "tui.select.top",
+        def!(
+            &["home", "ctrl+home", "super+home", "super+up"],
+            "Selection to first item"
+        ),
+    ),
+    (
+        "tui.select.bottom",
+        def!(
+            &["end", "ctrl+end", "super+end", "super+down"],
+            "Selection to last item"
+        ),
     ),
     ("tui.select.confirm", def!(&["enter"], "Confirm selection")),
     (
@@ -1247,11 +1269,36 @@ mod tests {
         assert!(kb.matches("ctrl+shift+c", "tui.editor.copySelection"));
         assert!(kb.matches("ctrl+home", "tui.editor.cursorDocStart"));
         assert!(kb.matches("ctrl+end", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("super+home", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+end", "tui.editor.cursorDocEnd"));
         // A user rebind replaces the default set.
         let rebound =
             KeybindingsManager::with_user_bindings(cfg(&[("tui.editor.redo", &["ctrl+r"])]));
         assert!(rebound.matches("ctrl+r", "tui.editor.redo"));
         assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
+    }
+
+    /// The list-edge jump defaults (the operator's top/bottom
+    /// navigation): home/end and their ctrl/super variants select the
+    /// first/last row. The agents view handles them; home/end stay line
+    /// motion for every editor-scope consumer.
+    #[test]
+    fn list_edge_jump_defaults_resolve() {
+        let kb = KeybindingsManager::new();
+        for key in ["home", "ctrl+home", "super+home", "super+up"] {
+            assert!(
+                kb.matches(key, "tui.select.top"),
+                "{key} selects the first row"
+            );
+        }
+        for key in ["end", "ctrl+end", "super+end", "super+down"] {
+            assert!(
+                kb.matches(key, "tui.select.bottom"),
+                "{key} selects the last row"
+            );
+        }
+        assert!(kb.matches("home", "tui.editor.cursorLineStart"));
+        assert!(kb.matches("end", "tui.editor.cursorLineEnd"));
     }
 
     /// The heartbeats shortcut is gone (the operator's 2026-09-24
