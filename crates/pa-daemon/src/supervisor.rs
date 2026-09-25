@@ -2465,6 +2465,10 @@ impl Supervisor {
 
     /// Handle one client command line: returns outbound lines in order and
     /// whether this client connection should stop.
+    // One more dispatch-context input than the lint's budget: the
+    // per-connection stream sender rides the same context bundle
+    // `execute_parsed_command` takes (its own allow below).
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_client(
         self: &Arc<Self>,
         line: &str,

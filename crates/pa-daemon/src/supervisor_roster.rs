@@ -793,19 +793,6 @@ mod tests {
                 && passivated.summary.get("activeSessionId").is_none(),
             "the live-only fields dropped with the passivation: {passivated:?}"
         );
-        // A LATER stop's unowned sweep never revisits the passivated
-        // top-level row (the sweep's business is the dead seeded
-        // families, not the stopped sessions' visible rows).
-        supervisor.passivate_roster_worker("w-none", false).await;
-        let roster = supervisor.roster.lock().unwrap();
-        assert!(
-            roster.entries().iter().any(|entry| {
-                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
-            }),
-            "the passivated top-level row survives a later stop's sweep"
-        );
-        drop(roster);
-
         // A queued child and an ephemeral worker's rows die with the stop.
         let mut queued_summary = live_child_summary(&root_file, &child_file);
         queued_summary["rlmChildId"] = json!("sub-queued");
@@ -840,6 +827,22 @@ mod tests {
                 |entry| entry.summary.get("rlmChildId").and_then(Value::as_str)
                     != Some("sub-queued")
             ));
+
+        // A LATER stop's unowned sweep never revisits the passivated
+        // top-level row (the sweep's business is the dead seeded
+        // families, not the stopped sessions' visible rows): the queued
+        // arm above was one stop pass since the row passivated, and this
+        // one is a second - the row survives both sweeps. The lock drops
+        // before the test's end; no await runs under it.
+        supervisor.passivate_roster_worker("w-none", false).await;
+        let roster = supervisor.roster.lock().unwrap();
+        assert!(
+            roster.entries().iter().any(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            }),
+            "the passivated top-level row survives later stops' sweeps"
+        );
+        drop(roster);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
