@@ -1243,9 +1243,13 @@ impl SessionScanState {
         {
             self.generation.dev == generation.dev && self.generation.ino == generation.ino
         }
+        // No dev/ino from std on this platform, so a grown file cannot be
+        // certified as the same inode: every grown file rescans whole (TS
+        // always has dev/ino from Node fs stats). An mtime-based identity
+        // would instead certify an in-place rewrite as a resume.
         #[cfg(not(unix))]
         {
-            self.generation.len == generation.len && self.generation.mtime == generation.mtime
+            false
         }
     }
 
