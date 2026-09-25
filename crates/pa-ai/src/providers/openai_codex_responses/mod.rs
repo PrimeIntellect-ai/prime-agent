@@ -1329,6 +1329,21 @@ mod tests {
                             eprintln!(
                                 "[mock] connection {connection_number} request {request_number} answered"
                             );
+                            // A script that ends in an error closes the
+                            // connection (the real server ends the request
+                            // with the error; the client's read loop needs
+                            // the close to finish its terminal bookkeeping).
+                            let ends_in_error = script
+                                .last()
+                                .and_then(|event| event.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("error");
+                            if ends_in_error {
+                                socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
+                                eprintln!(
+                                    "[mock] connection {connection_number} request {request_number} closed after error"
+                                );
+                            }
                         } else {
                             eprintln!(
                                 "[mock] connection {connection_number} request {request_number} NOT scripted (holding)"
