@@ -27,6 +27,10 @@ struct RpcChild {
     /// `current_dir` fails.
     _home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
+    /// Drain the child's stderr AFTER the Drop kills and reaps it (a
+    /// read on a live pipe blocks until exit; the sibling ACP harness
+    /// reads post-kill).
+    drain_stderr_on_drop: bool,
 }
 
 impl RpcChild {
@@ -68,6 +72,7 @@ impl RpcChild {
             next_id: 0,
             _home: home,
             spawn_stderr: Some(stderr),
+            drain_stderr_on_drop: false,
         }
     }
 
@@ -150,14 +155,11 @@ impl RpcChild {
         response
     }
 
+    /// Log the child's stderr once the Drop reaps it (a live read would
+    /// block until exit; the drain moves to the post-kill site like the
+    /// sibling ACP harness).
     fn drain_stderr(&mut self) {
-        if let Some(mut stderr) = self.spawn_stderr.take() {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
-            if !text.is_empty() {
-                eprintln!("RPC child stderr: {text}");
-            }
-        }
+        self.drain_stderr_on_drop = true;
     }
 }
 
@@ -165,6 +167,15 @@ impl Drop for RpcChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if self.drain_stderr_on_drop {
+            if let Some(mut stderr) = self.spawn_stderr.take() {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                if !text.is_empty() {
+                    eprintln!("RPC child stderr: {text}");
+                }
+            }
+        }
     }
 }
 
@@ -345,13 +356,22 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
 fn rpc_thinking_level_set_and_cycle() {
     let script = json!({ "responses": ["unused"], "reasoning": true });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
-    let response = client.request(&json!({ "type": "set_thinking_level", "level": "high" }));
+    // The changed event lands BEFORE the response (the handler publishes
+    // during the command): assert it among the pre-response frames
+    // instead of waiting for a later copy that never comes.
+    let id = client.command(&json!({ "type": "set_thinking_level", "level": "high" }));
+    let (response, before) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
     assert!(
         response.get("data").is_none(),
         "set_thinking_level answers without data"
     );
-    let changed = client.wait_event("thinking_level_changed", TIMEOUT);
+    let changed = before
+        .iter()
+        .find(|frame| {
+            frame.get("type").and_then(serde_json::Value::as_str) == Some("thinking_level_changed")
+        })
+        .expect("the changed event precedes the response");
     assert_eq!(changed["level"], "high");
     let state = client.request(&json!({ "type": "get_state" }));
     assert_eq!(state["data"]["thinkingLevel"], "high");
@@ -451,9 +471,17 @@ fn rpc_set_session_name_round_trip() {
         &["--mode", "rpc", "--no-session"],
         &turn_script(json!(["unused"])),
     );
-    let response = client.request(&json!({ "type": "set_session_name", "name": "  my session  " }));
+    // The changed event lands BEFORE the response: assert it among the
+    // pre-response frames (a later wait would never see a copy).
+    let id = client.command(&json!({ "type": "set_session_name", "name": "  my session  " }));
+    let (response, before) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
-    let changed = client.wait_event("session_info_changed", TIMEOUT);
+    let changed = before
+        .iter()
+        .find(|frame| {
+            frame.get("type").and_then(serde_json::Value::as_str) == Some("session_info_changed")
+        })
+        .expect("the changed event precedes the response");
     assert_eq!(changed["name"], "my session");
     let state = client.request(&json!({ "type": "get_state" }));
     assert_eq!(state["data"]["sessionName"], "my session");

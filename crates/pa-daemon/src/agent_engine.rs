@@ -1471,6 +1471,7 @@ impl AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key: self.resolve_request_api_key(model),
                 model: model.clone(),
+                headers: None,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {
@@ -2224,6 +2225,7 @@ impl SessionEngine for AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key: self.resolve_request_api_key(&model),
                 model: model.clone(),
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -3541,9 +3543,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -3574,9 +3577,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;

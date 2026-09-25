@@ -64,8 +64,12 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     // execution: a concurrent whole-session replacement (whose swap
     // waits on the write guard) can never dispose the kernel mid-command
     // (TS runs the admitted command before the next queued line can
-    // start a replacement).
-    run_session_command(state.as_ref(), engine, &command).await?;
+    // start a replacement). The model and key pass THROUGH (no second
+    // handle acquisition): a read re-acquisition queued behind a waiting
+    // writer would deadlock the command against its own guard.
+    let model = handle.model.clone();
+    let api_key = handle.api_key.clone();
+    run_session_command(state.as_ref(), engine, &command, model, api_key).await?;
     drop(handle);
     Ok(ResponseData::Absent)
 }
@@ -78,11 +82,9 @@ async fn run_session_command(
     state: &RpcState,
     engine: Arc<pa_core::session_engine::engine::SessionEngine>,
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
+    model: pa_types::ai::Model,
+    api_key: Option<String>,
 ) -> Result<(), String> {
-    let (model, api_key) = {
-        let handle = state.session.handle().await;
-        (handle.model.clone(), handle.api_key.clone())
-    };
     let is_compact = command.name == "compact";
     if is_compact {
         state.compacting.store(true, Ordering::SeqCst);
@@ -92,6 +94,10 @@ async fn run_session_command(
             .await;
     }
     let execution = {
+        // The executor rebuilds session context on its compact branch
+        // (like the direct `compact`/`refine` commands): serialize the
+        // context rebuilders against one another.
+        let _ops = state.session_ops.lock().await;
         let mut autonomous = state.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,

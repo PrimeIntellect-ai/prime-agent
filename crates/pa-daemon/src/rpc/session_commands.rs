@@ -114,7 +114,13 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
     let (target_leaf, selected_text) = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
-        let manager = persistence.lock().await;
+        let mut manager = persistence.lock().await;
+        // The entry lookup walks the full history: hydrate a windowed
+        // session first (the plain lookup asserts on the window).
+        manager
+            .ensure_full_history()
+            .await
+            .map_err(|error| format!("Cannot hydrate the session history: {error:#}"))?;
         let Some(entry) = manager.get_entry_by_id(entry_id) else {
             return Err("Invalid entry ID for forking".to_string());
         };
@@ -289,7 +295,13 @@ fn branch_entries_to_leaf(
 async fn get_fork_messages(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let handle = state.session.handle().await;
     let persistence = handle.engine.session.shared_persistence();
-    let manager = persistence.lock().await;
+    let mut manager = persistence.lock().await;
+    // The forking list walks the full history: hydrate a windowed
+    // session first.
+    manager
+        .ensure_full_history()
+        .await
+        .map_err(|error| format!("Cannot hydrate the session history: {error:#}"))?;
     let mut messages = Vec::new();
     for entry in manager.get_all_entries() {
         let FileEntry::Message {
@@ -336,11 +348,17 @@ async fn set_session_name(state: &Arc<RpcState>, payload: &Value) -> Result<Resp
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
         let mut manager = persistence.lock().await;
-        let _ = manager.append_session_info(name);
+        // The durable row owns the name: a persistence failure must
+        // answer the error instead of emitting the change event for a
+        // rename that will not survive a reload.
+        manager
+            .append_session_info(name)
+            .map_err(|error| format!("{error:#}"))?;
     }
     state
-        .writer
-        .write(json!({ "type": "session_info_changed", "name": name }));
+        .session
+        .write_connection_output(json!({ "type": "session_info_changed", "name": name }))
+        .await;
     Ok(ResponseData::Absent)
 }
 
@@ -366,9 +384,29 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
         .map(str::to_string);
     let handle = state.session.handle().await;
     let persistence = handle.engine.session.shared_persistence();
-    let manager = persistence.lock().await;
+    let mut manager = persistence.lock().await;
     let Some(session_file) = manager.get_session_file().map(Path::to_path_buf) else {
         return Err("Cannot export an in-memory session".to_string());
+    };
+    // The full-history export reads every entry: hydrate a windowed
+    // session before the walk (a plain get_all_entries asserts on the
+    // un-hydrated store).
+    manager
+        .ensure_full_history()
+        .await
+        .map_err(|error| format!("Cannot hydrate the session history: {error:#}"))?;
+    // A relative export lands next to the SESSION's project, not the
+    // CLI startup directory (a switched session's cwd owns its files).
+    let output_path = match output_path {
+        Some(path) => {
+            let path = Path::new(&path);
+            if path.is_absolute() {
+                Some(path.to_path_buf())
+            } else {
+                Some(manager.get_cwd().join(path))
+            }
+        }
+        None => None,
     };
     let mut entries: Vec<Value> = Vec::new();
     let mut header = Value::Null;
@@ -413,7 +451,7 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
         None,
         &state.agent_dir,
         &session_file,
-        output_path.as_deref(),
+        output_path.as_deref().map(|path| path.display().to_string()).as_deref(),
     )
     .map_err(|error| format!("{error:#}"))?;
     Ok(ResponseData::Present(json!({ "path": path })))

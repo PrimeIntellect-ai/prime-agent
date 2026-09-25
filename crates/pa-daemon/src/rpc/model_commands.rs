@@ -32,6 +32,7 @@ pub(crate) async fn set_model(
     state: &Arc<RpcState>,
     payload: &Value,
 ) -> Result<ResponseData, String> {
+    let _ops = state.model_ops.lock().await;
     let provider = payload
         .get("provider")
         .and_then(Value::as_str)
@@ -62,6 +63,14 @@ async fn apply_model_selection(
     model: &Model,
 ) -> Result<(), String> {
     let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+    // An unresolvable selection refuses the switch BEFORE anything moves:
+    // the TS `setModel` path answers the sign-in/not-found error instead
+    // of installing a target whose next turn fails on missing auth.
+    if !resolved.ok {
+        return Err(resolved
+            .error
+            .unwrap_or_else(|| "Model is not available: no credentials resolved".to_string()));
+    }
     {
         // The write guard serializes the swap with every reader that
         // holds the handle (a prompt admission snapshots the engine
@@ -74,6 +83,7 @@ async fn apply_model_selection(
             api_key: resolved.api_key.clone(),
             model: model.clone(),
             service_tier: None,
+            headers: resolved.headers.clone(),
         };
         *handle
             .provider_target
@@ -104,7 +114,9 @@ async fn apply_model_selection(
         let _ = manager.append_model_change(&model.provider, &model.id);
     }
     let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
-    let _ = settings.set_default_model_and_provider(model.provider.clone(), model.id.clone());
+    settings
+        .set_default_model_and_provider(model.provider.clone(), model.id.clone())
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -112,6 +124,7 @@ async fn apply_model_selection(
 /// cycle within the available catalog; fewer than two candidates answer
 /// `null` like TS.
 pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+    let _ops = state.model_ops.lock().await;
     let mut registry = registry(state);
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     if available.len() <= 1 {
@@ -164,6 +177,7 @@ pub(crate) async fn set_thinking_level(
     state: &Arc<RpcState>,
     payload: &Value,
 ) -> Result<ResponseData, String> {
+    let _ops = state.model_ops.lock().await;
     let level = payload
         .get("level")
         .and_then(Value::as_str)
@@ -186,7 +200,11 @@ async fn apply_thinking_level(
     level: ModelThinkingLevel,
 ) -> Result<(), String> {
     let (wire_level, changed) = {
-        let handle = state.session.handle().await;
+        // The write guard orders concurrent level switches: the live
+        // level, the durable row, and the settings default land in one
+        // serial sequence instead of interleaving (the durable row must
+        // match the live level on reload).
+        let mut handle = state.session.handle_mut().await;
         let agent = handle.engine.session.agent();
         let model = handle.model.clone();
         let clamped = pa_ai::models::clamp_thinking_level(&model, level);
@@ -203,23 +221,31 @@ async fn apply_thinking_level(
         if changed {
             let persistence = handle.engine.session.shared_persistence();
             let mut manager = persistence.lock().await;
-            let _ = manager.append_thinking_level_change(wire_level.as_str().unwrap_or("off"));
+            manager
+                .append_thinking_level_change(wire_level.as_str().unwrap_or("off"))
+                .map_err(|error| format!("{error:#}"))?;
             // TS persists the default when the model can think or the
             // level is a real reasoning request.
             if model.reasoning || clamped != ModelThinkingLevel::Off {
                 let mut settings =
                     pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
-                let _ = settings.set_default_thinking_level(
-                    pa_core::settings::ThinkingLevelSetting::from_model_level(clamped),
-                );
+                settings
+                    .set_default_thinking_level(
+                        pa_core::settings::ThinkingLevelSetting::from_model_level(clamped),
+                    )
+                    .map_err(|error| error.to_string())?;
             }
         }
         (wire_level, changed)
     };
     if changed {
         state
-            .writer
-            .write(json!({ "type": "thinking_level_changed", "level": wire_level }));
+            .session
+            .write_connection_output(json!({
+                "type": "thinking_level_changed",
+                "level": wire_level,
+            }))
+            .await;
     }
     Ok(())
 }
@@ -227,6 +253,7 @@ async fn apply_thinking_level(
 /// `cycle_thinking_level` (TS `session.cycleThinkingLevel`): cycle the
 /// supported levels; a model without reasoning answers `null`.
 pub(crate) async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+    let _ops = state.model_ops.lock().await;
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let agent = handle.engine.session.agent();
@@ -277,6 +304,24 @@ pub(crate) async fn set_queue_mode(
         agent.set_steering_mode(mode);
     } else {
         agent.set_follow_up_mode(mode);
+    }
+    drop(handle);
+    // The settings default follows the live mode (the daemon handlers
+    // persist the same way): a later session/connection loads the
+    // selected mode instead of reverting.
+    let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+    let setting = match mode {
+        pa_agent::agent::QueueMode::All => pa_core::settings::QueueModeSetting::All,
+        pa_agent::agent::QueueMode::OneAtATime => pa_core::settings::QueueModeSetting::OneAtATime,
+    };
+    if name == "set_steering_mode" {
+        settings
+            .set_steering_mode(setting)
+            .map_err(|error| error.to_string())?;
+    } else {
+        settings
+            .set_follow_up_mode(setting)
+            .map_err(|error| error.to_string())?;
     }
     Ok(ResponseData::Absent)
 }

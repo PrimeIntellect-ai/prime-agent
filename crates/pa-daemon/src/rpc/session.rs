@@ -158,9 +158,21 @@ impl RpcSession {
     /// subscription.
     async fn resubscribe(&self) {
         let engine = self.handle.read().await.engine.clone();
-        let pending_outputs = Arc::clone(&self.pending_outputs);
-        let writer = self.writer.clone();
-        let subscription = engine
+        let subscription =
+            Self::engine_subscription(&engine, &self.pending_outputs, &self.writer).await;
+        *self.subscription.lock().await = Some(subscription);
+    }
+
+    /// Create the loop-event subscription for one engine (the frames
+    /// forward through the shared prompt-response buffer and writer).
+    async fn engine_subscription(
+        engine: &Arc<SessionEngine>,
+        pending_outputs: &Arc<tokio::sync::Mutex<Option<Vec<serde_json::Value>>>>,
+        writer: &LineWriter,
+    ) -> Subscription {
+        let pending_outputs = Arc::clone(pending_outputs);
+        let writer = writer.clone();
+        engine
             .session
             .agent()
             .subscribe(move |event, _signal| {
@@ -180,8 +192,7 @@ impl RpcSession {
                     Ok(())
                 })
             })
-            .await;
-        *self.subscription.lock().await = Some(subscription);
+            .await
     }
 
     /// Acquire the whole-session replacement lease (TS
@@ -205,11 +216,38 @@ impl RpcSession {
             .factory
             .clone()
             .ok_or_else(|| "Session switching is not wired for this RPC transport".to_string())?;
+        // Reopening the currently-owned session file: release the current
+        // lease BEFORE the factory re-acquires it (TS's
+        // `acquireReplacementLease` reuses the current lease for the same
+        // path; releasing first lets the fresh acquire succeed).
+        if let RpcEngineRequest::Open { session_path } = &request {
+            let canonical = crate::lease::canonical_session_path(session_path);
+            let same_path = {
+                let current = self.handle.read().await;
+                current
+                    .session_lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.session_path == canonical)
+            };
+            if same_path {
+                // The dropped lease releases as the take's value drops.
+                self.handle.write().await.session_lease.take();
+            }
+        }
         // Build the replacement BEFORE any teardown: a failed assembly
         // must leave the live session serving (the old kernel keeps its
         // subscription and turns; nothing was disposed). The swap below
         // runs only on a fully assembled replacement.
         let replacement = factory(request).await?;
+        // Subscribe the replacement BEFORE publishing the handle: a
+        // prompt dispatched the instant the handle lands finds the
+        // subscription attached, so the turn's first events never drop.
+        let subscription = Self::engine_subscription(
+            &replacement.engine,
+            &self.pending_outputs,
+            &self.writer,
+        )
+        .await;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
@@ -220,10 +258,10 @@ impl RpcSession {
         // handler holding the handle), so the swap lands only once the
         // in-flight handle holders finish.
         *self.handle.write().await = replacement;
+        *self.subscription.lock().await = Some(subscription);
         // Retire the pumps spawned against the replaced engine so queued
         // input never delivers to the disposed session.
         self.pump_epoch.fetch_add(1, Ordering::SeqCst);
-        self.resubscribe().await;
         Ok(())
     }
 
@@ -242,8 +280,12 @@ impl RpcSession {
     }
 
     /// The stdin-close settle (TS `onInputEnd` -> `waitForIdle` ->
-    /// `shutdown`): waits the running turn out, then disposes the kernel.
+    /// `shutdown`): retires the queued-input pumps, waits the running
+    /// turn out, then disposes the kernel.
     pub async fn dispose(&self) {
+        // Retire the detached pumps first: none may deliver queued input
+        // onto the session this settle is about to dispose.
+        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         let engine = self.handle.read().await.engine.clone();
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;

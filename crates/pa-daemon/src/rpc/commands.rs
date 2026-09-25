@@ -40,6 +40,15 @@ pub struct RpcState {
     /// TS `_sessionInputPumpSuspended`: an abort suspends queued-input
     /// delivery; the next prompt/steer/follow-up resumes it.
     pub pump_suspended: Arc<std::sync::atomic::AtomicBool>,
+    /// The model-selection commands' serialization lane (TS runs every
+    /// command on one loop: `set_model`/`cycle_model` and the thinking
+    /// switches serialize read-then-apply instead of racing).
+    pub model_ops: Arc<tokio::sync::Mutex<()>>,
+    /// The context-rebuilding commands' serialization lane (`compact`,
+    /// `refine`, and the prompt-admitted session command executor: they
+    /// rebuild the session context and install the rebuilt transcript,
+    /// so they must not interleave).
+    pub session_ops: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RpcState {
@@ -108,6 +117,12 @@ pub fn kick_queue_pump(
                 break;
             }
             agent.wait_for_idle().await;
+            // Re-check after the idle wait: a replacement that lands in
+            // the wait window must retire this pump before it delivers
+            // onto the disposed session.
+            if state.session.pump_generation() != generation {
+                return;
+            }
             if !agent.has_queued_messages() {
                 break;
             }
@@ -236,9 +251,14 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
         "sessionActions".to_string(),
         session_actions_snapshot(agent.as_ref(), &agent_state),
     );
+    // Release the persistence guard before the goal-driver read: goal
+    // mutations take the driver first and persistence second, so holding
+    // the persistence mutex across the driver wait inverts the lock order.
+    drop(manager);
+    let goal = engine.goal_driver.lock().await.state();
     object.insert(
         "goal".to_string(),
-        serde_json::to_value(engine.goal_driver.lock().await.state()).unwrap_or(Value::Null),
+        serde_json::to_value(goal).unwrap_or(Value::Null),
     );
     Ok(ResponseData::Present(Value::Object(object)))
 }
@@ -287,6 +307,10 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
             handle.engine.clone(),
         )
     };
+    // Compact rebuilds the session context (like refine): serialize the
+    // context-rebuilding commands so their rebuilds cannot interleave
+    // and install an older snapshot over a newer one.
+    let _ops = state.session_ops.lock().await;
     state.compacting.store(true, Ordering::SeqCst);
     state
         .session
@@ -400,6 +424,9 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
         )
     };
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
+    // Refine rebuilds the session context (like compact): one
+    // context-rebuilding command at a time.
+    let _ops = state.session_ops.lock().await;
     let result = engine
         .session
         .refine(

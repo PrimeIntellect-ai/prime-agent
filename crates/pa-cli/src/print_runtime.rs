@@ -187,7 +187,7 @@ fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
-    let parts = build_headless_engine_parts(options, "rpc").await?;
+    let (parts, initial_lease) = build_headless_engine_parts_with_lease(options, "rpc").await?;
     // The CLI `--goal` seed rides the first session like the print mode.
     if let Some(goal) = &config.initial_goal {
         parts
@@ -197,8 +197,14 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
             .map_err(|error| format!("{error:#}"))?;
     }
     let factory = rpc_engine_factory(options);
+    let mut engine_handle = pa_daemon::rpc::session::RpcEngineHandle::from(parts);
+    // The initial (possibly resumed) session's runtime lease rides the
+    // handle: a later whole-session replacement releases it exactly when
+    // the initial engine stops writing (instead of holding the file
+    // until the process exits).
+    engine_handle.session_lease = initial_lease;
     let exit_code = pa_daemon::rpc::run_rpc_mode(pa_daemon::rpc::RpcOptions {
-        engine: parts.into(),
+        engine: engine_handle,
         engine_factory: Some(factory),
         cwd: config.cwd.clone(),
         agent_dir: config.agent_dir.clone(),
@@ -262,10 +268,15 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     // persisted history), and hold its runtime lease for
                     // the opened session.
                     let lease = session_open_guard(options.daemon_socket.as_deref(), session_path)?;
-                    // A failed open drops the lease (its guard releases
-                    // with the value), so the refusal/parse errors never
-                    // leave an orphaned hold behind.
+                    // A failed open's early return drops the lease
+                    // (released), so errors never leave an orphaned hold.
                     let manager = open_session_file(session_path, &session_dir, &cwd, None)?;
+                    // The replacement ADOPTS the opened session's own
+                    // cwd (TS createRuntime builds the runtime over the
+                    // session's project, not the CLI startup
+                    // directory): tools, settings, and file work run
+                    // against the session's repository.
+                    options.config.cwd = manager.get_cwd().to_path_buf();
                     opened_lease = Some(lease);
                     manager
                 }
@@ -351,11 +362,27 @@ async fn build_headless_engine_parts(
     options: &RunOptions,
     execution_mode: &str,
 ) -> Result<HeadlessEngine, String> {
+    let (engine, lease) = build_headless_engine_parts_with_lease(options, execution_mode).await?;
+    std::mem::forget(lease);
+    Ok(engine)
+}
+
+/// The same assembly, returning the opened session's runtime lease
+/// alongside (a long-lived connection holds it on the engine handle so a
+/// replacement releases it with the engine it guarded; the one-shot
+/// modes forget it for the process lifetime).
+async fn build_headless_engine_parts_with_lease(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
+    let (session_manager, lease) = select_session_manager_with_lease(options)?;
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        return build_faux_engine_parts(options, &script, execution_mode).await;
+        let engine = build_faux_engine_with(options, &script, session_manager, execution_mode)
+            .await?;
+        return Ok((engine, lease));
     }
-    let session_manager = select_session_manager(options)?;
-    build_headless_engine_with(options, session_manager, execution_mode).await
+    let engine = build_headless_engine_with(options, session_manager, execution_mode).await?;
+    Ok((engine, lease))
 }
 
 /// The session-manager selection every engine build shares
@@ -364,11 +391,26 @@ async fn build_headless_engine_parts(
 fn select_session_manager(
     options: &RunOptions,
 ) -> Result<Option<pa_core::session::manager::SessionManager>, String> {
+    let (manager, lease) = select_session_manager_with_lease(options)?;
+    std::mem::forget(lease);
+    Ok(manager)
+}
+
+/// The same selection, returning the opened session's runtime lease.
+fn select_session_manager_with_lease(
+    options: &RunOptions,
+) -> Result<
+    (
+        Option<pa_core::session::manager::SessionManager>,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
     if options.session.no_session {
-        Ok(None)
-    } else {
-        Ok(Some(build_session_manager(options)?))
+        return Ok((None, None));
     }
+    let (manager, lease) = build_session_manager_with_lease(options)?;
+    Ok((Some(manager), lease))
 }
 
 /// The real-provider engine assembly over one session-manager selection
@@ -398,6 +440,7 @@ async fn build_headless_engine_with(
         api_key: resolved.api_key.clone(),
         model: model.clone(),
         service_tier: None,
+        headers: resolved.headers.clone(),
     })));
     let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
@@ -621,6 +664,23 @@ fn resolve_thinking_level(
 fn build_session_manager(
     options: &RunOptions,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
+    let (manager, lease) = build_session_manager_with_lease(options)?;
+    std::mem::forget(lease);
+    Ok(manager)
+}
+
+/// The same resolution, returning the opened session's runtime lease
+/// (a long-lived connection holds it on the engine handle; the one-shot
+/// modes forget it for the process lifetime).
+fn build_session_manager_with_lease(
+    options: &RunOptions,
+) -> Result<
+    (
+        pa_core::session::manager::SessionManager,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
     use pa_core::session::manager::SessionManager;
     let cwd = options.config.cwd.clone();
     let session_dir = options
@@ -640,7 +700,7 @@ fn build_session_manager(
             | ResolvedSession::Local(path)
             | ResolvedSession::Global { path, .. } => path,
         };
-        return SessionManager::fork_from(&source, &cwd, &session_dir);
+        return Ok((SessionManager::fork_from(&source, &cwd, &session_dir)?, None));
     }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.
@@ -650,8 +710,11 @@ fn build_session_manager(
             resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
         return match resolved {
             ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
-                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
-                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
+                // A failed open's early return drops the lease (released),
+                // never leaving an orphaned hold behind.
+                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
+                Ok((manager, Some(lease)))
             }
             ResolvedSession::Global {
                 path: _,
@@ -669,13 +732,14 @@ fn build_session_manager(
         let most_recent = find_most_recent_session_for_cwd(&session_dir, &cwd);
         return match most_recent {
             Some(path) => {
-                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
-                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
+                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
+                Ok((manager, Some(lease)))
             }
-            None => Ok(SessionManager::persisted(&cwd, &session_dir)),
+            None => Ok((SessionManager::persisted(&cwd, &session_dir), None)),
         };
     }
-    Ok(SessionManager::persisted(&cwd, &session_dir))
+    Ok((SessionManager::persisted(&cwd, &session_dir), None))
 }
 
 /// Open a session file with the TS `SessionManager.open` cwd semantics: an
@@ -1106,15 +1170,6 @@ async fn run_prompts_and_emit(
 }
 
 /// The faux-script engine: identical session assembly, scripted provider.
-async fn build_faux_engine_parts(
-    options: &RunOptions,
-    script: &str,
-    execution_mode: &str,
-) -> Result<HeadlessEngine, String> {
-    let session_manager = select_session_manager(options)?;
-    build_faux_engine_with(options, script, session_manager, execution_mode).await
-}
-
 /// The faux assembly over one session-manager selection (the RPC mode's
 /// replacement builds share it under the same script).
 async fn build_faux_engine_with(
@@ -1218,6 +1273,7 @@ async fn build_faux_engine_with(
         api_key: None,
         model: model.clone(),
         service_tier: None,
+        headers: None,
     })));
     let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring (persist / --no-session

@@ -146,6 +146,8 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         last_goal: Arc::new(tokio::sync::Mutex::new(initial_goal)),
         queue_pump: Arc::new(tokio::sync::Mutex::new(())),
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        model_ops: Arc::new(tokio::sync::Mutex::new(())),
+        session_ops: Arc::new(tokio::sync::Mutex::new(())),
     });
     spawn_signal_handlers(Arc::clone(&session), writer.clone());
     Ok(serve_stdin(state).await)
@@ -221,7 +223,12 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
     // stdin closed: settle the in-flight handlers, wait the session
     // idle, dispose, drain the queued frames, exit 0 (TS `onInputEnd`).
     while pending.join_next().await.is_some() {}
-    state.session.dispose().await;
+    // Serialize with any in-flight queued-input pump before the settle
+    // (dispose retires the pumps; the lane ensures none is mid-delivery).
+    {
+        let _pump = state.queue_pump.lock().await;
+        state.session.dispose().await;
+    }
     state.writer.drain().await;
     0
 }
