@@ -2263,8 +2263,12 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
 /// the status label stale. The fixed contract is TS parity: the flagged
 /// model resolves from the full catalog, the turn fails at the run-start
 /// auth validation with the TS login-guidance message
-/// (`_validateCanStartAgentRun`), and the failed pick keeps the label
-/// (nothing switched — the TS daemon fails the same pick the same way).
+/// (`_validateCanStartAgentRun`), and the pick of the unsigned provider
+/// never surfaces the dead-end "Model not found" — the daemon's typed
+/// refusal routes the sign-in flow (TS `ensureModelProviderConfigured`),
+/// which in this headless composition (no provider-auth hook) lands the TS
+/// external-config error; the failed pick keeps the label (nothing
+/// switched).
 #[tokio::test]
 async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentials() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2340,8 +2344,13 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
             .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("Model not found: ") && rendered.contains("z-ai/glm-5.3"),
-        "the pick against the empty auth-scoped catalog fails with the TS message (label keeps the resolved model):\n{rendered}"
+        rendered.contains("must be configured externally")
+            && rendered.contains("prime-inference"),
+        "the pick against the empty auth-scoped catalog routes the sign-in flow (no provider-auth hook in this composition, so the TS external-config error):\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Model not found: "),
+        "the not-signed-in pick never surfaces the dead-end refusal (the typed sign-in class):\n{rendered}"
     );
     assert!(
         rendered.contains("No API key found for prime-inference"),
