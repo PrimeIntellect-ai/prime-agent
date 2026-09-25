@@ -49,7 +49,7 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {explicit} not found"
         );
         return Some(explicit);
     }
@@ -60,7 +60,7 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live snapshot test");
+    eprintln!("kernel python {candidate} not found; skipping live snapshot test");
     None
 }
 

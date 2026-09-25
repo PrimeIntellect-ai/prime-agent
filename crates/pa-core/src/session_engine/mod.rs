@@ -1511,10 +1511,10 @@ mod tests {
     async fn prompt_persists_tool_results() {
         struct EchoTool;
         impl pa_agent::types::AgentTool for EchoTool {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "echo"
             }
-            fn description(&self) -> &str {
+            fn description(&self) -> &'static str {
                 "echo the call"
             }
             fn parameters(&self) -> &serde_json::Value {

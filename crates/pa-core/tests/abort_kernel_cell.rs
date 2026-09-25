@@ -24,7 +24,7 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {explicit} not found"
         );
         return Some(explicit);
     }
@@ -35,7 +35,7 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    eprintln!("kernel python {candidate} not found; skipping live kernel test");
     None
 }
 
@@ -46,7 +46,7 @@ fn release_dir() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {explicit:?} has no prime-agent-runtime"
+            "PI_PACKAGE_DIR {explicit} has no prime-agent-runtime"
         );
         return Some(explicit);
     }
@@ -55,7 +55,7 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
+        eprintln!("no releases dir at {releases}; skipping live kernel test");
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries

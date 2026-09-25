@@ -95,7 +95,11 @@ fn normalize_hex_session_id(id: &str) -> Option<String> {
 
 /// `looksLikeSessionPath`: separators or a `.jsonl` suffix mean a path.
 pub fn looks_like_session_path(selector: &str) -> bool {
-    selector.contains('/') || selector.contains('\\') || selector.ends_with(".jsonl")
+    selector.contains('/')
+        || selector.contains('\\')
+        || selector
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("jsonl"))
 }
 
 /// `normalizeCwd`: an absolute path without symlink resolution.
