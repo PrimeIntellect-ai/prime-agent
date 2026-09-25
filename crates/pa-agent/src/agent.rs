@@ -196,6 +196,35 @@ impl PendingMessageQueue {
     }
 }
 
+/// One queued batch's text preview: the text of the batch's user
+/// messages (text parts concatenated), the TS action-preview shape.
+fn batch_preview(batch: &[AgentMessage]) -> String {
+    batch
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Standard(pa_agent::types::Message::User(user)) => {
+                let text = match &user.content {
+                    pa_agent::types::UserContent::Text(text) => Some(text.clone()),
+                    pa_agent::types::UserContent::Parts(parts) => {
+                        let text: Vec<&str> = parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                pa_agent::types::UserPart::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        (!text.is_empty()).then(|| text.join(" "))
+                    }
+                    _ => None,
+                };
+                text
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// One or a batch of messages queued through `steer`/`followUp`.
 // The `Single` variant mirrors the TS union member shape; boxing both arms
 // would complicate every call site for no memory benefit in queue paths.
@@ -899,6 +928,44 @@ impl Agent {
     pub fn clear_all_queues(&self) {
         self.clear_steering_queue();
         self.clear_follow_up_queue();
+    }
+
+    /// Previews of the queued steering batches (TS
+    /// `getSteeringMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn steering_previews(&self) -> Vec<String> {
+        self.inner
+            .steering_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
+    }
+
+    /// Previews of the queued follow-up batches (TS
+    /// `getFollowUpMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn follow_up_previews(&self) -> Vec<String> {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
     }
 
     /// Remove queued messages matching a predicate (TS `removeQueuedMessages`).

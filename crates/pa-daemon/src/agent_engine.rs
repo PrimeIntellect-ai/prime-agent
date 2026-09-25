@@ -672,7 +672,7 @@ impl AgentSessionEngine {
             Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
                 turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
                 agent: std::sync::Arc::clone(built.session.agent()),
-                compaction: *built.session.compaction_settings(),
+                compaction: built.session.compaction_settings(),
             });
         // The in-run autonomous continuation hook (the natural mint rides
         // the agent loop; the goal seam keeps its own boundary mint).

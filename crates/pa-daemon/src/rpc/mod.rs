@@ -1,0 +1,226 @@
+//! RPC stdio mode: headless operation with JSON commands on stdin and
+//! JSON responses and events on stdout (TS `modes/rpc/rpc-mode.ts`).
+//!
+//! One connection drives one live session. Commands arrive as JSON lines
+//! and answer one ordered stream of response and event frames: the
+//! response `data` channel distinguishes an absent key from JSON `null`,
+//! a `prompt` response is written before the turn's stream events
+//! (events landing while the response is pending are buffered and
+//! flushed after it, TS `promptResponsePending`), prompts serialize
+//! behind one lane while other commands run concurrently, and stdin
+//! close settles the running turn before the process exits. SIGTERM
+//! exits 143 and SIGHUP 129 (TS signal exit codes).
+//!
+//! The in-process transport serves the session engine directly, exactly
+//! like the TS in-process connection: the scheduling and agent-messaging
+//! surfaces answer their TS in-process "requires daemon mode" errors,
+//! and `observe` sees no other active sessions (the in-process session
+//! hosts no family) — the daemon-attached transport serves those for
+//! real.
+
+pub mod commands;
+pub mod model_commands;
+pub mod prompt_commands;
+pub mod protocol;
+pub mod session;
+
+use std::io::Write as _;
+use std::sync::Arc;
+
+use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
+
+use protocol::{ParsedLine, RpcCommand};
+use session::{RpcEngineFactory, RpcEngineHandle, RpcSession};
+
+/// Everything the composition root hands the mode.
+pub struct RpcOptions {
+    /// The assembled engine the connection adopts first.
+    pub engine: RpcEngineHandle,
+    /// The whole-session replacement seam (`new_session` /
+    /// `switch_session` / `fork`), when wired.
+    pub engine_factory: Option<RpcEngineFactory>,
+    /// The session's cwd (the engine replacement reads it).
+    pub cwd: std::path::PathBuf,
+    /// The agent dir (model registry auth, refinement history).
+    pub agent_dir: std::path::PathBuf,
+    /// The CLI autonomous flags seeding the host-owned autonomous state
+    /// (TS `createAgentSession` parity; `None` starts disabled).
+    pub autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
+}
+
+/// The ordered stdout writer: one queue for responses and events, in
+/// publication order (TS `output` through `writeRawStdout`).
+#[derive(Clone)]
+pub struct LineWriter {
+    tx: tokio::sync::mpsc::UnboundedSender<Value>,
+}
+
+impl LineWriter {
+    /// Spawn the writer task over the process stdout.
+    fn spawn() -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        tokio::spawn(async move {
+            let mut stdout = tokio::io::stdout();
+            use tokio::io::AsyncWriteExt;
+            while let Some(frame) = rx.recv().await {
+                let Ok(mut line) = serde_json::to_string(&frame) else {
+                    continue;
+                };
+                line.push('\n');
+                if stdout.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stdout.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Queue one frame (serializeJsonLine: LF-only framing).
+    pub fn write(&self, frame: Value) {
+        let _ = self.tx.send(frame);
+    }
+}
+
+/// The signal exit codes (TS `runRpcModeWithConnectionInternal`).
+const SIGTERM_EXIT: i32 = 143;
+const SIGHUP_EXIT: i32 = 129;
+
+/// The mode's exit path: the writer must flush its queued frames before
+/// the process exits (TS `process.exit` follows the synchronous writes).
+fn exit_with(code: i32) -> ! {
+    // stdout is line-buffered on the writer task; a direct flush of the
+    // blocking handle covers the frames the task already wrote.
+    let _ = std::io::stdout().flush();
+    std::process::exit(code);
+}
+
+/// The async entry: serve the RPC stdio mode until stdin closes or a
+/// signal exits. Returns the process exit code.
+///
+/// # Errors
+///
+/// Returns an error when the tokio runtime cannot be built; the transport
+/// itself never errors out of the loop (protocol failures answer on
+/// stdout, TS parity).
+pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
+    let writer = LineWriter::spawn();
+    let initial_goal = options.engine.engine.goal_state().await;
+    let session =
+        Arc::new(RpcSession::adopt(options.engine, options.engine_factory, writer.clone()).await);
+    let state = Arc::new(commands::RpcState {
+        session: Arc::clone(&session),
+        writer,
+        cwd: options.cwd,
+        agent_dir: options.agent_dir,
+        compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        autonomous: Arc::new(tokio::sync::Mutex::new(
+            pa_core::autonomous::create_autonomous_runtime_state(
+                options.autonomous_config.as_ref(),
+                None,
+            ),
+        )),
+        last_goal: Arc::new(tokio::sync::Mutex::new(initial_goal)),
+        queue_pump: Arc::new(tokio::sync::Mutex::new(())),
+        pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    spawn_signal_handlers(Arc::clone(&session));
+    serve_stdin(state).await
+}
+
+/// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this
+/// pair): abort the running turn, settle it, dispose the kernel, exit.
+fn spawn_signal_handlers(session: Arc<RpcSession>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let terminate_session = Arc::clone(&session);
+    tokio::spawn(async move {
+        if let Ok(mut stream) = signal(SignalKind::terminate()) {
+            stream.recv().await;
+            let engine = terminate_session.handle().await.engine.clone();
+            engine.session.agent().abort();
+            engine.session.agent().wait_for_idle().await;
+            engine.dispose_kernel().await;
+            exit_with(SIGTERM_EXIT);
+        }
+    });
+    let hangup_session = Arc::clone(&session);
+    tokio::spawn(async move {
+        if let Ok(mut stream) = signal(SignalKind::hangup()) {
+            stream.recv().await;
+            let engine = hangup_session.handle().await.engine.clone();
+            engine.session.agent().abort();
+            engine.session.agent().wait_for_idle().await;
+            engine.dispose_kernel().await;
+            exit_with(SIGHUP_EXIT);
+        }
+    });
+}
+
+/// The stdin loop: parse every line, dispatch commands concurrently
+/// (prompts serialize behind one lane), and settle on EOF.
+async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
+    // The prompt lane: one prompt command at a time, ordered (TS
+    // `promptCommandTail`).
+    let prompt_lane = Arc::new(tokio::sync::Mutex::new(()));
+    // The in-flight handlers EOF waits for (TS `pendingInputHandlers`).
+    let mut pending = tokio::task::JoinSet::new();
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match stdin.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match protocol::parse_line(&line) {
+            ParsedLine::ParseError(response) => state.writer.write(response),
+            // No in-process extension-UI seam exists: the bridge would
+            // answer; unknown request ids are silently ignored (TS
+            // `respondToExtensionUiRequest(...).catch(() => undefined)`).
+            ParsedLine::ExtensionUiResponse => {}
+            ParsedLine::Command(command) => {
+                let state = Arc::clone(&state);
+                let prompt_lane = Arc::clone(&prompt_lane);
+                pending.spawn(async move {
+                    dispatch_one(state, prompt_lane, command).await;
+                });
+            }
+        }
+    }
+    // stdin closed: settle the in-flight handlers, wait the session
+    // idle, dispose, exit 0 (TS `onInputEnd`).
+    while pending.join_next().await.is_some() {}
+    state.session.dispose().await;
+    0
+}
+
+/// One command's dispatch: prompts hold the lane and buffer connection
+/// events until their response is written (TS `handleInputLine`); every
+/// other command runs unlocked.
+async fn dispatch_one(
+    state: Arc<commands::RpcState>,
+    prompt_lane: Arc<tokio::sync::Mutex<()>>,
+    command: RpcCommand,
+) {
+    let is_prompt = command.command == "prompt";
+    if !is_prompt {
+        let response = commands::handle_command(&state, command).await;
+        state.writer.write(response);
+        return;
+    }
+    let lane = prompt_lane.lock().await;
+    state.session.set_prompt_response_pending(true).await;
+    let response = commands::handle_command(&state, command).await;
+    // The response writes while the buffer stays armed (TS `output` of
+    // the response precedes the buffered events); the flush then
+    // disarms and emits them in arrival order.
+    state.writer.write(response);
+    state.session.flush_connection_events().await;
+    drop(lane);
+}
