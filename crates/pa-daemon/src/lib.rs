@@ -18,6 +18,7 @@ mod autonomous_continuation;
 pub(crate) mod bash_notices;
 pub(crate) mod boot_reap;
 pub mod branch_navigation;
+pub(crate) mod child_status_notices;
 mod compact_autorefine;
 pub mod compaction;
 mod compaction_outcome;
