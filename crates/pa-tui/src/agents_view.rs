@@ -308,8 +308,12 @@ impl DeleteAction {
             return true;
         };
         match self {
-            DeleteAction::StopSubagent { .. } => data.get("cancelled") != Some(&serde_json::json!(false)),
-            DeleteAction::DeleteSubagent { .. } => data.get("deleted") != Some(&serde_json::json!(false)),
+            DeleteAction::StopSubagent { .. } => {
+                data.get("cancelled") != Some(&serde_json::json!(false))
+            }
+            DeleteAction::DeleteSubagent { .. } => {
+                data.get("deleted") != Some(&serde_json::json!(false))
+            }
             DeleteAction::StopAgent { .. } => true,
             DeleteAction::DeleteSavedSession { .. } => {
                 data.get("deleted").map(serde_json::Value::as_bool) != Some(Some(false))
@@ -377,15 +381,20 @@ fn spawn_delete_dispatch(
                 response
                     .data
                     .as_ref()
-                    .map(|data| crate::width::truncate_line(
-                        &vec![crate::Span::raw(
-                            serde_json::to_string(data).unwrap_or_default()
-                        )],
-                        120,
-                        "\u{2026}",
-                    )
+                    .map(|data| {
+                        crate::width::truncate_line(
+                            &vec![crate::Span::raw(
+                                serde_json::to_string(data).unwrap_or_default(),
+                            )],
+                            120,
+                            "\u{2026}",
+                        )
+                    })
                     .first()
-                    .map(|line| line.iter().map(|span| span.content.clone()).collect::<String>())
+                    .map(|line| line
+                        .iter()
+                        .map(|span| span.content.clone())
+                        .collect::<String>())
                     .unwrap_or_else(|| "nothing changed".into())
             ),
             Ok(response) => {
@@ -3022,7 +3031,9 @@ mod tests {
             "the stale word never executes"
         );
         assert!(
-            mode.pending_delete.as_ref().is_some_and(|pending| !pending.stop),
+            mode.pending_delete
+                .as_ref()
+                .is_some_and(|pending| !pending.stop),
             "the re-arm carries the current word: {:?}",
             mode.pending_delete
         );
