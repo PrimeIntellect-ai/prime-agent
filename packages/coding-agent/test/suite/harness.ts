@@ -206,7 +206,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: tempDir,
+		cwd: options.existingSessionFile ? sessionManager.getCwd() : tempDir,
 		modelRegistry,
 		resourceLoader,
 		agentObserveController: options.agentObserveController,

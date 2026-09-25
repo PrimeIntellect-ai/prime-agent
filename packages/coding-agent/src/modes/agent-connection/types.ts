@@ -588,6 +588,7 @@ export type AgentConnectionSessionEvent =
 			customInstructions?: string;
 	  }
 	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "cwd_changed"; cwd: string }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "service_tier_changed"; serviceTier: ServiceTier }
 	| {
@@ -798,6 +799,7 @@ export interface AgentConnection {
 	exportToHtml(outputPath?: string): Promise<string>;
 	exportToJsonl(outputPath?: string): Promise<string>;
 	setSessionName(name: string): Promise<void>;
+	setCwd(path: string): Promise<string>;
 	getRlmMaxDepthStatus(): Promise<RlmMaxDepthStatus>;
 	setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<SetRlmMaxDepthResult>;
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;

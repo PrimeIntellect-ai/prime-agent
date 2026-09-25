@@ -368,7 +368,7 @@ export class IpythonKernelProvisioner {
 	private disposeSnapshot = true;
 
 	constructor(
-		private readonly cwd: string,
+		private cwd: string,
 		private readonly options?: Omit<IpythonToolOptions, "provisioner">,
 	) {}
 
@@ -403,6 +403,13 @@ export class IpythonKernelProvisioner {
 	async listNamespaceNames(signal?: AbortSignal): Promise<string[] | null> {
 		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
 		return (await m?.listNamespaceNames(signal)) ?? null;
+	}
+
+	/** Retarget the kernel cwd: the pending/started manager now, the field for any future start; a refusal is thrown to the caller. */
+	async setCwd(cwd: string): Promise<void> {
+		this.cwd = cwd;
+		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
+		await m?.setCwd(cwd);
 	}
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */

@@ -831,6 +831,7 @@ function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSes
 		throw new Error("Daemon update restart response contains an invalid session config");
 	}
 	const clientEnv = readOptionalStringRecord(value.clientEnv, "clientEnv");
+	const cwdOverride = readOptionalString(value.cwdOverride, "cwdOverride");
 	const runtimeMetadata = parseDaemonUpdateRestartRuntimeMetadata(value.runtimeMetadata);
 	return {
 		activeSessionId: readString(value.activeSessionId, "activeSessionId"),
@@ -838,6 +839,7 @@ function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSes
 		sessionFile: readString(value.sessionFile, "sessionFile"),
 		cwd: readString(value.cwd, "cwd"),
 		config: config as DaemonUpdateRestartSession["config"],
+		...(cwdOverride ? { cwdOverride } : {}),
 		...(runtimeMetadata ? { runtimeMetadata } : {}),
 		...(clientEnv ? { clientEnv } : {}),
 		queue: {
@@ -1102,6 +1104,7 @@ async function restoreDaemonUpdateRestartSession(
 			type: "create",
 			sessionPath: session.sessionFile,
 			config: session.config,
+			...(session.cwdOverride ? { cwdOverride: session.cwdOverride } : {}),
 			...(runtimeMetadata ? { runtimeMetadata } : {}),
 			...(session.clientEnv ? { env: session.clientEnv } : {}),
 		},

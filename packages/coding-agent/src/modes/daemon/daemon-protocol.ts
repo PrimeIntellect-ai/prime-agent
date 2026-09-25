@@ -77,8 +77,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds the capability-gated abort_and_send_queued command.
 // Revision 30 adds structured update_restarting failure info for opens fenced by an update restart.
-export const DAEMON_SCHEMA_REVISION = 30;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-30-f908f493c9e1";
+// Revision 31 adds the set_cwd session command and the explicit create.cwdOverride field.
+export const DAEMON_SCHEMA_REVISION = 31;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-31-a4a923457ef1";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -367,6 +368,7 @@ export interface DaemonUpdateRestartSession {
 	sessionFile: string;
 	cwd: string;
 	config: AgentSessionRuntimeConfig;
+	cwdOverride?: string;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;
 	clientEnv?: Record<string, string>;
 	queue: DaemonUpdateRestartQueue;
@@ -418,6 +420,8 @@ export type DaemonCommand =
 			noSession?: boolean;
 			name?: string;
 			config?: AgentSessionRuntimeConfig;
+			/** Resume `sessionPath` pinned to this cwd for the whole run (--cwd, the missing-directory picker, an update restart of an override run). `config.cwd` is only the default for new sessions. */
+			cwdOverride?: string;
 			runtimeMetadata?: AgentSessionRuntimeMetadata;
 			lifecycle?: DaemonSessionLifecycle;
 	  } & DaemonClientEnv &
@@ -669,6 +673,7 @@ export type DaemonCommand =
 	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string; workerToken?: string }
 	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
+	| { id?: string; type: "set_cwd"; activeSessionId: string; cwd: string }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
 	| { id?: string; type: "delete_saved_session"; activeSessionId?: string; sessionPath: string }
 	| { id?: string; type: "get_session_context"; activeSessionId: string }
@@ -726,6 +731,7 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const CREATE_CWD_OVERRIDE_COMMAND = { minProtocol: 7, minSchemaRevision: 31 } as const;
 const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 17,
@@ -847,6 +853,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_session_name: LEGACY_DAEMON_COMMAND,
 	get_rlm_max_depth_status: RLM_MAX_DEPTH_COMMAND,
 	set_rlm_max_depth: RLM_MAX_DEPTH_COMMAND,
+	set_cwd: { minProtocol: 7, minSchemaRevision: 31 },
 	rename_saved_session: LEGACY_DAEMON_COMMAND,
 	delete_saved_session: LEGACY_DAEMON_COMMAND,
 	get_session_context: LEGACY_DAEMON_COMMAND,
@@ -966,6 +973,7 @@ export const DAEMON_COMMAND_PLANE = {
 	set_session_name: "control",
 	get_rlm_max_depth_status: "session",
 	set_rlm_max_depth: "session",
+	set_cwd: "session",
 	rename_saved_session: "control",
 	delete_saved_session: "control",
 	get_session_context: "session",
@@ -995,6 +1003,7 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
 		(command.type === "create" && command.config?.telemetryDisabled !== undefined);
 	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
+	if (command.type === "create" && command.cwdOverride !== undefined) requirements.push(CREATE_CWD_OVERRIDE_COMMAND);
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
 	}

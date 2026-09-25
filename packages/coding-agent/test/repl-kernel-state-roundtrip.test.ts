@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -74,6 +74,20 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 		} finally {
 			await reader.shutdown({ snapshot: true, drainHostRequests: true });
 		}
+	}, 60_000);
+
+	it("retargets a running kernel to setCwd's directory", async () => {
+		const manager = newManager();
+		try {
+			await manager.execute("x = 1");
+			const sub = mkdtempSync(join(dir, "sub-"));
+			await manager.setCwd(sub);
+			const result = await manager.execute("import os; print(os.getcwd())");
+			expect(result.stdout.trim()).toBe(realpathSync(sub));
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+		// test-policy: allow explicit-test-timeout -- parity with the neighbouring real-kernel tests in this file
 	}, 60_000);
 
 	it("treats a missing snapshot as an empty restore (clean start)", async () => {

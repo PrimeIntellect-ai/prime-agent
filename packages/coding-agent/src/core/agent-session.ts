@@ -36,6 +36,7 @@ import {
 	resetApiProviders,
 	supportsServiceTier,
 } from "@earendil-works/pi-ai";
+import { expandTildePath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -214,6 +215,7 @@ import {
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+	SESSION_CWD_CHANGED_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
@@ -319,6 +321,7 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
+import { isExistingDirectory } from "./session-cwd.js";
 import type {
 	BranchSummaryEntry,
 	ChildUsageAttributionEntry,
@@ -425,6 +428,7 @@ export type AgentSessionEvent =
 			customInstructions?: string;
 	  }
 	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "cwd_changed"; cwd: string }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "service_tier_changed"; serviceTier: ServiceTier }
 	| {
@@ -2165,6 +2169,31 @@ export class AgentSession {
 			}
 		}
 		return undefined;
+	}
+
+	/** Follows SessionManager's re-resolved cwd and drops queued [cwd-changed] notices; a kernel that refuses the chdir is reported, not rolled back. */
+	private async _reloadCwdFromBranch(): Promise<void> {
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
+			(message) => message.customType !== SESSION_CWD_CHANGED_CUSTOM_TYPE,
+		);
+		const cwd = this.sessionManager.getCwd();
+		if (cwd === this._cwd) return;
+		const previousCwd = this._cwd;
+		this._cwd = cwd;
+		this._emit({ type: "cwd_changed", cwd });
+		try {
+			await this._ipythonKernelProvisioner?.setCwd(cwd);
+		} catch (error) {
+			void this.sendCustomMessage(
+				{
+					customType: SESSION_CWD_CHANGED_CUSTOM_TYPE,
+					content: cwdKernelStaleNotice(previousCwd, cwd, error),
+					display: true,
+					details: { cwd, previousCwd },
+				},
+				{ deliverAs: "nextTurn" },
+			).catch(() => {});
+		}
 	}
 
 	private _resolveRlmMaxDepth(): {
@@ -14448,6 +14477,41 @@ export class AgentSession {
 		});
 	}
 
+	/** Retarget this session's working directory; SessionManager records it on the branch so a resume restarts there. */
+	async setCwd(input: string): Promise<string> {
+		// Holding the admission fence keeps a concurrent prompt from starting a turn under the kernel chdir.
+		const admissionFence = await this._acquireDirectTurnAdmissionFence();
+		try {
+			if (this.isStreaming) throw new Error("Cannot change the working directory while the agent is running.");
+			const cwd = resolve(this._cwd, expandTildePath(input.trim()));
+			if (!isExistingDirectory(cwd)) throw new Error(`Not a directory: ${cwd}`);
+			if (cwd === this._cwd) return cwd;
+			const previousCwd = this._cwd;
+			try {
+				// Kernel first: a dead kernel or a refused chdir records nothing.
+				await this._ipythonKernelProvisioner?.setCwd(cwd);
+				this.sessionManager.recordCwd(cwd);
+			} catch (error) {
+				await this._ipythonKernelProvisioner?.setCwd(previousCwd).catch(() => {});
+				throw error;
+			}
+			this._cwd = cwd;
+			this._emit({ type: "cwd_changed", cwd });
+			await this.sendCustomMessage(
+				{
+					customType: SESSION_CWD_CHANGED_CUSTOM_TYPE,
+					content: cwdChangedNotice(previousCwd, cwd),
+					display: true,
+					details: { cwd, previousCwd },
+				},
+				{ deliverAs: "nextTurn" },
+			);
+			return cwd;
+		} finally {
+			admissionFence.release();
+		}
+	}
+
 	/**
 	 * Navigate to a different node in the session tree.
 	 * Unlike fork() which creates a new session file, this stays in the same file.
@@ -14733,6 +14797,8 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
+
+			await this._reloadCwdFromBranch();
 
 			return { editorText, cancelled: false, summaryEntry };
 		} finally {
@@ -15098,4 +15164,24 @@ function rlmHeartbeatHostResponse(job: AgentCronJob): Record<string, unknown> {
 		last_error: job.lastError ?? null,
 		run_count: job.runCount,
 	};
+}
+
+function cwdChangedNotice(previousCwd: string, cwd: string): string {
+	return [
+		"[cwd-changed]",
+		"",
+		`The user ran /cwd. This session's working directory is now ${cwd} (previously ${previousCwd}); it stays so for the rest of the session, including after a resume.`,
+		`The Python kernel's working directory is now ${cwd} (os.getcwd()): bash() and relative paths resolve there, and new subagents start there. The "Working directory" line in the system prompt is from session start and no longer applies. Do not chdir back unless the user asks.`,
+	].join("\n");
+}
+
+function cwdKernelStaleNotice(previousCwd: string, cwd: string, error: unknown): string {
+	return [
+		"[cwd-changed]",
+		"",
+		`Tree navigation moved this session's working directory to ${cwd} (previously ${previousCwd}), but the running Python kernel could not change directory: ${
+			error instanceof Error ? error.message : String(error)
+		}.`,
+		`bash() and relative paths in the kernel still resolve in ${previousCwd} until you run __import__("os").chdir(${JSON.stringify(cwd)}) or the kernel restarts (it starts in ${cwd}). New subagents and ! commands already use ${cwd}.`,
+	].join("\n");
 }

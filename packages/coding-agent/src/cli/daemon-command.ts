@@ -288,6 +288,7 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 				name: sessionName,
 				config: sessionArgs.config,
 				sessionPath: sessionArgs.sessionPath,
+				cwdOverride: sessionArgs.cwdOverride,
 				continueRecent: sessionArgs.continueRecent,
 			});
 			if (response.success || !autoName || !response.error.includes(`Agent name "${sessionName}" is unavailable`)) {
@@ -315,6 +316,7 @@ interface ParsedSessionArgs {
 	daemonArgs: string[];
 	name?: string;
 	config?: AgentSessionRuntimeConfig;
+	cwdOverride?: string;
 	sessionPath?: string;
 	continueRecent?: boolean;
 }
@@ -409,6 +411,7 @@ function parseSessionArgs(args: string[]): ParsedSessionArgs {
 		daemonArgs,
 		name: name || undefined,
 		config: Object.keys(config).length > 0 ? config : undefined,
+		cwdOverride: sessionPath !== undefined ? config.cwd : undefined,
 		sessionPath,
 		continueRecent,
 	};
@@ -827,6 +830,7 @@ async function runCreate(client: DaemonClient, args: string[], json: boolean): P
 		name: sessionArgs.name,
 		config: sessionArgs.config,
 		sessionPath: sessionArgs.sessionPath,
+		cwdOverride: sessionArgs.cwdOverride,
 		continueRecent: sessionArgs.continueRecent,
 	});
 	const data = requireSuccess(response);

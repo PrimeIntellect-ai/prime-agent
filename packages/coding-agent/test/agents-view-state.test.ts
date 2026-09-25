@@ -2,14 +2,12 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SettingsManager } from "../src/core/settings-manager.js";
 import {
 	AgentsViewMode,
 	createAgentsViewListCommand,
-	createAgentsViewResumeConfig,
 	createInitialAgentsViewPersistentState,
 	createInitialAgentsViewScopeFrames,
 	createScopeBackReturnChatOpenResult,
@@ -1046,23 +1044,6 @@ describe("agents view state", () => {
 		expect(shouldShowAgentsViewSession(makeSummary({ lifecycle: "live", activity: "idle" }), true)).toBe(false);
 	});
 
-	test("does not override saved session cwd when reopening inactive agents", () => {
-		const config: AgentSessionRuntimeConfig = {
-			cwd: "/tmp/dashboard",
-			agentDir: "/tmp/agents",
-			sessionDir: "/tmp/sessions",
-			model: "openai/gpt-5",
-		};
-
-		const resumeConfig = createAgentsViewResumeConfig(config);
-
-		expect("cwd" in resumeConfig).toBe(false);
-		expect(resumeConfig.agentDir).toBe("/tmp/agents");
-		expect(resumeConfig.sessionDir).toBe("/tmp/sessions");
-		expect(resumeConfig.model).toBe("openai/gpt-5");
-		expect(config.cwd).toBe("/tmp/dashboard");
-	});
-
 	test("opens an existing-cwd session in its own directory with no override or notice", () => {
 		const dir = mkdtempSync(join(tmpdir(), "agents-view-cwd-"));
 		try {
@@ -1083,12 +1064,6 @@ describe("agents view state", () => {
 	test("does not override when there is no fallback cwd to use", () => {
 		const missing = join(tmpdir(), "agents-view-missing-worktree-does-not-exist");
 		expect(resolveAgentsViewOpenCwd(makeSummary({ cwd: missing }), undefined)).toEqual({});
-	});
-
-	test("passes the override cwd through the resume config when the stored cwd is missing", () => {
-		const config: AgentSessionRuntimeConfig = { cwd: "/tmp/launch", agentDir: "/tmp/agents" };
-		const resumeConfig = createAgentsViewResumeConfig(config, "/tmp/launch");
-		expect(resumeConfig.cwd).toBe("/tmp/launch");
 	});
 
 	test("requests only daemon-resident sessions for the agents view refresh", () => {

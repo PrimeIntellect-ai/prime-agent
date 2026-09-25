@@ -172,6 +172,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new`, `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
+| `/cwd [path]` | Change this session's working directory (kernel, new subagents, path completion; kept on resume) |
 | `/session` | Show session info (file, ID, messages) |
 | `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview traces, run one-shot current/all uploads, and manage automatic sharing (`upload` aliases `upload-current`) |
 | `/usage` | Show token, cost, and context usage |

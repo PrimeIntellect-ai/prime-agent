@@ -235,6 +235,8 @@ export interface SlashCommand {
 	argumentHint?: string;
 	sourceTag?: string;
 	takesArgument?: boolean;
+	/** Complete the argument like an `@` reference (fuzzy, cwd-relative) but insert it without the `@`. */
+	pathArgument?: boolean;
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
 }
 
@@ -299,6 +301,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const { rawPrefix, isQuotedPrefix } = parsePathPrefix(atPrefix);
 			const suggestions = await this.getFuzzyFileSuggestions(rawPrefix, {
 				isQuotedPrefix,
+				isAtPrefix: true,
 				signal: options.signal,
 			});
 			if (suggestions.length === 0) return null;
@@ -353,6 +356,15 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const name = "name" in cmd ? cmd.name : cmd.value;
 				return name === slashContext.commandName;
 			});
+			if (command && "pathArgument" in command && command.pathArgument) {
+				const { rawPrefix, isQuotedPrefix } = parsePathPrefix(slashContext.prefix);
+				const items = await this.getFuzzyFileSuggestions(rawPrefix, {
+					isQuotedPrefix,
+					isAtPrefix: false,
+					signal: options.signal,
+				});
+				return items.length === 0 ? null : { items, prefix: slashContext.prefix, kind: "file" };
+			}
 			if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
 				return null;
 			}
@@ -701,7 +713,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 	private async getFuzzyFileSuggestions(
 		query: string,
-		options: { isQuotedPrefix: boolean; signal: AbortSignal },
+		options: { isQuotedPrefix: boolean; isAtPrefix: boolean; signal: AbortSignal },
 	): Promise<AutocompleteItem[]> {
 		if (!this.fdPath || options.signal.aborted) {
 			return [];
@@ -736,7 +748,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const completionPath = isDirectory ? `${displayPath}/` : displayPath;
 				const value = buildCompletionValue(completionPath, {
 					isDirectory,
-					isAtPrefix: true,
+					isAtPrefix: options.isAtPrefix,
 					isQuotedPrefix: options.isQuotedPrefix,
 				});
 

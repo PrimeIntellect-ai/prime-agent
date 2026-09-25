@@ -300,6 +300,7 @@ export interface KernelClient {
 	pruneOversizedVariables(): Promise<SnapshotResult | null>;
 	restoreState(): Promise<RestoreResult | null>;
 	listNamespaceNames(signal?: AbortSignal): Promise<string[] | null>;
+	setCwd(cwd: string): Promise<void>;
 }
 
 // One registry serves every client kind; two parallel registries would

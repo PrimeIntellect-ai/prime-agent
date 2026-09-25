@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 export interface SessionCwdIssue {
 	sessionFile?: string;
@@ -55,5 +55,14 @@ export function assertSessionCwdExists(sessionManager: SessionCwdSource, fallbac
 	const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
 	if (issue) {
 		throw new MissingSessionCwdError(issue);
+	}
+}
+
+/** True for a directory the process can stat; false for missing, non-directory, or inaccessible paths. */
+export function isExistingDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
 	}
 }

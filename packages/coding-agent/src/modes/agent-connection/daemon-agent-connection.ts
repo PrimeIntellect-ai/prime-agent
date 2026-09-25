@@ -1786,6 +1786,15 @@ export class DaemonAgentConnection implements AgentConnection {
 		await this.requestOk({ type: "set_session_name", activeSessionId: this.activeSessionId, name });
 	}
 
+	async setCwd(path: string): Promise<string> {
+		const data = await this.requestData<{ cwd: string }>({
+			type: "set_cwd",
+			activeSessionId: this.activeSessionId,
+			cwd: path,
+		});
+		return data.cwd;
+	}
+
 	async getRlmMaxDepthStatus() {
 		return this.requestData<{ maxDepth: number; source: "default" | "env" | "global" | "inherited" | "chat" }>({
 			type: "get_rlm_max_depth_status",

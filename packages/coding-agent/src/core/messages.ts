@@ -40,6 +40,7 @@ export const HEARTBEAT_PROMPT_CUSTOM_TYPE = "heartbeat_prompt";
 export const HEARTBEAT_PROMPT_PREVIEW_LABEL = "Heartbeat prompt";
 export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE = "python_skills_unavailable";
+export const SESSION_CWD_CHANGED_CUSTOM_TYPE = "session_cwd_changed";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
@@ -342,6 +343,11 @@ export interface HeartbeatPromptDetails {
 
 export interface IpythonStateRestoredDetails {
 	restored: boolean;
+}
+
+export interface SessionCwdChangedDetails {
+	cwd: string;
+	previousCwd: string;
 }
 
 /** Import names of the pre-imported Python skills that failed to import into the kernel. */

@@ -1725,6 +1725,9 @@ export class InteractiveMode {
 				this.getTracesArgumentCompletions(prefix);
 		}
 
+		const cwdCommand = slashCommands.find((command) => command.name === "cwd");
+		if (cwdCommand) cwdCommand.pathArgument = true;
+
 		const connectionCommands = this.connectionCommands;
 		const templateCommands: SlashCommand[] = connectionCommands
 			.filter((cmd) => cmd.source === "prompt")
@@ -3293,6 +3296,9 @@ export class InteractiveMode {
 				break;
 			case "session_info_changed":
 				this.patchConnectionState({ sessionName: event.name });
+				break;
+			case "cwd_changed":
+				this.patchConnectionState({ cwd: event.cwd });
 				break;
 			case "thinking_level_changed":
 				this.patchConnectionState({ thinkingLevel: event.level });
@@ -5297,6 +5303,11 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
+				if (commandName === "cwd") {
+					this.editor.setText("");
+					await this.handleCwdCommand(canonicalCommandText);
+					return;
+				}
 				if (commandName === "rlm-max-depth") {
 					this.editor.setText("");
 					await this.handleRlmMaxDepthCommand(commandArgs);
@@ -6078,6 +6089,15 @@ export class InteractiveMode {
 			case "session_info_changed":
 				this.updateTerminalTitle();
 				this.refreshTopBarCostThrottled();
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+
+			case "cwd_changed":
+				this.footerDataProvider.setCwd(event.cwd);
+				this.setupAutocompleteProvider();
+				this.updateTerminalTitle();
+				this.builtInHeader?.invalidate();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -11437,7 +11457,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private getPathCommandArgument(text: string, command: "/export" | "/import"): string | undefined {
+	private getPathCommandArgument(text: string, command: "/export" | "/import" | "/cwd"): string | undefined {
 		if (text === command) {
 			return undefined;
 		}
@@ -11639,6 +11659,28 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleCwdCommand(text: string): Promise<void> {
+		if (text === "/cwd") {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("dim", `Working directory: ${this.getCurrentCwd()}`), 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+		const target = this.getPathCommandArgument(text, "/cwd");
+		if (!target) {
+			this.showError("Usage: /cwd <path>");
+			return;
+		}
+		try {
+			const cwd = await this.agentConnection.setCwd(target);
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("dim", `Working directory set: ${cwd}`), 1, 0));
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async handleRlmMaxDepthCommand(args: string): Promise<void> {
