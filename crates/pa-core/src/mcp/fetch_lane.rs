@@ -76,7 +76,7 @@ fn shared() -> &'static Mutex<SharedCaches> {
 fn plugins_catalog_cache_for(agent_dir: &Path) -> Arc<PluginsCatalogCache> {
     let cache_path = agent_dir.join(PLUGINS_CACHE_FILE);
     let mut shared = shared().lock().unwrap();
-    Arc::clone(&shared.entry(cache_path.clone()).or_insert_with(move || {
+    Arc::clone(shared.entry(cache_path.clone()).or_insert_with(move || {
         Arc::new(PluginsCatalogCache::at_url(
             MCP_SERVICE_CATALOG_URL,
             cache_path,
