@@ -2494,8 +2494,7 @@ runtime lease.\n\n• Continue where you left off:\n  prime-agent-rust --daemon-
 shell where you started it — that daemon owns this session)\n\n• Take over on this \
 daemon:\n  kill 4242 # the holder is prime-agent\n  Then retry — the file unlocks when \
 the holder exits.";
-        let mut mode = mode_with_notice(refusal);
-        let frame = |mode: &AgentsViewMode| {
+        let render = |mode: &mut AgentsViewMode| {
             let (lines, _) = mode.render_frame(120, 40);
             lines
                 .iter()
@@ -2507,7 +2506,8 @@ the holder exits.";
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let shown = frame(&mode);
+        let mut mode = mode_with_notice(refusal);
+        let shown = render(&mut mode);
         for way_out in [
             "Continue where you left off",
             "--daemon-socket <socket> --resume 'sess-1'",
@@ -2521,7 +2521,7 @@ the holder exits.";
         }
         // Any key dismisses the panel; the hint line returns.
         mode.handle_key("down");
-        let dismissed = frame(&mode);
+        let dismissed = render(&mut mode);
         assert!(
             !dismissed.contains("Take over on this daemon"),
             "the panel leaves the frame on any key:\n{dismissed}"
