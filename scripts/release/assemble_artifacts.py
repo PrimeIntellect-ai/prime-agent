@@ -85,6 +85,47 @@ TARGET_ALIASES = {
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 
+# Split-debug decoder sidecars (prime-agent-*.debug / *.debug.gz) are release
+# assets for offline symbolication, NEVER install payload: the installer and
+# the update channel extract the tarball verbatim, so a decoder inside it
+# would ship DWARF bytes to every install. release.yml uploads the decoder
+# as a separate release asset; this assembly hard-fails if one appears in
+# the staging tree or the packed archive (guards the future, not just today:
+# a later staging mistake must fail the release step, not ride the tarball).
+DECODER_SUFFIXES = (".debug", ".debug.gz")
+
+
+def decoder_like(path: Path) -> bool:
+    return path.name.endswith(DECODER_SUFFIXES)
+
+
+def fail_if_decoder_in_tree(staging: Path) -> None:
+    offenders = sorted(
+        str(p.relative_to(staging))
+        for p in staging.rglob("*") if p.is_file() and decoder_like(p)
+    )
+    if offenders:
+        fail(
+            "decoder-like sidecar(s) in the release payload (split-debug "
+            "assets are separate release assets, never install payload): "
+            + ", ".join(offenders)
+        )
+
+
+def fail_if_decoder_in_archive(archive_path: Path) -> None:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        offenders = sorted(
+            m.name for m in archive.getmembers()
+            if decoder_like(Path(m.name))
+        )
+    if offenders:
+        archive_path.unlink(missing_ok=True)
+        fail(
+            f"decoder-like sidecar(s) packed into {archive_path.name} "
+            "(split-debug assets are separate release assets, never install "
+            f"payload): {', '.join(offenders)}"
+        )
+
 # A git commit SHA as carried by `${GITHUB_SHA}` (full 40 hex chars, either
 # case accepted).
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -224,6 +265,9 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         }
         (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
         payload.append("package.json")
+    # The payload guard runs on the staged tree BEFORE packing: a decoder
+    # sidecar staged by a later change fails here, not in the field.
+    fail_if_decoder_in_tree(staging)
     return {
         "executable_sha256": sha256_file(staging / "prime-agent"),
         "payload": payload,
@@ -302,6 +346,9 @@ def main() -> int:
         )
         archive_path = out_dir / archive_name
         pack_tarball(staging, archive_path, facts["payload"])
+        # The packed archive is the artifact the channel serves: assert it
+        # carries no decoder sidecar before anything records its hash.
+        fail_if_decoder_in_archive(archive_path)
         archive_sha256 = sha256_file(archive_path)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
