@@ -432,7 +432,6 @@ where
     T: serde::Serialize,
     U: serde::de::DeserializeOwned,
 {
-    use serde::Serialize as _;
     let mut bytes = Vec::new();
     let mut serializer = serde_json::Serializer::new(&mut bytes);
     value.serialize(&mut serializer).ok()?;

@@ -435,10 +435,10 @@ impl<'a> ContextMessageRef<'a> {
 /// `tokensBefore` estimate) skip the full-context clone. The assembly
 /// stays in lockstep with [`build_session_context`];
 /// `context_refs_match_owned_context` holds the two together.
-pub fn session_context_message_refs(
-    entries: &[FileEntry],
+pub fn session_context_message_refs<'a>(
+    entries: &'a [FileEntry],
     leaf_id: Option<&str>,
-) -> Vec<ContextMessageRef<'_>> {
+) -> Vec<ContextMessageRef<'a>> {
     let by_id: HashMap<&str, usize> = entries
         .iter()
         .enumerate()
