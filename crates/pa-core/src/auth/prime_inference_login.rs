@@ -12,8 +12,7 @@ use std::path::Path;
 
 use super::prime_inference::{
     check_prime_inference_access, read_prime_cli_config, PrimeAccessError, PrimeHttp,
-    PrimeInferenceAuthConfig, DEFAULT_PRIME_API_BASE_URL, DEFAULT_PRIME_FRONTEND_URL,
-    DEFAULT_REQUEST_TIMEOUT_MS,
+    PrimeInferenceAuthConfig, DEFAULT_REQUEST_TIMEOUT_MS,
 };
 use super::prime_traces::{run_prime_browser_login, PrimeAuthInfo, DEFAULT_POLL_INTERVAL_MS};
 use super::types::PrimeTeamAssignment;
@@ -171,8 +170,10 @@ pub async fn login_prime_inference(
 
 #[cfg(test)]
 mod tests {
+    use super::super::prime_inference::{DEFAULT_PRIME_API_BASE_URL, DEFAULT_PRIME_FRONTEND_URL};
     use super::super::types::PrimeTeamCredential;
     use super::*;
+    use base64::Engine as _;
     use rsa::pkcs8::DecodePublicKey;
     use std::collections::VecDeque;
     use std::future::Future;
