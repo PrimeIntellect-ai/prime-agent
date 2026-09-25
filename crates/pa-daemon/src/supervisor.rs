@@ -4183,7 +4183,10 @@ impl Supervisor {
         // admission path (a named open of a live session reuses it above,
         // and a root create keeps the plain live check), so only a
         // `kind: "subagent"` create reserves.
-        let name_reservation = self.reserve_subagent_create_name(command)?;
+        // The binding owns the reservation guard: it releases the key
+        // only when `handle_create` returns (the RAII drop), holding the
+        // name across the whole launch and durable admission.
+        let _name_reservation = self.reserve_subagent_create_name(command)?;
         if let DaemonCommand::Create {
             name: Some(name), ..
         } = command

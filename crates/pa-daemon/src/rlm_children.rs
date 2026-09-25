@@ -1850,7 +1850,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     rlm_child_id: child_id.clone(),
                     session_name: created.session_name.clone().unwrap_or_else(|| name.clone()),
                     active_session_id: created.active_session_id.clone(),
-                    session_id: created.session_id,
+                    session_id: created.session_id.clone(),
                     session_dir: created.session_dir.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
