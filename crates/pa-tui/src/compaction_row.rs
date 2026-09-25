@@ -146,9 +146,34 @@ pub fn render_compaction_stream(
     }
     let body = theme.fg_style(ThemeColor::RefinementSummary);
     let content_width = crate::branch::branch_content_width(width);
-    let wrapped = crate::width::wrap_text(&state.summary, content_width);
+    // The wrap window: the block renders only the newest
+    // [`STREAM_BLOCK_MAX_ROWS`] rows, so re-wrapping the whole growing
+    // summary on every delta would be quadratic work for no visual gain.
+    // Wrapping a tail window instead is exact: a text that fits in the
+    // cap rows holds at most cap * (content_width + 1) chars — inside
+    // the (cap + 1) * (content_width + 1) window, so it wraps whole and
+    // unclamped — and a clamped window wraps to at least cap + 1 rows
+    // (no row holds more than content_width chars plus its newline), so
+    // every kept row's boundaries live entirely inside the window. Only
+    // the window's first row can be a partial cut, and it always
+    // scrolls out of the cap.
+    let window = (STREAM_BLOCK_MAX_ROWS + 1) * (content_width + 1);
+    let total_chars = state.summary.chars().count();
+    let clamped = total_chars > window;
+    let text = if clamped {
+        state
+            .summary
+            .chars()
+            .skip(total_chars - window)
+            .collect::<String>()
+    } else {
+        state.summary.clone()
+    };
+    let wrapped = crate::width::wrap_text(&text, content_width);
     // The tail follows the generation: render the newest rows, marking
-    // the cut with a dim ellipsis when older rows scroll out of the cap.
+    // the cut with a dim ellipsis when older rows scroll out of the cap
+    // (a clamped window always wraps past the cap, so both the clipped
+    // and the many-row shapes keep the marker).
     let truncated = wrapped.len() > STREAM_BLOCK_MAX_ROWS;
     let rows_to_paint = wrapped.len().saturating_sub(STREAM_BLOCK_MAX_ROWS)..;
     let mut painted: Vec<Line> = Vec::new();
