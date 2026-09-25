@@ -74,7 +74,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// Minimal JSONL supervisor client (roster_subscribe / list).
+/// Minimal JSONL supervisor client (`roster_subscribe` / list).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -126,7 +126,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(

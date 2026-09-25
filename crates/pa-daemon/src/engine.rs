@@ -373,6 +373,12 @@ pub trait SessionEngine: Send + Sync {
     /// `Ok(None)` is every silent outcome — no trigger armed, a gate
     /// dropping it, the cooldown holding it, or a declined review.
     /// Engines without the compact-trigger machine never arm one.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the armed round itself fails (its model call); every
+    /// silent outcome stays `Ok(None)`, and engines without the
+    /// compact-trigger machine never error.
     fn consume_compact_auto_refine(
         &self,
     ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
@@ -398,6 +404,12 @@ pub trait SessionEngine: Send + Sync {
     /// timeline, a plain branch move keeps faithful branch semantics).
     /// Engines without a persistent model context accept and ignore the
     /// branch.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the moved branch's live-context rebuild fails; the
+    /// parked-branch path (no session built yet) and the goal reload do
+    /// not error.
     fn rebuild_session_context(
         &self,
         branch_entries: Vec<pa_types::session::FileEntry>,
@@ -637,6 +649,12 @@ pub trait SessionEngine: Send + Sync {
     /// Adopt the RLM identity from the session's create command. Fails when a
     /// carried value is invalid (an unknown thinking level), so the create
     /// fails instead of a later turn.
+    ///
+    /// # Errors
+    ///
+    /// Errors when a carried thinking level is not a known level name, so
+    /// the create fails instead of a later turn; engines without an RLM
+    /// identity never error.
     fn configure_rlm_identity(&self, _identity: RlmSessionIdentity) -> Result<()> {
         Ok(())
     }
@@ -715,6 +733,13 @@ pub trait SessionEngine: Send + Sync {
     /// value is the TS `RefinementResult` wire object; engines without
     /// refinement support answer an error and the caller surfaces it as
     /// the command failure.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the engine does not support refinement (the default
+    /// answer), or when model resolution, the session build, the
+    /// refinement round, or the result conversion fails; the caller
+    /// surfaces the error as the command failure.
     fn run_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
@@ -765,6 +790,12 @@ pub trait SessionEngine: Send + Sync {
     /// `set_rlm_max_depth` command). Returns the TS `SetRlmMaxDepthResult`
     /// wire object: `{ maxDepth, source, globalSaved }` plus `globalError`
     /// when the requested global settings write failed.
+    ///
+    /// # Errors
+    ///
+    /// The ported engines never error this command: the global settings
+    /// write failure rides the result's `globalError` field instead (the
+    /// TS shape), and the default engine answers the static result.
     fn set_rlm_max_depth(&self, max_depth: u64, global: bool) -> Result<Value> {
         let _ = global;
         Ok(json!({ "maxDepth": max_depth, "source": "chat", "globalSaved": false }))
@@ -825,7 +856,7 @@ pub struct CompactionRun {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionOutcome {
     /// Compacted; the run carries the result and entry usage. Boxed: the
-    /// run's insertion-ordered JSON maps (preserve_order, wire parity)
+    /// run's insertion-ordered JSON maps (`preserve_order`, wire parity)
     /// would make this variant dwarf the skip/abort/fail variants
     /// (`large_enum_variant`).
     Compacted { run: Box<CompactionRun> },
@@ -856,6 +887,10 @@ pub struct BranchSummaryRun {
     pub summary: String,
     pub usage: Option<Value>,
     pub details: Option<Value>,
+    /// The model that served the call (`provider`, `modelId`) when the
+    /// scripted response or the live engine names one: persisted on the
+    /// `branch_summary` entry for the per-model cost fold.
+    pub model: Option<(String, String)>,
 }
 
 /// How one branch-summary run ended (TS `BranchSummaryResult` outcomes).
@@ -1015,6 +1050,14 @@ struct SideQuestionScript {
 }
 
 impl ScriptedEngine {
+    /// Build the scripted engine from its JSON shape; every missing or
+    /// malformed script field takes its default.
+    ///
+    /// # Errors
+    ///
+    /// Never errors (the script shape is total and every field defaults);
+    /// the `Result` return keeps the constructor uniform with the other
+    /// builders.
     pub fn from_value(script: Value) -> Result<Self> {
         let responses = script
             .get("responses")
@@ -1082,16 +1125,15 @@ impl ScriptedEngine {
                         "continuationsUsed": 0,
                     })
                 }),
-                message: goal
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
+                message: goal.get("message").and_then(Value::as_str).map_or_else(
+                    || {
                         format!(
                             "[goal: continuation]\n\n{}",
                             goal.get("objective").and_then(Value::as_str).unwrap_or("")
                         )
-                    }),
+                    },
+                    str::to_string,
+                ),
                 emit_update_on_prompt: goal
                     .get("emitUpdateOnPrompt")
                     .and_then(Value::as_bool)
@@ -1106,6 +1148,13 @@ impl ScriptedEngine {
         })
     }
 
+    /// Build the scripted engine from a JSON file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or its JSON cannot
+    /// be parsed; the parsed value itself never errors (see
+    /// [`ScriptedEngine::from_value`]).
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_value(serde_json::from_str(&content)?)
@@ -1155,12 +1204,10 @@ impl SessionEngine for ScriptedEngine {
     /// The scripted thread goal's state, or the empty state (no goal
     /// section scripted).
     fn goal_state_value(&self) -> Value {
-        self.goal
-            .as_ref()
-            .map(|goal| goal.state.clone())
-            .unwrap_or_else(|| {
-                serde_json::to_value(pa_core::goals::empty_goal_state()).unwrap_or(Value::Null)
-            })
+        self.goal.as_ref().map_or_else(
+            || serde_json::to_value(pa_core::goals::empty_goal_state()).unwrap_or(Value::Null),
+            |goal| goal.state.clone(),
+        )
     }
 
     /// The scripted post-compaction mint: one continuation turn built from
@@ -1583,6 +1630,7 @@ impl SessionEngine for ScriptedEngine {
                     summary: "scripted branch summary".to_string(),
                     usage: None,
                     details: Some(json!({ "readFiles": [], "modifiedFiles": [] })),
+                    model: None,
                 },
             };
         };
@@ -1607,6 +1655,11 @@ impl SessionEngine for ScriptedEngine {
                     .to_string(),
                 usage: entry.get("usage").cloned().filter(|usage| !usage.is_null()),
                 details: entry.get("details").cloned().filter(|d| !d.is_null()),
+                model: (|| {
+                    let provider = entry.get("provider")?.as_str()?.to_string();
+                    let model_id = entry.get("modelId")?.as_str()?.to_string();
+                    Some((provider, model_id))
+                })(),
             },
         }
     }
@@ -1770,7 +1823,6 @@ mod tests {
                 seen_clone.fetch_add(1, Ordering::SeqCst);
                 match event {
                     EngineEvent::UserMessage(_) => false, // cancel right away
-                    EngineEvent::Done(_) | EngineEvent::DoneAborted => true,
                     _ => true,
                 }
             },

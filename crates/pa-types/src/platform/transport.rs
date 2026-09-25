@@ -1,7 +1,7 @@
 //! Transport contract for daemon sockets and streams.
 //!
 //! The daemon redesign defines its transport as a trait from day one
-//! (MISSION.md, Windows-readiness): AF_UNIX sockets today, named pipes
+//! (MISSION.md, Windows-readiness): `AF_UNIX` sockets today, named pipes
 //! (`\\.\pipe\...`) on Windows later. Callers bind/connect through these
 //! traits and never name a concrete socket type, so a future platform swap
 //! (tokio named-pipe listener) is an implementation change only.
@@ -62,11 +62,11 @@ impl TransportListener for tokio::net::UnixListener {
     }
 }
 
-/// AF_UNIX `sun_path` capacity: 108 bytes including the terminating NUL.
+/// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
 #[cfg(unix)]
 const MAX_SUN_PATH: usize = 107;
 
-/// A kernel-valid AF_UNIX address for `bind`/`connect`.
+/// A kernel-valid `AF_UNIX` address for `bind`/`connect`.
 ///
 /// Paths within the limit pass through unchanged. A longer path is re-anchored
 /// through an `O_PATH` descriptor on its parent directory
@@ -91,7 +91,7 @@ impl UnixSocketAddress {
         &self.address
     }
 
-    /// Resolve `path` into a kernel-valid AF_UNIX address, or fail with the
+    /// Resolve `path` into a kernel-valid `AF_UNIX` address, or fail with the
     /// original path in the message.
     fn new(path: &Path) -> Result<Self> {
         if path.as_os_str().len() <= MAX_SUN_PATH {
@@ -152,6 +152,11 @@ impl UnixSocketAddress {
 }
 
 /// Bind a listening endpoint at `path` (a socket file on Unix).
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be turned into a kernel-valid socket
+/// address or if binding the listener fails.
 #[cfg(unix)]
 pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
     let address = UnixSocketAddress::new(path)?;
@@ -160,6 +165,11 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
 }
 
 /// Connect to the endpoint at `path` asynchronously.
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be turned into a kernel-valid socket
+/// address or if the connection attempt fails.
 #[cfg(unix)]
 pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> {
     let address = UnixSocketAddress::new(path)?;
@@ -225,8 +235,17 @@ pub trait BlockingTransportStream:
 {
     /// Duplicate the underlying handle so reads and writes can proceed on
     /// separate owned halves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying handle cannot be duplicated.
     fn try_clone_box(&self) -> std::io::Result<Box<dyn BlockingTransportStream>>;
     /// Deadline a pending read (poll granularity for deadline-driven waits).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setting the read deadline on the underlying
+    /// stream fails.
     fn set_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()>;
 }
 
@@ -242,6 +261,11 @@ impl BlockingTransportStream for std::os::unix::net::UnixStream {
 }
 
 /// Connect to the endpoint at `path`, blocking until connected.
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be turned into a kernel-valid socket
+/// address or if the blocking connection attempt fails.
 #[cfg(unix)]
 pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTransportStream>> {
     let address = UnixSocketAddress::new(path).map_err(std::io::Error::other)?;
@@ -291,6 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn over_limit_paths_bind_connect_and_land_in_place() {
+        use tokio::io::AsyncReadExt;
         let dir = dir_of_exact_len("roundtrip", 120);
         let socket = dir.join("worker-test.sock");
         let _ = std::fs::remove_file(&socket);
@@ -320,7 +345,6 @@ mod tests {
         let (server, _) = listener.accept().await.expect("accept");
         let client = connect.await.expect("client task");
         // Round-trip one write to prove the pair is the same socket.
-        use tokio::io::AsyncReadExt;
         let (mut reader, _writer) = client.split();
         server.writable().await.expect("server writable");
         server.try_write(b"ping").expect("server write");

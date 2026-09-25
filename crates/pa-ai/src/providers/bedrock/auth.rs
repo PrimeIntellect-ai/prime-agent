@@ -1,6 +1,6 @@
 //! Bedrock authentication and endpoint resolution.
 //!
-//! Ports the SigV4 request signing used by `@aws-sdk/client-bedrock-runtime`
+//! Ports the `SigV4` request signing used by `@aws-sdk/client-bedrock-runtime`
 //! for `POST /model/{modelId}/converse-stream`, plus the region / endpoint /
 //! credential resolution rules from `packages/ai/src/providers/amazon-bedrock.ts`.
 
@@ -102,13 +102,12 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// UTC timestamp in SigV4 formats: `x-amz-date` (20250101T000000Z) and date
+/// UTC timestamp in `SigV4` formats: `x-amz-date` (20250101T000000Z) and date
 /// stamp (20250101). Uses std time to avoid a chrono dependency.
 fn now_utc_parts() -> (String, String) {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs());
     let (year, month, day, hour, minute, second) = civil_from_unix(seconds);
     (
         format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z"),
@@ -140,7 +139,7 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
-/// Produce the SigV4 auth headers for a request.
+/// Produce the `SigV4` auth headers for a request.
 /// Returns `(x-amz-date, authorization, x-amz-security-token)`.
 pub struct SigV4Params<'a> {
     pub method: &'a str,
@@ -154,7 +153,7 @@ pub struct SigV4Params<'a> {
     pub extra_signed_headers: &'a [(String, String)],
 }
 
-/// Produce the SigV4 auth headers for a request.
+/// Produce the `SigV4` auth headers for a request.
 /// Returns `(x-amz-date, authorization, x-amz-security-token)`.
 pub fn sigv4_headers(
     params: &SigV4Params<'_>,
@@ -264,7 +263,7 @@ pub fn should_use_explicit_bedrock_endpoint(
 }
 
 /// Resolve the request endpoint and region: explicit model baseUrl (custom
-/// gateways, fips, GovCloud) or the standard regional endpoint.
+/// gateways, fips, `GovCloud`) or the standard regional endpoint.
 pub(crate) fn resolve_endpoint(model: &Model, options: &BedrockOptions) -> (String, String) {
     let configured_region = get_configured_bedrock_region(options.region.as_deref());
     let has_profile = has_configured_bedrock_profile();

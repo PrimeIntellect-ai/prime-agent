@@ -42,11 +42,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -144,7 +143,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -364,10 +363,10 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     );
 }
 
-/// The begin_login host request is live in the daemon worker product path:
+/// The `begin_login` host request is live in the daemon worker product path:
 /// the kernel reaches the session's real MCP manager, which answers with
 /// the TS wording for unknown servers (the full login flow is verified
-/// against the fixture OAuth transport in the mcp_login unit tests — a
+/// against the fixture OAuth transport in the `mcp_login` unit tests — a
 /// real login needs a live HTTPS provider, so this e2e pins the wiring).
 #[test]
 fn begin_login_host_request_is_live_in_the_worker() {

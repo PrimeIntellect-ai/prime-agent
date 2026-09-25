@@ -56,11 +56,24 @@ use crate::{socket, util};
 /// Worker connect budget: socket probes, connect, and the auth handshake
 /// all share this deadline from spawn time (TS `WORKER_CONNECT_TIMEOUT_MS`:
 /// 30s on Unix, 90s on Windows). A worker that never comes up fails the
-/// launch within this budget instead of hanging.
+/// launch within this budget instead of hanging. The budget is
+/// env-overridable (`WORKER_CONNECT_TIMEOUT_ENV`, ms) for environments
+/// whose worker boots need more headroom (e.g. parallel e2e runs on
+/// shared vCPUs); the default keeps the TS wire behavior.
 #[cfg(unix)]
-const WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
 #[cfg(not(unix))]
-const WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
+const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
+/// The auth handshake's minimum budget. Probes, connect, and auth share the
+/// connect deadline, but a probe phase that ate nearly all of it (a
+/// slow-booting worker under load) must not leave the auth route with
+/// crumbs: a worker that just proved life (the probe connected) gets at
+/// least this long to answer the handshake, so the launch fails with the
+/// connect-budget error only when the worker is genuinely wedged.
+const WORKER_AUTH_FLOOR_MS: u64 = 10_000;
+/// Overrides [`DEFAULT_WORKER_CONNECT_TIMEOUT_MS`] when set to a positive
+/// number of milliseconds (tests under parallel load use this seam).
+const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS";
 /// One socket probe attempt (TS `WORKER_CONNECT_PROBE_MS`).
 #[cfg(unix)]
 const WORKER_CONNECT_PROBE_MS: u64 = 500;
@@ -254,6 +267,16 @@ enum AdoptionOutcome {
 }
 
 impl Supervisor {
+    /// Build the supervisor: the descriptor dir, the persisted config,
+    /// the event channel, the log, and the compaction-supervision
+    /// journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor directory cannot be created,
+    /// the sessions dir cannot be resolved, the supervisor config
+    /// cannot be persisted, or the compaction-supervision journal cannot
+    /// be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
@@ -525,6 +548,17 @@ impl Supervisor {
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket path cannot be prepared (already
+    /// in use), the supervisor socket cannot be bound, or the accept
+    /// loop fails while not shutting down.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the telemetry mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
         // Daemon telemetry: same env/settings posture as the sessions
         // (the supervisor is the `daemon` execution mode).
@@ -550,6 +584,13 @@ impl Supervisor {
         // refresh only adds live pricing and catalog-repo/new entries.
         pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
+        // The plugins service catalog's keep-warm (the `/mcp` view's remote
+        // catalog): the same supervisor-owned cadence — a forced startup
+        // refresh plus the hourly loop, fire-and-forget, failures keep the
+        // last-good disk cache (the packaged bundled snapshot serves
+        // until the first fetch lands).
+        pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
+        pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
         // Adoption telemetry for the wiring: one `daemon event` (kind
         // `catalog_refresh`) when the startup refresh settles — the
         // served model count, primitives only. The awaited refresh is
@@ -1075,8 +1116,7 @@ impl Supervisor {
             self.close_children_of_dead_parent(&resident).await;
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |elapsed| elapsed.as_millis() as u64);
             let failures = Self::next_failure_count(&resident, now_ms);
             if failures > MAX_CONSECUTIVE_FAILURES {
                 let mut descriptor = resident.descriptor.lock().await;
@@ -1390,8 +1430,7 @@ impl Supervisor {
             .with_context(|| format!("spawn session worker {}", resident.worker_id))?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
         resident.spawned_at_ms.store(now_ms, Ordering::SeqCst);
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
@@ -1618,33 +1657,24 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
+                        let routing = active_session_id.map_or(
+                            ClientRouting::Broadcast,
+                            |active_session_id| ClientRouting::AttachedSession {
                                 active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
-                        let _ = events.send((routing, payload));
-                    } else if outbound_type == "session_status" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
+                            },
+                        );
                         let _ = events.send((routing, payload));
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
+                        let routing = active_session_id.map_or(
+                            ClientRouting::Broadcast,
+                            |active_session_id| ClientRouting::AttachedSession {
                                 active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
+                            },
+                        );
                         let _ = events.send((routing, payload));
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
@@ -1685,15 +1715,16 @@ impl Supervisor {
         // Authenticate against the worker within the remaining connect
         // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
         // deadline).
+        // A worker whose probes ate the whole connect budget still proved
+        // it is alive (the socket answered), so the handshake always gets
+        // at least the auth floor — the floor, never the budget's crumbs,
+        // and a fully-spent budget included. The launch's failure mode
+        // stays the connect-budget error instead of a misleading route
+        // timeout on a worker that just came up.
         let auth_budget_ms = connect_deadline
             .saturating_duration_since(tokio::time::Instant::now())
-            .as_millis() as u64;
-        if auth_budget_ms == 0 {
-            return Err(anyhow!(
-                "session worker {} did not come up in time",
-                resident.worker_id
-            ));
-        }
+            .as_millis()
+            .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
         let response = self
             .route_command(
                 resident,
@@ -1708,7 +1739,19 @@ impl Supervisor {
                 }),
                 auth_budget_ms,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                // The handshake route's timeout is the connect budget
+                // running out, not a session command timing out: report the
+                // launch-budget failure so a loaded-box launch failure says
+                // what actually happened (never the generic route timeout
+                // text, which pointed triage at the wrong seam).
+                if error.to_string() == "Session worker timed out" {
+                    anyhow!("session worker {} did not come up in time", resident.worker_id)
+                } else {
+                    error
+                }
+            })?;
         if !response.success {
             return Err(anyhow!(
                 "worker authentication failed: {}",
@@ -1722,12 +1765,11 @@ impl Supervisor {
             .as_ref()
             .and_then(|data| data.get("capabilities"))
             .and_then(Value::as_array)
-            .map(|capabilities| {
+            .is_some_and(|capabilities| {
                 capabilities
                     .iter()
                     .any(|capability| capability == "direct_peer_transport")
-            })
-            .unwrap_or(false);
+            });
         resident
             .peer_transport_capable
             .store(peer_transport_capable, Ordering::SeqCst);
@@ -1850,7 +1892,7 @@ impl Supervisor {
             }
             // Sleep until the route state moves or the deadline passes.
             match tokio::time::timeout_at(deadline, state.changed()).await {
-                Ok(Ok(())) => continue,
+                Ok(Ok(())) => {}
                 // The resident (and its watch sender) was dropped entirely.
                 Ok(Err(_)) => bail!(WORKER_NOT_CONNECTED),
                 Err(_) => bail!("Session worker timed out"),
@@ -2374,7 +2416,7 @@ impl Supervisor {
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -3735,50 +3777,47 @@ impl Supervisor {
             return Vec::new();
         };
         // Session-addressed form: use the live worker's cwd and session dir.
-        let (cwd, session_dir) = match active_session_id {
-            Some(active_session_id) => {
-                let resident = self.registry.get(active_session_id).await;
-                match resident {
-                    Some(resident) => {
-                        let descriptor = resident.descriptor.lock().await;
-                        let cwd = descriptor
-                            .create_command
-                            .rest
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .unwrap_or("/")
-                            .to_string();
-                        let session_dir = descriptor
-                            .create_command
-                            .rest
-                            .get("sessionDir")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        (cwd, session_dir)
-                    }
-                    None => {
-                        return vec![response_line(&response_failure(
-                            Some(command_id),
-                            "list_saved_sessions",
-                            &format!("Unknown active session: {active_session_id}"),
-                            None,
-                        ))];
-                    }
+        let (cwd, session_dir) = if let Some(active_session_id) = active_session_id {
+            let resident = self.registry.get(active_session_id).await;
+            match resident {
+                Some(resident) => {
+                    let descriptor = resident.descriptor.lock().await;
+                    let cwd = descriptor
+                        .create_command
+                        .rest
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .unwrap_or("/")
+                        .to_string();
+                    let session_dir = descriptor
+                        .create_command
+                        .rest
+                        .get("sessionDir")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (cwd, session_dir)
                 }
-            }
-            None => {
-                let Some(cwd) = cwd else {
-                    // The TS supervisor runs Node's path.resolve on the
-                    // missing cwd; reproduce the observable error string.
+                None => {
                     return vec![response_line(&response_failure(
                         Some(command_id),
                         "list_saved_sessions",
-                        "The \"paths[0]\" property must be of type string, got undefined",
+                        &format!("Unknown active session: {active_session_id}"),
                         None,
                     ))];
-                };
-                (cwd.clone(), session_dir.clone())
+                }
             }
+        } else {
+            let Some(cwd) = cwd else {
+                // The TS supervisor runs Node's path.resolve on the
+                // missing cwd; reproduce the observable error string.
+                return vec![response_line(&response_failure(
+                    Some(command_id),
+                    "list_saved_sessions",
+                    "The \"paths[0]\" property must be of type string, got undefined",
+                    None,
+                ))];
+            };
+            (cwd.clone(), session_dir.clone())
         };
         let dir = match session_dir.as_deref() {
             Some(dir) => crate::paths::expand_tilde(dir),
@@ -3928,97 +3967,92 @@ impl Supervisor {
                 return response_failure(Some(&command_id), &type_name, &error.to_string(), None);
             }
         };
-        let summaries: Vec<Value> = match all {
-            Some(true) => {
-                // TS `buildSessionList` order: saved rows (resident ones
-                // replaced in place by their live summary), then passive
-                // ledger children, then resident-only rows.
-                let mut infos = list_sessions(&dir);
-                if let Some(cwd) = cwd {
-                    infos.retain(|info| info.cwd == cwd);
-                }
-                let residents = self.registry.list().await;
-                let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-                for resident in residents.iter() {
-                    let descriptor = resident.descriptor.lock().await;
-                    if let Some(session_file) = &descriptor.session_file {
-                        resident_by_file.push(ResidentRoot {
-                            session_file: crate::lease::canonical_session_path(Path::new(
-                                session_file,
-                            )),
-                            resident: Arc::clone(resident),
-                            // Resident roots carry their active session id
-                            // so passive children of a resident parent
-                            // report parentActiveSessionId.
-                            active_session_id: Some(descriptor.root_active_session_id.clone()),
-                        });
-                    }
-                }
-                let mut summaries = Vec::new();
-                let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
-                for info in &infos {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: info.path.clone(),
-                        active_session_id: None,
-                    });
-                    let canonical = crate::lease::canonical_session_path(&info.path);
-                    let resident = resident_by_file
-                        .iter()
-                        .position(|root| root.session_file == canonical)
-                        .map(|at| resident_by_file.swap_remove(at));
-                    match resident {
-                        Some(root) => {
-                            roots.last_mut().expect("saved root").active_session_id =
-                                root.active_session_id;
-                            summaries.push(self.worker_summary(&root.resident).await);
-                        }
-                        None => summaries.push(saved_session_summary(info)),
-                    }
-                }
-                let mut resident_only = Vec::new();
-                for root in resident_by_file {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: root.session_file,
-                        active_session_id: root.active_session_id,
-                    });
-                    resident_only.push(self.worker_summary(&root.resident).await);
-                }
-                let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
-                    Ok(ledger) => ledger,
-                    Err(error) => {
-                        return response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &error.to_string(),
-                            None,
-                        );
-                    }
-                };
-                match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
-                    Ok(children) => {
-                        for child in &children {
-                            summaries.push(crate::rlm_roster::passive_child_summary(child));
-                        }
-                    }
-                    Err(error) => {
-                        let message = format!("Could not walk passive RLM children: {error:#}");
-                        self.log_line(&message);
-                        return response_failure(Some(&command_id), &type_name, &message, None);
-                    }
-                }
-                // TS `buildSessionList` order: saved rows, passive children,
-                // then resident-only rows.
-                summaries.append(&mut resident_only);
-                summaries
+        let summaries: Vec<Value> = if let Some(true) = all {
+            // TS `buildSessionList` order: saved rows (resident ones
+            // replaced in place by their live summary), then passive
+            // ledger children, then resident-only rows.
+            let mut infos = list_sessions(&dir);
+            if let Some(cwd) = cwd {
+                infos.retain(|info| info.cwd == cwd);
             }
-            _ => {
-                // Live residents of this supervisor.
-                let mut summaries = Vec::new();
-                for resident in self.registry.list().await {
-                    summaries.push(self.worker_summary(&resident).await);
+            let residents = self.registry.list().await;
+            let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
+            for resident in residents.iter() {
+                let descriptor = resident.descriptor.lock().await;
+                if let Some(session_file) = &descriptor.session_file {
+                    resident_by_file.push(ResidentRoot {
+                        session_file: crate::lease::canonical_session_path(Path::new(session_file)),
+                        resident: Arc::clone(resident),
+                        // Resident roots carry their active session id
+                        // so passive children of a resident parent
+                        // report parentActiveSessionId.
+                        active_session_id: Some(descriptor.root_active_session_id.clone()),
+                    });
                 }
-                summaries
             }
+            let mut summaries = Vec::new();
+            let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
+            for info in &infos {
+                roots.push(crate::rlm_roster::RosterWalkRoot {
+                    session_file: info.path.clone(),
+                    active_session_id: None,
+                });
+                let canonical = crate::lease::canonical_session_path(&info.path);
+                let resident = resident_by_file
+                    .iter()
+                    .position(|root| root.session_file == canonical)
+                    .map(|at| resident_by_file.swap_remove(at));
+                match resident {
+                    Some(root) => {
+                        roots.last_mut().expect("saved root").active_session_id =
+                            root.active_session_id;
+                        summaries.push(self.worker_summary(&root.resident).await);
+                    }
+                    None => summaries.push(saved_session_summary(info)),
+                }
+            }
+            let mut resident_only = Vec::new();
+            for root in resident_by_file {
+                roots.push(crate::rlm_roster::RosterWalkRoot {
+                    session_file: root.session_file,
+                    active_session_id: root.active_session_id,
+                });
+                resident_only.push(self.worker_summary(&root.resident).await);
+            }
+            let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
+                Ok(ledger) => ledger,
+                Err(error) => {
+                    return response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &error.to_string(),
+                        None,
+                    );
+                }
+            };
+            match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
+                Ok(children) => {
+                    for child in &children {
+                        summaries.push(crate::rlm_roster::passive_child_summary(child));
+                    }
+                }
+                Err(error) => {
+                    let message = format!("Could not walk passive RLM children: {error:#}");
+                    self.log_line(&message);
+                    return response_failure(Some(&command_id), &type_name, &message, None);
+                }
+            }
+            // TS `buildSessionList` order: saved rows, passive children,
+            // then resident-only rows.
+            summaries.append(&mut resident_only);
+            summaries
+        } else {
+            // Live residents of this supervisor.
+            let mut summaries = Vec::new();
+            for resident in self.registry.list().await {
+                summaries.push(self.worker_summary(&resident).await);
+            }
+            summaries
         };
         response_success(
             Some(&command_id),
@@ -4050,13 +4084,15 @@ impl Supervisor {
                 .rest
                 .get("sessionDir")
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    Path::new(&session_file)
-                        .parent()
-                        .map(|dir| dir.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                });
+                .map_or_else(
+                    || {
+                        Path::new(&session_file)
+                            .parent()
+                            .map(|dir| dir.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    },
+                    str::to_string,
+                );
             (
                 session_file,
                 session_dir,
@@ -4094,8 +4130,7 @@ impl Supervisor {
             session_dir,
             session_file: display
                 .as_ref()
-                .map(|entry| entry.session_file.clone())
-                .unwrap_or_else(|| session_file.clone()),
+                .map_or_else(|| session_file.clone(), |entry| entry.session_file.clone()),
             rlm_parent_node_id: display
                 .as_ref()
                 .and_then(|entry| entry.rlm_parent_node_id.clone()),
@@ -4103,7 +4138,7 @@ impl Supervisor {
             spawn_code: display.as_ref().and_then(|entry| entry.spawn_code.clone()),
             model: display.as_ref().and_then(|entry| entry.model.clone()),
             status: "deleted".to_string(),
-            created_at: display.as_ref().map(|entry| entry.created_at).unwrap_or(0),
+            created_at: display.as_ref().map_or(0, |entry| entry.created_at),
         };
         if let Err(error) = crate::rlm_ledger::write_rlm_subagent_display(&tombstone) {
             self.log_line(&format!(
@@ -4298,13 +4333,15 @@ impl Supervisor {
             .as_ref()
             .and_then(|config| config.get("sessionDir"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                Path::new(child)
-                    .parent()
-                    .map(|dir| dir.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
+            .map_or_else(
+                || {
+                    Path::new(child)
+                        .parent()
+                        .map(|dir| dir.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                },
+                str::to_string,
+            );
         let ledger = self.rlm_spawn_ledger_for(None).await?;
         ledger
             .append_spawn(crate::rlm_ledger::RlmSpawnInput {
@@ -4315,7 +4352,7 @@ impl Supervisor {
                 name: session_name.clone(),
             })
             .inspect_err(|error| {
-                self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"))
+                self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));
             })?;
         let display = crate::rlm_ledger::RlmSubagentDisplayEntry {
             type_tag: "rlm_subagent".to_string(),
@@ -4346,7 +4383,7 @@ impl Supervisor {
             crate::rlm_ledger::write_rlm_subagent_display(&display).inspect_err(|error| {
                 self.log_line(&format!(
                     "failed to persist RLM subagent display entry: {error:#}"
-                ))
+                ));
             })?;
         if !written {
             self.log_line(&format!(
@@ -4415,68 +4452,62 @@ impl Supervisor {
         // current id, so the rest of this route - and the response handling
         // below - addresses the session's current worker.
         let mut rebound_to: Option<String> = None;
-        let resident = match self.registry.resolve(&selector).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                // Spec §10.4: attach-by-durable-id at any time. A restore
-                // pass may still be bringing the rostered session up, so
-                // the command queues server-side behind the pass (no
-                // client-visible retry); a settled restore answers with the
-                // per-row failure (session file + manual-resume hint)
-                // instead of the plain unknown-session error.
-                self.await_restore_target(&selector).await;
-                match self.registry.resolve(&selector).await {
-                    Ok(resident) => resident,
-                    Err(_) => {
-                        // The stale-active-id rebind: the selector is a
-                        // superseded id the binding table still maps to the
-                        // session's durable identity, and a live resident
-                        // owns that identity now. The command failed before
-                        // it ever reached a worker, so routing it once to
-                        // the current resident delivers it exactly once.
-                        match self.binding_target(&selector).await {
-                            Some(resident) => {
-                                // A detach addressed to a superseded id has
-                                // no worker to reach: the stale worker is
-                                // gone (its client-side state died with it),
-                                // and forwarding the detach to the
-                                // replacement would drop the very attach
-                                // the client may have just established there
-                                // (the worker keys its detach by client). The
-                                // supervisor retires the stale address
-                                // itself and answers the detach.
-                                if matches!(command, DaemonCommand::Detach { .. }) {
-                                    attached.lock().unwrap().retain(|id| id != &selector);
-                                    return (
-                                        vec![response_line(&response_success(
-                                            Some(&command_id),
-                                            &type_name,
-                                            None,
-                                        ))],
-                                        false,
-                                    );
-                                }
-                                rebound_to = Some(
-                                    self.rebind_connection(&selector, &resident, attached).await,
-                                );
-                                resident
-                            }
-                            None => {
-                                let message =
-                                    self.restore_failure_for(&selector).unwrap_or_else(|| {
-                                        format!("Unknown active session: {selector}")
-                                    });
-                                return (
-                                    vec![response_line(&response_failure(
-                                        Some(&command_id),
-                                        &type_name,
-                                        &message,
-                                        None,
-                                    ))],
-                                    false,
-                                );
-                            }
+        let resident = if let Ok(resident) = self.registry.resolve(&selector).await {
+            resident
+        } else {
+            // Spec §10.4: attach-by-durable-id at any time. A restore
+            // pass may still be bringing the rostered session up, so
+            // the command queues server-side behind the pass (no
+            // client-visible retry); a settled restore answers with the
+            // per-row failure (session file + manual-resume hint)
+            // instead of the plain unknown-session error.
+            self.await_restore_target(&selector).await;
+            match self.registry.resolve(&selector).await {
+                Ok(resident) => resident,
+                Err(_) => {
+                    // The stale-active-id rebind: the selector is a
+                    // superseded id the binding table still maps to the
+                    // session's durable identity, and a live resident
+                    // owns that identity now. The command failed before
+                    // it ever reached a worker, so routing it once to
+                    // the current resident delivers it exactly once.
+                    if let Some(resident) = self.binding_target(&selector).await {
+                        // A detach addressed to a superseded id has
+                        // no worker to reach: the stale worker is
+                        // gone (its client-side state died with it),
+                        // and forwarding the detach to the
+                        // replacement would drop the very attach
+                        // the client may have just established there
+                        // (the worker keys its detach by client). The
+                        // supervisor retires the stale address
+                        // itself and answers the detach.
+                        if matches!(command, DaemonCommand::Detach { .. }) {
+                            attached.lock().unwrap().retain(|id| id != &selector);
+                            return (
+                                vec![response_line(&response_success(
+                                    Some(&command_id),
+                                    &type_name,
+                                    None,
+                                ))],
+                                false,
+                            );
                         }
+                        rebound_to =
+                            Some(self.rebind_connection(&selector, &resident, attached).await);
+                        resident
+                    } else {
+                        let message = self
+                            .restore_failure_for(&selector)
+                            .unwrap_or_else(|| format!("Unknown active session: {selector}"));
+                        return (
+                            vec![response_line(&response_failure(
+                                Some(&command_id),
+                                &type_name,
+                                &message,
+                                None,
+                            ))],
+                            false,
+                        );
                     }
                 }
             }
@@ -4662,8 +4693,7 @@ impl Supervisor {
                             let active_id = data
                                 .get("activeSessionId")
                                 .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| resident.worker_id.clone());
+                                .map_or_else(|| resident.worker_id.clone(), str::to_string);
                             self.note_daemon_event(
                                 if matches!(command, DaemonCommand::Reattach { .. }) {
                                     "reattach"
@@ -4944,9 +4974,19 @@ async fn probe_worker_socket(
 }
 
 /// The shared worker-connect deadline: probes, connect, and auth must all
-/// fit inside one [`WORKER_CONNECT_TIMEOUT_MS`] budget from spawn time.
+/// fit inside one worker-connect budget from spawn time (the TS default,
+/// or the env override for load-heavy e2e environments). An override past
+/// the platform's representable range falls back to the default budget
+/// instead of panicking the deadline arithmetic.
 fn worker_connect_deadline() -> tokio::time::Instant {
-    tokio::time::Instant::now() + Duration::from_millis(WORKER_CONNECT_TIMEOUT_MS)
+    let timeout_ms = std::env::var(WORKER_CONNECT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_WORKER_CONNECT_TIMEOUT_MS);
+    let now = tokio::time::Instant::now();
+    now.checked_add(Duration::from_millis(timeout_ms))
+        .unwrap_or_else(|| now + Duration::from_millis(DEFAULT_WORKER_CONNECT_TIMEOUT_MS))
 }
 
 fn streamed_attach_lines(
@@ -5110,6 +5150,12 @@ fn offline_summary(worker_id: &str) -> Value {
 }
 
 /// Entry point for the supervisor process.
+///
+/// # Errors
+///
+/// Returns an error when the supervisor cannot start (see
+/// [`Supervisor::new`]) or its serve loop fails (see
+/// [`Supervisor::run`]).
 pub async fn run_supervisor(options: SupervisorOptions) -> Result<()> {
     let supervisor = Arc::new(Supervisor::new(options)?);
     supervisor.run().await
@@ -5131,11 +5177,6 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
         "allMessagesText": info.all_messages_text,
         "state": info.state.as_ref().map(|state| json!({ "status": state })),
     });
-    if let Some(status) = &info.agent_status {
-        row.as_object_mut()
-            .expect("row object")
-            .insert("agentStatus".to_string(), status.clone());
-    }
     let object = row.as_object_mut().expect("row object");
     if let Some(name) = &info.name {
         object.insert("name".to_string(), json!(name));
@@ -5207,12 +5248,9 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
                 (descriptor.pid, descriptor.process_start_id.clone())
             };
             let alive = is_process_alive(pid as u32).unwrap_or(false)
-                && start_id
-                    .as_deref()
-                    .map(|start| {
-                        crate::protocol::process_start_id(pid as u32).as_deref() == Some(start)
-                    })
-                    .unwrap_or(true);
+                && start_id.as_deref().is_none_or(|start| {
+                    crate::protocol::process_start_id(pid as u32).as_deref() == Some(start)
+                });
             if !alive {
                 return true;
             }
@@ -5566,7 +5604,7 @@ mod tests {
 
     /// The shutdown gate and the accept loop's exit flag are separate: the
     /// gate refuses creates the moment a terminal stop begins, but the
-    /// loop must stay up until begin_shutdown finishes stopping the workers.
+    /// loop must stay up until `begin_shutdown` finishes stopping the workers.
     #[tokio::test]
     async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
         let dir = tempfile::TempDir::new().unwrap();

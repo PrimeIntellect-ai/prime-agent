@@ -61,7 +61,7 @@ impl Inner {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut size = path.metadata().map_or(0, |m| m.len());
         if size > MAX_KERNEL_STDERR_LOG_BYTES {
             let old = path.with_extension("log.old");
             let _ = std::fs::remove_file(&old);
@@ -194,7 +194,7 @@ impl Inner {
                 ));
             }
         };
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
         {
@@ -246,7 +246,7 @@ impl Inner {
     /// Wire the spawned child: protocol reader, stderr tail + log, and the
     /// exit watcher that settles the manager when the process dies.
     fn wire_child(self: &Arc<Self>, mut child: tokio::process::Child, generation: u64) {
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -392,12 +392,8 @@ impl Inner {
             if was_live {
                 inner.append_diagnostic(&format!(
                     "unexpected exit code={} signal={}",
-                    exit.code
-                        .map(|c| c.to_string())
-                        .unwrap_or("null".to_string()),
-                    exit.signal
-                        .map(|s| s.to_string())
-                        .unwrap_or("null".to_string()),
+                    exit.code.map_or("null".to_string(), |c| c.to_string()),
+                    exit.signal.map_or("null".to_string(), |s| s.to_string()),
                 ));
             }
             live_kernels::remove(&inner);

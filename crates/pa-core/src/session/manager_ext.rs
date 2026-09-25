@@ -1,9 +1,9 @@
-//! SessionManager part 2: queries, branches, labels, status entries.
+//! `SessionManager` part 2: queries, branches, labels, status entries.
 //! Port of the tail of core/session-manager.ts (getBranch/getTree/branch*).
 
 use pa_types::session::{
-    AgentMessage, AgentStatus, AgentStatusEntry, CustomMessageEntry, FileEntry, GitContext,
-    GitStateEntry, LabelEntry, SessionStateStatus,
+    AgentMessage, CustomMessageEntry, FileEntry, GitContext, GitStateEntry, LabelEntry,
+    SessionStateStatus,
 };
 
 use super::manager::SessionManager;
@@ -24,7 +24,7 @@ impl SessionManager {
     }
 
     /// True when the session holds user-meaningful content beyond the default
-    /// creation prefix (model_change, thinking_level_change, service_tier_change).
+    /// creation prefix (`model_change`, `thinking_level_change`, `service_tier_change`).
     pub fn has_user_content(&self) -> bool {
         let owned_entries = self.get_entries();
         let content_entries: Vec<&FileEntry> = owned_entries
@@ -53,27 +53,11 @@ impl SessionManager {
         content_entries.len() > start
     }
 
-    pub fn append_agent_status(
-        &mut self,
-        summary: &str,
-        task_state: Option<pa_types::session::AgentTaskState>,
-        based_on_message_count: usize,
-    ) -> std::io::Result<String> {
-        let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::AgentStatus {
-            payload: AgentStatusEntry {
-                status: AgentStatus {
-                    summary: summary.to_string(),
-                    task_state,
-                    based_on_message_count: based_on_message_count as u64,
-                },
-            },
-            base,
-        })?;
-        Ok(id)
-    }
-
+    /// Append a `git_state` row; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -108,11 +92,11 @@ impl SessionManager {
         }
     }
 
-    /// Latest agent status on the active branch.
-    pub fn get_latest_agent_status(&self) -> Option<AgentStatus> {
-        self.latest_agent_status_entry()
-    }
-
+    /// Append a custom message entry; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_custom_message_entry(
         &mut self,
         custom_type: &str,
@@ -136,6 +120,14 @@ impl SessionManager {
     }
 
     /// Append a label change for a target entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the target entry exists.
     pub fn append_label_change(
         &mut self,
         target_id: &str,
@@ -211,6 +203,10 @@ impl SessionManager {
     }
 
     /// Move the leaf to `branch_from_id` (the session keeps its file).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the target entry exists.
     pub fn branch(&mut self, branch_from_id: &str) {
         assert!(
             self.get_entry_by_id(branch_from_id).is_some(),
@@ -225,6 +221,15 @@ impl SessionManager {
     }
 
     /// Branch with a summary message describing what the abandoned branch held.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append of the
+    /// summary row fails; the leaf is restored to its previous position.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the given branch target entry exists.
     pub fn branch_with_summary(
         &mut self,
         branch_from_id: Option<&str>,
@@ -247,9 +252,7 @@ impl SessionManager {
         let id = base.id.clone().unwrap_or_default();
         let appended = self.append_entry(FileEntry::BranchSummary {
             payload: pa_types::session::BranchSummaryEntry {
-                from_id: branch_from_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "root".to_string()),
+                from_id: branch_from_id.map_or_else(|| "root".to_string(), str::to_string),
                 summary: summary.to_string(),
                 details,
                 from_hook,
@@ -289,7 +292,6 @@ fn entry_type(entry: &FileEntry) -> &'static str {
         FileEntry::Label { .. } => "label",
         FileEntry::SessionInfo { .. } => "session_info",
         FileEntry::SessionState { .. } => "session_state",
-        FileEntry::AgentStatus { .. } => "agent_status",
         FileEntry::GitState { .. } => "git_state",
         FileEntry::Unknown { .. } => "unknown",
     }
@@ -363,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_and_status_on_active_branch() {
+    fn labels_on_active_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::in_memory(tmp.path());
         let a = manager.append_message(user("first")).unwrap();
@@ -373,20 +375,5 @@ mod tests {
         // Clear the label.
         manager.append_label_change(&a, None).unwrap();
         assert_eq!(manager.get_label(&a), None);
-        // Agent status visible on the active branch.
-        let status_id = manager
-            .append_agent_status(
-                "working",
-                Some(pa_types::session::AgentTaskState::NeedsInput),
-                3,
-            )
-            .unwrap();
-        assert!(manager.get_entry_by_id(&status_id).is_some());
-        let status = manager.get_latest_agent_status().unwrap();
-        assert_eq!(status.summary, "working");
-        assert_eq!(status.based_on_message_count, 3);
-        // Branch away: the status is no longer on the active path.
-        manager.branch(&a);
-        assert_eq!(manager.get_latest_agent_status(), None);
     }
 }

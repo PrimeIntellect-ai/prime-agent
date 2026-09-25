@@ -93,7 +93,7 @@ pub struct LoadedResources {
     pub extension_paths: Vec<String>,
 }
 
-/// Resource loading options (the TS DefaultResourceLoaderOptions surface,
+/// Resource loading options (the TS `DefaultResourceLoaderOptions` surface,
 /// minus the extension-runner/theme machinery).
 #[derive(Default)]
 pub struct ResourceLoaderOptions {
@@ -131,6 +131,11 @@ impl ResourceLoaderOptions {
 /// packages, settings arrays, auto-discovery, bundled skills) feeds the
 /// enabled skill and prompt paths; CLI extension sources resolve in the
 /// temporary scope.
+///
+/// # Errors
+///
+/// Returns an error when the session resource resolution fails (a
+/// configured package source cannot be parsed, installed, or refreshed).
 pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResources> {
     let settings = options
         .settings
@@ -234,13 +239,13 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
     resources.system_prompt = system_source.and_then(|source| resolve_prompt_input(&source));
 
     // Append system prompt: explicit sources or discovered file.
-    let append_sources: Vec<String> = if !options.append_system_prompt.is_empty() {
-        options.append_system_prompt.clone()
-    } else {
+    let append_sources: Vec<String> = if options.append_system_prompt.is_empty() {
         discover_append_system_prompt_file(&options.cwd, &options.agent_dir)
             .map(|path| path.to_string_lossy().to_string())
             .into_iter()
             .collect()
+    } else {
+        options.append_system_prompt.clone()
     };
     resources.append_system_prompt = append_sources
         .iter()
@@ -252,8 +257,9 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
 
 fn diagnostics_path(diagnostic: &ResourceDiagnostic) -> Option<String> {
     match diagnostic {
-        ResourceDiagnostic::Warning { path, .. } => path.clone(),
-        ResourceDiagnostic::Error { path, .. } => path.clone(),
+        ResourceDiagnostic::Warning { path, .. } | ResourceDiagnostic::Error { path, .. } => {
+            path.clone()
+        }
         ResourceDiagnostic::Collision { path, .. } => Some(path.clone()),
     }
 }
@@ -286,7 +292,7 @@ fn dedupe_prompts(prompts: Vec<PromptTemplate>) -> Vec<PromptTemplate> {
     out
 }
 
-/// cwd/{CONFIG_DIR_NAME}/SYSTEM.md then agentDir/SYSTEM.md.
+/// `cwd/{CONFIG_DIR_NAME}/SYSTEM.md` then agentDir/SYSTEM.md.
 pub fn discover_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathBuf> {
     let project = cwd.join(crate::settings::CONFIG_DIR_NAME).join("SYSTEM.md");
     if project.exists() {
@@ -299,7 +305,7 @@ pub fn discover_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathB
     None
 }
 
-/// cwd/{CONFIG_DIR_NAME}/APPEND_SYSTEM.md then agentDir/APPEND_SYSTEM.md.
+/// `cwd/{CONFIG_DIR_NAME}/APPEND_SYSTEM.md` then `agentDir/APPEND_SYSTEM.md`.
 pub fn discover_append_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathBuf> {
     let project = cwd
         .join(crate::settings::CONFIG_DIR_NAME)

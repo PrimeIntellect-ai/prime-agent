@@ -3,7 +3,7 @@
 //! grammar through cli-highlight's theme mapping). Cell-level scope coloring
 //! only: cli-highlight's parent-scope wrap is invisible once a child token
 //! colors the same cells, so the render needs one color per cell, matching
-//! the `theme.ts` mapping (keyword -> syntaxKeyword, built_in/type ->
+//! the `theme.ts` mapping (keyword -> syntaxKeyword, `built_in/type` ->
 //! syntaxType, literal/number -> syntaxNumber, string -> syntaxString,
 //! comment -> syntaxComment, title -> syntaxFunction, params ->
 //! syntaxVariable, everything else default). F-string substitutions and
@@ -455,7 +455,7 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
         let rest = &code[i..];
         let ch = rest.chars().next().expect("char boundary");
         if ch == '#' {
-            let end = rest.find('\n').map(|n| i + n).unwrap_or(code.len());
+            let end = rest.find('\n').map_or(code.len(), |n| i + n);
             flush_plain(&mut plain, &mut tokens);
             tokens.push((code[i..end].to_string(), Scope::Comment));
             i = end;
@@ -490,17 +490,14 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
             // `def`/`class` open the function/class mode: the name (title)
             // and the parameter parens (params) follow.
             if (word == "def" || word == "class") && !ident_continues(code, i + word_len) {
-                match header_mode(code, i, word_len, &mut plain, &mut tokens) {
-                    Some(next) => {
-                        i = next;
-                        continue;
-                    }
-                    None => {
-                        flush_plain(&mut plain, &mut tokens);
-                        tokens.push((word.to_string(), Scope::Keyword));
-                        i += word_len;
-                        continue;
-                    }
+                if let Some(next) = header_mode(code, i, word_len, &mut plain, &mut tokens) {
+                    i = next;
+                    continue;
+                } else {
+                    flush_plain(&mut plain, &mut tokens);
+                    tokens.push((word.to_string(), Scope::Keyword));
+                    i += word_len;
+                    continue;
                 }
             }
             match scope {
@@ -575,7 +572,7 @@ fn header_mode(
             return Some(i + 1);
         }
         if ch == '#' {
-            let end = rest.find('\n').map(|n| i + n).unwrap_or(code.len());
+            let end = rest.find('\n').map_or(code.len(), |n| i + n);
             flush_params(&mut params_plain, tokens);
             tokens.push((code[i..end].to_string(), Scope::Comment));
             i = end;

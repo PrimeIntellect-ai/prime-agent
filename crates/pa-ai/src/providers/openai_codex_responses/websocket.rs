@@ -147,13 +147,6 @@ fn bun_connect_failure(url: &str, error: WsError) -> WebSocketTransportError {
 /// with the transport's own detail text.
 fn bun_read_failure(error: WsError) -> WebSocketTransportError {
     match &error {
-        WsError::Io(_)
-        | WsError::ConnectionClosed
-        | WsError::AlreadyClosed
-        | WsError::WriteBufferFull(_) => WebSocketTransportError::close(
-            WEBSOCKET_CLOSE_CODE_ABNORMAL,
-            WEBSOCKET_CONNECTION_ENDED_REASON,
-        ),
         // The transport's EOF-without-close-frame error is the same socket
         // death the runtime reports as the 1006 close event.
         WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
@@ -165,7 +158,11 @@ fn bun_read_failure(error: WsError) -> WebSocketTransportError {
         WsError::Capacity(CapacityError::MessageTooLong { .. }) => {
             WebSocketTransportError::close(WEBSOCKET_CLOSE_CODE_TOO_BIG, "")
         }
-        WsError::Capacity(_) => WebSocketTransportError::close(
+        WsError::Io(_)
+        | WsError::ConnectionClosed
+        | WsError::AlreadyClosed
+        | WsError::WriteBufferFull(_)
+        | WsError::Capacity(_) => WebSocketTransportError::close(
             WEBSOCKET_CLOSE_CODE_ABNORMAL,
             WEBSOCKET_CONNECTION_ENDED_REASON,
         ),
@@ -221,8 +218,7 @@ async fn spawn_connection_worker(
 
     if signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(CodexStreamError::Aborted);
     }
@@ -304,8 +300,7 @@ async fn read_request_events(
     loop {
         if signal
             .as_ref()
-            .map(tokio_util::sync::CancellationToken::is_cancelled)
-            .unwrap_or(false)
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
         {
             return Err(CodexStreamError::Aborted);
         }
@@ -393,9 +388,7 @@ async fn read_request_events(
                 };
                 return Err(CodexStreamError::Transport(error));
             }
-            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {
-                continue;
-            }
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
             Some(Err(error)) => {
                 return Err(CodexStreamError::Transport(bun_read_failure(error)));
             }
@@ -422,8 +415,7 @@ impl AcquiredConnection {
     ) -> Result<mpsc::Receiver<WorkerEvent>, CodexStreamError> {
         if signal
             .as_ref()
-            .map(tokio_util::sync::CancellationToken::is_cancelled)
-            .unwrap_or(false)
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
         {
             return Err(CodexStreamError::Aborted);
         }
@@ -500,16 +492,12 @@ pub async fn acquire_websocket(
     }
 
     // Fresh connection: cache it for the session unless an entry is busy.
-    let entry_busy = session_state()
-        .lock()
-        .map(|state| {
-            state
-                .connections
-                .get(session_id)
-                .map(|entry| entry.busy)
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
+    let entry_busy = session_state().lock().is_ok_and(|state| {
+        state
+            .connections
+            .get(session_id)
+            .is_some_and(|entry| entry.busy)
+    });
     let (worker, connection_id) = spawn_connection_worker(url, headers, signal).await?;
 
     let cached = if entry_busy {
@@ -705,7 +693,7 @@ mod tests {
 }
 
 /// Raw-socket WebSocket mocks for the transport tests: one connection, one
-/// scripted wire sequence per scenario (the provider_error probe drives the
+/// scripted wire sequence per scenario (the `provider_error` probe drives the
 /// TS binary through the same sequences; these pin the texts and the
 /// diagnostic error surface in-crate).
 #[cfg(test)]
@@ -1077,7 +1065,7 @@ mod ws_wire_tests {
 
     /// An invalid JSON frame is a non-transport protocol error (`isCodexNonTransportError`
     /// in the TS): it throws without the SSE fallback, surfacing the
-    /// `CodexProtocolError` name in the provider_stream_failure diagnostic.
+    /// `CodexProtocolError` name in the `provider_stream_failure` diagnostic.
     #[tokio::test]
     async fn invalid_json_is_non_transport_error() {
         let error = request_terminal_error(MockAction::InvalidJson).await;

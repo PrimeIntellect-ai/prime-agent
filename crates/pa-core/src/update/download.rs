@@ -23,6 +23,12 @@ pub struct DownloadBudget {
 /// Stream `url` to `destination` verifying the archive digest while bytes
 /// arrive (a digest mismatch is caught without a second pass). Retries the
 /// whole download while the budget remains.
+///
+/// # Errors
+///
+/// Returns the last attempt's error when every download attempt fails;
+/// when the wall-clock budget expires before an attempt runs, the
+/// budget-expiry error replaces it.
 pub async fn download_archive(
     url: &str,
     expected_sha256: &str,
@@ -54,6 +60,7 @@ async fn download_once(
     timeout: Duration,
     user_agent: &str,
 ) -> Result<()> {
+    use futures::StreamExt;
     let response = reqwest::Client::new()
         .get(url)
         .header("User-Agent", user_agent)
@@ -69,7 +76,6 @@ async fn download_once(
     let mut file = std::fs::File::create(&temporary)
         .with_context(|| format!("create {}", temporary.display()))?;
     let mut stream = response.bytes_stream();
-    use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read the archive stream")?;
         digest.update(&chunk);
@@ -121,6 +127,13 @@ fn sweep_staging(releases: &Path) {
 /// kill once the read bound is hit), and stdout is read to a bounded
 /// length, so a payload binary that hangs or streams cannot exhaust the
 /// updater.
+///
+/// # Errors
+///
+/// Returns an error when the probe child cannot be spawned, exposes no
+/// stdout pipe, times out or overruns its bounds, or exits without
+/// success. A successful probe returns the trimmed stdout verbatim:
+/// empty output and non-version text are `Ok`, not errors.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const MAX_VERSION_OUTPUT: usize = 512;
@@ -162,13 +175,12 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     read.with_context(|| format!("read the {} --version output", exe.display()))?;
     // A well-behaved binary has exited by now; a hung or over-writing one
     // is killed only when the overall probe budget expires.
-    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(status) => status,
-        Err(_) => {
-            let _ = child.kill().await;
-            anyhow::bail!("{} --version timed out", exe.display())
-        }
-    }
+    let status = (if let Ok(status) = tokio::time::timeout_at(deadline, child.wait()).await {
+        status
+    } else {
+        let _ = child.kill().await;
+        anyhow::bail!("{} --version timed out", exe.display())
+    })
     .with_context(|| format!("wait for {} --version", exe.display()))?;
     if !status.success() {
         anyhow::bail!("{} --version exited with {status}", exe.display());
@@ -186,6 +198,13 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
 /// silently reactivated. Returns the release directory (spec §7: the
 /// candidate is created at `Downloading`/`Staged` and never removed by the
 /// update flow).
+///
+/// # Errors
+///
+/// Returns an error when the existing release fails re-validation, the
+/// staging scratch cannot be created, the archive's digest no longer
+/// matches after extraction, the unpack fails, or the staged tree cannot
+/// be renamed or fsynced into place.
 pub fn stage_archive(
     archive: &Path,
     archive_sha256: &str,
@@ -246,6 +265,13 @@ fn file_digest(path: &Path) -> Result<String> {
 /// place: a manual install can never write over a running binary (the
 /// in-place `cp` class of corrupted installs) and a crash can never leave
 /// a partial release under its final name.
+///
+/// # Errors
+///
+/// Returns an error when the payload path cannot be resolved or is not a
+/// directory or regular file, when the staging scratch cannot be created,
+/// when the payload's `--version` probe fails, when the copy fails its
+/// digest check, or when the staged tree cannot be renamed into place.
 pub async fn stage_local_payload(
     payload: &Path,
     root: &Path,
@@ -723,6 +749,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_permission_change_stages_a_new_release() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let payload = fixture_payload(dir.path(), "payload", "9.9.9");
         let root = dir.path().join("install-root");
@@ -734,7 +761,6 @@ mod tests {
         // payload: the digest must not reuse the earlier release.
         let helper = payload.join("README.md");
         let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(permissions.mode() | 0o111);
         std::fs::set_permissions(&helper, permissions).unwrap();
         let (second, _) = stage_local_payload(&payload, &root, "https://example.com")

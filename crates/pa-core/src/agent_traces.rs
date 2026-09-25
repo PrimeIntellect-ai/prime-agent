@@ -786,8 +786,7 @@ pub fn retry_after_delay(retry_after: Option<&str>, cap_ms: u64) -> Option<u64> 
 fn parse_http_date(value: &str) -> Option<u64> {
     let rest = value
         .split_once(',')
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or(value.trim());
+        .map_or(value.trim(), |(_, rest)| rest.trim());
     let parts: Vec<&str> = rest.split_whitespace().collect();
     if parts.len() < 4 {
         return None;
@@ -1218,15 +1217,23 @@ pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
 /// TS `uploadAllAgentTraces`: the concurrent sweep (default 4 workers)
 /// through the shared request gate, with the per-file progress and the
 /// cancel checks at the worker boundaries.
+///
+/// # Panics
+///
+/// Panics if a per-file result slot mutex is poisoned, i.e. if another
+/// worker panicked while holding that lock.
 pub async fn upload_all_traces(options: &TraceUploadAllOptions<'_>) -> TraceUploadAllResult {
-    let session_dir = options.session_dir.map(resolve_path).unwrap_or_else(|| {
-        // TS `getSessionsDir()`: the env override expanded, else the
-        // agent dir's sessions directory.
-        match std::env::var_os("PRIME_AGENT_SESSION_DIR") {
-            Some(dir) if !dir.is_empty() => resolve_path(Path::new(&dir)),
-            _ => options.agent_dir.join("sessions"),
-        }
-    });
+    let session_dir = options.session_dir.map_or_else(
+        || {
+            // TS `getSessionsDir()`: the env override expanded, else the
+            // agent dir's sessions directory.
+            match std::env::var_os("PRIME_AGENT_SESSION_DIR") {
+                Some(dir) if !dir.is_empty() => resolve_path(Path::new(&dir)),
+                _ => options.agent_dir.join("sessions"),
+            }
+        },
+        resolve_path,
+    );
     let session_files = find_trace_files(&session_dir);
     let total = session_files.len();
     let gate = TraceRequestGate::new();
@@ -1421,16 +1428,12 @@ pub fn agent_traces_log_path(agent_dir: &Path) -> PathBuf {
 /// break the upload).
 fn append_rotating_log(log_path: &Path, message: &str) {
     let write = || -> std::io::Result<()> {
+        use std::io::Write;
         std::fs::create_dir_all(log_path.parent().unwrap_or(Path::new("")))?;
-        if std::fs::metadata(log_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-            > MAX_LOG_BYTES
-        {
+        if std::fs::metadata(log_path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
             let _ = std::fs::remove_file(log_path.with_extension("log.old"));
             let _ = std::fs::rename(log_path, log_path.with_extension("log.old"));
         }
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .create(true)

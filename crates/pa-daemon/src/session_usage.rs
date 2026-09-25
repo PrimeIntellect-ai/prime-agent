@@ -68,7 +68,7 @@ pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> 
 /// `set`/`contains` constant-time over that insertion order (a plain
 /// `HashMap` would reorder the sums; a bare vec scan is the O(n²) fold
 /// long sessions would stall on).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AssistantUsageById {
     entries: Vec<(String, Usage)>,
     index: std::collections::HashMap<String, usize>,
@@ -79,13 +79,17 @@ impl AssistantUsageById {
         self.index.contains_key(id)
     }
 
+    /// The retained-entry count: TS `state.acc.assistantUsageById.size`.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn set(&mut self, id: &str, usage: Usage) {
-        match self.index.get(id) {
-            Some(at) => self.entries[*at].1 = usage,
-            None => {
-                self.index.insert(id.to_string(), self.entries.len());
-                self.entries.push((id.to_string(), usage));
-            }
+        if let Some(at) = self.index.get(id) {
+            self.entries[*at].1 = usage;
+        } else {
+            self.index.insert(id.to_string(), self.entries.len());
+            self.entries.push((id.to_string(), usage));
         }
     }
 }
@@ -162,7 +166,7 @@ pub struct SessionUsageTotals {
 /// the fold's authority — an attribution folds only when its target is
 /// already in the map (the assistant entry precedes its children's settle
 /// in the file).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
     attributed_child_usage: Usage,
@@ -170,6 +174,12 @@ pub struct UsageScan {
 }
 
 impl UsageScan {
+    /// TS `storeSessionScanState`'s retained-usage accounting: the number of
+    /// per-assistant-message records the scan state keeps resident.
+    pub(crate) fn retained_entries(&self) -> usize {
+        self.assistant_usage_by_id.len()
+    }
+
     /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id.
     /// Only an assistant row with a usage block lands in the map.
     pub(crate) fn fold_message(&mut self, id: &str, role: Option<&str>, usage: Option<Usage>) {
@@ -518,7 +528,7 @@ mod tests {
     }
 
     /// The map keeps first-insertion order so the cost sums stay
-    /// bit-identical to the TS `Map` fold (a HashMap would reorder them).
+    /// bit-identical to the TS `Map` fold (a `HashMap` would reorder them).
     #[test]
     fn cost_sums_follow_insertion_order() {
         let line = |id: &str, cost: f64| {

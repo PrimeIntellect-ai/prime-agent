@@ -104,8 +104,7 @@ fn posix_join(a: &str, b: &str) -> String {
     for part in [a, b] {
         for seg in part.split('/') {
             match seg {
-                "" => {}
-                "." => {}
+                "" | "." => {}
                 ".." => {
                     segments.pop();
                 }

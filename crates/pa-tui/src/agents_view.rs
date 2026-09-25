@@ -76,6 +76,12 @@ pub struct AgentsViewOptions {
     /// `AgentsViewMode` creates its own `KeybindingsManager`), the same
     /// contract as the session view.
     pub keybindings: crate::keybindings::KeybindingsManager,
+    /// The `showHardwareCursor` setting snapshot the view mounts with (TS
+    /// `AgentsViewMode` constructs its TUI with
+    /// `settingsManager.getShowHardwareCursor()`, default false): the
+    /// hardware cursor is positioned at the search caret for IME every
+    /// frame, but only shown when this is set.
+    pub show_hardware_cursor: bool,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -195,6 +201,14 @@ enum UiInput {
     SavedFailed {
         error: String,
     },
+    /// One stop-or-delete dispatch landed (the ctrl+x flow): the status
+    /// line reports the outcome.
+    DeleteResult {
+        message: String,
+        /// The deleted saved session's path (the catalog key for the
+        /// immediate row removal); `None` for the other arms.
+        deleted_saved_path: Option<String>,
+    },
 }
 
 /// The flow's roster connection (TS `AgentsViewPersistentState.rosterClient`):
@@ -230,6 +244,204 @@ pub struct AgentsViewRun {
     pub link: Option<AgentsViewLink>,
 }
 
+/// The armed stop-or-delete row (TS `pendingDeleteAgent` /
+/// `pendingKillSubagent`): which row waits on the second press, and the
+/// word its hint renders (`stop` while the row has live work, `delete`
+/// otherwise — TS `hasLiveWork`). The session key rides along so a
+/// roster replacement (the same identity, a NEW live session) retires
+/// the arm: the second press must confirm the session it will act on,
+/// never silently act on its replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingDelete {
+    identity: String,
+    stop: bool,
+    /// The row's live-session key (or the session-file key for saved
+    /// rows) at arm time.
+    session_key: Option<String>,
+}
+
+/// One stop-or-delete dispatch the run loop executes (the wire variant
+/// follows the row kind — TS `handleDeleteSelected`'s branches).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeleteAction {
+    /// A running subagent: stop it via its parent's session
+    /// (`cancel_rlm_child`).
+    StopSubagent {
+        active_session_id: String,
+        child_id: String,
+        name: String,
+    },
+    /// An idle subagent: delete the row via its parent's session
+    /// (`delete_rlm_subagent`).
+    DeleteSubagent {
+        active_session_id: String,
+        child_id: String,
+        name: String,
+    },
+    /// A live agent: stop the session (`kill`).
+    StopAgent {
+        active_session_id: String,
+        name: String,
+    },
+    /// A saved, non-live agent: delete the session file
+    /// (`delete_saved_session`).
+    DeleteSavedSession { session_path: String, name: String },
+}
+
+impl DeleteAction {
+    /// The status line's success text (the wire word plus the row).
+    fn success_message(&self) -> String {
+        match self {
+            DeleteAction::StopSubagent { name, .. } | DeleteAction::StopAgent { name, .. } => {
+                format!("Stopped {name}")
+            }
+            DeleteAction::DeleteSubagent { name, .. } => {
+                format!("Deleted {name}")
+            }
+            DeleteAction::DeleteSavedSession { name, .. } => {
+                format!("Deleted session {name}")
+            }
+        }
+    }
+
+    /// The failure prefix (the arm's wire word).
+    fn fail_word(&self) -> &'static str {
+        match self {
+            DeleteAction::StopSubagent { .. } | DeleteAction::StopAgent { .. } => "Stop",
+            DeleteAction::DeleteSubagent { .. } | DeleteAction::DeleteSavedSession { .. } => {
+                "Delete"
+            }
+        }
+    }
+
+    /// Whether the wire's own outcome fields say the effect actually
+    /// happened (the honest-success check: a `cancelled: false` or a
+    /// `deleted: false` in a `success` response means the command ran
+    /// but changed nothing — reported as such, never as success).
+    fn effect_happened(&self, response: &pa_types::daemon::DaemonResponse) -> bool {
+        let Some(data) = response.data.as_ref() else {
+            return true;
+        };
+        match self {
+            DeleteAction::StopSubagent { .. } => {
+                data.get("cancelled") != Some(&serde_json::json!(false))
+            }
+            DeleteAction::DeleteSubagent { .. } => {
+                data.get("deleted") != Some(&serde_json::json!(false))
+            }
+            DeleteAction::StopAgent { .. } => true,
+            DeleteAction::DeleteSavedSession { .. } => {
+                data.get("ok").map(serde_json::Value::as_bool) != Some(Some(false))
+            }
+        }
+    }
+}
+
+/// The no-effect status summary: the wire's own explanation (`error`
+/// or `reason`) beats a bare `ok: false`, a string value renders bare,
+/// and a payload with no explanation falls back to its own text.
+fn no_effect_summary(data: Option<&serde_json::Value>) -> String {
+    data.and_then(|data| {
+        data.get("error")
+            .or_else(|| data.get("reason"))
+            .or_else(|| data.get("ok"))
+            .or(Some(data))
+    })
+    .map_or_else(
+        || "nothing changed".to_string(),
+        |value| {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string)
+        },
+    )
+}
+
+/// One stop-or-delete wire dispatch (TS `handleDeleteSelected`'s arms):
+/// the call runs off the key loop with a client clone and its outcome
+/// re-enters the loop as a `DeleteResult` status line — the live roster
+/// push refreshes the rows behind it, so the stopped or deleted row
+/// leaves the list on the next roster event, not on the status itself.
+fn spawn_delete_dispatch(
+    client: &DaemonClient,
+    ui_tx: mpsc::UnboundedSender<UiInput>,
+    action: DeleteAction,
+) -> tokio::task::JoinHandle<()> {
+    let client = client.clone();
+    tokio::spawn(async move {
+        let request = match &action {
+            DeleteAction::StopSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => DaemonCommand::CancelRlmChild {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                child_id: child_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::DeleteSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => DaemonCommand::DeleteRlmSubagent {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                child_id: child_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::StopAgent {
+                active_session_id, ..
+            } => DaemonCommand::Kill {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::DeleteSavedSession { session_path, .. } => {
+                DaemonCommand::DeleteSavedSession {
+                    id: None,
+                    active_session_id: None,
+                    session_path: session_path.clone(),
+                    rest: Default::default(),
+                }
+            }
+        };
+        let outcome = match client.request(request).await {
+            Ok(response) if response.success && action.effect_happened(&response) => {
+                action.success_message()
+            }
+            Ok(response) if response.success => {
+                // The wire ran but changed nothing: the status carries
+                // what the wire said, never the button's hope.
+                let summary = no_effect_summary(response.data.as_ref());
+                format!("{} did not change anything: {summary}", action.fail_word())
+            }
+            Ok(response) => {
+                let error = response
+                    .error
+                    .unwrap_or_else(|| "the command failed".into());
+                format!("{} failed: {error}", action.fail_word())
+            }
+            Err(error) => format!("{} failed: {error}", action.fail_word()),
+        };
+        let deleted_saved_path = match &action {
+            DeleteAction::DeleteSavedSession { session_path, .. }
+                if outcome.starts_with("Deleted session") =>
+            {
+                Some(session_path.clone())
+            }
+            DeleteAction::DeleteSavedSession { .. }
+            | DeleteAction::StopSubagent { .. }
+            | DeleteAction::DeleteSubagent { .. }
+            | DeleteAction::StopAgent { .. } => None,
+        };
+        let _ = ui_tx.send(UiInput::DeleteResult {
+            message: outcome,
+            deleted_saved_path,
+        });
+    })
+}
+
 /// The agents view state: roster + catalog data, search, selection, and
 /// the pending exit/open requests.
 struct AgentsViewMode {
@@ -247,6 +459,19 @@ struct AgentsViewMode {
     /// status truncation, so the full text — both ways out included —
     /// stays readable.
     notice: Option<String>,
+    /// The armed stop-or-delete confirm (TS `pendingDeleteAgent` /
+    /// `pendingKillSubagent`, keyed by row identity): the first ctrl+x
+    /// arms it over the selected row, the second press on the same row
+    /// executes, any other key clears it.
+    pending_delete: Option<PendingDelete>,
+    /// The executed delete the run loop takes (the dispatch runs off the
+    /// key loop with the client, the saved-catalog fetch's pattern).
+    pending_delete_action: Option<DeleteAction>,
+    /// Session paths deleted this run: an in-flight saved-catalog
+    /// response can still carry a file the daemon already deleted, so
+    /// the catalog apply filters these paths out (a deleted row never
+    /// reappears behind a slow fetch).
+    deleted_saved_paths: std::collections::HashSet<String>,
     /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
     /// scope root is not on the roster (the view falls back to the global
     /// list with a status message, TS scope-resolution fallback).
@@ -360,6 +585,9 @@ impl AgentsViewMode {
             query,
             status,
             notice,
+            pending_delete: None,
+            pending_delete_action: None,
+            deleted_saved_paths: Default::default(),
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
@@ -401,13 +629,12 @@ impl AgentsViewMode {
         // status message.
         let mut scope_active = false;
         let scoped = match &self.options.scope {
-            Some(scope) if !self.scope_dropped => match scope_to_subtree(&records, scope) {
-                Some(scoped) => {
+            Some(scope) if !self.scope_dropped => {
+                if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
                     self.scope_depth = scope_depth(&records, scope);
                     Some(scoped)
-                }
-                None => {
+                } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
                     self.status = Some(
@@ -415,7 +642,7 @@ impl AgentsViewMode {
                     );
                     None
                 }
-            },
+            }
             _ => None,
         };
         self.scope_active = scope_active;
@@ -525,6 +752,22 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
+        // The armed confirm only rides a row the list still carries
+        // under the session key it armed with: a removed, re-created,
+        // or re-keyed row retires it, so the hint always matches a row
+        // the execution gate accepts.
+        if let Some(pending) = &self.pending_delete {
+            let still_there = self.rows.iter().any(|row| row.identity == pending.identity);
+            let unchanged_key = self
+                .rows
+                .iter()
+                .find(|row| row.identity == pending.identity)
+                .map(|row| self.armed_session_key(row))
+                .is_some_and(|key| key == pending.session_key);
+            if !still_there || !unchanged_key {
+                self.pending_delete = None;
+            }
+        }
         self.sync_selected_row_state();
     }
 
@@ -680,6 +923,229 @@ impl AgentsViewMode {
     /// success.
     fn note_query_changed(&mut self) {
         self.saved_query_rearm = self.saved_fetch_failed;
+    }
+
+    /// The selected row's stop-or-delete arming target (the confirm's
+    /// [`PendingDelete`]), `None` for rows with no stop-or-delete action
+    /// (summary rows, and rows carrying neither a live session nor a
+    /// saved file). `stop` is true while the row has live work (TS
+    /// `hasLiveWork`).
+    fn delete_arm_target(&self) -> Option<PendingDelete> {
+        let row = self.rows.get(self.selected)?;
+        let stop = self.delete_arm_word(row);
+        match row.kind {
+            RowKind::SubagentSummary => None,
+            // An agent with a live session stops (TS `stopAgentForDeletion`
+            // keys on the session's existence — an idle-but-live row still
+            // stops, never deletes its file); a saved-only row deletes.
+            RowKind::Agent if row.summary.get("activeSessionId").is_some() => row
+                .summary
+                .get("activeSessionId")
+                .map(Value::as_str)
+                .map(|_| ()),
+            // A scoped view's promoted direct child is an Agent-kind row
+            // carrying the child id: it rides the child arms, never the
+            // agent arms.
+            RowKind::Agent if row.summary.get("rlmChildId").is_some() => {
+                row.summary.get("rlmChildId").map(Value::as_str).map(|_| ())
+            }
+            RowKind::Agent => row
+                .summary
+                .get("sessionFile")
+                .map(Value::as_str)
+                .map(|_| ()),
+            RowKind::Subagent => row.summary.get("rlmChildId").map(Value::as_str).map(|_| ()),
+        }?;
+        // A child arm only when its dispatch can resolve: the parent
+        // session (the summary's parentActiveSessionId, or the parent
+        // row's live session) must exist, or the second press would be a
+        // confirmed no-op.
+        let parent_session_missing = !row
+            .summary
+            .get("parentActiveSessionId")
+            .is_some_and(Value::is_string)
+            && row
+                .parent_identity
+                .as_deref()
+                .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
+                .and_then(|parent| {
+                    parent
+                        .summary
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                })
+                .is_none();
+        if (row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some())
+            && parent_session_missing
+        {
+            return None;
+        }
+        Some(PendingDelete {
+            identity: row.identity.clone(),
+            stop,
+            session_key: self.armed_session_key(row),
+        })
+    }
+
+    /// The session a child dispatch targets: the summary's
+    /// parentActiveSessionId, else the parent row's live session (the
+    /// daemon scopes the child lookup by the parent's session — the
+    /// child's own activeSessionId is never the target).
+    fn child_parent_session_key(&self, row: &AgentsViewRow) -> Option<String> {
+        if let Some(parent_id) = row
+            .summary
+            .get("parentActiveSessionId")
+            .and_then(Value::as_str)
+        {
+            return Some(parent_id.to_string());
+        }
+        row.parent_identity
+            .as_deref()
+            .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
+            .and_then(|parent| {
+                parent
+                    .summary
+                    .get("activeSessionId")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string)
+    }
+
+    /// The arm's session key: the session the execution itself targets —
+    /// a child rides its parent's session, a live agent its own, a saved
+    /// row its file. A roster change that swaps the key (a re-parented
+    /// child above all) retires the confirm: the second press acts on
+    /// the session the first press confirmed.
+    fn armed_session_key(&self, row: &AgentsViewRow) -> Option<String> {
+        if row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some() {
+            return self.child_parent_session_key(row);
+        }
+        row.summary
+            .get("activeSessionId")
+            .or_else(|| row.summary.get("sessionFile"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// The row's stop-or-delete word (the hint + the execution gate's
+    /// shared derivation): true while the row rides a live session or
+    /// the running section (TS `hasLiveWork`), false for a saved-only
+    /// row.
+    fn delete_arm_word(&self, row: &AgentsViewRow) -> bool {
+        if row.summary.get("rlmChildId").is_some() {
+            // A child rides its own activity (TS `hasLiveWork` over the
+            // child): the running section is its live work, an idle
+            // child deletes — the retained activeSessionId on an idle
+            // child is not live work.
+            row.section == crate::agents_view_state::Section::Running
+        } else {
+            // An agent keys on its session's existence (TS
+            // `stopAgentForDeletion`): an idle-but-live agent still
+            // stops, never deletes its file.
+            row.summary.get("activeSessionId").is_some()
+        }
+    }
+
+    /// The executed dispatch for the armed row (the second press): the
+    /// wire variant follows the row kind, exactly TS
+    /// `handleDeleteSelected`'s branches.
+    fn delete_action_for_selected(&self) -> Option<DeleteAction> {
+        let row = self.rows.get(self.selected)?;
+        let name = row.title.clone();
+        // A promoted direct child (an Agent-kind row carrying rlmChildId)
+        // rides the child arms with its own id.
+        let child_id = row
+            .summary
+            .get("rlmChildId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let active_session_id = row
+            .summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // Subagent rows (and promoted children) target the child through
+        // the parent's live session.
+        if let Some(child_id) = child_id {
+            if row.kind == RowKind::SubagentSummary {
+                return None;
+            }
+            // The child arms always run through the PARENT's session: a
+            // scoped promoted child has no parent row in the list, so the
+            // summary's own parentActiveSessionId carries the parent
+            // session; the nested child walks its parent row.
+            let active_session_id = self.child_parent_session_key(row)?;
+            if self.delete_arm_word(row) {
+                return Some(DeleteAction::StopSubagent {
+                    active_session_id,
+                    child_id,
+                    name,
+                });
+            }
+            return Some(DeleteAction::DeleteSubagent {
+                active_session_id,
+                child_id,
+                name,
+            });
+        }
+        // Agent rows: a live session stops (idle-but-live included — TS
+        // `stopAgentForDeletion` keys on the session's existence); a
+        // saved-only row deletes its file.
+        match row.kind {
+            RowKind::SubagentSummary | RowKind::Subagent => None,
+            RowKind::Agent => {
+                if let Some(active_session_id) = active_session_id {
+                    Some(DeleteAction::StopAgent {
+                        active_session_id,
+                        name,
+                    })
+                } else {
+                    let session_path = row.summary.get("sessionFile")?.as_str()?.to_string();
+                    Some(DeleteAction::DeleteSavedSession { session_path, name })
+                }
+            }
+        }
+    }
+
+    /// The executed delete the run loop takes (the dispatch runs with
+    /// the client, off the key loop).
+    fn take_delete_action(&mut self) -> Option<DeleteAction> {
+        self.pending_delete_action.take()
+    }
+
+    /// One landed stop-or-delete outcome: the status line reports it,
+    /// and a deleted saved row leaves the catalog immediately (the live
+    /// roster push covers the other arms; saved rows have no push).
+    fn delete_result(&mut self, message: String, deleted_saved_path: Option<String>) {
+        self.status = Some(message);
+        // A deleted saved row leaves the catalog by its own path (the
+        // key the daemon deleted), never by the display name.
+        if let Some(path) = deleted_saved_path {
+            self.deleted_saved_paths.insert(path.clone());
+            self.saved.retain(|saved| {
+                saved
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_none_or(|saved_path| saved_path != path)
+            });
+            self.rebuild_rows();
+        }
+    }
+
+    /// A landed saved-catalog snapshot: the authoritative array replaces
+    /// the stream's rows, with this run's deleted paths filtered out (a
+    /// slow fetch never restores a row the daemon already deleted).
+    fn apply_saved_loaded(&mut self, sessions: Vec<Value>) {
+        self.saved = sessions
+            .into_iter()
+            .filter(|saved| {
+                saved
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_none_or(|path| !self.deleted_saved_paths.contains(path))
+            })
+            .collect();
+        self.saved_fetch_failed = false;
     }
 
     /// Whether the loop must re-arm the saved-catalog fetch (one retry
@@ -935,7 +1401,11 @@ impl AgentsViewMode {
         }
         self.notice = None;
         // Any other key clears the exit hint (TS `clearCtrlCExitHint`).
+        // Any other key clears the exit hint (TS `clearCtrlCExitHint`)
+        // and the stop-or-delete confirm (TS `clearDeleteConfirmation`
+        // at the top of `handleInput`).
         self.exit_armed = false;
+        let was_delete_armed = self.pending_delete.take();
         let has_query = !self.query.is_empty();
         // TS `app.clear` (default ctrl+c): the first press arms the exit
         // hint, a second press while armed exits the view (TS
@@ -951,6 +1421,32 @@ impl AgentsViewMode {
                 self.running = false;
             } else {
                 self.exit_armed = true;
+            }
+            return;
+        }
+        // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
+        // `handleInput`'s gate): stop or delete the selected row. The
+        // first press arms the confirm over the row (the hint reads
+        // "stop" while the row has live work, "delete" otherwise — TS
+        // `hasLiveWork`), the second press on the same row executes, and
+        // any other key clears the arm.
+        if !has_query && self.keybindings.matches(key, "app.agents.delete") {
+            if was_delete_armed.as_ref().is_some_and(|pending| {
+                self.rows.get(self.selected).is_some_and(|row| {
+                    row.identity == pending.identity
+                        // The armed word must still match the row's live
+                        // work: a row that settled between the presses
+                        // (running -> idle) re-arms rather than executing
+                        // the stale word (the hint said stop; the row now
+                        // deletes - the confirm rides the CURRENT state).
+                        && self.delete_arm_word(row) == pending.stop
+                })
+            }) {
+                if let Some(action) = self.delete_action_for_selected() {
+                    self.pending_delete_action = Some(action);
+                }
+            } else if let Some(pending) = self.delete_arm_target() {
+                self.pending_delete = Some(pending);
             }
             return;
         }
@@ -1269,6 +1765,14 @@ impl AgentsViewMode {
     /// headings count top-level agents only (TS `getDisplayRowsForSection`
     /// / `countRowsBySection`).
     fn render_list(&mut self, width: usize, max_rows: usize) -> Vec<Line> {
+        /// One rendered display entry of the sectioned list (TS
+        /// `DisplayItem`): the spacer between section blocks, a section
+        /// heading, or one row.
+        enum DisplayItem<'a> {
+            Spacer,
+            Heading(Section),
+            Row(&'a AgentsViewRow),
+        }
         if max_rows == 0 {
             return Vec::new();
         }
@@ -1279,14 +1783,6 @@ impl AgentsViewMode {
                 "No sessions match your search."
             };
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
-        }
-        /// One rendered display entry of the sectioned list (TS
-        /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row.
-        enum DisplayItem<'a> {
-            Spacer,
-            Heading(Section),
-            Row(&'a AgentsViewRow),
         }
         let layout = build_layout(&self.rows, width);
         // The display-item sequence (TS `displayItems`): each non-empty
@@ -1309,9 +1805,7 @@ impl AgentsViewMode {
         // relevance-ordered run of hits (per-row icons carry the status),
         // not status section blocks. Without a query the sectioned
         // layout stays TS-identical.
-        if !self.query.trim().is_empty() {
-            display.extend(self.rows.iter().map(DisplayItem::Row));
-        } else {
+        if self.query.trim().is_empty() {
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -1330,6 +1824,8 @@ impl AgentsViewMode {
                     }
                 }
             }
+        } else {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
         }
         // The viewport (TS `renderSessionRows`): reserve the column header
         // and its spacer, center the slice on the selected row, and clip
@@ -1348,8 +1844,7 @@ impl AgentsViewMode {
             .position(
                 |item| matches!(item, DisplayItem::Row(row) if Some(row.identity.as_str()) == selected_identity),
             )
-            .map(|index| index as isize)
-            .unwrap_or(-1);
+            .map_or(-1, |index| index as isize);
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
@@ -1370,8 +1865,7 @@ impl AgentsViewMode {
                     let count = counts
                         .iter()
                         .find(|(count_section, _)| count_section == section)
-                        .map(|(_, count)| *count)
-                        .unwrap_or(0);
+                        .map_or(0, |(_, count)| *count);
                     vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
@@ -1520,6 +2014,26 @@ impl AgentsViewMode {
             };
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
+        // The armed stop-or-delete confirm: "Press ctrl+x again to
+        // stop|delete" (TS `renderHints`'s delete hint, keyed by the
+        // armed row's CURRENT live work — a row that settles between
+        // the presses shows the word the confirm now carries).
+        if let Some(pending) = &self.pending_delete {
+            let stop = self
+                .rows
+                .iter()
+                .find(|row| row.identity == pending.identity)
+                .map_or(pending.stop, |row| self.delete_arm_word(row));
+            let word = if stop { "stop" } else { "delete" };
+            let hint = match self.keybindings.first_key("app.agents.delete") {
+                Some(key) => format!(
+                    "Press {} again to {word}",
+                    crate::keybindings::format_key_text(&key)
+                ),
+                None => format!("Press again to {word}"),
+            };
+            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+        }
         if let Some(status) = status_override.or(self.status.as_deref()) {
             return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
         }
@@ -1582,7 +2096,13 @@ fn truncate_line(line: Line, width: usize) -> Line {
 }
 
 enum Renderer {
-    Terminal(ratatui::Terminal<crate::hyperlinks::LinkBackend>),
+    Terminal {
+        term: ratatui::Terminal<crate::hyperlinks::LinkBackend>,
+        /// The `showHardwareCursor` setting snapshot the surface mounted
+        /// with (TS constructs the agents-view TUI with the live
+        /// `settingsManager.getShowHardwareCursor()`).
+        show_hardware_cursor: bool,
+    },
     Headless {
         width: u16,
         height: u16,
@@ -1596,6 +2116,7 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: crate::exit_guard::ExitGuard,
         surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        show_hardware_cursor: bool,
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
@@ -1644,16 +2165,23 @@ impl Renderer {
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
                 // never reach the pane on its own: queue it with the
-                // cursor show and let the first draw's single flush carry
+                // cursor hide and let the first draw's single flush carry
                 // clear + frame together. A separate clear-and-flush here
                 // shows a blank pane for the whole render gap — a visible
-                // flicker on every surface switch.
+                // flicker on every surface switch. The cursor hides with
+                // the mount (TS `TUI.start` writes hideCursor, never a
+                // show): a shown cursor here sits visible at a stale
+                // position until the first frame decides the visibility,
+                // the exact window the cursor glitch shows in.
                 crossterm::queue!(
                     std::io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Show
+                    crossterm::cursor::Hide
                 )?;
-                Ok(Renderer::Terminal(terminal))
+                Ok(Renderer::Terminal {
+                    term: terminal,
+                    show_hardware_cursor,
+                })
             }
             AgentsViewUiMode::Headless(plan) => {
                 let steps = plan.steps;
@@ -1691,16 +2219,27 @@ impl Renderer {
 
     fn draw(&mut self, mode: &mut AgentsViewMode) -> Option<(usize, usize)> {
         match self {
-            Renderer::Terminal(terminal) => {
-                let area = terminal.size().expect("terminal size");
+            Renderer::Terminal {
+                term,
+                show_hardware_cursor,
+            } => {
+                let area = term.size().expect("terminal size");
                 let (lines, cursor) = mode.render_frame(area.width as usize, area.height as usize);
                 crate::hyperlinks::install_frame(&lines);
-                terminal
-                    .draw(|f| {
-                        let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
-                        let rendered: Vec<ratatui::text::Line<'static>> =
-                            lines.iter().map(crate::markdown::to_ratatui_line).collect();
-                        f.render_widget(ratatui::text::Text::from(rendered), area);
+                // TS cursor control: the hardware cursor is positioned at
+                // the focused caret for IME on every frame, but only shown
+                // when `showHardwareCursor` is on (default off). ratatui's
+                // `set_cursor_position` shows unconditionally, so only the
+                // show case may hand it the caret; the hidden case queues
+                // the bare MoveTo after the paint instead (TS positions
+                // the caret while the cursor stays hidden).
+                let show = *show_hardware_cursor;
+                term.draw(|f| {
+                    let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
+                    let rendered: Vec<ratatui::text::Line<'static>> =
+                        lines.iter().map(crate::markdown::to_ratatui_line).collect();
+                    f.render_widget(ratatui::text::Text::from(rendered), area);
+                    if show {
                         if let Some((row, col)) = cursor {
                             if row < area.height as usize && col < area.width as usize {
                                 f.set_cursor_position(ratatui::layout::Position::new(
@@ -1708,8 +2247,23 @@ impl Renderer {
                                 ));
                             }
                         }
-                    })
-                    .expect("draw frame");
+                    }
+                })
+                .expect("draw frame");
+                if !show {
+                    if let Some((row, col)) = cursor {
+                        if row < area.height as usize && col < area.width as usize {
+                            // execute! (not queue!): the position write must
+                            // flush now — the paint backend's flush already
+                            // ran inside `draw`, so a queued write would sit
+                            // in the stdout buffer until the next frame.
+                            let _ = crossterm::execute!(
+                                std::io::stdout(),
+                                crossterm::cursor::MoveTo(col as u16, row as u16)
+                            );
+                        }
+                    }
+                }
                 None
             }
             Renderer::Headless {
@@ -1740,7 +2294,14 @@ impl Renderer {
     /// onto the main screen.
     fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
-            Renderer::Terminal(_) => {
+            Renderer::Terminal { term, .. } => {
+                // ratatui's `Terminal` drop restores the cursor its last
+                // frame hid (the `hidden_cursor` flag): run the drop
+                // before the handoff's hide so the hide is the final
+                // word — TS `stop(preserveAltScreen)` leaves the cursor
+                // hidden for the surface taking the screen over. The
+                // real-exit arm ends shown for the shell either way.
+                drop(term);
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).
@@ -1781,14 +2342,13 @@ async fn open_roster_link(
     mpsc::UnboundedReceiver<DaemonClientEvent>,
     Vec<Value>,
 )> {
-    let (mut client, mut events) = match link {
-        Some(AgentsViewLink { client, events }) => (client, events),
-        None => {
-            let link = AgentsViewLink::connect(&options.socket_path)
-                .await
-                .with_context(|| "the agents view could not attach to the daemon")?;
-            (link.client, link.events)
-        }
+    let (mut client, mut events) = if let Some(AgentsViewLink { client, events }) = link {
+        (client, events)
+    } else {
+        let link = AgentsViewLink::connect(&options.socket_path)
+            .await
+            .with_context(|| "the agents view could not attach to the daemon")?;
+        (link.client, link.events)
     };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
@@ -1840,8 +2400,8 @@ fn spawn_saved_catalog_fetch(
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
 ) -> String {
-    let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let client = client.clone();
     // The id rides the supervisor reader's `daemon_` namespace: the
     // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
     // the fetch too, or a dead connection leaves the long-running scan's
@@ -1888,6 +2448,15 @@ fn spawn_saved_catalog_fetch(
     id
 }
 
+/// Run the agents view over the roster link (terminal or headless) and
+/// return its run state.
+///
+/// # Errors
+///
+/// Returns `Err` when the view surface fails (a roster-link failure,
+/// a draw failure, a transport error); a terminal-mode error runs the
+/// exit restore first when this run mounted the surface or adopted a
+/// pane already in TUI state.
 pub async fn run_agents_view(
     options: AgentsViewOptions,
     ui: AgentsViewUiMode,
@@ -1962,7 +2531,13 @@ async fn run_agents_view_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone(), &surface_mounted)?;
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx.clone(),
+        exit_guard.clone(),
+        &surface_mounted,
+        options.show_hardware_cursor,
+    )?;
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below
@@ -1992,6 +2567,12 @@ async fn run_agents_view_surface(
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
     let mut saved_flush: Option<tokio::time::Instant> = None;
+    // The in-flight stop-or-delete dispatches: the view's teardown
+    // waits for them (bounded, one window for all) so an exit right
+    // after a confirmed ctrl+x cannot drop a request on the floor (the
+    // loop's client close would take the connection down before a
+    // detached task ever sent).
+    let mut delete_dispatches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     while mode.running {
         let mut redraw = false;
@@ -2017,8 +2598,27 @@ async fn run_agents_view_surface(
                         mode.drop_saved_stream();
                         saved_flush = None;
                     }
+                    // The executed stop-or-delete dispatch (the second
+                    // ctrl+x): the wire call runs off the key loop with
+                    // the client — the saved-catalog fetch's pattern —
+                    // and its outcome lands as a `DeleteResult` status
+                    // line (the roster push refreshes the rows behind
+                    // it).
+                    if let Some(action) = mode.take_delete_action() {
+                        delete_dispatches.push(spawn_delete_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            action,
+                        ));
+                    }
                 }
                 UiInput::Resize | UiInput::Settled => {}
+                UiInput::DeleteResult {
+                    message,
+                    deleted_saved_path,
+                } => {
+                    mode.delete_result(message, deleted_saved_path);
+                }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
                 UiInput::SavedLoaded { sessions } => {
@@ -2027,8 +2627,7 @@ async fn run_agents_view_surface(
                     // never re-orders after streaming them.
                     mode.drop_saved_stream();
                     saved_flush = None;
-                    mode.saved = sessions;
-                    mode.saved_fetch_failed = false;
+                    mode.apply_saved_loaded(sessions);
                     // The failure status is the fetch's own honest error;
                     // the catalog's success retires it (the status line
                     // must not keep reporting an unavailable catalog after
@@ -2143,17 +2742,12 @@ async fn run_agents_view_surface(
         }
     }
 
-    // The view decided to leave: arm the force-quit deadline so the
-    // teardown below (terminal restore, roster unsubscribe over a possibly
-    // dead daemon) is best-effort and cannot hold the process open. A
-    // selection (or a new session) is a view switch, not an exit: the
-    // process keeps running and TS has no exit deadline on this path —
-    // its teardown may take its full drain second while the app simply
-    // waits, so the deadline covers only the leaves that end this process.
+    // The view decided to leave. The force-quit deadline arms below,
+    // after the stop-or-delete drain settles: a confirmed request
+    // completes before any deadline can cut it down. `renderer.finish`
+    // consumes the renderer, so the terminal check is read first.
     let handing_off = mode.opened.is_some() || mode.new_session;
-    if matches!(renderer, Renderer::Terminal(_)) && !handing_off {
-        exit_guard.arm_for_exit();
-    }
+    let terminal_exit = matches!(renderer, Renderer::Terminal { .. }) && !handing_off;
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
     // exiting releases the alternate screen.
     let frames = renderer.finish(mode.opened.is_some() || mode.new_session);
@@ -2171,13 +2765,35 @@ async fn run_agents_view_surface(
                 .await;
         });
     }
-    // A selection hands the terminal to a session run: the process keeps
-    // going, so retire the watchdog. A selection-less exit ends the
-    // process, where the deadline dies with it — or fires if it wedged.
-    if mode.opened.is_some() || mode.new_session {
+    let opened = mode.opened.take();
+    // A handoff retires the watchdog before the drain wait: the reader
+    // keeps observing Ctrl+C through that window, and a double-press
+    // must not force-quit a process that is merely switching views —
+    // the retirement never affects the in-flight dispatches.
+    if handing_off {
         exit_guard.cancel();
     }
-    let opened = mode.opened.take();
+    // An in-flight stop-or-delete dispatch settles before the connection
+    // closes (bounded): an exit right after the second ctrl+x must not
+    // drop the request on the floor (the loop's client close would take
+    // the connection down before the detached task ever sent).
+    // One bounded window covers every in-flight dispatch: they run
+    // concurrently, so the exit wait stays the same size no matter
+    // how many confirms are outstanding.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    for dispatch in delete_dispatches {
+        let _ = tokio::time::timeout_at(deadline, dispatch).await;
+    }
+    // The force-quit deadline arms only after the drain: the drain
+    // window is bounded, so it never wedges, and the watchdog then
+    // covers the teardown's remaining best-effort leaves (the client
+    // close over a possibly dead daemon, the return path). A selection
+    // (or a new session) is a view switch, not an exit: the process
+    // keeps running and TS has no exit deadline on this path, so the
+    // deadline covers only the leaves that end this process.
+    if terminal_exit {
+        exit_guard.arm_for_exit();
+    }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
     let link = if opened.is_some() || mode.new_session {
@@ -2204,7 +2820,7 @@ async fn run_agents_view_surface(
             selected_row_identity: opened.as_ref().map(|row| row.selected_row_identity.clone()),
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
-            opened_has_children: opened.as_ref().map(|row| row.has_children).unwrap_or(false),
+            opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
@@ -2258,6 +2874,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -2459,6 +3076,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2466,6 +3084,477 @@ mod tests {
         ];
         mode.rebuild_rows();
         mode
+    }
+
+    /// The ctrl+x stop-or-delete flow (TS `handleDeleteSelected`, the
+    /// operator's missing-functionality report): the first press arms the
+    /// confirm over the selected row with the stop|delete hint, the second
+    /// press on the same row takes the dispatch, any other key clears the
+    /// arm, and a moved selection never executes.
+    #[test]
+    fn ctrl_x_arms_then_executes_the_stop_or_delete() {
+        let mut mode = mode_with_parent_and_child();
+        // Subagent rows materialize only inside the parent's expanded
+        // list: expand the parent (found by its Agent kind, never by
+        // section order), then select the child by its own rlmChildId.
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
+        let child_identity = mode.rows[mode.selected].identity.clone();
+        assert!(child_identity.contains("c"));
+        // First press: armed, no dispatch.
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete.is_some(),
+            "the first press arms the confirm"
+        );
+        assert!(mode.pending_delete_action.is_none(), "no dispatch yet");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert_eq!(armed.identity, child_identity);
+        assert!(armed.stop, "the running subagent arms as stop");
+        // Any other key clears the arm.
+        mode.handle_key("down");
+        assert!(mode.pending_delete.is_none(), "another key clears the arm");
+        // Re-select the child, then arm and execute on the same row.
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.handle_key("ctrl+x");
+        mode.handle_key("ctrl+x");
+        let action = mode.take_delete_action().expect("the executed dispatch");
+        match action {
+            DeleteAction::StopSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => {
+                assert_eq!(active_session_id, "p-live", "the parent's session");
+                assert_eq!(child_id, "child-c", "the child's rlm id");
+            }
+            other => panic!("a running subagent stops, got {other:?}"),
+        }
+    }
+
+    /// The idle arm: an idle subagent arms as delete and dispatches the
+    /// `delete_rlm_subagent` wire; the hint word follows the live work.
+    #[test]
+    fn ctrl_x_on_an_idle_subagent_deletes() {
+        let mut mode = mode_with_parent_and_child();
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(!armed.stop, "the idle subagent arms as delete");
+        mode.handle_key("ctrl+x");
+        mode.handle_key("ctrl+x");
+        let action = mode.take_delete_action().expect("the executed dispatch");
+        match action {
+            DeleteAction::DeleteSubagent { child_id, .. } => {
+                assert_eq!(child_id, "child-c");
+            }
+            other => panic!("an idle subagent deletes, got {other:?}"),
+        }
+    }
+
+    /// The armed hint renders the stop|delete word with the effective
+    /// binding; any other row selection clears the arm before the press.
+    #[test]
+    fn the_delete_confirm_hint_and_the_cleared_arm() {
+        let mut mode = mode_with_parent_and_child();
+        // Expand the parent's list so the child row materializes, then
+        // select it by its own rlmChildId.
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
+        mode.handle_key("ctrl+x");
+        let hint = mode
+            .render_hints(120, None)
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to stop"),
+            "the confirm hint row: {hint}"
+        );
+        assert!(
+            hint.contains("again to stop"),
+            "the live row reads stop: {hint}"
+        );
+        // A moved selection never executes the armed row: the arm dies
+        // with the key that moved the selection (the clear-on-any-other-
+        // key), and no dispatch ever rode along.
+        mode.handle_key("down");
+        assert!(mode.pending_delete.is_none(), "the arm dies with the move");
+        assert!(mode.pending_delete_action.is_none());
+    }
+
+    /// The honest-success check: a `success` response whose own outcome
+    /// field says nothing happened (`cancelled: false`, `deleted: false`)
+    /// never reports Stopped/Deleted — the status says what the wire
+    /// said, not what the button hoped.
+    #[test]
+    fn a_no_effect_success_response_reports_nothing_changed() {
+        let action = DeleteAction::StopSubagent {
+            active_session_id: "p-live".to_string(),
+            child_id: "child-c".to_string(),
+            name: "worker one".to_string(),
+        };
+        let response = pa_types::daemon::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"cancelled": false})),
+            error: None,
+            id: None,
+            command: "cancel_rlm_child".to_string(),
+            error_info: None,
+        };
+        assert!(!action.effect_happened(&response));
+        let response = pa_types::daemon::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"cancelled": true})),
+            error: None,
+            id: None,
+            command: "cancel_rlm_child".to_string(),
+            error_info: None,
+        };
+        assert!(action.effect_happened(&response));
+        let delete = DeleteAction::DeleteSubagent {
+            active_session_id: "p-live".to_string(),
+            child_id: "child-c".to_string(),
+            name: "worker one".to_string(),
+        };
+        let response = pa_types::daemon::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"deleted": false})),
+            error: None,
+            id: None,
+            command: "delete_rlm_subagent".to_string(),
+            error_info: None,
+        };
+        assert!(!delete.effect_happened(&response));
+    }
+
+    /// The no-effect summary surfaces the wire's own explanation: the
+    /// daemon's `error`/`reason` beats a bare `ok: false` (which hid
+    /// the actual explanation), a string renders bare, and a payload
+    /// without any explanation still shows its own text.
+    #[test]
+    fn the_no_effect_summary_surfaces_the_wires_explanation() {
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({
+                "ok": false,
+                "error": "session gone"
+            }))),
+            "session gone"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({
+                "deleted": false,
+                "reason": "running"
+            }))),
+            "running"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({"ok": false}))),
+            "false"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({"queued": true}))),
+            r#"{"queued":true}"#
+        );
+        assert_eq!(no_effect_summary(None), "nothing changed");
+    }
+
+    /// A row that settles between the presses re-arms instead of
+    /// executing the stale word: the armed confirm rides the row's
+    /// CURRENT live-work state.
+    #[test]
+    fn a_settled_row_re_arms_instead_of_executing_the_stale_word() {
+        let mut mode = mode_with_parent_and_child();
+        mode.toggle_subagent_list(
+            &mode
+                .rows
+                .iter()
+                .find(|row| row.kind == RowKind::Agent)
+                .expect("the parent row")
+                .clone(),
+        );
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        // Arm over the running child (the word is stop).
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(armed.stop);
+        // The settled child: the section reads idle while the arm
+        // rides the same row.
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        // The armed stop word no longer matches the settled row: the
+        // confirm re-arms over the current state instead of executing
+        // the stale stop.
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete_action.is_none(),
+            "the stale word never executes"
+        );
+        assert!(
+            mode.pending_delete
+                .as_ref()
+                .is_some_and(|pending| !pending.stop),
+            "the re-arm carries the current word: {:?}",
+            mode.pending_delete
+        );
+    }
+
+    /// The confirm hint rides the armed row's CURRENT live work: a
+    /// running row arms as stop, and the same row settled between the
+    /// presses reads delete — the word the next press re-confirms,
+    /// never the stale stop the first press armed with.
+    #[test]
+    fn the_confirm_hint_rides_the_current_live_work() {
+        let mut mode = mode_with_parent_and_child();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.handle_key("ctrl+x");
+        let hint = mode
+            .render_hints(120, None)
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to stop"),
+            "the running row's confirm reads stop: {hint}"
+        );
+        // The settled child keeps the arm on its identity and session
+        // key; the hint reads the settled row's word.
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        let hint = mode
+            .render_hints(120, None)
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to delete"),
+            "the settled row's confirm reads delete: {hint}"
+        );
+    }
+
+    /// A deleted path never reappears behind a slow catalog fetch: the
+    /// `SavedLoaded` apply filters the recorded deleted paths, so a stale
+    /// response cannot restore a row the daemon already deleted.
+    #[test]
+    fn a_deleted_path_survives_a_late_catalog_apply() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![saved_catalog_row(
+            "/x/gone.jsonl",
+            "gone-1",
+            "a deleted session",
+        )];
+        mode.rebuild_rows();
+        mode.delete_result(
+            "Deleted session a deleted session".to_string(),
+            Some("/x/gone.jsonl".to_string()),
+        );
+        assert!(mode.saved.is_empty());
+        // The in-flight fetch lands late with the deleted file still in
+        // its snapshot: the apply filters it.
+        mode.apply_saved_loaded(vec![saved_catalog_row(
+            "/x/gone.jsonl",
+            "gone-1",
+            "a deleted session",
+        )]);
+        assert!(
+            mode.saved.is_empty(),
+            "the deleted path stays gone behind the late fetch"
+        );
+    }
+
+    /// A roster replacement retires the arm: the same row identity with
+    /// a NEW live session (the worker was replaced) never inherits the
+    /// armed confirm — the second press confirms the session it acts
+    /// on (a stale arm must not stop the replacement's new session).
+    #[test]
+    fn a_roster_replacement_retires_the_armed_confirm() {
+        let mut mode = mode_with_parent_and_child();
+        mode.selected = 0;
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        let key = armed.session_key;
+        assert!(key.is_some());
+        // The roster replaces the agent: the same identity, a new live
+        // session id.
+        mode.roster[0]["summary"]["activeSessionId"] = serde_json::json!("p-live-2");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_none(),
+            "the replacement retires the arm"
+        );
+        // The same session (no replacement) keeps it.
+        mode.selected = 0;
+        mode.handle_key("ctrl+x");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_some(),
+            "an unchanged roster keeps the arm"
+        );
+    }
+
+    /// A parent-session replacement retires an armed CHILD confirm:
+    /// the child's own session survives the re-parenting, but its
+    /// dispatch keys on the parent's session — a second press must never
+    /// act through a parent the confirmation never saw.
+    #[test]
+    fn a_parent_replacement_retires_the_armed_child_confirm() {
+        let mut mode = mode_with_parent_and_child();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert_eq!(
+            armed.session_key.as_deref(),
+            Some("p-live"),
+            "the child arm keys on the parent's session"
+        );
+        // The parent is replaced and the child re-parents: its own
+        // session is unchanged, the dispatch scoping is not.
+        mode.roster[1]["summary"]["parentActiveSessionId"] = serde_json::json!("p2-live");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_none(),
+            "the re-parented child never inherits the confirm"
+        );
+    }
+
+    /// A deleted saved row leaves the catalog by its own path: the
+    /// removal keys on the session PATH (the daemon's key), never the
+    /// display name — the old message-contains check would leave the
+    /// row in the Inactive list while the status said Deleted.
+    #[test]
+    fn a_deleted_saved_row_leaves_the_catalog_by_path() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![
+            saved_catalog_row("/x/gone.jsonl", "gone-1", "a deleted session"),
+            saved_catalog_row("/x/stays.jsonl", "stays-1", "a surviving session"),
+        ];
+        mode.rebuild_rows();
+        mode.delete_result(
+            "Deleted session a deleted session".to_string(),
+            Some("/x/gone.jsonl".to_string()),
+        );
+        assert!(
+            !mode
+                .saved
+                .iter()
+                .any(|saved| saved.get("path") == Some(&serde_json::json!("/x/gone.jsonl"))),
+            "the deleted path leaves the catalog"
+        );
+        assert!(
+            mode.saved
+                .iter()
+                .any(|saved| saved.get("path") == Some(&serde_json::json!("/x/stays.jsonl"))),
+            "the other rows stay"
+        );
+        // The name-matching trap: a path that never appears in any
+        // display name still matches by its own key.
+        mode.delete_result(
+            "Deleted session Some Other Name".to_string(),
+            Some("/x/stays.jsonl".to_string()),
+        );
+        assert!(
+            mode.saved.is_empty(),
+            "the path removes regardless of the name"
+        );
+    }
+
+    /// The delete hint renders the word for a row without live work.
+    #[test]
+    fn the_delete_confirm_hint_reads_delete_for_saved_rows() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![saved_catalog_row(
+            "/x/saved.jsonl",
+            "saved-1",
+            "an old session",
+        )];
+        mode.rebuild_rows();
+        // The saved row sits in the Inactive section.
+        let saved_index = mode
+            .rows
+            .iter()
+            .position(|row| row.identity.contains("saved"))
+            .expect("the saved row");
+        mode.selected = saved_index;
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(!armed.stop, "the saved row arms as delete");
+        mode.handle_key("ctrl+x");
+        match mode.take_delete_action().expect("the dispatch") {
+            DeleteAction::DeleteSavedSession { session_path, .. } => {
+                assert_eq!(session_path, "/x/saved.jsonl");
+            }
+            other => panic!("the saved row deletes its file, got {other:?}"),
+        }
     }
 
     /// A fresh-open view anchored on the given session (the agents-back
@@ -2485,6 +3574,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -2507,6 +3597,7 @@ mod tests {
             selected_key: None,
             status_message: Some(notice.to_string()),
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.rebuild_rows();
         mode
@@ -2847,6 +3938,7 @@ the holder exits.";
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -2880,6 +3972,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2965,6 +4058,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3061,7 +4155,7 @@ the holder exits.";
 
     /// Kitty-protocol key releases map to no key id: the reader filters
     /// them the way every session handler does, so a release never runs
-    /// handle_key's "any other key" arm — which would clear the armed
+    /// `handle_key`'s "any other key" arm — which would clear the armed
     /// exit hint between the presses of a double Ctrl+C, and the second
     /// press would re-arm the hint instead of exiting.
     #[test]
@@ -3168,6 +4262,7 @@ the holder exits.";
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3201,6 +4296,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3313,6 +4409,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();

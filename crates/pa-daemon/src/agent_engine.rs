@@ -62,7 +62,7 @@ pub struct AgentEngineConfig {
     pub faux_script: Option<String>,
     /// Supervisor socket + own active session id for the worker's supervisor
     /// link. Present only inside a daemon worker; it enables the kernel's
-    /// agent_message/agent_observe host requests.
+    /// `agent_message/agent_observe` host requests.
     pub supervisor_link: Option<SupervisorLinkConfig>,
     /// Telemetry opt-out from the create command (Some(true) installs no
     /// telemetry; None/Some(false) resolve the configured sinks).
@@ -174,7 +174,7 @@ pub struct AgentSessionEngine {
     pub(crate) goal_runtime: std::sync::Mutex<Option<GoalRuntimeHandles>>,
     /// Whether this run's usage accounting crossed the goal's token budget
     /// (TS `_accountGoalUsageForAssistantMessage` returning `true` at the
-    /// message_end hook): the natural boundary mints the budget-limit
+    /// `message_end` hook): the natural boundary mints the budget-limit
     /// wrap-up steer and ends the run. Shared with the agent-loop
     /// subscription (a plain field cannot cross the 'static handler).
     pub(crate) goal_budget_crossed: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -392,6 +392,19 @@ pub struct AgentSessionEngine {
 }
 
 impl AgentSessionEngine {
+    /// Build the engine: the shared async runtime, the model selection
+    /// (create config, else the process env pair), the supervisor link, the
+    /// children registry, and the MCP store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the multi-thread runtime cannot be built.
+    ///
+    /// # Panics
+    ///
+    /// The MCP user-server and catalog-source closures built here panic
+    /// on a poisoned engine cwd lock (a holder panicked while holding
+    /// it).
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
@@ -575,6 +588,11 @@ impl AgentSessionEngine {
     /// harnesses inject a scripted driver here; the product keeps the
     /// default shell-gate driver in the session cwd. Call before the
     /// first admitted turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the autonomous-driver lock is poisoned (a holder
+    /// panicked while holding it).
     pub fn set_autonomous_driver(
         &self,
         driver: std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>,
@@ -844,6 +862,12 @@ impl AgentSessionEngine {
     /// reused for a fresh create), and a stale settle callback must find
     /// no goal runtime to mint through — the owed slot itself survives
     /// the close in the durable state for a later resumed session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the goal runtime or the
+    /// autonomous boundary lock, after a holder panicked while holding
+    /// it).
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -869,6 +893,11 @@ impl AgentSessionEngine {
     }
 
     /// Session-scoped kernel shell activity; never builds a new session/kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no session kernel is running ("Kernel is
+    /// not running"), or when the kernel's own shell-activity call fails.
     pub async fn bash_activity(
         &self,
         action: &str,
@@ -1057,23 +1086,22 @@ impl AgentSessionEngine {
             pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
         )
         .await;
-        let (model, fallback_message) = match restored {
-            Some(restored) => (Some((restored.provider, restored.id)), None),
-            None => {
-                // The TS `modelFallbackMessage`: the restore miss is on the
-                // record — the startup chain owns the session, and the
-                // summary publishes what happened (never silent).
-                let fallback = self.startup_chain_model(&registry);
-                let message = match &fallback {
-                    Some(fallback) => format!(
-                        "Could not restore model {provider}/{model_id}. Using {}/{}",
-                        fallback.provider, fallback.id
-                    ),
-                    None => format!("Could not restore model {provider}/{model_id}"),
-                };
-                eprintln!("{message}");
-                (None, Some(message))
-            }
+        let (model, fallback_message) = if let Some(restored) = restored {
+            (Some((restored.provider, restored.id)), None)
+        } else {
+            // The TS `modelFallbackMessage`: the restore miss is on the
+            // record — the startup chain owns the session, and the
+            // summary publishes what happened (never silent).
+            let fallback = self.startup_chain_model(&registry);
+            let message = match &fallback {
+                Some(fallback) => format!(
+                    "Could not restore model {provider}/{model_id}. Using {}/{}",
+                    fallback.provider, fallback.id
+                ),
+                None => format!("Could not restore model {provider}/{model_id}"),
+            };
+            eprintln!("{message}");
+            (None, Some(message))
         };
         *self
             .restored_model
@@ -1588,10 +1616,10 @@ fn artifact_reference(
     artifact_type: &str,
     file_path: &str,
 ) -> Option<Value> {
+    use sha2::{Digest, Sha256};
     if file_path.is_empty() {
         return None;
     }
-    use sha2::{Digest, Sha256};
     let digest = Sha256::new()
         .chain_update(format!("{session_id}\0{artifact_type}\0{file_path}"))
         .finalize();
@@ -1640,10 +1668,10 @@ fn logical_artifact_path(cwd: &str, file_path: &str) -> String {
             return relative;
         }
     }
-    std::path::Path::new(file_path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "artifact".to_string())
+    std::path::Path::new(file_path).file_name().map_or_else(
+        || "artifact".to_string(),
+        |name| name.to_string_lossy().to_string(),
+    )
 }
 
 fn now_millis() -> u64 {
@@ -2004,7 +2032,7 @@ impl SessionEngine for AgentSessionEngine {
     /// The `compact` command path (TS `compact()`'s background
     /// `_scheduleAutoRefine("compact")` on an idle session): the round
     /// runs right after the compaction answered, through the same gated
-    /// body the turn boundaries use (compact_autorefine.rs).
+    /// body the turn boundaries use (`compact_autorefine.rs`).
     fn consume_compact_auto_refine(
         &self,
     ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
@@ -2401,6 +2429,14 @@ impl SessionEngine for AgentSessionEngine {
         let entries = request.entries;
         let custom_instructions = request.custom_instructions;
         let replace_instructions = request.replace_instructions;
+        // TS #2411: the branch summary resolves its model through the
+        // `auxiliaryModel` setting (the session model above is the
+        // fallback), so its one-off prompt stays off the session's
+        // prompt-cache prefix.
+        let auxiliary = pa_core::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: self.cwd(),
+            agent_dir: self.config.agent_dir.clone(),
+        };
         let run = async {
             pa_core::session_engine::branch_summarization::generate_branch_summary(
                 &entries,
@@ -2410,6 +2446,7 @@ impl SessionEngine for AgentSessionEngine {
                     custom_instructions: custom_instructions.as_deref(),
                     replace_instructions,
                     reserve_tokens,
+                    auxiliary: Some(&auxiliary),
                 },
             )
             .await
@@ -2438,6 +2475,7 @@ impl SessionEngine for AgentSessionEngine {
                             "readFiles": result.read_files,
                             "modifiedFiles": result.modified_files,
                         })),
+                        model: result.model,
                     },
                 }
             }
@@ -3086,26 +3124,25 @@ impl SessionEngine for AgentSessionEngine {
         // terminal notices). The plain turn records the accepted user
         // message; images ride as multimodal content blocks after the text
         // (TS prompt admission: the text part first, then the image parts).
-        let accepted = match &request.custom_message {
-            Some(custom) => EngineEvent::CustomMessage(custom.clone()),
-            None => {
-                let mut content = vec![json!({ "type": "text", "text": request.message })];
-                for image in &request.images {
-                    let mut block = match serde_json::to_value(image) {
-                        Ok(Value::Object(block)) => Value::Object(block),
-                        _ => continue,
-                    };
-                    if let Some(object) = block.as_object_mut() {
-                        object.insert("type".to_string(), json!("image"));
-                    }
-                    content.push(block);
+        let accepted = if let Some(custom) = &request.custom_message {
+            EngineEvent::CustomMessage(custom.clone())
+        } else {
+            let mut content = vec![json!({ "type": "text", "text": request.message })];
+            for image in &request.images {
+                let mut block = match serde_json::to_value(image) {
+                    Ok(Value::Object(block)) => Value::Object(block),
+                    _ => continue,
+                };
+                if let Some(object) = block.as_object_mut() {
+                    object.insert("type".to_string(), json!("image"));
                 }
-                EngineEvent::UserMessage(json!({
-                    "role": "user",
-                    "content": content,
-                    "timestamp": now_millis(),
-                }))
+                content.push(block);
             }
+            EngineEvent::UserMessage(json!({
+                "role": "user",
+                "content": content,
+                "timestamp": now_millis(),
+            }))
         };
         if !emit(accepted) {
             return;
@@ -3821,9 +3858,9 @@ impl AgentSessionEngine {
                     // TS `_checkCompaction` Case 1 at `agent_end`: a
                     // context-overflow error triggers one compact-and-retry
                     // attempt before the run ends.
-                    let arm = assistant
-                        .map(|assistant| self.run_overflow_compaction(&assistant, emit))
-                        .unwrap_or(OverflowArmRun::NotApplicable);
+                    let arm = assistant.map_or(OverflowArmRun::NotApplicable, |assistant| {
+                        self.run_overflow_compaction(&assistant, emit)
+                    });
                     match arm {
                         OverflowArmRun::RetryTurn => {
                             overflow_retry = true;
@@ -4608,8 +4645,8 @@ pub(crate) mod tests {
 
     pub(crate) use super::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -6335,7 +6372,7 @@ pub(crate) mod tests {
     }
 
     /// The manual wire `compact` command (TS daemon-mode `compact`) feeds
-    /// the same seam: the compaction the CompactionManager runs counts
+    /// the same seam: the compaction the `CompactionManager` runs counts
     /// into the still-open run it interrupts.
     #[test]
     fn manual_wire_compaction_counts_into_the_run_telemetry() {
@@ -8078,7 +8115,7 @@ fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
 /// compaction flow's interrupt-and-settle wait, the `abort` command, kill,
 /// shutdown — cancels the in-flight fetch immediately instead of at the
 /// next streamed event. The turn settles on its aborted message with
-/// EMPTY_USAGE (TS `createAbortedAssistantMessage` with no partial), so the
+/// `EMPTY_USAGE` (TS `createAbortedAssistantMessage` with no partial), so the
 /// aborted turn's usage never reaches the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
@@ -8476,8 +8513,8 @@ fn retried_run_restarts_with_its_own_agent_frames() {
 /// The aborted turn's goal accounting (TS
 /// `_accountGoalUsageForAssistantMessage`'s aborted guard): an active
 /// goal's turn aborted mid-provider-wait settles on its aborted row —
-/// broadcast through the engine's stream as the message_start/
-/// message_end pair (the row's own start frame plus the settled row,
+/// broadcast through the engine's stream as the `message_start`/
+/// `message_end` pair (the row's own start frame plus the settled row,
 /// `createAbortedAssistantMessage`'s shape: empty content, the abort
 /// error, EMPTY usage) — and the row persists, yet the goal accounting
 /// skips it: the goal state the goal-start turn left is the state the
@@ -8666,11 +8703,10 @@ impl Drop for KernelEnvOverride {
 /// install).
 #[cfg(test)]
 fn live_kernel_python() -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -8680,11 +8716,10 @@ fn live_kernel_python() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 fn live_release_dir() -> Option<std::path::PathBuf> {
-    let releases = std::path::PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!("no releases dir at {releases:?}; skipping live kernel test");
         return None;
@@ -8875,6 +8910,7 @@ fn run_prompts(
 /// and the demand-build's resolution reads the cached model.
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
+    use crate::engine::SessionEngine as _;
     let (engine, _dir) = tokio::task::spawn_blocking(|| {
         let _faux = FAUX_TEST_LOCK
             .lock()
@@ -8919,7 +8955,6 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
     .expect("engine build join");
     // No prompt ran: the read seam must build the session itself.
     assert!(engine.session.lock().await.is_none());
-    use crate::engine::SessionEngine as _;
     let commands = engine.connection_commands().await;
     assert!(
         engine.session.lock().await.is_some(),
@@ -9278,20 +9313,17 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         &|| false,
         &mut |event| {
             if let EngineEvent::AssistantUpdate { message, .. } = &event {
-                let text_len = message["content"]
-                    .as_array()
-                    .map(|blocks| {
-                        blocks
-                            .iter()
-                            .map(|block| {
-                                block
-                                    .get("text")
-                                    .and_then(Value::as_str)
-                                    .map_or(0, str::len)
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0);
+                let text_len = message["content"].as_array().map_or(0, |blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| {
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map_or(0, str::len)
+                        })
+                        .sum()
+                });
                 updates.push((start.elapsed(), text_len));
             }
             true

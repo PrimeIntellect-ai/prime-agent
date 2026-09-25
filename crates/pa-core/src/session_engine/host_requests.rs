@@ -1,5 +1,5 @@
 //! Kernel host-request handlers for the bundled goal and rlm-heartbeat
-//! skills: the snake_case bridge the Python REPL skills call. Port of
+//! skills: the `snake_case` bridge the Python REPL skills call. Port of
 //! handleGoalHostRequest / handleRlmHeartbeatHostRequest in agent-session.ts
 //! plus rlmHeartbeatHostResponse.
 
@@ -17,16 +17,13 @@ use crate::session::manager::SessionManager;
 
 use super::goal_driver::GoalDriver;
 
-/// The snake_case heartbeat payload returned to the rlm-heartbeat skill.
+/// The `snake_case` heartbeat payload returned to the rlm-heartbeat skill.
 pub fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
     json!({
         "id": job.id,
         "status": status_name(job.status),
         "label": nullable_string(job.label.clone()),
-        "delivery_mode": job
-            .delivery_mode
-            .map(delivery_mode_name)
-            .unwrap_or("steer"),
+        "delivery_mode": job.delivery_mode.map_or("steer", delivery_mode_name),
         "instruction": job.prompt,
         "schedule": serde_json::to_value(&job.schedule).unwrap_or(Value::Null),
         "created_at": job.created_at,
@@ -62,7 +59,13 @@ fn nullable_string(value: Option<String>) -> Value {
 }
 
 /// Handle a `goal.*` host request. All goal state stays host-side; the kernel
-/// only sees the serialized snake_case response.
+/// only sees the serialized `snake_case` response.
+///
+/// # Errors
+///
+/// Returns an error when the request payload's fields are invalid, the
+/// objective or budget fails validation, the request type is unknown, or a
+/// goal-state persist fails.
 pub fn handle_goal_host_request(
     request_type: &str,
     payload: &Value,
@@ -164,6 +167,11 @@ pub struct RlmHeartbeatHostOutcome {
 /// Handle an `rlm_heartbeat.*` host request from the bundled rlm-heartbeat
 /// skill. These heartbeats are internal to the active session and never read
 /// or mutate the user-level /heartbeat.
+///
+/// # Errors
+///
+/// Returns an error when the request payload's fields are invalid, the
+/// schedule text cannot be parsed, or the request type is unknown.
 pub fn handle_rlm_heartbeat_host_request(
     request_type: &str,
     payload: &Value,
@@ -294,8 +302,7 @@ pub fn handle_rlm_heartbeat_host_request(
                 response: json!({
                     "heartbeat": heartbeat
                         .as_ref()
-                        .map(rlm_heartbeat_host_response)
-                        .unwrap_or(Value::Null),
+                        .map_or(Value::Null, rlm_heartbeat_host_response),
                 }),
                 // TS wakes only when the update found the job.
                 mutation: heartbeat.map(|job| RlmHeartbeatMutation { job, drop_queued }),
@@ -310,8 +317,7 @@ pub fn handle_rlm_heartbeat_host_request(
                 response: json!({
                     "heartbeat": heartbeat
                         .as_ref()
-                        .map(rlm_heartbeat_host_response)
-                        .unwrap_or(Value::Null),
+                        .map_or(Value::Null, rlm_heartbeat_host_response),
                 }),
                 // TS `deleteRlmHeartbeatForState` always withdraws the
                 // queued fire of the deleted job.

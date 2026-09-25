@@ -24,6 +24,7 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
 /// conservative policy the session engine's compaction estimator applies
 /// (`pa-core` cannot be a dependency here, so the heuristic is restated).
 fn estimated_input_tokens(context: &Context) -> u64 {
+    const TOOL_ENVELOPE_CHARS: u64 = 48;
     let mut chars = context
         .system_prompt
         .as_deref()
@@ -34,12 +35,10 @@ fn estimated_input_tokens(context: &Context) -> u64 {
     // envelope on the wire (OpenAI-completions:
     // `{"type":"function","function":...}` plus flags like `strict`), so
     // every tool also counts the widest envelope's chars.
-    const TOOL_ENVELOPE_CHARS: u64 = 48;
     for tool in context.tools.iter().flatten() {
         chars = chars.saturating_add(
             serde_json::to_string(tool)
-                .map(|json| TOOL_ENVELOPE_CHARS + json.chars().count() as u64)
-                .unwrap_or(0),
+                .map_or(0, |json| TOOL_ENVELOPE_CHARS + json.chars().count() as u64),
         );
     }
     for message in &context.messages {
@@ -61,8 +60,7 @@ fn estimated_input_tokens(context: &Context) -> u64 {
                     crate::types::AssistantContent::ToolCall(call) => {
                         call.name.chars().count() as u64
                             + serde_json::to_string(&call.arguments)
-                                .map(|json| json.chars().count() as u64)
-                                .unwrap_or(0)
+                                .map_or(0, |json| json.chars().count() as u64)
                     }
                 })
                 .sum(),
@@ -81,9 +79,9 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .map(|block| match block {
             crate::types::UserOrToolContent::Text(text) => text.text.chars().count() as u64,
             crate::types::UserOrToolContent::Image(_) => 4_800,
-            crate::types::UserOrToolContent::Raw(value) => serde_json::to_string(value)
-                .map(|json| json.chars().count() as u64)
-                .unwrap_or(0),
+            crate::types::UserOrToolContent::Raw(value) => {
+                serde_json::to_string(value).map_or(0, |json| json.chars().count() as u64)
+            }
         })
         .sum()
 }
@@ -128,6 +126,10 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
 }
 
 /// Start streaming a completion for `model` using provider-native options.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream(
     model: &Model,
     context: &Context,
@@ -140,6 +142,10 @@ pub fn stream(
 }
 
 /// Await the final assistant message of a provider-native stream.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete(
     model: &Model,
     context: &Context,
@@ -150,6 +156,10 @@ pub async fn complete(
 }
 
 /// Start a streaming completion with unified reasoning options (`streamSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream_simple(
     model: &Model,
     context: &Context,
@@ -167,6 +177,10 @@ pub fn stream_simple(
 }
 
 /// Await the final assistant message of a simple stream (`completeSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete_simple(
     model: &Model,
     context: &Context,

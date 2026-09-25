@@ -165,10 +165,22 @@ pub fn is_agent_session_message_id(id: Option<&str>) -> bool {
 }
 
 /// Normalize and validate an outgoing message body.
+///
+/// # Errors
+///
+/// Returns an error when the message is empty after trimming or longer
+/// than the default message limit.
 pub fn normalize_agent_session_message(message: &str) -> anyhow::Result<String> {
     normalize_agent_session_message_limited(message, DEFAULT_AGENT_MESSAGE_MAX_CHARS)
 }
 
+/// Normalize and validate an outgoing message body with an explicit
+/// character limit.
+///
+/// # Errors
+///
+/// Returns an error when the message is empty after trimming or longer
+/// than `max_chars`.
 pub fn normalize_agent_session_message_limited(
     message: &str,
     max_chars: usize,
@@ -187,6 +199,12 @@ pub fn normalize_agent_session_message_limited(
 }
 
 /// Reject broadcast targets: only direct messaging is supported.
+/// Normalize a direct-messaging target and reject broadcast wildcards.
+///
+/// # Errors
+///
+/// Returns an error when the target is empty after trimming or names the
+/// broadcast wildcard.
 pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String> {
     let normalized = target.trim();
     if normalized.is_empty() {
@@ -202,6 +220,11 @@ pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String
 }
 
 /// Guard the target session's pending-work capacity.
+///
+/// # Errors
+///
+/// Returns an error when the target's unfinished action count has reached
+/// the pending-work limit.
 pub fn assert_agent_message_queue_capacity(
     unfinished_action_count: usize,
     max_pending: usize,
@@ -635,11 +658,19 @@ pub trait AgentObserveController: Send + Sync {
 }
 
 /// Clamp an observe limit (default 8, range 1..=50).
+///
+/// # Errors
+///
+/// Returns an error when the limit falls outside 1..=50.
 pub fn normalize_observe_limit(limit: Option<u64>) -> anyhow::Result<usize> {
     clamp_integer(limit.unwrap_or(8), 1, 50, "agent_observe limit")
 }
 
 /// Clamp an observe preview width (default 800, range 80..=2000).
+///
+/// # Errors
+///
+/// Returns an error when the width falls outside 80..=2000.
 pub fn normalize_observe_max_chars(max_chars: Option<u64>) -> anyhow::Result<usize> {
     clamp_integer(
         max_chars.unwrap_or(800),
@@ -1270,22 +1301,6 @@ mod tests {
                 anyhow::bail!("no route")
             }
         }
-        let mut handlers = HostRequestHandlers::default();
-        register_agent_message_host_handlers(
-            std::sync::Arc::new(NoFamilyController),
-            &mut handlers,
-        );
-        let send = handlers.get("agent_message.send").unwrap().clone();
-        let broadcast = send_request(&send, json!({ "target": "all", "message": "hi" })).unwrap();
-        assert_eq!(broadcast["receipts"].as_array().map(Vec::len), Some(0));
-
-        // A role send against an empty family: no parent matches.
-        let no_parent =
-            send_request(&send, json!({ "message": "hi", "receiver_role": "parent" })).unwrap_err();
-        assert_eq!(no_parent.to_string(), "No parent matches the current agent");
-
-        // One-member family with a failing send: the receipt records the
-        // error instead of aborting the broadcast.
         struct LoneFamilyController;
         impl AgentMessageController for LoneFamilyController {
             async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
@@ -1303,6 +1318,22 @@ mod tests {
                 anyhow::bail!("peer unreachable")
             }
         }
+        let mut handlers = HostRequestHandlers::default();
+        register_agent_message_host_handlers(
+            std::sync::Arc::new(NoFamilyController),
+            &mut handlers,
+        );
+        let send = handlers.get("agent_message.send").unwrap().clone();
+        let broadcast = send_request(&send, json!({ "target": "all", "message": "hi" })).unwrap();
+        assert_eq!(broadcast["receipts"].as_array().map(Vec::len), Some(0));
+
+        // A role send against an empty family: no parent matches.
+        let no_parent =
+            send_request(&send, json!({ "message": "hi", "receiver_role": "parent" })).unwrap_err();
+        assert_eq!(no_parent.to_string(), "No parent matches the current agent");
+
+        // One-member family with a failing send: the receipt records the
+        // error instead of aborting the broadcast.
         let mut handlers = HostRequestHandlers::default();
         register_agent_message_host_handlers(
             std::sync::Arc::new(LoneFamilyController),

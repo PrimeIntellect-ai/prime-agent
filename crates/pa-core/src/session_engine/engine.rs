@@ -1,4 +1,4 @@
-//! SessionEngine assembly: build a running agent session from a config.
+//! `SessionEngine` assembly: build a running agent session from a config.
 //! This is the facade pa-cli/pa-daemon call — the Rust equivalent of the
 //! `createAgentSession` wiring: resources, prompt, model, tools, loop, and
 //! persistence. The session subscribes persistence listeners on the caller's
@@ -72,7 +72,7 @@ pub struct SessionEngineConfig {
     /// Optional name allow-list for extension tools (`--tools`, TS
     /// `isAllowedTool`); an absent list allows every registered tool.
     pub extension_tool_allow_list: Option<Vec<String>>,
-    /// Session telemetry wiring (PostHog client + execution mode). `None`
+    /// Session telemetry wiring (`PostHog` client + execution mode). `None`
     /// (opt-out) installs nothing; non-depth-0 sessions never install.
     pub telemetry: Option<super::telemetry::TelemetryWiring>,
     /// The embedding's queued-goal-context purge (TS
@@ -211,6 +211,17 @@ fn mcp_gating_blocking(
 
 /// Assemble a session: load resources, build the system prompt, and start the
 /// loop with persistence wiring.
+///
+/// # Errors
+///
+/// Returns an error when the MCP gating task fails, when the session
+/// resources cannot be resolved or loaded, or when the runtime bootstrap
+/// fails.
+///
+/// # Panics
+///
+/// Panics if the MCP manager mutex is poisoned while wiring telemetry
+/// reporting.
 pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
@@ -670,6 +681,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             .keep_recent_tokens
             .unwrap_or(crate::session_engine::compaction::DEFAULT_KEEP_RECENT_TOKENS),
     });
+    // TS #2411: the session's summarizer passes (compaction summaries;
+    // branch summaries route through the same context at the daemon seam)
+    // resolve their model through the `auxiliaryModel` setting with the
+    // session model as fallback, so their one-off prompts stay off the
+    // session's prompt-cache prefix.
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd,
+            agent_dir: config.agent_dir.clone(),
+        },
+    );
     // The kernel-state probe behind the post-compaction `ipython_state`
     // notice (TS `AgentSession._ipythonKernelProvisioner`): the engine's
     // provisioner is the session's kernel whether it added the `ipython`
@@ -777,7 +799,13 @@ impl SessionEngine {
         }
     }
 
-    /// Prompt the session (delegates to AgentSession::prompt).
+    /// Prompt the session (delegates to `AgentSession::prompt`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying turn admission error: an invalid prompt, an
+    /// already-busy session under its admission rule, or the turn's own
+    /// failure.
     pub async fn prompt(
         &self,
         text: &str,
@@ -797,6 +825,11 @@ impl SessionEngine {
     }
 
     /// Out-of-band kernel bash activity, scoped to this session's live kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session has no running kernel, or the
+    /// kernel's bash-activity validation or request fails.
     pub async fn bash_activity(
         &self,
         action: &str,
@@ -949,7 +982,7 @@ mod tests {
         let _ = ToolDefinitionBridge::new;
     }
 
-    /// A spawned child's prompt stamps its recursion depth: create_session
+    /// A spawned child's prompt stamps its recursion depth: `create_session`
     /// at depth N reads "depth: N (not root)", never the root identity the
     /// pre-fix default (None -> 0) stamped on every child.
     #[tokio::test]

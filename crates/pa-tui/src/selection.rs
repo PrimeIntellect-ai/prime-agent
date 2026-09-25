@@ -351,7 +351,7 @@ impl SelectionState {
                 if spans.is_empty() {
                     return None;
                 }
-                let row = snapshot.rows.get(line).map(String::as_str).unwrap_or("");
+                let row = snapshot.rows.get(line).map_or("", String::as_str);
                 let parts: Vec<String> = spans
                     .iter()
                     .map(|(from, to)| slice_text_by_column(row, *from, to - from))
@@ -389,7 +389,16 @@ impl AgentView {
             .into_iter()
             .flatten()
         {
-            point.line = (point.line as isize - delta).max(0) as usize;
+            // The tail-relative points sit in the TAIL_SELECTION_ORIGIN
+            // band - within an `isize` of the integer's ceiling - so
+            // the shift works in usize: a growth lowers the point
+            // toward zero, a shrink raises it toward the origin, and
+            // neither conversion can overflow.
+            point.line = if delta >= 0 {
+                point.line.saturating_sub(delta as usize)
+            } else {
+                point.line.saturating_add(delta.unsigned_abs())
+            };
         }
     }
 
@@ -681,7 +690,7 @@ mod tests {
     }
 
     fn rendered_row(frame: &[Line], row: usize) -> String {
-        row_text(frame.get(row).map(Vec::as_slice).unwrap_or(&[]))
+        row_text(frame.get(row).map_or(&[], Vec::as_slice))
     }
 
     /// A transcript window row: the top bar sits at row 0, so the first

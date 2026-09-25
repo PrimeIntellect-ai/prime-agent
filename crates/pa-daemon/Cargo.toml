@@ -18,7 +18,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 sha2 = "0.10"
-regex = "1"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]

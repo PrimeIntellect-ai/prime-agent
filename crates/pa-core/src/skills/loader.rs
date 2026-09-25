@@ -23,7 +23,7 @@ pub struct LoadSkillsResult {
     pub diagnostics: Vec<ResourceDiagnostic>,
 }
 
-/// Agent-side config dir name (TS CONFIG_DIR_NAME).
+/// Agent-side config dir name (TS `CONFIG_DIR_NAME`).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 fn normalize_path(input: &str) -> PathBuf {
@@ -154,14 +154,12 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
             });
             continue;
         }
-        let source = if !options.include_defaults {
-            if is_under_path(&resolved_path, &user_skills_dir) {
-                "user"
-            } else if is_under_path(&resolved_path, &project_skills_dir) {
-                "project"
-            } else {
-                "path"
-            }
+        let source = if options.include_defaults {
+            "path"
+        } else if is_under_path(&resolved_path, &user_skills_dir) {
+            "user"
+        } else if is_under_path(&resolved_path, &project_skills_dir) {
+            "project"
         } else {
             "path"
         };

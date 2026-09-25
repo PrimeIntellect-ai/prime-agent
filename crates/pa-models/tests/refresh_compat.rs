@@ -1,4 +1,4 @@
-//! Compat regressions (spec §5.2) over the generic CatalogCache and a
+//! Compat regressions (spec §5.2) over the generic `CatalogCache` and a
 //! scripted local HTTP server: fake future versions keep last-good
 //! silently, malformed entries skip per policy, failures keep state
 //! unchanged, hourly gating + coalescing hold, and scopes isolate
@@ -20,7 +20,7 @@ use pa_models::prime_inference::{
 use serde_json::{json, Value};
 
 /// A cache over the models catalog parse pipeline (the same closure
-/// ModelCatalog installs in production), aimed at the mock server.
+/// `ModelCatalog` installs in production), aimed at the mock server.
 fn models_cache(dir: &std::path::Path, url: String) -> CatalogCache<Vec<pa_models::Model>> {
     let templates = PinnedTemplates::from_compiled();
     let parse: pa_models::cache::CatalogParse<Vec<pa_models::Model>> =

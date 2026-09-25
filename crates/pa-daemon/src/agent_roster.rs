@@ -14,7 +14,7 @@ use pa_types::daemon::agent_roster::{
 };
 use serde_json::Value;
 
-/// The supervisor-owned roster. Write() classifies once and its file index
+/// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.
 pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,
@@ -370,10 +370,10 @@ impl AgentRoster {
 /// indexing): lexically normalized, falling back to the raw path when the
 /// file does not exist yet.
 fn canonical_roster_path(path: &str) -> String {
-    Path::new(path)
-        .canonicalize()
-        .map(|canonical| canonical.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string())
+    Path::new(path).canonicalize().map_or_else(
+        |_| path.to_string(),
+        |canonical| canonical.to_string_lossy().to_string(),
+    )
 }
 
 #[cfg(test)]

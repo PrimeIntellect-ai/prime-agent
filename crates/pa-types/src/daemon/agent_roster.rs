@@ -64,8 +64,7 @@ pub fn classify_session_roster_status(
 pub fn classify_summary_value(summary: &Value, queued_child: bool) -> AgentRosterStatus {
     let resident = summary
         .get("activeSessionId")
-        .map(|id| !id.is_null() && id.as_str() != Some(""))
-        .unwrap_or(false);
+        .is_some_and(|id| !id.is_null() && id.as_str() != Some(""));
     let activity = summary
         .get("activity")
         .and_then(Value::as_str)

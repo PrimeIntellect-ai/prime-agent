@@ -97,7 +97,7 @@ pub fn is_pasteable_token_service(service: &McpServiceDescriptor) -> bool {
 
 /// Tokens that stay uppercase in the derived label: real acronyms, not
 /// shouty ids ("DD" is deliberately absent — it is a branding abbreviation
-/// the strip rule removes: "Datadog DD_API_KEY" reads as "Datadog API key").
+/// the strip rule removes: "Datadog `DD_API_KEY`" reads as "Datadog API key").
 const FIELD_LABEL_ACRONYMS: [&str; 6] = ["api", "aws", "ci", "sdk", "cli", "id"];
 
 /// Human prompt label for one credential field, derived from the field id

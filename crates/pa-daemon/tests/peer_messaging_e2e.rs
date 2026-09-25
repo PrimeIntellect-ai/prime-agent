@@ -19,7 +19,7 @@
 //! (`engine: "faux"`), so the kernel host request, the supervisor link, the
 //! peer ticket, and the direct socket delivery are all exercised for real.
 //!
-//! Linux-only e2e (AF_UNIX sockets, process-group kills): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, process-group kills): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -57,11 +57,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -152,7 +151,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(

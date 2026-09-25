@@ -1335,7 +1335,6 @@ dependencies = [
  "pa-models",
  "pa-telemetry",
  "pa-types",
- "regex",
  "serde",
  "serde_json",
  "sha2",

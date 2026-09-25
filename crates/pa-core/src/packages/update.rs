@@ -11,6 +11,11 @@ use super::source::{parse_source, GitSource, NpmSource, ParsedSource, SourceScop
 impl PackageManager {
     /// Update configured packages. With a source, only packages with the same
     /// identity update; an unknown source is an error with a suggestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a given source matches no configured package,
+    /// or when a package's update or reinstall fails.
     pub fn update(&mut self, source: Option<&str>) -> Result<()> {
         let identity = source.map(|source| self.get_source_match_key_for_input(source));
         let mut matched = false;
@@ -102,9 +107,9 @@ impl PackageManager {
 
         for (source, scope) in sources {
             match parse_source(&source) {
-                ParsedSource::Local(_) => continue,
-                ParsedSource::Npm(parsed) if parsed.pinned => continue,
-                ParsedSource::Git(parsed) if parsed.pinned => continue,
+                ParsedSource::Local(_) => {}
+                ParsedSource::Npm(parsed) if parsed.pinned => {}
+                ParsedSource::Git(parsed) if parsed.pinned => {}
                 ParsedSource::Npm(parsed) => npm_candidates.push(NpmUpdateTarget {
                     source,
                     parsed,

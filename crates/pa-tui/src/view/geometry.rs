@@ -7,6 +7,12 @@ impl AgentView {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
+        // A condensed run's block counts in place of its entries in the
+        // collapsed detail mode (the members count zero); every other
+        // detail mode counts each entry exactly as before.
+        if let Some(rows) = self.count_condensed(index, width) {
+            return rows;
+        }
         // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
         // the previous row: a tool call, agent message, bash execution, or
         // shell completion all count.
@@ -160,6 +166,7 @@ mod tests {
 
     #[test]
     fn supported_entry_geometry_matches_rendering() {
+        use crate::custom_message::*;
         let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
         for text in [
             "",
@@ -192,7 +199,6 @@ mod tests {
                 })));
             }
         }
-        use crate::custom_message::*;
         view.push_entry(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
             direction: AgentMessageDirection::Received,
             participant: "from child".into(),

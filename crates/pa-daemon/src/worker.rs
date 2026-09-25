@@ -132,6 +132,17 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Read the worker spawn env pair into a config: the socket path,
+    /// the authentication token, the root active session id, and the
+    /// agent dir; the script, the telemetry-disabled flag, the supervisor
+    /// socket path, and the recovery journal path all default when unset
+    /// or unreadable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required env pair is missing (the socket
+    /// path, the authentication token, or the root active session id),
+    /// or the agent dir cannot be resolved.
     pub fn from_env() -> Result<Self> {
         let socket_path: PathBuf = std::env::var_os(WORKER_SOCKET_ENV)
             .map(PathBuf::from)
@@ -144,13 +155,14 @@ impl WorkerConfig {
             .map(PathBuf::from)
             .unwrap_or_default();
         let agent_dir = paths::agent_dir()?;
-        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
+        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV).map_or_else(
+            || {
                 agent_dir
                     .join("daemon-workers")
                     .join(format!("{active_session_id}.recovery.jsonl"))
-            });
+            },
+            PathBuf::from,
+        );
         let script = std::env::var_os(WORKER_SCRIPT_ENV)
             .map(PathBuf::from)
             .and_then(|path| {
@@ -248,7 +260,6 @@ pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
         .and_then(|policy| policy.get("nextTurnContextTiming"))
         .and_then(Value::as_str);
     match timing {
-        Some("commit") => TurnPolicy::Queued,
         Some("preparation") => {
             let preserved = payload
                 .get("executionPolicy")
@@ -325,7 +336,7 @@ pub(crate) struct QueuedItem {
     /// The original agent-message text when this item came from an
     /// `agent_message` delivery (the marker `agent_messages_clear` /
     /// `agent_messages_pause` remove queued items by); `None` for items a
-    /// client queued directly (steer/follow_up).
+    /// client queued directly (`steer/follow_up`).
     pub(crate) agent_message: Option<String>,
     /// The scheduler's queue key (TS `followUpQueueKey`): a heartbeat's
     /// queued fire carries `heartbeat:<id>`, and a later fire replaces the
@@ -498,10 +509,10 @@ impl SessionCore {
     #[cfg(test)]
     pub(crate) fn test_core(store: Option<SessionFile>, cwd: String) -> Self {
         SessionCore {
-            active_session_id: store
-                .as_ref()
-                .map(|store| store.session_id().to_string())
-                .unwrap_or_else(|| "test-session".to_string()),
+            active_session_id: store.as_ref().map_or_else(
+                || "test-session".to_string(),
+                |store| store.session_id().to_string(),
+            ),
             generation: String::new(),
             last_event_sequence: 0,
             store,
@@ -537,71 +548,6 @@ impl SessionCore {
     }
 }
 
-impl crate::status_line::StatusSession for SessionCore {
-    fn status_messages(&self) -> Vec<Value> {
-        self.store
-            .as_ref()
-            .map(super::session_store::SessionFile::messages)
-            .unwrap_or_default()
-    }
-
-    fn status_busy(&self) -> bool {
-        self.busy
-    }
-
-    fn status_active_session_id(&self) -> String {
-        self.active_session_id.clone()
-    }
-
-    fn status_generation(&self) -> String {
-        self.generation.clone()
-    }
-
-    fn status_next_sequence(&mut self) -> u64 {
-        self.last_event_sequence += 1;
-        self.last_event_sequence
-    }
-
-    fn status_append_agent_status(
-        &mut self,
-        status: &crate::status_line::PersistedAgentStatus,
-    ) -> Result<()> {
-        let Some(store) = self.store.as_mut() else {
-            return Ok(());
-        };
-        let persisted = pa_types::session::AgentStatus {
-            summary: status.summary.clone(),
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::persisted),
-            based_on_message_count: status.based_on_message_count as u64,
-        };
-        store.persist_entry(
-            "agent_status",
-            json!({ "status": serde_json::to_value(&persisted)? }),
-        )?;
-        Ok(())
-    }
-
-    fn status_latest_agent_status(&self) -> Option<crate::status_line::PersistedAgentStatus> {
-        let store = self.store.as_ref()?;
-        let entry = store
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.type_ == "agent_status")?;
-        let status: pa_types::session::AgentStatus =
-            serde_json::from_value(entry.fields.get("status")?.clone()).ok()?;
-        Some(crate::status_line::PersistedAgentStatus {
-            summary: status.summary,
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::from_persisted),
-            based_on_message_count: status.based_on_message_count as usize,
-        })
-    }
-}
-
 /// One outbound frame: the serialized JSON payload plus its private-frame
 /// `outboundType` (`session_event` or `side_question_event`), mirroring the
 /// TS worker frame header. The supervisor fans frames out per its own
@@ -619,14 +565,6 @@ impl OutboundFrame {
         OutboundFrame {
             payload,
             outbound_type: "session_event",
-            seq: 0,
-        }
-    }
-
-    pub(crate) fn session_status(payload: Vec<u8>) -> Self {
-        OutboundFrame {
-            payload,
-            outbound_type: "session_status",
             seq: 0,
         }
     }
@@ -809,9 +747,6 @@ pub struct Worker {
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    /// Post-turn status-line runner (seeded from persisted verdicts at
-    /// session create).
-    status_runner: std::sync::Arc<crate::status_line::StatusLineRunner<SessionCore>>,
     /// Live side-question runs (registry, guards, event frames).
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
@@ -955,6 +890,14 @@ fn sender_parent_edge_is(
 }
 
 impl Worker {
+    /// Build the worker: the session core, the engine, and the sink and
+    /// hook wiring between them.
+    ///
+    /// # Panics
+    ///
+    /// The closures wired here (the queue purge and the session-input
+    /// probe) panic on a poisoned session-core mutex (a holder panicked
+    /// while holding it).
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
         let supervisor_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1019,18 +962,6 @@ impl Worker {
         let recovery = Arc::new(Mutex::new(None));
         let work_notify = Arc::new(Notify::new());
         let idle_notify = Arc::new(Notify::new());
-        // The post-turn status line: turn-end notifications (debounced) and
-        // periodic sweeps ask the small dashboard model for a recap.
-        let status_runner = std::sync::Arc::new(crate::status_line::StatusLineRunner::new(
-            std::sync::Arc::clone(&core),
-            config.agent_dir.clone(),
-            events.clone(),
-        ));
-        let (status_notify, status_rx) = tokio::sync::mpsc::unbounded_channel();
-        let status_runner_handle = std::sync::Arc::clone(&status_runner);
-        tokio::spawn(async move {
-            status_runner.run(status_rx).await;
-        });
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner's busy-flip pushes and
         // the command arms' switch pushes (the same env the runner reads,
@@ -1311,7 +1242,6 @@ impl Worker {
                 events: events.clone(),
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
-                status_notify,
                 roster_pushes: roster_pushes.clone(),
             };
             tokio::spawn(async move {
@@ -1371,7 +1301,6 @@ impl Worker {
             idle_notify,
             events,
             recovery,
-            status_runner: status_runner_handle,
             side_questions,
             peer_grants: PeerGrantStore::new(),
             compaction,
@@ -1392,6 +1321,17 @@ impl Worker {
     }
 
     /// Serve worker connections until the process is asked to shut down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovery journal cannot be opened, the
+    /// socket path cannot be prepared, the worker socket cannot be
+    /// bound, or an accept fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the recovery mutex is poisoned (a holder panicked
+    /// while holding it).
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
             &self.config.recovery_journal_path,
@@ -1545,7 +1485,7 @@ impl Worker {
                                     }
                                     sink.mark_flushed(frame.seq);
                                 }
-                                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {}
                                 Err(broadcast::error::RecvError::Closed) => {
                                     sink.mark_closed();
                                     break;
@@ -2631,9 +2571,6 @@ impl Worker {
                 let _ = engine.ensure_core_session_async(&model).await;
             });
         }
-        // Seed the status line from the latest persisted verdict (a respawned
-        // worker resumes with the pre-crash verdict).
-        self.status_runner.seed_from_session();
         // Bind the schedule catalog onto the session (artifact partition,
         // job rebind, scheduler start) — TS `rebindCronJobsToState`.
         self.bind_scheduled_jobs().await;
@@ -2753,7 +2690,7 @@ impl Worker {
         let capabilities = payload
             .get("capabilities")
             .and_then(Value::as_array)
-            .map(|array| {
+            .map_or_else(default_client_capabilities, |array| {
                 normalize_client_capabilities(
                     &array
                         .iter()
@@ -2761,8 +2698,7 @@ impl Worker {
                         .map(str::to_string)
                         .collect::<Vec<_>>(),
                 )
-            })
-            .unwrap_or_else(default_client_capabilities);
+            });
         let resume_cursor = payload
             .get("resumeCursor")
             .cloned()
@@ -2906,14 +2842,7 @@ impl Worker {
                 // steering lane - otherwise a steering delivery that
                 // arrives in the same window would jump the prompt's turn
                 // (the runner drains steering first).
-                Some(_) => {
-                    if core.busy {
-                        Lane::FollowUp
-                    } else {
-                        Lane::Steering
-                    }
-                }
-                None => {
+                Some(_) | None => {
                     if core.busy {
                         Lane::FollowUp
                     } else {
@@ -3509,15 +3438,11 @@ impl Worker {
     /// Refresh the replacement session's derived state (TS
     /// `refreshReplacedSessionState` on the `sessionReplaced` event): the
     /// moved-to session's depth re-seeds the worker core and the engine's
-    /// RLM identity (a resumed subagent keeps its persisted depth), and
-    /// the wire summary re-seeds from the new session. The schedule
+    /// RLM identity (a resumed subagent keeps its persisted depth). The schedule
     /// catalog rebind runs separately (`bind_scheduled_jobs`), like the
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) fn refresh_replaced_session_state(&self) {
-        // The status line re-seeds from the moved-to session's persisted
-        // verdict (TS `summarizer.forget` + `seed` on the replacement).
-        self.status_runner.seed_from_session();
         let (rlm_depth, summary, child_script) = {
             let mut core = self
                 .core
@@ -3565,8 +3490,8 @@ impl Worker {
     /// Bind the live session's schedule catalog (TS `rebindCronJobsToState`):
     /// register the session's artifact partition, rebind the stored jobs onto
     /// the live ids, and start (or wake) the scheduler. Runs at create and
-    /// after every replacement swap (new_session / switch_session /
-    /// import_jsonl / fork) - the jobs follow the live session onto the
+    /// after every replacement swap (`new_session` / `switch_session` /
+    /// `import_jsonl` / fork) - the jobs follow the live session onto the
     /// moved-to file, exactly like the TS rebind on the runtime swap.
     pub(crate) async fn bind_scheduled_jobs(&self) {
         let binding = {
@@ -4358,8 +4283,7 @@ impl Worker {
             .as_ref()
             .and_then(|model| model.get("id"))
             .and_then(Value::as_str)
-            .map(supports_fast_mode)
-            .unwrap_or(false);
+            .is_some_and(supports_fast_mode);
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -4398,18 +4322,13 @@ impl Worker {
                 .map(|p| p.to_string_lossy().to_string()),
             leaf_id: store.and_then(|s| s.leaf_id().map(str::to_string)),
             auto_compaction_enabled: core.auto_compaction_enabled,
-            message_count: store
-                .map(super::session_store::SessionFile::message_count)
-                .unwrap_or(0) as u32,
+            message_count: store.map_or(0, super::session_store::SessionFile::message_count) as u32,
             session_actions: session_snapshot(core),
-            compaction_count: store
-                .map(|store| store.compaction_count() as u32)
-                .unwrap_or(0),
+            compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
             goal: self.engine.goal_state_value(),
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
             context_usage: None,
-            recap: None,
         }
     }
 
@@ -4441,9 +4360,7 @@ impl Worker {
         let store = core.store.as_ref();
         journal.record(
             &core.active_session_id,
-            store
-                .map(super::session_store::SessionFile::session_id)
-                .unwrap_or(""),
+            store.map_or("", super::session_store::SessionFile::session_id),
             store
                 .map(|s| s.path.to_string_lossy().to_string())
                 .as_deref(),
@@ -4481,7 +4398,7 @@ impl Worker {
         self.emit_worker_event(json!({ "type": "message_end", "message": message }));
     }
 
-    /// Sequence and broadcast one session_event for the queue projection.
+    /// Sequence and broadcast one `session_event` for the queue projection.
     pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
         let mut core = self.core.lock().unwrap();
         // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
@@ -4841,8 +4758,6 @@ fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
-    let mut steering = VecDeque::new();
-    let mut follow_up = VecDeque::new();
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
         // Images on a queued prompt do not survive the worker restart:
         // the recovery journal stores the delivery rows without the
@@ -4872,6 +4787,9 @@ fn restore_queue_snapshot(
             })
             .collect()
     }
+
+    let mut steering = VecDeque::new();
+    let mut follow_up = VecDeque::new();
     if let Some((steering_lanes, follow_up_lanes)) =
         journal.latest_queue_snapshot(active_session_id)
     {
@@ -5199,7 +5117,6 @@ struct TurnRunner {
     /// Shared worker recovery journal (queue snapshot persistence).
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     active_session_id: String,
-    status_notify: tokio::sync::mpsc::UnboundedSender<()>,
     /// The coalescing roster push queue: the busy flips enqueue here and
     /// the queue's consumer composes and ships the summary (the
     /// event-driven arm lives in [`crate::roster_activity`]).
@@ -5349,8 +5266,7 @@ impl TurnRunner {
             let core = self.core.lock().unwrap();
             core.store
                 .as_ref()
-                .map(super::session_store::SessionFile::message_count)
-                .unwrap_or(0)
+                .map_or(0, super::session_store::SessionFile::message_count)
                 / 2
         };
         let request = PromptRequest {
@@ -5548,15 +5464,12 @@ impl TurnRunner {
                     }
                 }
                 match &event {
-                    EngineEvent::UserMessage(message) | EngineEvent::AssistantMessage(message) => {
-                        if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry("message", json!({ "message": message }));
-                        }
-                    }
                     // The session-file form of a tool result: a `message`
                     // entry with the `role: "toolResult"` payload (TS
                     // `_processAgentEvent` appendMessage path).
-                    EngineEvent::ToolResultMessage(message) => {
+                    EngineEvent::UserMessage(message)
+                    | EngineEvent::AssistantMessage(message)
+                    | EngineEvent::ToolResultMessage(message) => {
                         if let Some(store) = core.store.as_mut() {
                             let _ = store.persist_entry("message", json!({ "message": message }));
                         }
@@ -5732,16 +5645,13 @@ impl TurnRunner {
                         "result": result,
                         "isError": is_error,
                     })],
-                    EngineEvent::ToolResultMessage(message) => vec![
+                    EngineEvent::ToolResultMessage(message)
+                    | EngineEvent::CustomMessage(message) => vec![
                         json!({ "type": "message_start", "message": message }),
                         json!({ "type": "message_end", "message": message }),
                     ],
-                    EngineEvent::CustomMessage(message) => vec![
-                        json!({ "type": "message_start", "message": message }),
-                        json!({ "type": "message_end", "message": message }),
-                    ],
-                    EngineEvent::CompactionStart { event } => vec![event],
-                    EngineEvent::Compaction { event, .. } => vec![event],
+                    EngineEvent::CompactionStart { event }
+                    | EngineEvent::Compaction { event, .. } => vec![event],
                     EngineEvent::GoalUpdate { goal } => vec![json!({
                         "type": "goal_update",
                         "goal": goal,
@@ -5778,16 +5688,14 @@ impl TurnRunner {
                     EngineEvent::Done(Ok(())) if !engine_turn_ended => {
                         vec![json!({ "type": "turn_end" })]
                     }
-                    EngineEvent::Done(Ok(())) => Vec::new(),
                     EngineEvent::Done(Err(error)) if !engine_turn_ended => {
                         vec![json!({ "type": "turn_end", "error": error })]
                     }
-                    EngineEvent::Done(Err(_)) => Vec::new(),
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
                     })],
-                    EngineEvent::DoneAborted => Vec::new(),
+                    EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
@@ -6043,9 +5951,6 @@ impl TurnRunner {
             },
         );
         let _ = self.emit_action_update(&snapshot);
-        // A finished turn is the cue to refresh the session's status line
-        // (the runner debounces a burst into one request).
-        let _ = self.status_notify.send(());
         self.idle_notify.notify_waiters();
         // The settled prompts' admissions clear (TS `clearAdmission` in
         // the prompt arm's finally).
@@ -6120,6 +6025,12 @@ impl TurnRunner {
 }
 
 /// Entry point for the worker process.
+///
+/// # Errors
+///
+/// Returns an error when the worker role env is missing (it must be
+/// `WORKER_ROLE_ENV=1`), the worker env pair cannot be read, or the
+/// serve loop fails.
 pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
@@ -6334,9 +6245,7 @@ pub(crate) fn session_summary(
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         attached_clients: core.attached_client_ids.len() as u32,
-        message_count: store
-            .map(super::session_store::SessionFile::message_count)
-            .unwrap_or(0) as u32,
+        message_count: store.map_or(0, super::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),
         streaming_message: None,
         created: store.map(|s| s.header.timestamp.clone()),
@@ -6349,9 +6258,6 @@ pub(crate) fn session_summary(
         usage,
         worker_state: Some("ready".to_string()),
         worker_pid: Some(std::process::id()),
-        status_label: None,
-        summary: None,
-        task_state: None,
         // Set by the caller when the snapshot backs a roster push (the
         // push-order lock reads the pre-stamp counter); authoritative
         // pulls embed the live counter in `summary_locked` instead.
@@ -6390,8 +6296,8 @@ fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
 /// The active action's queue label (TS `compactRlmText(text, 160)`):
 /// collapse whitespace and cap at 160 chars with an ellipsis.
 fn compact_action_label(text: &str) -> String {
-    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_CHARS: usize = 160;
+    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.chars().count() <= MAX_CHARS {
         return compact;
     }
@@ -7675,7 +7581,7 @@ mod tests {
     /// completion surface) settles the goal, and the completion's
     /// boundary mints nothing more. The completing cell needs a
     /// bootable kernel: a sandbox gate run must provide uv and
-    /// PI_PACKAGE_DIR at the checkout (the guard inside names the
+    /// `PI_PACKAGE_DIR` at the checkout (the guard inside names the
     /// recipe when the cell fails instead of letting the loop drain
     /// the faux script into a misleading count mismatch).
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
@@ -7824,7 +7730,7 @@ mod tests {
     /// gap: TS broadcasts AND persists it, the gate used to drop it): a
     /// turn aborted mid-provider-wait settles on its aborted assistant
     /// row, and the gate forwards the row — the attached client sees the
-    /// row's message_start/message_end pair (stopReason "aborted", the
+    /// row's `message_start/message_end` pair (stopReason "aborted", the
     /// abort error, EMPTY usage) and the session file holds the same
     /// row — while the active goal's accounting skips it (the state the
     /// goal-start turn left is unchanged after the abort).
@@ -8997,7 +8903,6 @@ mod turn_stream_tests {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
         }));
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             core,
             input_pauses: crate::session_input_pause::InputPauseTable::new(),
@@ -9008,7 +8913,6 @@ mod turn_stream_tests {
             engine,
             recovery: Arc::new(Mutex::new(None)),
             active_session_id: "burst-session".to_string(),
-            status_notify,
             roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
         }
     }
@@ -9854,7 +9758,6 @@ mod turn_stream_tests {
             Arc::clone(&events),
             roster_pushes.clone(),
         );
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             recovery: Arc::new(Mutex::new(None)),
             core,
@@ -9865,7 +9768,6 @@ mod turn_stream_tests {
             events,
             engine,
             active_session_id: "feed-session".to_string(),
-            status_notify,
             roster_pushes,
         }
     }
@@ -10263,8 +10165,7 @@ mod turn_stream_tests {
         assert!(
             events[turn_ends[0]]
                 .as_object()
-                .map(|object| object.len() == 1)
-                .unwrap_or(false),
+                .is_some_and(|object| object.len() == 1),
             "the fallback turn_end carries no payload: {events:?}"
         );
         let agent_ends = positions_of(&events, "agent_end");
@@ -10272,8 +10173,7 @@ mod turn_stream_tests {
         assert!(
             events[agent_ends[0]]
                 .as_object()
-                .map(|object| object.len() == 1)
-                .unwrap_or(false),
+                .is_some_and(|object| object.len() == 1),
             "the fallback agent_end carries no payload: {events:?}"
         );
         assert!(
@@ -10291,6 +10191,17 @@ mod turn_stream_tests {
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     #[tokio::test]
     async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
+        fn roles_of(frame: &Value) -> Vec<String> {
+            frame["messages"]
+                .as_array()
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .map(|message| message["role"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10391,17 +10302,6 @@ mod turn_stream_tests {
             2,
             "one agent_end per agent run: {events:?}"
         );
-        fn roles_of(frame: &Value) -> Vec<String> {
-            frame["messages"]
-                .as_array()
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .map(|message| message["role"].as_str().unwrap_or_default().to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
         let first = &events[agent_ends[0]];
         assert_eq!(
             roles_of(first),
@@ -10524,7 +10424,7 @@ mod turn_stream_tests {
 
     /// An instant burst (the provider outruns the tick entirely) parks one
     /// snapshot at a time; the settle frame flushes the final snapshot
-    /// before message_end, so the client sees the full message without a
+    /// before `message_end`, so the client sees the full message without a
     /// tick waiting period and nothing lands out of order.
     #[tokio::test]
     async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {

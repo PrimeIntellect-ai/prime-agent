@@ -346,14 +346,13 @@ impl Supervisor {
                         .summary
                         .get("sessionFile")
                         .and_then(Value::as_str)
-                        .map(|file| {
+                        .is_some_and(|file| {
                             parent_by_child
                                 .get(&canonical_session_path(Path::new(file)))
                                 .is_some_and(|parent| {
                                     family_descends_from(parent_by_child, parent, &roots)
                                 })
-                        })
-                        .unwrap_or(false);
+                        });
                 if !ephemeral && entry.queued_child != Some(true) && anchored {
                     let passivated =
                         roster.write_summary(passivated_summary(entry.summary), None, None);
@@ -402,14 +401,13 @@ impl Supervisor {
                             .summary
                             .get("sessionFile")
                             .and_then(Value::as_str)
-                            .map(|file| {
+                            .is_some_and(|file| {
                                 parent_by_child
                                     .get(&canonical_session_path(Path::new(file)))
                                     .is_some_and(|parent| {
                                         family_descends_from(parent_by_child, parent, &roots)
                                     })
-                            })
-                            .unwrap_or(false);
+                            });
                     if !anchored {
                         roster.delete(&entry.agent_id);
                         removed.push(entry.agent_id.clone());
@@ -626,7 +624,7 @@ mod tests {
     /// reasoning-controls metadata); the passivated row keeps the
     /// DURABLE display field - the `{provider, modelId}` pair the
     /// ledger-seed hydrate writes and the agents view reads (the
-    /// thinking_level e2e's post-stop assertion).
+    /// `thinking_level` e2e's post-stop assertion).
     #[tokio::test]
     async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
@@ -1141,12 +1139,14 @@ mod tests {
         loop {
             match events.try_recv() {
                 Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
                     panic!("roster push subscriber lagged by {missed}; drain per delta");
                 }
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
             }
         }
         pushes
@@ -1159,6 +1159,36 @@ mod tests {
     /// supervisor client socket).
     #[tokio::test]
     async fn worker_roster_delta_drops_stale_sequences() {
+        fn summary(level: &str) -> Value {
+            serde_json::json!({
+                "sessionId": "s1",
+                "activeSessionId": "s1",
+                "activity": "idle",
+                "thinkingLevel": level,
+            })
+        }
+        async fn delta(
+            supervisor: &Arc<Supervisor>,
+            token: &str,
+            level: &str,
+            sequence: Option<u64>,
+            instance: &str,
+        ) -> DaemonResponse {
+            supervisor
+                .handle_worker_roster_delta(
+                    "d",
+                    "worker_roster_delta",
+                    WorkerRosterDelta {
+                        worker_token: token.to_string(),
+                        summary: summary(level),
+                        removed: Vec::new(),
+                        sequence,
+                        worker_instance_id: Some(instance.to_string()),
+                    },
+                )
+                .await
+        }
+
         let dir = std::env::temp_dir().join(format!("pa-roster-seq-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let supervisor = Arc::new(
@@ -1203,37 +1233,7 @@ mod tests {
                 .map(|entry| entry.summary["thinkingLevel"].clone())
                 .expect("the roster entry")
         };
-        fn summary(level: &str) -> Value {
-            serde_json::json!({
-                "sessionId": "s1",
-                "activeSessionId": "s1",
-                "activity": "idle",
-                "thinkingLevel": level,
-            })
-        }
-        async fn delta(
-            supervisor: &Arc<Supervisor>,
-            token: &str,
-            level: &str,
-            sequence: Option<u64>,
-            instance: &str,
-        ) -> DaemonResponse {
-            supervisor
-                .handle_worker_roster_delta(
-                    "d",
-                    "worker_roster_delta",
-                    WorkerRosterDelta {
-                        worker_token: token.to_string(),
-                        summary: summary(level),
-                        removed: Vec::new(),
-                        sequence,
-                        worker_instance_id: Some(instance.to_string()),
-                    },
-                )
-                .await
-        }
-
-        // A fresh worker's create/registration pull stamps the ZERO
+        // A fresh worker's create/registration pull stamps the ZERO        // A fresh worker's create/registration pull stamps the ZERO
         // counter (the worker has pushed nothing yet): it starts the
         // slot and applies — the create path's first authoritative
         // write.
@@ -1554,9 +1554,7 @@ mod tests {
             handler_nanos += start.elapsed().as_nanos();
             for push in drain_roster_pushes(&mut events) {
                 pushes += 1;
-                payload_bytes += serde_json::to_string(&push)
-                    .map(|payload| payload.len())
-                    .unwrap_or(0);
+                payload_bytes += serde_json::to_string(&push).map_or(0, |payload| payload.len());
             }
         }
         let flips = FLIPS as f64;

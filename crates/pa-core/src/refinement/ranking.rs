@@ -33,6 +33,11 @@ fn is_cjk(char: char) -> bool {
 
 /// Tokenize text into lowercase query terms: word runs of letters/digits/marks
 /// (>= 4 chars), CJK runs as overlapping bigrams.
+///
+/// # Panics
+///
+/// The `next().unwrap()` on the first char of a run cannot fire: the run is
+/// checked non-empty right before.
 pub fn harness_query_terms(text: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let mut run = String::new();

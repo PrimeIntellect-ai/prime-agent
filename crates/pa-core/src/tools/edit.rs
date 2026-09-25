@@ -69,10 +69,23 @@ pub fn edit_tool_details(diff: &str, first_changed_line: Option<usize>) -> serde
 /// Object-safe on purpose (`&dyn` injection without generics).
 pub trait EditOperations: Send + Sync {
     /// Read file contents, matching Node `fs/promises` error messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the file cannot be read.
     fn read_file(&self, absolute_path: &str) -> std::io::Result<Vec<u8>>;
     /// Write content as UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the file cannot be written.
     fn write_file(&self, absolute_path: &str, content: &str) -> std::io::Result<()>;
     /// Check the file is readable and writable; error code mirrors Node `access`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `fs.access`-shaped I/O error when the file is not both
+    /// readable and writable.
     fn access(&self, absolute_path: &str) -> std::io::Result<()>;
 }
 
@@ -101,6 +114,11 @@ impl EditOperations for LocalEditOperations {
 /// Normalize tool arguments (TS: `prepareEditArguments`):
 /// - `edits` sent as a JSON string is parsed into an array.
 /// - Legacy top-level `oldText`/`newText` is appended to `edits`.
+///
+/// # Panics
+///
+/// The `unwrap` on the string `edits` value cannot fire: it runs only
+/// inside the `is_string` guard.
 pub fn prepare_edit_arguments(mut input: serde_json::Value) -> serde_json::Value {
     let Some(obj) = input.as_object_mut() else {
         return input;

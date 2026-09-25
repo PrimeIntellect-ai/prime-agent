@@ -172,15 +172,14 @@ fn css_color(color: ResolvedColor, light: bool) -> String {
 /// The theme file for `name`: a built-in (bundled data) or a custom theme
 /// file under `<agent-dir>/themes/<name>.json` (TS `loadThemeJson`).
 fn load_theme_json(name: &str, agent_dir: &Path) -> Result<ExportThemeJson> {
-    let raw = match pa_types::themes::builtin_theme_json(name) {
-        Some(builtin) => builtin.to_string(),
-        None => {
-            let path = custom_theme_path(agent_dir, name);
-            if !path.exists() {
-                return Err(anyhow!("Theme not found: {name}"));
-            }
-            std::fs::read_to_string(&path).with_context(|| format!("read theme {name}"))?
+    let raw = if let Some(builtin) = pa_types::themes::builtin_theme_json(name) {
+        builtin.to_string()
+    } else {
+        let path = custom_theme_path(agent_dir, name);
+        if !path.exists() {
+            return Err(anyhow!("Theme not found: {name}"));
         }
+        std::fs::read_to_string(&path).with_context(|| format!("read theme {name}"))?
     };
     parse_theme_json(&raw).map_err(|error| anyhow!("Invalid theme \"{name}\": {error}"))
 }
@@ -324,9 +323,7 @@ pub(crate) fn resolve_export_theme(
     theme_name: Option<&str>,
     agent_dir: &Path,
 ) -> Result<ExportTheme> {
-    let name = theme_name
-        .map(str::to_string)
-        .unwrap_or_else(default_theme_name);
+    let name = theme_name.map_or_else(default_theme_name, str::to_string);
     let theme = load_theme_json(&name, agent_dir)?;
     let light = theme.name == "light";
 

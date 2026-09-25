@@ -78,7 +78,7 @@ pub const RESERVED_KEYBINDING_IDS: &[&str] = &[
 /// key id -> (canonical binding id, whether extension overrides are blocked).
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinKeybindings {
-    /// Key id -> (keybinding id, restrict_override).
+    /// Key id -> (keybinding id, `restrict_override`).
     pub by_key: HashMap<String, (String, bool)>,
 }
 
@@ -94,9 +94,7 @@ impl BuiltinKeybindings {
             for key in keys {
                 let normalized = key.to_lowercase();
                 match by_key.get(&normalized) {
-                    Some((_, existing_restrict)) if *existing_restrict && !restrict => {
-                        continue;
-                    }
+                    Some((_, existing_restrict)) if *existing_restrict && !restrict => {}
                     _ => {
                         by_key.insert(normalized, (keybinding.clone(), restrict));
                     }

@@ -3,7 +3,7 @@
 //!
 //! TS ground truth (`packages/coding-agent/src/modes/daemon/daemon-mode.ts`):
 //! RLM children are hosted IN the parent's process, so they die with it -
-//! a SIGKILLed parent session takes its children down, and the durable
+//! a `SIGKILLed` parent session takes its children down, and the durable
 //! spawn ledger keeps each closed child as a passive roster row
 //! (`getChildActiveSessionStates` joins children by
 //! `metadata.parentActiveSessionId`; `closeChildSessions` is the cascade).
@@ -20,12 +20,12 @@
 //! session whose kernel cell spawns the child through the product
 //! `rlm.spawn` surface, and a scripted child worker kept mid-run:
 //!
-//! 1. SIGKILLing the parent worker closes the spawned child: its worker
+//! 1. `SIGKILLing` the parent worker closes the spawned child: its worker
 //!    leaves the supervisor roster, its session file archives, the
 //!    respawned parent's `get_rlm_children` reads empty, and the `list
 //!    --all` surface shows the child as a passive ledger row (the spawn
 //!    edge survived - the close is a stop, not a delete).
-//! 2. SIGKILLing the parent KEEPS an `rlm.create_session` depth-0 root
+//! 2. `SIGKILLing` the parent KEEPS an `rlm.create_session` depth-0 root
 //!    session running: the close touches parent-linked children only.
 //!
 //! The parent's kernel Python is ambient product state; like the other
@@ -89,7 +89,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -99,11 +99,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -164,7 +163,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(

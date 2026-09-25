@@ -4,7 +4,7 @@
 //! implementation: SigV4-signed `POST /model/{modelId}/converse-stream`,
 //! binary `vnd.amazon.eventstream` response decoding (see [`eventstream`]),
 //! message conversion and cache points (see [`convert`]), and credential /
-//! region resolution (see [`auth`]). Supports bearer-token auth, SigV4 skip
+//! region resolution (see [`auth`]). Supports bearer-token auth, `SigV4` skip
 //! for local gateways, Claude adaptive vs budget-based thinking, and
 //! GovCloud-safe request fields.
 
@@ -130,7 +130,7 @@ fn bedrock_endpoint_port(endpoint: &str) -> u16 {
 /// Port of the AWS SDK error deserialization for a non-2xx HTTP response:
 /// the error name comes from the body `__type`/`code` (after the `#`
 /// namespace separator, like the SDK's error-code parser) and the message
-/// from the body `message` (defaulting to "UnknownError", like
+/// from the body `message` (defaulting to "`UnknownError`", like
 /// `decorateServiceException`); unknown names fall through
 /// `throwDefaultError`'s `parsedBody.code || errorCode || statusCode` chain.
 /// The result is what `formatBedrockError` composes for it.
@@ -165,9 +165,8 @@ fn bedrock_http_error(
         .as_ref()
         .and_then(|parsed| parsed.get("message").or_else(|| parsed.get("Message")))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
         // `decorateServiceException`: `message || Message || "UnknownError"`
-        .unwrap_or_else(|| "UnknownError".to_string());
+        .map_or_else(|| "UnknownError".to_string(), str::to_string);
     ProviderError::Http(ProviderHttpError {
         message: bedrock_exception_message(&exception_name, &message),
         // AWS SDK exceptions carry no `.status` field for the TS classifier
@@ -245,11 +244,7 @@ fn bedrock_proxy_configured() -> bool {
         "no_proxy",
     ]
     .iter()
-    .any(|key| {
-        std::env::var(key)
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
-    })
+    .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
 }
 
 /// Port of `streamBedrock`.
@@ -331,8 +326,7 @@ fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool 
     if options
         .region
         .as_deref()
-        .map(|region| region.to_lowercase().starts_with("us-gov-"))
-        .unwrap_or(false)
+        .is_some_and(|region| region.to_lowercase().starts_with("us-gov-"))
     {
         return true;
     }
@@ -454,8 +448,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -692,8 +685,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -878,7 +870,7 @@ mod tests {
     }
 
     /// Throttling exceptions keep their name as the classification key
-    /// ("throttl" -> rate_limit), like the TS rethrown stream exception.
+    /// ("throttl" -> `rate_limit`), like the TS rethrown stream exception.
     #[test]
     fn bedrock_throttling_error_classifies() {
         let error = bedrock_http_error(
@@ -897,7 +889,7 @@ mod tests {
     /// An unrecognized error body names the generic fallback by the raw
     /// status text (smithy `throwDefaultError`: `parsedBody.code ||
     /// errorCode || statusCode || "UnknownError"`), and a missing message
-    /// defaults to "UnknownError" like `decorateServiceException`.
+    /// defaults to "`UnknownError`" like `decorateServiceException`.
     #[test]
     fn bedrock_http_error_generic_fallback() {
         let error = bedrock_http_error(400, "{\"foo\":1}", &Default::default());

@@ -1,6 +1,6 @@
 //! The bedrock default transport: h2c prior-knowledge HTTP/2 over cleartext.
 //!
-//! The TS bedrock client (bun) runs the AWS SDK's NodeHttp2Handler: HTTP/2
+//! The TS bedrock client (bun) runs the AWS SDK's `NodeHttp2Handler`: HTTP/2
 //! with prior knowledge over cleartext (`http2.connect`, no upgrade), an
 //! isolated session per event-stream request, no transport retries
 //! (`maxAttempts: 1`), and no transport timeout. The TS-visible failure
@@ -22,7 +22,7 @@ use crate::utils_inner::stream_failure::{
 };
 
 /// The bedrock wire transport, mirroring the TS request-handler selection:
-/// the AWS SDK's NodeHttp2Handler by default; NodeHttpHandler (http1) when
+/// the AWS SDK's `NodeHttp2Handler` by default; `NodeHttpHandler` (http1) when
 /// `AWS_BEDROCK_FORCE_HTTP1=1` or a proxy environment is configured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BedrockTransport {
@@ -34,8 +34,8 @@ pub(crate) enum BedrockTransport {
     H2TlsAlpn,
 }
 
-/// Port of the TS request-handler selection: NodeHttp2Handler (http2) by
-/// default; the http1 NodeHttpHandler for `AWS_BEDROCK_FORCE_HTTP1=1` or any
+/// Port of the TS request-handler selection: `NodeHttp2Handler` (http2) by
+/// default; the http1 `NodeHttpHandler` for `AWS_BEDROCK_FORCE_HTTP1=1` or any
 /// configured proxy environment (the product's own proxy path).
 pub(crate) fn select_transport(
     scheme: &str,
@@ -80,8 +80,7 @@ impl H2Response {
         if self
             .signal
             .as_ref()
-            .map(tokio_util::sync::CancellationToken::is_cancelled)
-            .unwrap_or(false)
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
         {
             return Err(ProviderError::Aborted);
         }
@@ -198,8 +197,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
 
     if signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -398,9 +396,9 @@ mod h2_wire_tests {
     }
 
     enum MockAction {
-        /// Respond 200 + partial eventstream bytes, then RST_STREAM.
+        /// Respond 200 + partial eventstream bytes, then `RST_STREAM`.
         RstStream,
-        /// Respond 200 + partial bytes, then GOAWAY(PROTOCOL_ERROR), then close.
+        /// Respond 200 + partial bytes, then `GOAWAY(PROTOCOL_ERROR)`, then close.
         GoAway,
         /// Respond 200 + partial bytes, then close the socket (FIN).
         Close,
@@ -502,7 +500,7 @@ mod h2_wire_tests {
         }
     }
 
-    /// RST_STREAM mid-body: the nghttp2 code name + the AWS SDK
+    /// `RST_STREAM` mid-body: the nghttp2 code name + the AWS SDK
     /// deserialization hint (TS-binary verified).
     #[tokio::test]
     async fn rst_stream_mid_body_text() {

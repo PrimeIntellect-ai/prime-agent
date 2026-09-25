@@ -41,6 +41,10 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
 /// Spawn the successor supervisor detached (the TS launcher deletes the
 /// worker role env from the inherited environment; the roster path is the
 /// one addition, spec §6).
+///
+/// # Errors
+/// Returns an error when the successor supervisor process cannot be
+/// spawned.
 pub fn spawn_supervisor(
     exe: &Path,
     socket_path: &Path,

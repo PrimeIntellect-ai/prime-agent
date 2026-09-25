@@ -34,6 +34,7 @@ use crate::model_picker::{CurrentModel, ModelPicker, ModelPickerAction, ModelPic
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
+use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };
@@ -374,7 +375,7 @@ pub(crate) struct SessionUi {
     /// monotonically within a run.
     working_tokens: LoaderTokenTracker,
     /// The turn already surfaced its error (a failed assistant message or a
-    /// retry-exhausted banner); the turn_end error stays silent then (TS
+    /// retry-exhausted banner); the `turn_end` error stays silent then (TS
     /// renders the failure once, through the message or the retry banner).
     turn_error_shown: bool,
     /// Tool cards awaiting their final result (TS `pendingTools`): a
@@ -445,7 +446,7 @@ pub(crate) struct SessionUi {
     /// The session's fetched skill commands (the `enableSkillCommands`
     /// toggle re-applies them without a daemon round trip).
     skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
-    /// The current Python bash() registry snapshot from the owning kernel.
+    /// The current Python `bash()` registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
     /// response from an older request must not repaint a newer snapshot.
@@ -681,8 +682,7 @@ impl SessionUi {
             fullscreen_enabled: options
                 .client_settings
                 .as_ref()
-                .map(|settings| settings.fullscreen())
-                .unwrap_or(true),
+                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,
@@ -1026,15 +1026,11 @@ impl SessionUi {
         // rebuilds from the snapshot): a turn that is still live behind the
         // re-attach keeps the spinner, one that died with the old link (or
         // never ran) does not.
-        let streaming = attach
-            .snapshot
-            .get("state")
-            .map(|state| {
-                ["isStreaming", "isCompacting"]
-                    .iter()
-                    .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-            })
-            .unwrap_or(false);
+        let streaming = attach.snapshot.get("state").is_some_and(|state| {
+            ["isStreaming", "isCompacting"]
+                .iter()
+                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
+        });
         self.turn_active = streaming;
         self.streaming_index = None;
         // TS `applyConnectionStateSnapshot` -> `bindPromptStashSession`: the
@@ -1269,6 +1265,7 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            view.runs_view = None;
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
@@ -1371,6 +1368,21 @@ impl SessionUi {
                         self.side_bash_discarded = None;
                     }
                 }
+            }
+        }
+        // A resync rebuild replaces the transcript wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no run
+        // survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
             }
         }
         // The rebuilt chat follows the session's live state: an attached
@@ -1497,7 +1509,15 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        self.cost_usd = data.get("cost").and_then(Value::as_f64);
+        // The top bar's spend is the FULL session+subagents total
+        // (`totalCost`, the /context root totalUsage's fold): the TS
+        // active-region `cost` drops pre-compaction spend, which reads
+        // as an inaccurate title after every compaction. Older daemons
+        // without the field fall back to the TS shape.
+        self.cost_usd = data
+            .get("totalCost")
+            .and_then(Value::as_f64)
+            .or_else(|| data.get("cost").and_then(Value::as_f64));
         self.dirty = true;
     }
 
@@ -2803,31 +2823,31 @@ impl SessionUi {
             }
             // `/tree` (TS `showTreeSelector`): the session-tree navigator.
             "tree" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /tree", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("tree");
                     self.open_tree_selector(view, None).await?;
+                } else {
+                    self.note("Usage: /tree", view);
                 }
             }
             // `/fork` (TS `showUserMessageSelector`): fork from a user
             // message into a new session.
             "fork" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /fork", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("fork");
                     self.open_fork_selector(view).await?;
+                } else {
+                    self.note("Usage: /fork", view);
                 }
             }
             // `/clone` (TS `handleCloneCommand`): duplicate the session at
             // the current position.
             "clone" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /clone", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("clone");
                     self.handle_clone_command(view).await?;
+                } else {
+                    self.note("Usage: /clone", view);
                 }
             }
             // TS `handleCopyCommand`: the last assistant text (the
@@ -2835,13 +2855,13 @@ impl SessionUi {
             // clipboard (platform tools, OSC 52 fallback). An argument is
             // the usage error with the text kept in the editor.
             "copy" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("copy");
+                    self.handle_copy_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /copy", view);
-                } else {
-                    self.track_command_used("copy");
-                    self.handle_copy_command(view).await?;
                 }
             }
             // `/login` (TS `showConfigurationMenu("providers")`): the
@@ -2849,27 +2869,27 @@ impl SessionUi {
             // configuration menu stays unported; the panel is the same
             // TS `OAuthSelectorComponent` the tab mounts).
             "login" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /login", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("login");
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /login", view);
                 }
             }
             // `/logout` (TS `showLogoutSelector`): the stored-credential
             // selector; an empty store answers the TS status directly.
             "logout" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /logout", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("logout");
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /logout", view);
                 }
             }
             // `/import <path.jsonl>` (TS `handleImportCommand`): the
@@ -3028,13 +3048,13 @@ impl SessionUi {
             // text stays in the editor); otherwise the session exports to a
             // temp file and uploads as a secret gist.
             "share" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("share");
+                    self.handle_share_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /share", view);
-                } else {
-                    self.track_command_used("share");
-                    self.handle_share_command(view).await?;
                 }
             }
             // `/hotkeys` (TS `handleHotkeysCommand` after
@@ -3608,28 +3628,25 @@ impl SessionUi {
             }
             AuthSelectorAction::Login { provider, api_key } => {
                 view.provider_auth = None;
-                match api_key {
-                    // The panel-prompted key: store it (TS
-                    // `showApiKeyLoginDialog`'s save path, no panel
-                    // needed).
-                    Some(api_key) => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                // The panel-prompted key: store it (TS
+                // `showApiKeyLoginDialog`'s save path, no panel
+                // needed).
+                if let Some(api_key) = api_key {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                    self.apply_auth_outcome(outcome, view);
+                } else {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    if provider.id.starts_with("mcp:")
+                        || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    {
+                        self.start_provider_panel_login(&provider, auth, view);
+                    } else {
+                        // The unported OAuth subscription stubs: the
+                        // error row is the whole flow (nothing drives
+                        // the panel).
+                        let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, view);
-                    }
-                    None => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        if provider.id.starts_with("mcp:")
-                            || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        {
-                            self.start_provider_panel_login(&provider, auth, view);
-                        } else {
-                            // The unported OAuth subscription stubs: the
-                            // error row is the whole flow (nothing drives
-                            // the panel).
-                            let outcome = auth.0.login(&provider, None).await;
-                            self.apply_auth_outcome(outcome, view);
-                        }
                     }
                 }
             }
@@ -4444,11 +4461,21 @@ impl SessionUi {
                 let _ = self.handle_reload_command(view).await;
             }
             "show-hardware-cursor" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_show_hardware_cursor(enabled),
-                    value,
-                    view,
-                );
+                // The show-images shape: a failed persist surfaces the
+                // error and changes nothing — the live flag flips only
+                // when the setting actually persisted, so the view and
+                // the on-disk state can never disagree.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                // The live TUI effect (TS persists through the settings
+                // manager, then calls `ui.setShowHardwareCursor(enabled)`
+                // in place): the very next frame shows or hides the
+                // hardware cursor at the focused caret.
+                view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {
@@ -4807,8 +4834,10 @@ impl SessionUi {
                 .editor
                 .keybindings()
                 .first_key("tui.viewport.follow")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "ctrl+shift+down".to_string());
+                .map_or_else(
+                    || "ctrl+shift+down".to_string(),
+                    |key| crate::keybindings::format_key_text(&key),
+                );
             format!("Fullscreen rendering on — wheel/pageUp scroll, {follow} follows output")
         } else {
             "Fullscreen rendering off".to_string()
@@ -4837,7 +4866,7 @@ impl SessionUi {
     /// Updates the footer tok/sec readout from a completed assistant
     /// message (TS `recordSpeedSample`): output tokens over the
     /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this message_end arrival. Timestamps keep the span true
+    /// start) to this `message_end` arrival. Timestamps keep the span true
     /// even when buffered session events replay back-to-back on attach.
     /// Aborted/failed responses and samples without a finite positive
     /// span or token count are skipped: some providers only fill usage at
@@ -5618,7 +5647,7 @@ impl SessionUi {
             .as_mut()
             .map(|mcp_view| mcp_view.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(crate::mcp_view::McpViewAction::None) => {}
+            Some(crate::mcp_view::McpViewAction::None) | None => {}
             Some(crate::mcp_view::McpViewAction::Cancel) => {
                 view.mcp_view = None;
                 self.picker_restored_draft = false;
@@ -5660,7 +5689,6 @@ impl SessionUi {
                     title: format!("Connect {label}"),
                 });
             }
-            None => {}
         }
         Ok(())
     }
@@ -5854,11 +5882,10 @@ impl SessionUi {
     /// tray while one is mounted.
     pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
         if self.ctrl_c_hint_visible() {
-            let key = self
-                .keybindings
-                .first_key("app.clear")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "Ctrl+C".to_string());
+            let key = self.keybindings.first_key("app.clear").map_or_else(
+                || "Ctrl+C".to_string(),
+                |key| crate::keybindings::format_key_text(&key),
+            );
             return Some(format!("Press {key} again to exit"));
         }
         streaming_tray_hint(
@@ -5885,7 +5912,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(ModelPickerAction::None) => {}
+            Some(ModelPickerAction::None) | None => {}
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
                 self.picker_restored_draft = false;
@@ -5914,7 +5941,6 @@ impl SessionUi {
                     self.apply_thinking_level(&level, view).await;
                 }
             }
-            None => {}
         }
         self.update_fast_filter(view);
         Ok(())
@@ -5947,6 +5973,7 @@ impl SessionUi {
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
+            || view.runs_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -6020,6 +6047,8 @@ impl SessionUi {
     /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
     /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
+        use base64::Engine;
+        use std::io::Write;
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
@@ -6027,8 +6056,6 @@ impl SessionUi {
             self.toast("Copied selection to clipboard", view);
             return;
         }
-        use base64::Engine;
-        use std::io::Write;
         let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
         let mut out = std::io::stdout();
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
@@ -6057,7 +6084,7 @@ impl SessionUi {
                         row,
                         col,
                         started: Instant::now(),
-                    })
+                    });
                 }
             },
             None => self.selection_auto_scroll = None,
@@ -6107,9 +6134,10 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited. The read-only
-        // goal panel consumes it the same way.
-        if view.bash_view.is_some() || view.goal_panel.is_some() {
+        // where a later Enter would submit it unedited. The runs view
+        // owns the frame the same way, and the read-only goal panel
+        // consumes it the same way.
+        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -6137,7 +6165,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(EffortPickerAction::None) => {}
+            Some(EffortPickerAction::None) | None => {}
             Some(EffortPickerAction::Cancel) => {
                 view.effort_picker = None;
                 self.dirty = true;
@@ -6146,7 +6174,6 @@ impl SessionUi {
                 view.effort_picker = None;
                 self.apply_thinking_level(&level, view).await;
             }
-            None => {}
         }
         Ok(())
     }
@@ -6196,10 +6223,10 @@ impl SessionUi {
     /// about, and only that session's frames land.
     pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
         let session = match &update {
-            BashActivityUpdate::List { session, .. } => session,
-            BashActivityUpdate::Tail { session, .. } => session,
-            BashActivityUpdate::Refresh { session } => session,
-            BashActivityUpdate::Error { session, .. } => session,
+            BashActivityUpdate::List { session, .. }
+            | BashActivityUpdate::Tail { session, .. }
+            | BashActivityUpdate::Refresh { session }
+            | BashActivityUpdate::Error { session, .. } => session,
         };
         if session != &self.active_session_id {
             return;
@@ -6335,6 +6362,61 @@ impl SessionUi {
                 self.open_goal_panel(view);
             }
         }
+    }
+
+    /// Open the condensed tool runs view (the drill-in pane for the
+    /// collapsed transcript's condensed blocks): the pane reads the
+    /// view's own transcript - no wire requests, no state beyond the
+    /// cursor and the scroll.
+    fn open_runs_view(&mut self, view: &mut AgentView) {
+        let runs = view.condensed_runs();
+        view.runs_view = Some(RunsView::new(
+            picker_viewport_rows(view.terminal_rows()),
+            &view.chat,
+            &runs,
+        ));
+        self.dirty = true;
+    }
+
+    /// One key press while the condensed tool runs view is open: the view
+    /// owns the frame the same way as the bash view; its only action is
+    /// closing (the pane is pure presentation).
+    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        let runs = view.condensed_runs();
+        // The runs change live under the open pane: reconcile BEFORE the
+        // key acts (the cursor and the open detail can point at a run
+        // that grew, split, or vanished since the last look), closing
+        // the pane when no run survives.
+        if view
+            .runs_view
+            .as_mut()
+            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
+        {
+            view.runs_view = None;
+            self.dirty = true;
+            return Ok(());
+        }
+        let kb = view.editor.keybindings().clone();
+        let action = view
+            .runs_view
+            .as_mut()
+            .map_or(RunsViewAction::None, |runs_view| {
+                runs_view.handle_key(&id, &kb, &view.chat, &runs)
+            });
+        match action {
+            RunsViewAction::Close => {
+                view.runs_view = None;
+            }
+            RunsViewAction::None => {}
+        }
+        self.dirty = true;
+        Ok(())
     }
 
     /// The dock's goal row opens the read-only goal panel (the
@@ -7081,8 +7163,7 @@ impl SessionUi {
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| picked_model_id.to_string());
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
             view.chrome.model_id = Some(model_id);
             self.dirty = true;
         }
@@ -7228,6 +7309,25 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
+        // The rebuilt transcript replaces the chat wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no
+        // run survives) - compaction sets `transcript_stale` and this
+        // rebuild lands after the update path already reconciled
+        // against the pre-rebuild chat, so without this seam the pane
+        // rides stale start indices and identity keys until the next
+        // key press.
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         view.follow();
         self.dirty = true;
     }
@@ -7327,6 +7427,10 @@ impl SessionUi {
         // The bash view owns the frame the same way.
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
+        }
+        // The condensed tool runs view owns the frame the same way.
+        if view.runs_view.is_some() {
+            return self.handle_runs_view_key(key, view).await;
         }
         // The read-only goal panel owns the frame the same way.
         if view.goal_panel.is_some() {
@@ -7490,17 +7594,6 @@ impl SessionUi {
             self.handle_clipboard_image_paste(view).await;
             return Ok(());
         }
-        // The heartbeats-open action (default ctrl+r, TS the editor's
-        // `app.heartbeats.open` registration): open the `/heartbeats`
-        // management view from anywhere in the session.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.heartbeats.open")
-        {
-            self.open_heartbeats_view(view);
-            return Ok(());
-        }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
             // The completion surface consumes Esc: the open dropdown
             // closes, and a parked request (Tab before the input-idle
@@ -7662,6 +7755,21 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
+            self.dirty = true;
+            return Ok(());
+        }
+        // `app.transcript.runs` (default alt+t): the condensed tool runs
+        // view opens over the editor dock (the drill-in pane for the
+        // collapsed transcript's condensed blocks); with no condensed
+        // runs the key opens the same pane with its empty note - the
+        // affordance stays discoverable.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.transcript.runs")
+        {
+            self.emit_activity_opened("runs");
+            self.open_runs_view(view);
             self.dirty = true;
             return Ok(());
         }
@@ -8571,6 +8679,20 @@ impl SessionUi {
             }
             TurnUpdate::StatusUpdate => {}
         }
+        // A transcript mutation reshaped the condensed runs: reconcile an
+        // open runs pane now (the cursor and the open detail can point at
+        // a run that grew, split, or vanished; the pane closes when no
+        // run survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         self.dirty = true;
     }
 
@@ -8781,7 +8903,7 @@ impl SessionUi {
                     match &error_message {
                         Some(message) => card.set_failed(message),
                         None => {
-                            card.set_complete(exit_code, cancelled, truncated, full_output_path)
+                            card.set_complete(exit_code, cancelled, truncated, full_output_path);
                         }
                     }
                 }
@@ -9178,9 +9300,7 @@ impl SessionUi {
 /// The terminal's current column count (TS `this.ui.terminal.columns` for
 /// the goal status detail suffix); 80 when the size is unavailable.
 fn terminal_columns() -> usize {
-    crossterm::terminal::size()
-        .map(|(columns, _)| columns as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize)
 }
 
 fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
@@ -9231,10 +9351,10 @@ fn streaming_tray_hint(
 /// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
 /// the running user command, spelled through the effective keybindings.
 fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
-    let key = keybindings
-        .first_key("app.clear")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_else(|| "Ctrl+C".to_string());
+    let key = keybindings.first_key("app.clear").map_or_else(
+        || "Ctrl+C".to_string(),
+        |key| crate::keybindings::format_key_text(&key),
+    );
     // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
     // row text (the StatusKind tier is color only).
     format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")

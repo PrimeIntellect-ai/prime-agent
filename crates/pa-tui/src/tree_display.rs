@@ -254,11 +254,7 @@ pub fn entry_display_text(
             ThemeColor::Dim,
             format!(
                 "[service tier: {}]",
-                payload
-                    .service_tier
-                    .as_ref()
-                    .map(tier_name)
-                    .unwrap_or("default")
+                payload.service_tier.as_ref().map_or("default", tier_name)
             ),
         )],
         FileEntry::Custom { payload, .. } => vec![color(
@@ -295,7 +291,6 @@ pub fn entry_display_text(
         }
         FileEntry::Header { .. }
         | FileEntry::SessionState { .. }
-        | FileEntry::AgentStatus { .. }
         | FileEntry::GitState { .. }
         | FileEntry::Unknown { .. } => Vec::new(),
     };
@@ -365,8 +360,7 @@ pub fn searchable_text(node: &TreeNodeData) -> String {
                 payload
                     .service_tier
                     .as_ref()
-                    .map(tier_name)
-                    .unwrap_or("default")
+                    .map_or("default", tier_name)
                     .to_string(),
             );
         }

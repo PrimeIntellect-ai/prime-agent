@@ -152,6 +152,11 @@ impl GoalDriver {
     }
 
     /// Start a new goal (validates objective and budget).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the objective or budget fails validation, or
+    /// when the new goal state cannot be persisted.
     pub fn start(
         &mut self,
         session: &mut SessionManager,
@@ -192,6 +197,10 @@ impl GoalDriver {
     }
 
     /// Clear the goal entirely (empty state).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cleared goal state cannot be persisted.
     pub fn clear(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         self.set_state(session, empty_goal_state())?;
         self.accounting_started_at = None;
@@ -235,6 +244,10 @@ impl GoalDriver {
 
     /// Account one assistant turn's usage. Double-counts are suppressed by
     /// message id. Returns whether the budget was reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the accounted goal state cannot be persisted.
     pub fn record_assistant_usage(
         &mut self,
         session: &mut SessionManager,
@@ -258,10 +271,7 @@ impl GoalDriver {
         let budget_reached = next_goal
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
-        let outcome = if !budget_reached {
-            self.set_state(session, next_goal)?;
-            UsageOutcome::Accounted
-        } else {
+        let outcome = if budget_reached {
             let token_budget = next_goal.token_budget;
             let budget_reason = token_budget
                 .map(|budget| format!("Reached {budget} token goal budget"))
@@ -277,6 +287,9 @@ impl GoalDriver {
                 },
             )?;
             UsageOutcome::BudgetReached
+        } else {
+            self.set_state(session, next_goal)?;
+            UsageOutcome::Accounted
         };
         // Account the message only after the durable write lands.
         self.accounted_messages.insert(message_id.to_string());
@@ -284,6 +297,10 @@ impl GoalDriver {
     }
 
     /// Pause the goal (no-op when not active).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paused goal state cannot be persisted.
     pub fn pause(&mut self, session: &mut SessionManager, reason: &str) -> anyhow::Result<()> {
         if self.state.status != GoalStatus::Active {
             return Ok(());
@@ -309,6 +326,11 @@ impl GoalDriver {
 
     /// Resume a paused/budget-limited goal. Returns the continuation context
     /// message when the goal becomes active again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resumed goal state or its continuation
+    /// message cannot be persisted.
     pub fn resume(
         &mut self,
         session: &mut SessionManager,
@@ -352,6 +374,10 @@ impl GoalDriver {
     }
 
     /// Complete the goal (host `goal.complete()`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the completed goal state cannot be persisted.
     pub fn complete(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         if self.state.objective.is_none() || self.state.status == GoalStatus::Idle {
             return Ok(());
@@ -370,35 +396,35 @@ impl GoalDriver {
     }
 
     /// Terminal-assistant handling: `aborted` keeps the goal, `error` fails it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal goal state cannot be persisted.
     pub fn finish_for_terminal_message(
         &mut self,
         session: &mut SessionManager,
         stop_reason: pa_types::ai::StopReason,
         error_message: Option<&str>,
     ) -> anyhow::Result<()> {
+        use pa_types::ai::StopReason;
         if self.state.status != GoalStatus::Active {
             return Ok(());
         }
-        use pa_types::ai::StopReason;
-        match stop_reason {
-            StopReason::Aborted => {}
-            StopReason::Error => {
-                let reason = error_message
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or("Assistant response failed");
-                let goal = self.with_accounted_wall_clock();
-                self.set_state(
-                    session,
-                    GoalState {
-                        active: false,
-                        status: GoalStatus::Error,
-                        last_reason: Some(reason.to_string()),
-                        last_error: Some(reason.to_string()),
-                        ..goal
-                    },
-                )?;
-            }
-            _ => {}
+        if let StopReason::Error = stop_reason {
+            let reason = error_message
+                .filter(|message| !message.is_empty())
+                .unwrap_or("Assistant response failed");
+            let goal = self.with_accounted_wall_clock();
+            self.set_state(
+                session,
+                GoalState {
+                    active: false,
+                    status: GoalStatus::Error,
+                    last_reason: Some(reason.to_string()),
+                    last_error: Some(reason.to_string()),
+                    ..goal
+                },
+            )?;
         }
         Ok(())
     }
@@ -408,6 +434,11 @@ impl GoalDriver {
     /// and `_maybeResumeGoalContinuationAfterRlmWork` both run the mint
     /// through `_setGoalState`, which appends the `thread_goal_state`
     /// entry before the continuation turn is admitted).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the continuation-consumed goal state or its
+    /// context message cannot be persisted or built.
     pub fn next_continuation_message(
         &mut self,
         session: &mut SessionManager,
@@ -447,6 +478,11 @@ impl GoalDriver {
     /// mints; a failed mint restores the deferral so the boundary
     /// retries. `None` when no continuation was owed or the goal
     /// cannot mint.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mint error of the owed continuation (the deferral is
+    /// restored for the next boundary).
     pub fn take_owed_continuation(
         &mut self,
         session: &mut SessionManager,
@@ -472,6 +508,11 @@ impl GoalDriver {
     /// restores the goal snapshot when new session input arrived during the
     /// mint; the threshold-cancel rollback decrements the same way): the
     /// next boundary re-mints instead of double-counting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rolled-back goal state cannot be
+    /// persisted.
     pub fn rollback_continuation_mint(
         &mut self,
         session: &mut SessionManager,

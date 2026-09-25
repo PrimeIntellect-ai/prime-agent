@@ -7,12 +7,12 @@
 //! registry bound to the parent (the same registry `rlm.list_subagents`
 //! and the worker's own controller read). The parent-side sends go through
 //! the real kernel host handler (`agent_message.send` with
-//! receiver_role/receiver_name), resolving through the controller's
+//! `receiver_role/receiver_name`), resolving through the controller's
 //! family view and delivering over the supervisor route; the child is a
 //! real worker with a scripted engine whose kernel answers each delivered
 //! prompt with a real `agent_message.send` addressed to its parent.
 //!
-//! Linux-only e2e (AF_UNIX sockets), like the other pa-daemon verifiers.
+//! Linux-only e2e (`AF_UNIX` sockets), like the other pa-daemon verifiers.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -155,7 +155,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -213,11 +213,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -283,17 +282,23 @@ fn receipt_listing(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// A recorded JSON file, waiting for the turn that writes it.
+/// A recorded JSON file, waiting for the turn that writes it. The
+/// recording cell writes the receipt non-atomically (`open(w).write`),
+/// so the file can exist while its content is still empty or partial:
+/// readiness is a successful parse, not file existence — a read that
+/// does not parse yet polls on like a missing one until the deadline.
 fn read_recorded(dir: &Path, name: &str) -> Value {
     let path = dir.join(name);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&content).expect("recorded json");
+            if let Ok(value) = serde_json::from_str(&content) {
+                return value;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "record {name} never appeared in {}: existing: {}",
+            "record {name} never appeared or never parsed in {}: existing: {}",
             dir.display(),
             receipt_listing(dir)
         );
@@ -849,6 +854,19 @@ async fn family_edges_never_cross_families_end_to_end() {
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
     let kid_b_active = &kids[1].0;
 
+    // The kid's script accounts for the parent's broadcast draining into
+    // its steering queue as the spawn turn's follow-up (the filler turn):
+    // parent-a's first turn — the spawn-settle notice — runs the cell
+    // that sends it. That notice rides a watcher with second-scale
+    // cadence, so gate the drives on its own observable: once the
+    // broadcast receipt exists the delivery completed, the broadcast is
+    // already ahead of every drive in the FIFO steering lane, and each
+    // scripted cell lands on its driven turn no matter when the drain
+    // fires. Ungated, a slow notice shifts every cell one turn late and
+    // the observe cell runs out of driven turns — its receipt then never
+    // appears (the receipt-absent red).
+    let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
+
     // Drive kid-a's kernel turns: the cross-family sibling probe, the
     // parent reply, and its own broadcast.
     let drive_kid_turn = |client: &mut Client, id: &str, message: &str| {
@@ -927,30 +945,31 @@ async fn family_edges_never_cross_families_end_to_end() {
     // host error, and the recorded traceback carries the TS error text
     // (the send resolves no sibling — the other family's session is not
     // addressable by name from this family).
-    let crossed = match std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) {
-        Ok(content) => content,
-        Err(_) => {
-            let transcript = client.messages("gm-kid-debug", kid_a_active);
-            eprintln!("KEEP-DIR {}", dir.path().display());
-            if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
-                std::mem::forget(dir);
-            }
-            let daemon_log = std::fs::read_to_string(socket.with_extension("daemon.log"))
-                .unwrap_or_else(|_| "<no daemon log>".to_string());
-            panic!(
-                "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
-                std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
-                transcript,
-                daemon_log
-                    .chars()
-                    .rev()
-                    .take(4000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
+    let crossed = if let Ok(content) =
+        std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error"))
+    {
+        content
+    } else {
+        let transcript = client.messages("gm-kid-debug", kid_a_active);
+        eprintln!("KEEP-DIR {}", dir.path().display());
+        if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
+            std::mem::forget(dir);
         }
+        let daemon_log = std::fs::read_to_string(socket.with_extension("daemon.log"))
+            .unwrap_or_else(|_| "<no daemon log>".to_string());
+        panic!(
+            "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
+            std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
+            transcript,
+            daemon_log
+                .chars()
+                .rev()
+                .take(4000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
     };
     assert!(
         crossed.contains("No sibling matches"),

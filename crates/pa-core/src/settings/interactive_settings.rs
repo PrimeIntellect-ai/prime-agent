@@ -10,6 +10,10 @@ use super::manager::SettingsManager;
 impl SettingsManager {
     /// `terminal.showImages` setter (the getter lives with the manager's
     /// startup accessors).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_show_images(&mut self, show: bool) -> Result<()> {
         self.global_mut()
             .terminal
@@ -29,6 +33,11 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
+    /// `terminal.fullscreen` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_fullscreen(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .terminal
@@ -47,6 +56,11 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
+    /// `terminal.clearOnShrink` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_clear_on_shrink(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .terminal
@@ -64,6 +78,11 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
+    /// `terminal.showTerminalProgress` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_show_terminal_progress(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .terminal
@@ -74,6 +93,10 @@ impl SettingsManager {
 
     /// `terminal.fullscreenMouse` setter (the getter lives with the mouse
     /// surface).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_fullscreen_mouse(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .terminal
@@ -91,6 +114,11 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
+    /// `images.autoResize` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_image_auto_resize(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .images
@@ -108,6 +136,11 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
+    /// `images.blockImages` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_block_images(&mut self, blocked: bool) -> Result<()> {
         self.global_mut()
             .images
@@ -121,6 +154,11 @@ impl SettingsManager {
         self.settings().enable_skill_commands.unwrap_or(true)
     }
 
+    /// `enableSkillCommands` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_enable_skill_commands(&mut self, enabled: bool) -> Result<()> {
         self.global_mut().enable_skill_commands = Some(enabled);
         self.save_global_scope()
@@ -131,6 +169,11 @@ impl SettingsManager {
         self.settings().enable_builtin_skills.unwrap_or(true)
     }
 
+    /// `enableBuiltinSkills` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_enable_builtin_skills(&mut self, enabled: bool) -> Result<()> {
         self.global_mut().enable_builtin_skills = Some(enabled);
         self.save_global_scope()
@@ -142,6 +185,11 @@ impl SettingsManager {
         self.settings().show_hardware_cursor.unwrap_or(false)
     }
 
+    /// `showHardwareCursor` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_show_hardware_cursor(&mut self, enabled: bool) -> Result<()> {
         self.global_mut().show_hardware_cursor = Some(enabled);
         self.save_global_scope()
@@ -152,6 +200,11 @@ impl SettingsManager {
         self.settings().editor_padding_x.unwrap_or(0)
     }
 
+    /// `editorPaddingX` setter (clamped 0-3).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_editor_padding_x(&mut self, padding: u64) -> Result<()> {
         self.global_mut().editor_padding_x = Some(padding.min(3));
         self.save_global_scope()
@@ -162,6 +215,11 @@ impl SettingsManager {
         self.settings().autocomplete_max_visible.unwrap_or(5)
     }
 
+    /// `autocompleteMaxVisible` setter (clamped 3-20).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_autocomplete_max_visible(&mut self, max_visible: u64) -> Result<()> {
         self.global_mut().autocomplete_max_visible = Some(max_visible.clamp(3, 20));
         self.save_global_scope()
@@ -172,6 +230,11 @@ impl SettingsManager {
         self.settings().quiet_startup.unwrap_or(false)
     }
 
+    /// `quietStartup` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_quiet_startup(&mut self, quiet: bool) -> Result<()> {
         self.global_mut().quiet_startup = Some(quiet);
         self.save_global_scope()
@@ -200,6 +263,11 @@ impl SettingsManager {
     }
 
     /// TS `setIdleEvictionMinutes`: a positive number or `"off"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is neither `"off"` nor a positive
+    /// finite number, or when the global settings scope cannot be saved.
     pub fn set_idle_eviction_minutes(&mut self, value: &str) -> Result<()> {
         if value == "off" {
             self.global_mut().idle_eviction_minutes = Some(serde_json::json!("off"));
@@ -232,6 +300,12 @@ impl SettingsManager {
         }
     }
 
+    /// `markdown.mermaid` setter (`off`, `final`, or `streaming`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown rendering mode, or when the global
+    /// settings scope cannot be saved.
     pub fn set_mermaid_rendering_mode(&mut self, mode: &str) -> Result<()> {
         let parsed = match mode {
             "off" => super::types::MermaidRenderingMode::Off,
@@ -256,6 +330,11 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
+    /// `warnings.anthropicExtraUsage` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_warnings_anthropic_extra_usage(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .warnings
@@ -266,6 +345,10 @@ impl SettingsManager {
 
     /// `treeFilterMode` setter (the getter lives with the manager's
     /// startup accessors); TS `setTreeFilterMode` writes the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_tree_filter_mode(&mut self, mode: &str) -> Result<()> {
         self.global_mut().tree_filter_mode = Some(mode.to_string());
         self.save_global_scope()
@@ -277,6 +360,11 @@ impl SettingsManager {
         self.settings().enabled_models.clone()
     }
 
+    /// `enabledModels` setter (`None` is no filter).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_enabled_models(&mut self, models: Option<Vec<String>>) -> Result<()> {
         self.global_mut().enabled_models = models;
         self.save_global_scope()

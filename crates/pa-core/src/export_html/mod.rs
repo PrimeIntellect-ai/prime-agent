@@ -119,9 +119,7 @@ fn generate_html(data: &SessionExportData, theme: &theme::ExportTheme) -> String
 /// Write the export file and return the output path as the caller will
 /// report it (the given path verbatim, or the default name).
 fn write_export(html: &str, session_file: &Path, output_path: Option<&str>) -> Result<String> {
-    let output = output_path
-        .map(str::to_string)
-        .unwrap_or_else(|| default_html_output_path(session_file));
+    let output = output_path.map_or_else(|| default_html_output_path(session_file), str::to_string);
     std::fs::write(&output, html)?;
     Ok(output)
 }
@@ -132,6 +130,11 @@ fn write_export(html: &str, session_file: &Path, output_path: Option<&str>) -> R
 /// the TS exporter against `agent_dir`; `session_file` is the session's
 /// JSONL path, which names the default output file; a given `output_path`
 /// is used verbatim (the caller resolves it against the session's cwd).
+///
+/// # Errors
+///
+/// Returns an error when the configured theme cannot be resolved or the
+/// export file cannot be written.
 pub fn export_session_to_html(
     data: &SessionExportData,
     theme_name: Option<&str>,
@@ -147,6 +150,12 @@ pub fn export_session_to_html(
 /// Export an arbitrary session file to HTML (the CLI `session export`
 /// command). Loads the file exactly like a session open (repair and
 /// migration included), so the exported data is what a resume would see.
+///
+/// # Errors
+///
+/// Returns an error when the input file does not exist, cannot be loaded or
+/// migrated, when the default theme cannot be resolved, or when the export
+/// file cannot be written.
 pub fn export_from_file(
     input_path: &Path,
     output_path: Option<&str>,

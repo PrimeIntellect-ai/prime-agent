@@ -298,8 +298,14 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
+    // A full workspace run around this suite (the battery) can starve a
+    // freshly-launched session worker's boot far past the 30s default
+    // connect budget; the generous override keeps the suite's session
+    // creates deterministic under that load (the supervisor passes its
+    // environment to the workers it spawns).
+    command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
             return Supervisor { child, socket };
@@ -2639,22 +2645,54 @@ async fn tui_side_question_pane_flow() {
             pa_tui::interactive::HeadlessStep::Submit(
                 "/btw what is the capital of France".to_string(),
             ),
-            // The side question runs outside the turn state; give the
-            // daemon run time to stream and settle.
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            // The side question runs outside the turn state (the WaitIdle
+            // barrier cannot see it), and its answer is a daemon-driven
+            // stream: wait for the rendered condition (early exit) instead
+            // of a fixed wall-clock window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Paris, obviously".to_string(),
+                timeout_ms: 30_000,
+            },
+            // The pane's run must SETTLE before the follow-up: TS's
+            // active-run guard drops a follow-up submitted while the run
+            // is still streaming (it keeps the draft and warns). The
+            // settled hint row ("reply to follow up") is the pane's own
+            // idle marker, so wait for it — never a fixed window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // The open pane captures a plain reply as a follow-up side
             // question (TS's side-conversation ladder).
             pa_tui::interactive::HeadlessStep::Submit("and its largest city".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Second answer".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Settle again: an Esc against a still-running pane would
+            // CANCEL the run instead of closing the pane (TS's two-stage
+            // escape), so the close step needs the pane idle too.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // A slash command inside the pane gets the TS notice turn.
             pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Slash commands are not available in side conversations.".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Esc returns to the main thread.
+            // Esc returns to the main thread: the pane's hint row is the
+            // surface's own state, so wait for it to leave the newest
+            // frame.
             escape,
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "esc to return to session".to_string(),
+                timeout_ms: 10_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
         ],
         width: 120,

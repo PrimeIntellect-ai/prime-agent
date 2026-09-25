@@ -1,6 +1,6 @@
-//! OpenAI Completions streaming core.
+//! `OpenAI` Completions streaming core.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
-//! chunk-driven block state (text/thinking/toolcalls/reasoning_details), SSE
+//! chunk-driven block state (`text/thinking/toolcalls/reasoning_details`), SSE
 //! decoding, and the provider stream function.
 
 use std::collections::HashMap;
@@ -165,14 +165,13 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
                     content_index: index as u64,
                     content: thinking.thinking.clone(),
                     partial: state.output.clone(),
-                })
+                });
             }
             AssistantContent::ToolCall(_) => {
                 let partial_args = state.tool_call_partial_args.remove(&index);
                 let arguments = partial_args
                     .as_deref()
-                    .map(|partial| parse_streaming_json(Some(partial)))
-                    .unwrap_or_else(|| json!({}));
+                    .map_or_else(|| json!({}), |partial| parse_streaming_json(Some(partial)));
                 let arguments = arguments.as_object().cloned().unwrap_or_default();
                 if let AssistantContent::ToolCall(tool_call) = &mut state.output.content[index] {
                     tool_call.arguments = arguments;
@@ -233,11 +232,7 @@ fn handle_chunk(
     };
 
     // Fallback: some providers (e.g., Moonshot) return usage in choice.usage.
-    if !chunk
-        .get("usage")
-        .map(serde_json::Value::is_object)
-        .unwrap_or(false)
-    {
+    if !chunk.get("usage").is_some_and(serde_json::Value::is_object) {
         if let Some(usage) = choice.get("usage") {
             if usage.is_object() {
                 state.output.usage = parse_chunk_usage(usage, model, cache_write_cost);
@@ -651,8 +646,7 @@ async fn run_stream(
     if base_options
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

@@ -113,21 +113,6 @@ fn crossing_usage() -> Value {
     })
 }
 
-/// The dashboard status-line recap (`status_line.rs`) rides the same
-/// provider entry, so its request also lands on the mock. It summarizes
-/// the session's user-visible rows -- the outcome disclosure included --
-/// so the wire-purity scan over model-context requests must skip it.
-fn is_status_line_request(body: &Value) -> bool {
-    body["messages"].as_array().is_some_and(|messages| {
-        messages.iter().any(|message| {
-            message["role"] == "system"
-                && message["content"]
-                    .as_str()
-                    .is_some_and(|text| text.starts_with("You generate a status line"))
-        })
-    })
-}
-
 fn is_summarizer_request(body: &Value) -> bool {
     body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
@@ -305,7 +290,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -541,8 +526,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
             path.extension()
                 .is_some_and(|extension| extension == "jsonl")
                 && std::fs::read_to_string(path)
-                    .map(|content| content.contains("compaction_outcome"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("compaction_outcome"))
         })
         .expect("the durable outcome row in the session file");
     let persisted = std::fs::read_to_string(&session_file).expect("read session file");
@@ -577,7 +561,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let requests = mock.requests.lock().expect("mock lock").clone();
     let next_turn_request = requests[before_next..]
         .iter()
-        .find(|body| !is_summarizer_request(body) && !is_status_line_request(body))
+        .find(|body| !is_summarizer_request(body))
         .expect("the next turn reached the provider")
         .clone();
     let serialized = serde_json::to_string(&next_turn_request).expect("serialize request");

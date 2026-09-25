@@ -24,10 +24,7 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
         Some("local" | "global")
     );
     let edits = details.get("edits").and_then(Value::as_array);
-    let valid = message
-        .get("content")
-        .map(Value::is_string)
-        .unwrap_or(false)
+    let valid = message.get("content").is_some_and(Value::is_string)
         && summary.is_some()
         && scope_ok
         && edits.is_some_and(|edits| {
@@ -35,9 +32,9 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
                 matches!(
                     edit.get("action").and_then(Value::as_str),
                     Some("create" | "update" | "delete")
-                ) && edit.get("kind").map(Value::is_string).unwrap_or(false)
-                    && edit.get("id").map(Value::is_string).unwrap_or(false)
-                    && edit.get("applied").map(Value::is_boolean).unwrap_or(false)
+                ) && edit.get("kind").is_some_and(Value::is_string)
+                    && edit.get("id").is_some_and(Value::is_string)
+                    && edit.get("applied").is_some_and(Value::is_boolean)
             })
         });
     if !valid {
@@ -190,17 +187,7 @@ fn refinement_edit_row(edit: &Value, fallback_scope: &str) -> RefinementEditRow 
     let action = edit.get("action").and_then(Value::as_str).unwrap_or("");
     let kind = edit.get("kind").and_then(Value::as_str).unwrap_or("");
     let id = edit.get("id").and_then(Value::as_str).unwrap_or("");
-    let label = if !applied {
-        let error = edit
-            .get("error")
-            .and_then(Value::as_str)
-            .map(|error| format!(": {error}"))
-            .unwrap_or_default();
-        vec![LabelPart {
-            text: format!("Failed to {action} {scope} {kind} `{id}`{error}"),
-            color: Some(ThemeColor::Error),
-        }]
-    } else {
+    let label = if applied {
         let verb = match action {
             "create" => "Created",
             "update" => "Updated",
@@ -216,6 +203,16 @@ fn refinement_edit_row(edit: &Value, fallback_scope: &str) -> RefinementEditRow 
                 color: None,
             },
         ]
+    } else {
+        let error = edit
+            .get("error")
+            .and_then(Value::as_str)
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        vec![LabelPart {
+            text: format!("Failed to {action} {scope} {kind} `{id}`{error}"),
+            color: Some(ThemeColor::Error),
+        }]
     };
     RefinementEditRow {
         label,
@@ -298,9 +295,7 @@ fn edit_field_rows(edit: &Value) -> Vec<EditField> {
     let after = edit.get("after").filter(|v| v.is_object());
     let action = edit.get("action").and_then(Value::as_str).unwrap_or("");
     if !applied {
-        let proposed = after
-            .map(entry_field_rows)
-            .unwrap_or_else(|| entry_field_rows(edit));
+        let proposed = after.map_or_else(|| entry_field_rows(edit), entry_field_rows);
         return match before {
             None => proposed,
             Some(before) => {

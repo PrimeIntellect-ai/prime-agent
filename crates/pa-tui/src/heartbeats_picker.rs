@@ -290,8 +290,7 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
                 .job
                 .next_run_at
                 .as_deref()
-                .map(format_timestamp)
-                .unwrap_or_else(|| "\u{2014}".to_string()),
+                .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
         ),
         ("runs", entry.job.run_count.to_string()),
     ];
@@ -310,10 +309,10 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
 fn human_schedule_pair(entry: &HeartbeatEntry) -> String {
     let expression = entry.job.schedule_expression.trim();
     let human = human_schedule(expression);
-    if human != expression {
-        format!("{human} ({expression})")
-    } else {
+    if human == expression {
         human
+    } else {
+        format!("{human} ({expression})")
     }
 }
 
@@ -545,12 +544,8 @@ impl HeartbeatsPicker {
     /// One key id (TS `handleInput`, minus the busy gate: the session UI
     /// awaits the management request itself).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> HeartbeatsPickerAction {
-        // Cancel keys — including the open binding (ctrl+r toggles closed)
-        // — close the view (TS `tui.select.cancel` / `app.heartbeats.open`).
-        if key == "ctrl+c"
-            || kb.matches(key, "tui.select.cancel")
-            || kb.matches(key, "app.heartbeats.open")
-        {
+        // Cancel keys close the view (TS `tui.select.cancel`).
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return HeartbeatsPickerAction::Close;
         }
         // Back (left): the detail pane returns to the list, the list closes.
@@ -782,8 +777,7 @@ impl HeartbeatsPicker {
             .as_deref()
             .map(str::trim)
             .filter(|label| !label.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| default_heartbeat_name(entry).to_string());
+            .map_or_else(|| default_heartbeat_name(entry).to_string(), str::to_string);
         let subtitle = format!(
             "{} \u{b7} {}",
             human_schedule(&entry.job.schedule_expression),
@@ -885,8 +879,7 @@ impl HeartbeatsPicker {
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} open \u{b7} {} close",
@@ -901,8 +894,7 @@ impl HeartbeatsPicker {
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} run \u{b7} {} back \u{b7} {} close",
@@ -1021,12 +1013,10 @@ pub fn human_schedule(expression: &str) -> String {
     let at = |h: u32, m: u32| format!("{h:02}:{m:02}");
     if dom == CronField::Any && dow == CronField::Any {
         return match (hour, minute) {
-            (CronField::Any, CronField::Any) => "every minute".to_string(),
-            (CronField::Any, CronField::Step(1)) => "every minute".to_string(),
+            (CronField::Any, CronField::Any | CronField::Step(1)) => "every minute".to_string(),
             (CronField::Any, CronField::Step(n)) => format!("every {n} minutes"),
-            (CronField::Step(1), CronField::Value(0)) => "hourly".to_string(),
+            (CronField::Step(1) | CronField::Any, CronField::Value(0)) => "hourly".to_string(),
             (CronField::Step(n), CronField::Value(0)) => format!("every {n} hours"),
-            (CronField::Any, CronField::Value(0)) => "hourly".to_string(),
             (CronField::Any, CronField::Value(m)) => format!("hourly at :{m:02}"),
             (CronField::Value(h), CronField::Value(m)) => format!("daily {}", at(h, m)),
             _ => trimmed.to_string(),
@@ -1152,8 +1142,7 @@ impl Columns {
                         .job
                         .next_run_at
                         .as_deref()
-                        .map(format_timestamp)
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
                     16,
                 ),
             ),
@@ -1845,7 +1834,7 @@ mod tests {
 
     /// The schedule pair never displaces the error row (the bot-round
     /// fix): a heartbeat carrying both a schedule fact and a last error
-    /// renders every pair — MAX_DETAIL_ROWS covers the seven base pairs.
+    /// renders every pair — `MAX_DETAIL_ROWS` covers the seven base pairs.
     #[test]
     fn the_schedule_pair_never_hides_the_error_row() {
         let mut catalog = entries();
@@ -1895,7 +1884,7 @@ mod tests {
 
     /// The scroll-indicator row is reserved exactly once: a scrolling
     /// viewport uses every row it can hold (the frame constant excludes
-    /// the conditional indicator; menu_list_layout reserves it).
+    /// the conditional indicator; `menu_list_layout` reserves it).
     #[test]
     fn a_scrolling_viewport_uses_every_row() {
         let mut catalog = entries();

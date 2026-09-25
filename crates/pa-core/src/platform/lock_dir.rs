@@ -179,6 +179,12 @@ impl LockDir {
     /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); callers
     /// own retry policy. A lock older than `stale_after` is removed and
     /// retried once, so a crashed holder cannot wedge the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::WouldBlock`] when a fresh lock is held by
+    /// another process, and any underlying I/O error (missing parent,
+    /// permissions, stale-reclaim failures) as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);

@@ -153,7 +153,7 @@ mod tests {
     }
 
     /// Wire shape: `delete_rlm_subagent` answers `{ deleted: false }` for an
-    /// unknown child (TS `deleteInactiveRlmSubagent` -> "not_found").
+    /// unknown child (TS `deleteInactiveRlmSubagent` -> "`not_found`").
     #[tokio::test]
     async fn delete_rlm_subagent_answers_the_ts_not_found_shape() {
         let worker = created_worker().await;

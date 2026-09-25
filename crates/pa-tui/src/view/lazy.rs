@@ -340,7 +340,7 @@ impl AgentView {
         if movement < 0 {
             match &mut window.anchor {
                 Anchor::Tail(distance) => {
-                    *distance = distance.saturating_sub(movement.unsigned_abs())
+                    *distance = distance.saturating_sub(movement.unsigned_abs());
                 }
                 Anchor::Top(offset) => *offset = offset.saturating_sub(movement.unsigned_abs()),
             }
@@ -422,7 +422,7 @@ impl AgentView {
         // TS `precededByToolActivity` = the compact set (see layout pass).
         let preceded_by_tool = index > 0 && self.is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
-        if self.entry_cacheable(entry) {
+        if self.entry_cacheable_at(index, entry) {
             if let Some(layout) = &self.entry_layout[index][detail] {
                 if layout.spacing == spacing {
                     return layout.rows.clone();
@@ -436,7 +436,7 @@ impl AgentView {
             index == 0,
             preceded_by_tool,
         ));
-        if self.entry_cacheable(entry) {
+        if self.entry_cacheable_at(index, entry) {
             self.entry_layout[index][detail] = Some(EntryLayout {
                 spacing,
                 rows: rows.clone(),

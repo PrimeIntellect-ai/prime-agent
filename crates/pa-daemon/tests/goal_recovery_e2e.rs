@@ -9,7 +9,7 @@
 //! The flow (the f21 worker-recovery pattern): a faux-scripted session
 //! over the real agent engine starts a goal, runs work turns, compacts
 //! (the post-compaction mint bumps `continuationsUsed` durably), is
-//! SIGKILLed, and recovers through the supervisor's respawn — then keeps
+//! `SIGKILLed`, and recovers through the supervisor's respawn — then keeps
 //! using the goal, with the second compact's mint continuing the count.
 #![cfg(unix)]
 
@@ -106,7 +106,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -319,7 +319,7 @@ impl Harness {
         assert_eq!(done["success"], true, "prompt {id} failed: {done}");
     }
 
-    /// The last goal_update announcement's `continuationsUsed`.
+    /// The last `goal_update` announcement's `continuationsUsed`.
     fn announced_continuations(&self) -> Vec<u64> {
         self.client
             .events

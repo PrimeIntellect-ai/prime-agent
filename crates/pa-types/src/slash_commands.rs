@@ -202,6 +202,11 @@ pub fn parse_slash_command(text: &str) -> Option<(String, String)> {
 
 /// Suggest the closest candidate command name, mirroring
 /// `findSlashCommandSuggestion` in core/slash-commands.ts.
+///
+/// # Panics
+///
+/// Cannot panic: the `unwrap` below only runs when `closest` already holds
+/// a candidate, because the `||` in the loop guard short-circuits first.
 pub fn find_slash_command_suggestion<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     let mut closest: Option<(&str, usize)> = None;
     for &candidate in candidates {

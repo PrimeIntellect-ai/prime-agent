@@ -20,8 +20,7 @@ pub fn detect_line_ending(content: &str) -> LineEnding {
     let crlf_idx = content.find("\r\n");
     let lf_idx = content.find('\n');
     match (crlf_idx, lf_idx) {
-        (_, None) => LineEnding::Lf,
-        (None, _) => LineEnding::Lf,
+        (_, None) | (None, _) => LineEnding::Lf,
         (Some(c), Some(l)) => {
             if c < l {
                 LineEnding::CrLf

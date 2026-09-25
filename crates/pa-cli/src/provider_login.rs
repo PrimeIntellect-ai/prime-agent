@@ -3,7 +3,7 @@
 //! their auth status, the API-key store, the MCP device flow, the Prime
 //! Inference terminal login (`prime_inference_login`), and the credential
 //! removal. The provider OAuth flows (TS `the TS AI library/oauth`:
-//! Anthropic, GitHub Copilot, OpenAI Codex, xAI subscriptions) and the
+//! Anthropic, GitHub Copilot, `OpenAI` Codex, xAI subscriptions) and the
 //! Prime browser logins (the RSA `auth_challenge` flow) are not ported
 //! yet; their rows render (TS shape) and their flows report the
 //! unavailability.
@@ -77,8 +77,7 @@ fn display_name(provider_id: &str) -> String {
     BUILT_IN_PROVIDER_DISPLAY_NAMES
         .iter()
         .find(|(id, _)| *id == provider_id)
-        .map(|(_, name)| name.to_string())
-        .unwrap_or_else(|| provider_id.to_string())
+        .map_or_else(|| provider_id.to_string(), |(_, name)| name.to_string())
 }
 
 /// TS `isApiKeyLoginProvider`: the display-name map, or a provider the
@@ -484,14 +483,16 @@ fn login_blocking_on_panel(
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
-                    &auth,
-                    &format!("login {server}"),
-                    panel,
-                ))
-            })
-            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
+            .map_or_else(
+                |error: std::io::Error| format!("login failed: {error}"),
+                |runtime| {
+                    runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
+                        &auth,
+                        &format!("login {server}"),
+                        panel,
+                    ))
+                },
+            );
         return if outcome.starts_with("Usage:") {
             ProviderAuthOutcome::Error(outcome)
         } else {
@@ -505,28 +506,29 @@ fn login_blocking_on_panel(
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
-                    crate::prime_inference_login::PrimeLoginInputs {
-                        agent_dir: &agent_dir,
-                        provider_name: &provider_row.name,
-                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
-                        http: &pa_core::auth::ReqwestPrimeHttp,
-                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
-                            &agent_dir,
-                        )
-                        .as_deref(),
-                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
-                    },
-                    &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
-                ))
-            })
-            .unwrap_or_else(|error| {
-                ProviderAuthOutcome::Error(format!(
-                    "Failed to login to {}: {error}",
-                    provider_row.name
-                ))
-            });
+            .map_or_else(
+                |error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                        crate::prime_inference_login::PrimeLoginInputs {
+                            agent_dir: &agent_dir,
+                            provider_name: &provider_row.name,
+                            config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                            http: &pa_core::auth::ReqwestPrimeHttp,
+                            prime_cli_config_path:
+                                crate::prime_inference_login::prime_cli_config_path(&agent_dir)
+                                    .as_deref(),
+                            prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                        },
+                        &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
+                    ))
+                },
+            );
     }
     // Any other row that reaches the panel body reports the stub (the
     // session routes only the panel rows here).

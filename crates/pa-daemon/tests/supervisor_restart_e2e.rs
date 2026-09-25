@@ -6,7 +6,7 @@
 //! re-register within a bounded window, the roster rebuilds, and a scripted
 //! turn completes through an attach to the rebuilt roster.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -161,7 +161,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -330,7 +330,7 @@ fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &
     loop {
         let evidence = std::fs::read_to_string(&journal_path)
             .ok()
-            .map(|content| {
+            .is_some_and(|content| {
                 content.lines().any(|line| {
                     let Ok(record) = serde_json::from_str::<Value>(line) else {
                         return false;
@@ -338,8 +338,7 @@ fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &
                     record["activeSessionId"].as_str() == Some(session_id)
                         && record["busy"].as_bool() == Some(true)
                 })
-            })
-            .unwrap_or(false);
+            });
         if evidence {
             return;
         }

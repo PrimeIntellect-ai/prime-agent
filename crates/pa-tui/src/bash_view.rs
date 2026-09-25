@@ -39,9 +39,6 @@ const PREFERRED_VISIBLE: usize = 8;
 /// ruling).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The command column's width cap.
-const COMMAND_CAP: usize = 44;
-
 /// The lines the open detail asks for first (the lazy tail: the pane
 /// shows the newest output and loads more of it on upward scroll, so a
 /// finished task's full output never loads up front).
@@ -73,10 +70,14 @@ impl BashActivity {
 
 /// Accept either the daemon response's `activities` array or the array
 /// itself. Rows without a nonempty string id are ignored; ids are never
-/// interpreted as pids.
+/// interpreted as pids. Running shells ride the top (the operator's
+/// running-first ruling, 2026-09-25): the stable sort keeps the
+/// registry's own order within each side, the idle, stopped, and dead
+/// rows follow the live work.
 pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     let rows = data.get("activities").unwrap_or(data);
-    rows.as_array()
+    let mut activities: Vec<BashActivity> = rows
+        .as_array()
         .into_iter()
         .flatten()
         .filter_map(|row| {
@@ -104,13 +105,14 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                 status: row
                     .get("status")
                     .and_then(Value::as_str)
-                    .map(crate::menu_panel::scrub_controls)
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .map_or_else(|| "unknown".to_string(), crate::menu_panel::scrub_controls),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
             })
         })
-        .collect()
+        .collect();
+    activities.sort_by_key(|activity| !activity.running());
+    activities
 }
 
 /// The pane's interactive mode: the columned list, or a row's detail
@@ -302,8 +304,7 @@ impl BashView {
         let loaded = self
             .output_tail
             .as_ref()
-            .map(|(_, output)| output.len())
-            .unwrap_or(0);
+            .map_or(0, |(_, output)| output.len());
         self.tail_complete = loaded < self.tail_window as usize || self.tail_window >= TAIL_LINES;
     }
 
@@ -337,8 +338,7 @@ impl BashView {
                 self.tail_window = self
                     .output_tail
                     .as_ref()
-                    .map(|(_, output)| output.len() as u32)
-                    .unwrap_or(FIRST_TAIL_LINES);
+                    .map_or(FIRST_TAIL_LINES, |(_, output)| output.len() as u32);
             }
             // Only a fetch failure releases the in-flight claims (the
             // lazy load's, the open retry's): a kill error knows nothing
@@ -773,8 +773,7 @@ impl BashView {
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} open \u{b7} {} close",
@@ -791,8 +790,7 @@ impl BashView {
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         let up_down = format!(
             "{}/{}",
@@ -842,6 +840,7 @@ struct Columns {
     command: usize,
     duration: usize,
     pid: usize,
+    status: usize,
 }
 
 impl Columns {
@@ -871,20 +870,18 @@ impl Columns {
             .unwrap_or(0);
         // The fixed cells: the indent, the three two-column gaps, and
         // the duration, pid, and status columns.
-        let fixed = 2 + 2 + 2 + 2 + 2 + duration_content + pid + status;
-        let command_content = activities
-            .iter()
-            .map(|activity| str_width(&activity.command))
-            .chain([str_width("Command")])
-            .max()
-            .unwrap_or(0);
-        let command = command_content
-            .min(COMMAND_CAP)
-            .min(width.saturating_sub(fixed));
+        let fixed = 2 + 2 + 2 + 2 + duration_content + pid + status;
+        // The command column carries the full remaining width (the
+        // operator's width-distribution ruling, 2026-09-25): the fixed
+        // fact columns hug their content, the command prose column
+        // absorbs the rest, so the columns together span the terminal —
+        // no dead space past the last column.
+        let command = width.saturating_sub(fixed);
         Self {
             command,
             duration: duration_content,
             pid,
+            status,
         }
     }
 
@@ -897,7 +894,7 @@ impl Columns {
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, plain_cell("PID", self.pid)));
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(ThemeColor::Dim, "Status".to_string()));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Status", self.status)));
         truncate_line(&row, width, "")
     }
 
@@ -938,15 +935,17 @@ impl Columns {
                 plain_cell(
                     &activity
                         .pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .map_or_else(|| "\u{2014}".to_string(), |pid| pid.to_string()),
                     self.pid,
                 ),
             ),
         );
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&activity.status);
-        row.push(theme.fg_span(status_color, format!("{dot} {}", activity.status)));
+        row.push(theme.fg_span(
+            status_color,
+            plain_cell(&format!("{dot} {}", activity.status), self.status),
+        ));
         fill_row(theme, row, selected, width)
     }
 }
@@ -1201,6 +1200,22 @@ mod tests {
         assert_eq!(rows[0].id, "z");
     }
 
+    /// Running shells ride the top (the operator's running-first
+    /// ruling, 2026-09-25): a finished row that arrives first in the
+    /// registry moves below the live work, and the registry's own order
+    /// survives within each side.
+    #[test]
+    fn running_shells_ride_the_top_of_the_list() {
+        let rows = parse_bash_activities(&json!({"activities": [
+            {"id":"done-1","command":"echo one","status":"finished","exitCode":0},
+            {"id":"live-1","command":"sleep 10","status":"running"},
+            {"id":"done-2","command":"echo two","status":"finished","exitCode":1},
+            {"id":"live-2","command":"sleep 20","status":"running"},
+        ]}));
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["live-1", "live-2", "done-1", "done-2"]);
+    }
+
     /// The list is a columned table: a dim header naming the columns, the
     /// rows aligned under it, and one bottom hint line.
     #[test]
@@ -1236,13 +1251,13 @@ mod tests {
         }
     }
 
-    /// The table fills the full width of the TUI (the operator's
-    /// 2026-09-24 ruling) while the columns keep their content-hug
-    /// geometry: the selected row's wash spans the terminal width, the
-    /// plain rows' text stops well short of the edge, and no column
-    /// ever stretches its text to the terminal edge.
+    /// The columns distribute across the full TUI width (the operator's
+    /// 2026-09-25 ruling): the command column carries the remaining
+    /// width, so the header and every row — selected or plain — span
+    /// the terminal edge to edge; the fixed fact columns (duration,
+    /// pid, status) keep their content-hug geometry inside it.
     #[test]
-    fn the_table_fills_the_full_width_columns_hug_their_content() {
+    fn the_columns_distribute_across_the_full_width() {
         let view = BashView::new(activities(), 24);
         let frame = view.render(&theme(), 120, &kb());
         let selected = frame
@@ -1261,15 +1276,20 @@ mod tests {
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("Duration")))
             .expect("the column header");
-        assert!(
-            crate::width::spans_width(header) < 120,
-            "the columns never stretch their text to the edge"
+        assert_eq!(
+            crate::width::spans_width(header),
+            120,
+            "the columns span the terminal edge to edge"
         );
         let plain = frame
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("echo hi")))
             .expect("the other row");
-        assert!(crate::width::spans_width(plain) < 120);
+        assert_eq!(
+            crate::width::spans_width(plain),
+            120,
+            "every row spans the distributed width"
+        );
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
     }
 
@@ -1715,7 +1735,7 @@ mod tests {
                     view.set_output("a", &grown.join("\n"), view.detail_generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1745,7 +1765,7 @@ mod tests {
                     view.set_output("a", &full.join("\n"), view.detail_generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1788,7 +1808,7 @@ mod tests {
                     view.set_output("a", &tail.join("\n"), generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1866,7 +1886,7 @@ mod tests {
                     loaded = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1896,7 +1916,7 @@ mod tests {
                     retried = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1950,7 +1970,7 @@ mod tests {
                     view.set_output("a", &lines(FIRST_TAIL_LINES * 2).join("\n"), generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1969,7 +1989,7 @@ mod tests {
                     failed = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1988,7 +2008,7 @@ mod tests {
                     retried = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -2020,7 +2040,7 @@ mod tests {
                     generation = gen;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }

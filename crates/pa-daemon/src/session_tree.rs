@@ -140,6 +140,11 @@ fn message_text(message: &Value) -> String {
 impl SessionFile {
     /// `branch` (TS `SessionManager.branch`): move the leaf onto an
     /// existing entry; the next append parents from there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target entry does not exist in the
+    /// session; a `None` id clears the leaf and never errors.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
         match id {
             Some(id) => {
@@ -156,6 +161,11 @@ impl SessionFile {
     /// `branchWithSummary`: move the leaf, then append the
     /// `branch_summary` entry describing the abandoned branch. Returns the
     /// summary entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the branch target does not exist or the
+    /// summary entry cannot be persisted.
     pub fn append_branch_summary(
         &mut self,
         from_id: Option<&str>,
@@ -163,6 +173,7 @@ impl SessionFile {
         details: Option<Value>,
         from_hook: Option<bool>,
         usage: Option<Value>,
+        model: Option<(&str, &str)>,
     ) -> Result<String> {
         self.branch_to(from_id)?;
         let mut fields = json!({
@@ -176,11 +187,24 @@ impl SessionFile {
         if let Some(usage) = usage {
             fields["usage"] = usage;
         }
+        if let Some((provider, model_id)) = model {
+            // The serving model of the summary call (TS #2411's
+            // auxiliary routing): the per-model cost fold bills the
+            // row's spend on the model that billed it rather than the
+            // branch timeline.
+            fields["provider"] = json!(provider);
+            fields["modelId"] = json!(model_id);
+        }
         self.persist_entry("branch_summary", fields)
     }
 
     /// `appendLabelChange`: persist the `label` entry for a target and
     /// keep the label state consistent (a null label clears it).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target entry does not exist or the
+    /// label entry cannot be persisted.
     pub fn append_label_change(&mut self, target_id: &str, label: Option<&str>) -> Result<String> {
         if self.entry(target_id).is_none() {
             return Err(anyhow!("Entry {target_id} not found"));
@@ -207,6 +231,12 @@ impl SessionFile {
     /// their targets' labels re-recorded as fresh label entries), with a
     /// new header whose `parentSession` is this file. The caller re-points
     /// the worker at the returned store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the leaf entry does not exist, the fork's
+    /// lease cannot be acquired, or the forked session file cannot be
+    /// written.
     pub fn create_branched_file(&self, leaf_id: &str, session_dir: &Path) -> Result<SessionFile> {
         let path = self
             .branch_path_entries(leaf_id)
@@ -297,6 +327,11 @@ impl SessionFile {
     /// In-memory fork (TS non-persisted `createBranchedSession`): replace
     /// this store's entries with the root-to-`leaf_id` path, carrying the
     /// labels of the kept entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the leaf entry does not exist (a `None` id
+    /// clears the session and never errors).
     pub fn replace_with_branch(&mut self, leaf_id: Option<&str>) -> Result<()> {
         let path: Vec<SessionEntry> = match leaf_id {
             Some(leaf_id) => self
@@ -468,6 +503,7 @@ mod tests {
                 Some(json!({"readFiles": []})),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let entry = store.entry(&summary).unwrap();
@@ -477,6 +513,33 @@ mod tests {
         assert_eq!(entry.fields["summary"], json!("explored"));
         // The summary is the new leaf.
         assert_eq!(store.leaf_id(), Some(summary.as_str()));
+    }
+
+    /// A summary served by an auxiliary model (TS #2411) persists its
+    /// serving identity on the entry: the per-model cost fold bills the
+    /// row on the model that billed it, not the branch timeline.
+    #[test]
+    fn branch_summary_entry_records_the_serving_model() {
+        let (_dir, mut store) = temp_store();
+        let a = message_entry(&mut store, "user", "first");
+        let summary = store
+            .append_branch_summary(
+                Some(&a),
+                "aux summary",
+                None,
+                None,
+                Some(json!({
+                    "input": 50, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 55,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+                })),
+                Some(("anthropic", "aux-opus-4")),
+            )
+            .unwrap();
+        let entry = store.entry(&summary).unwrap();
+        assert_eq!(entry.fields["provider"], json!("anthropic"));
+        assert_eq!(entry.fields["modelId"], json!("aux-opus-4"));
+        assert_eq!(entry.fields["usage"]["totalTokens"], json!(55));
     }
 
     #[test]
