@@ -80,7 +80,7 @@ struct StallMock {
     turn_requests: Arc<Mutex<Vec<Instant>>>,
     review_request_at: Arc<Mutex<Option<Instant>>>,
     review_replied_at: Arc<Mutex<Option<Instant>>>,
-    summarizer_delay_ms: AtomicU64,
+    summarizer_delay_ms: Arc<AtomicU64>,
     port: u16,
 }
 
@@ -700,7 +700,7 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         .find(|(phase, _)| phase == "auto.end_emitted")
         .expect("the completion event traced");
     assert!(
-        end_emitted.1.saturating_sub(persist_elapsed) < COMPLETION_BOUND_MS * 1_000,
+        end_emitted.1.saturating_sub(persist_elapsed) < u128::from(COMPLETION_BOUND_MS) * 1_000,
         "the completion event took {}us after the durable persist (bound {}ms)",
         end_emitted.1.saturating_sub(persist_elapsed),
         COMPLETION_BOUND_MS
@@ -806,7 +806,6 @@ fn interrupted_threshold_compaction_settles_consistent() {
         "the interrupted compaction took {:?} to settle after the abort ack",
         settled_at - abort_ack
     );
-    let _ = abort_started;
     client.drain_events(500);
 
     // The aborted end event and the durable cancelled row broadcast.
