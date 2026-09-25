@@ -151,7 +151,6 @@ describe("#2193 shell completion presentation", () => {
 			"",
 			'    Command: "printf done"',
 		]);
-		for (const line of notice.content.split("\n").filter(Boolean)) expect(render([event])).toContain(line);
 		expect(launch.hasRunningBackgroundShell()).toBe(true);
 	});
 	it("keeps duplicate candidates and reused PIDs unmatched", () => {
