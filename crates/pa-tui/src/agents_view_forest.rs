@@ -2363,7 +2363,14 @@ mod tests {
         // `recursiveCost`), and the details layout carries it.
         assert_eq!(rows[0].cost, 0.75);
         let empty: HashMap<String, Rollup> = HashMap::new();
-        let rows = build_rows(&records, None, &Default::default(), &empty, None);
+        let rows = build_rows(
+            &records,
+            None,
+            &Default::default(),
+            &Default::default(),
+            &empty,
+            None,
+        );
         // Without rollups the per-pass walk fills the same totals.
         assert_eq!(rows[0].cost, 0.75);
         assert_eq!(rows[0].descendant_count, 1);
@@ -2430,7 +2437,7 @@ mod tests {
         // Expansion state must not reintroduce nesting under a query.
         let mut expanded = HashSet::new();
         expanded.insert("file:/x/orch.jsonl".to_string());
-        let rows = build_rows(&filtered, None, &expanded, &rollups, None);
+        let rows = build_rows(&filtered, None, &expanded, &expanded, &rollups, None);
         let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
         assert_eq!(
             titles,
@@ -2499,7 +2506,14 @@ mod tests {
         );
         assert_eq!(filtered.len(), 2);
         let rollups: HashMap<String, Rollup> = HashMap::new();
-        let rows = build_rows(&filtered, None, &Default::default(), &rollups, None);
+        let rows = build_rows(
+            &filtered,
+            None,
+            &Default::default(),
+            &Default::default(),
+            &rollups,
+            None,
+        );
         assert_eq!(
             rows[0].title, "sweep beta",
             "recency breaks score ties before section grouping"

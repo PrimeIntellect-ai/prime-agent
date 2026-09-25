@@ -118,8 +118,10 @@ pub fn descendant_positions_with_depth(
     let mut linked: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut index = 0;
     while index < queue.len() {
-        let (key, owner_depth) = &queue[index];
-        for position in by_parent_key.get(key).into_iter().flatten() {
+        // The owned copy ends the slice borrow before the extend below
+        // mutates the queue.
+        let (key, owner_depth) = queue[index].clone();
+        for position in by_parent_key.get(&key).into_iter().flatten() {
             if linked.insert(*position) {
                 positions.push((*position, owner_depth + 1));
                 queue.extend(
