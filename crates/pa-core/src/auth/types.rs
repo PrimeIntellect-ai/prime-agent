@@ -67,9 +67,10 @@ pub enum AuthCredential {
         access: String,
         refresh: Option<String>,
         expires: i64,
-        /// The ChatGPT account the Codex Subscription token carries (TS
-        /// stores the codex login's `accountId` next to the credentials;
-        /// the request path re-extracts it from the token, like TS).
+        /// The `ChatGPT` account the Codex Subscription token carries
+        /// (TS stores the codex login's `accountId` next to the
+        /// credentials; the request path re-extracts it from the token,
+        /// like TS).
         #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
         /// The GitHub Enterprise domain the Copilot login ran against (TS

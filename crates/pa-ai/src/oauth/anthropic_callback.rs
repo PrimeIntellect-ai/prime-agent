@@ -44,7 +44,11 @@ impl CallbackShared {
         if slot.is_none() {
             *slot = Some(result);
             drop(slot);
-            self.notify.notify_waiters();
+            // `notify_one` stores a permit when no waiter is registered
+            // yet, so a wait that checked the empty slot just before the
+            // settle still wakes on its first poll — `notify_waiters`
+            // would miss that window and hang the wait forever.
+            self.notify.notify_one();
         }
     }
 }
@@ -216,15 +220,27 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
     .await;
 }
 
-/// Read one request head (until the connection goes quiet); the
-/// callback browser request carries no body worth parsing.
+/// Read one request head (accumulating until the blank line — a
+/// fragmented browser request parses the same as a whole one; the
+/// callback request carries no body worth reading past it).
 async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut head = Vec::with_capacity(1024);
     let mut buffer = [0u8; 8192];
-    let read = stream.read(&mut buffer).await.ok()?;
-    if read == 0 {
-        return None;
+    loop {
+        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Some(String::from_utf8_lossy(&head).to_string());
+        }
+        if head.len() >= buffer.len() {
+            // An oversized head: parse what arrived (the handler's route
+            // checks reject it).
+            return Some(String::from_utf8_lossy(&head).to_string());
+        }
+        let read = stream.read(&mut buffer).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        head.extend_from_slice(&buffer[..read]);
     }
-    Some(String::from_utf8_lossy(&buffer[..read]).to_string())
 }
 
 async fn write_response(
@@ -436,6 +452,32 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("Could not start"), "{error}");
         drop(blocker);
+    }
+
+    /// The missed-notification regression: a settle landing between the
+    /// wait's empty-slot check and its `notified` registration still
+    /// wakes — the settle's stored permit (`notify_one`) completes the
+    /// future's first poll. With a `notify_waiters` settle this wait
+    /// would hang and the bound fails the test.
+    #[tokio::test]
+    async fn a_settle_in_the_registration_window_still_wakes() {
+        let server = AnthropicCallbackServer::bind("127.0.0.1", 0, "the-state")
+            .await
+            .expect("a free loopback port binds");
+        let shared = &server.shared;
+        // The settle lands before the wait registers: the stored permit
+        // must wake it.
+        shared
+            .settle(Some(CallbackCode {
+                code: "the-code".to_string(),
+                state: "the-state".to_string(),
+            }))
+            .await;
+        let result = tokio::time::timeout(Duration::from_secs(2), server.wait_for_code())
+            .await
+            .expect("the stored permit wakes the first poll")
+            .expect("the settle settled a code");
+        assert_eq!(result.code, "the-code");
     }
 
     #[test]

@@ -40,7 +40,11 @@ impl CallbackShared {
         if slot.is_none() {
             *slot = Some(result);
             drop(slot);
-            self.notify.notify_waiters();
+            // `notify_one` stores a permit when no waiter is registered
+            // yet, so a wait that checked the empty slot just before the
+            // settle still wakes on its first poll — `notify_waiters`
+            // would miss that window and hang the wait forever.
+            self.notify.notify_one();
         }
     }
 }
@@ -206,15 +210,27 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
     }
 }
 
-/// Read one request head (until the connection goes quiet); the
-/// callback browser request carries no body worth parsing.
+/// Read one request head: accumulate until the head's closing blank
+/// line (a request split across TCP reads stays complete; the callback
+/// browser request carries no body worth parsing).
 async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut head = Vec::with_capacity(1024);
     let mut buffer = [0u8; 8192];
-    let read = stream.read(&mut buffer).await.ok()?;
-    if read == 0 {
-        return None;
+    loop {
+        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Some(String::from_utf8_lossy(&head).to_string());
+        }
+        if head.len() >= buffer.len() {
+            // An oversized head: parse what arrived (the handler's route
+            // checks reject it).
+            return Some(String::from_utf8_lossy(&head).to_string());
+        }
+        let read = stream.read(&mut buffer).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        head.extend_from_slice(&buffer[..read]);
     }
-    Some(String::from_utf8_lossy(&buffer[..read]).to_string())
 }
 
 async fn write_response(
@@ -321,6 +337,7 @@ fn error_page(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     /// One live server on a free loopback port, with its port.
     async fn live(state: &str) -> (CodexCallbackServer, u16) {
@@ -354,6 +371,63 @@ mod tests {
             }
         }
         response
+    }
+
+    /// The missed-notification regression: a settle landing between the
+    /// wait's empty-slot check and its `notified` registration still
+    /// wakes — the settle's stored permit (`notify_one`) completes the
+    /// future's first poll. With a `notify_waiters` settle this wait
+    /// would hang and the bound fails the test.
+    #[tokio::test]
+    async fn a_settle_in_the_registration_window_still_wakes() {
+        let server = CodexCallbackServer::bind("127.0.0.1", 0, "the-state")
+            .await
+            .expect("a free loopback port binds");
+        let shared = server
+            .shared
+            .as_ref()
+            .expect("a bound server carries its shared slot");
+        // The wait's shape, with the race window staged exactly: the
+        // slot check ran (empty), the `notified` future exists but has
+        // not registered yet, and the settle lands in that window.
+        let notified = shared.notify.notified();
+        assert!(
+            shared.result.lock().await.is_none(),
+            "the slot starts empty"
+        );
+        shared.settle(None).await;
+        tokio::time::timeout(Duration::from_secs(2), notified)
+            .await
+            .expect("the wait wakes on the stored permit");
+        let settled = shared.result.lock().await.take();
+        assert_eq!(settled, Some(None));
+    }
+
+    /// The fragmentation regression: a request split across reads stays
+    /// complete (the head accumulates until the closing blank line).
+    #[tokio::test]
+    async fn a_request_split_across_reads_parses() {
+        let (server, port) = live("the-state").await;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the callback server accepts the connection");
+        stream
+            .write_all(b"GET /auth/call")
+            .await
+            .expect("the first fragment writes");
+        stream.flush().await.expect("the fragment flushes");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stream
+            .write_all(b"back?code=split-code&state=the-state HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("the rest of the request writes");
+        // The settle is the observable readiness: the split request
+        // still settles its code.
+        let code = tokio::time::timeout(Duration::from_secs(2), server.wait_for_code())
+            .await
+            .expect("the split request settles")
+            .expect("the code settles");
+        assert_eq!(code.code, "split-code");
     }
 
     #[tokio::test]

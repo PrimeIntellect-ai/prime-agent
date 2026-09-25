@@ -404,6 +404,12 @@ pub(crate) struct SessionUi {
     /// panel through it; the run loop owns the receiving side and folds
     /// each request into the mounted panel).
     auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
+    /// The running panel login's cooperative cancel signal (#2770):
+    /// armed only by the flows that check it between their poll steps
+    /// (the codex subscription login); Esc/ctrl+c on the mounted panel
+    /// marks it and unmounts, and a cancelled flow never writes its
+    /// credential.
+    auth_panel_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
@@ -3685,16 +3691,30 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        // A still-running previous flow ends before its replacement arms:
+        // its flag marks the blocking body out of the way, and its late
+        // settle is skipped below so it can never close the newer panel.
+        if let Some(previous) = self.auth_panel_cancel.take() {
+            previous.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
             .contains(&provider.id.as_str())
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
             let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
-                provider: provider.id.clone(),
-                outcome,
-            });
+            // The driving surface already exited (Esc, or a newer login
+            // re-armed): the panel is unmounted, the outcome is cancelled
+            // or errored by the flow's own checks, and applying a stale
+            // settle would close the NEWER flow's panel — so it never
+            // lands (TS the cancelled dialog's outcome is dropped with
+            // the dialog).
+            if !panel.cancelled() {
+                panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
+                    provider: provider.id.clone(),
+                    outcome,
+                });
+            }
         });
     }
 
@@ -8680,10 +8700,12 @@ impl SessionUi {
             TurnUpdate::QueueUpdated {
                 steering,
                 follow_ups,
+                starting,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
+                    starting,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor

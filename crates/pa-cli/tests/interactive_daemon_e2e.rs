@@ -2069,20 +2069,23 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
             .expect("interactive run");
     let rendered = outcome.frames.join("\n");
 
-    // The hint renders the user's binding, not the default.
-    assert!(
-        rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
-        "the prompt-context hint renders the override:\n{rendered}"
-    );
-    // The override key fired the action: the detail cycled to Details.
+    // The hint renders the user's binding, not the default, at the
+    // startup detail level (TS #2447: chats start at the middle
+    // `details` level).
     assert!(
         rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
+        "the prompt-context hint renders the override:\n{rendered}"
+    );
+    // The override key fired the action: the detail cycled to the
+    // expanded level.
+    assert!(
+        rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
         "the override key cycled conversation detail:\n{rendered}"
     );
-    // The default key no longer fires the action: the cycle never reached
-    // the third (all output) mode.
+    // The default key leaves the detail unchanged: the cycle never wraps
+    // back to the collapsed overview mode.
     assert!(
-        !rendered.contains("All mode ("),
+        !rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
         "the default ctrl+o must not cycle after the override:\n{rendered}"
     );
     // The scripted turn still ran under the custom bindings.

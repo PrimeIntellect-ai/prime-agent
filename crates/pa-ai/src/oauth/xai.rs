@@ -37,6 +37,12 @@ const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 /// The device poll's default interval (TS: 5000 when the response
 /// carries none).
 const DEFAULT_POLL_INTERVAL_MS: u64 = 5000;
+/// The refresh grant's request bound: the refresh runs under the auth
+/// store's file lock, which a peer declares stale after 10 seconds — the
+/// request must fit inside that window so a slow endpoint fails the
+/// refresh (kept for a retry) instead of holding the lock past its
+/// staleness.
+pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
 /// The cancel error the driving surface maps to the silent cancelled
 /// outcome.
 pub const LOGIN_CANCELLED: &str = "Login cancelled";
@@ -76,6 +82,11 @@ pub async fn login_xai(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<XaiCredentials, String> {
+    // An exited surface never starts: no device request, no browser
+    // launch (the #2770 flag is the seam).
+    if ui.is_cancelled() {
+        return Err(LOGIN_CANCELLED.to_string());
+    }
     let response = post_form(
         http,
         ui,
@@ -180,7 +191,7 @@ pub async fn refresh_xai_token(
             ("client_id", XAI_CLIENT_ID),
             ("refresh_token", refresh_token),
         ],
-        REQUEST_TIMEOUT_MS,
+        REFRESH_TIMEOUT_MS,
     )
     .await?;
     if !response.ok {
@@ -303,12 +314,16 @@ fn credentials_from_response(
             .map(str::to_string)
             .ok_or_else(|| "Invalid xAI OAuth response field: refresh_token".to_string())?,
     };
-    let lifetime_ms =
-        positive_seconds(body.get("expires_in").or(Some(&serde_json::json!(3600))))? * 1000;
+    let lifetime_ms = positive_seconds(body.get("expires_in").or(Some(&serde_json::json!(3600))))?
+        .saturating_mul(1000);
     Ok(XaiCredentials {
         access,
         refresh,
-        expires: now_ms() + lifetime_ms - REFRESH_SKEW_MS.min(lifetime_ms / 2),
+        // Saturating: a hostile `expires_in` must not overflow the sum
+        // (the NaN/inf gate already answered the field error).
+        expires: now_ms()
+            .saturating_add(lifetime_ms)
+            .saturating_sub(REFRESH_SKEW_MS.min(lifetime_ms / 2)),
     })
 }
 

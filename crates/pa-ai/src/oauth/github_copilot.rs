@@ -44,6 +44,12 @@ const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER: f64 = 1.4;
 /// One request's bound (the port's request-timeout norm; TS `fetch`
 /// carries no explicit timeout here).
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
+/// The refresh grant's request bound: the refresh runs under the auth
+/// store's file lock, which a peer declares stale after 10 seconds — the
+/// request must fit inside that window so a slow endpoint fails the
+/// refresh (kept for a retry) instead of holding the lock past its
+/// staleness.
+pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
 /// The credential's expiry skew (TS `5 * 60 * 1000`).
 const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
 /// The device flow's requested scope (TS `scope: "read:user"`).
@@ -143,6 +149,11 @@ pub async fn login_github_copilot(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<CopilotCredentials, String> {
+    // An exited surface never starts: no prompt, no browser launch (the
+    // #2770 flag is the seam).
+    if ui.is_cancelled() {
+        return Err(LOGIN_CANCELLED.to_string());
+    }
     let input = ui
         .on_prompt(&OAuthPrompt {
             message: "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
@@ -201,6 +212,8 @@ pub async fn refresh_github_copilot_token(
     for (name, value) in COPILOT_CLIENT_HEADERS {
         headers.push((name.to_string(), value.to_string()));
     }
+    // The refresh runs under the auth store's lock: the request fits
+    // inside the lock's staleness window (REFRESH_TIMEOUT_MS).
     let response = http
         .request(
             ProviderHttpRequest {
@@ -210,7 +223,7 @@ pub async fn refresh_github_copilot_token(
                 body: None,
                 follow_redirects: true,
             },
-            DEFAULT_TOKEN_TIMEOUT_MS,
+            REFRESH_TIMEOUT_MS,
         )
         .await?;
     if !response.ok() {
@@ -237,7 +250,7 @@ pub async fn refresh_github_copilot_token(
     Ok(CopilotCredentials {
         access: token,
         refresh: github_access_token.to_string(),
-        expires: (expires_at * 1000.0) as i64 - EXPIRY_SKEW_MS,
+        expires: ((expires_at * 1000.0) as i64).saturating_sub(EXPIRY_SKEW_MS),
         enterprise_url: enterprise_domain.map(str::to_string),
     })
 }

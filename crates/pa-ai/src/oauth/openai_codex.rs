@@ -1,4 +1,4 @@
-//! The ChatGPT Plus/Pro (Codex Subscription) OAuth flow — the port of
+//! The `ChatGPT` Plus/Pro (Codex Subscription) OAuth flow — the port of
 //! `packages/ai/src/utils/oauth/openai-codex.ts` (+ `pkce.ts`): the PKCE
 //! authorization request against the app registration, the localhost
 //! callback server raced against the manual paste, the token exchange,
@@ -21,7 +21,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use super::callback::{CallbackCode, CodexCallbackServer};
+use super::callback::CodexCallbackServer;
 use super::CodexHttp;
 
 /// The app registration the TS flow ships (TS `CLIENT_ID`).
@@ -39,6 +39,11 @@ const SCOPE: &str = "openid profile email offline_access";
 pub const DEFAULT_ORIGINATOR: &str = "pi";
 /// One token request's bound (the port's request-timeout norm).
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
+/// The refresh grant's tighter bound: the auth storage runs it under its
+/// file lock, which a peer declares stale after 10 seconds — the request
+/// must fit inside that window so a slow endpoint fails the refresh
+/// (kept for a retry) instead of holding the lock past its staleness.
+pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
 /// TS the `onAuth` instructions line.
 const AUTH_INSTRUCTIONS: &str = "A browser window should open. Complete login to finish.";
 /// TS the `onPrompt` fallback line.
@@ -106,6 +111,12 @@ pub async fn login_openai_codex(
     ui: &dyn CodexLoginUi,
     originator: &str,
 ) -> Result<OAuthCredentials, String> {
+    // The surface exited before the flow started: no server, no
+    // browser launch — the exit ends the flow (the first of the
+    // between-poll cancel checks, #2770).
+    if ui.is_cancelled() {
+        return Err(LOGIN_CANCELLED.to_string());
+    }
     let (verifier, challenge) = generate_pkce();
     let state = create_state();
     let url = authorization_url(&challenge, &state, originator);
@@ -340,16 +351,20 @@ fn account_id_of(access_token: &str) -> Result<String, String> {
 /// One token POST's outcome validation (TS `exchangeAuthorizationCode` /
 /// `refreshAccessToken` share the shape): a 2xx answer with the three
 /// fields the flow requires.
-async fn token_post(
+/// One token POST with an explicit request bound (the login keeps the
+/// port's default; the refresh runs under the storage lock and takes the
+/// tighter one).
+async fn token_post_bounded(
     http: &dyn CodexHttp,
     params: &[(&str, &str)],
     label: &str,
+    timeout_ms: u64,
 ) -> Result<TokenSuccess, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params.iter().map(|(key, value)| (*key, *value)))
         .finish();
     let response = http
-        .post_form(TOKEN_URL, &body, DEFAULT_TOKEN_TIMEOUT_MS)
+        .post_form(TOKEN_URL, &body, timeout_ms)
         .await
         .map_err(|message| format!("OpenAI Codex token {label} error: {message}"))?;
     if !response.ok() {
@@ -389,13 +404,25 @@ async fn token_post(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
     };
+    if !expires_in.is_finite() {
+        // A NaN/`inf` lifetime is not a lifetime (TS's arithmetic yields
+        // a never-expiring credential; the port refuses it as a broken
+        // response instead).
+        return Err(format!(
+            "OpenAI Codex token {label} response missing fields: {json}"
+        ));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
+    // Saturating: an oversized `expires_in` cannot overflow the
+    // epoch-millisecond sum (the worst case saturates at the never
+    // until it refreshes).
+    let expires = now.saturating_add((expires_in * 1000.0) as i64);
     Ok(TokenSuccess {
         access: access.to_string(),
         refresh: refresh.to_string(),
-        expires: now + (expires_in * 1000.0) as i64,
+        expires,
     })
 }
 
@@ -406,7 +433,7 @@ async fn exchange_authorization_code(
     code: &str,
     verifier: &str,
 ) -> Result<TokenSuccess, String> {
-    token_post(
+    token_post_bounded(
         http,
         &[
             ("grant_type", "authorization_code"),
@@ -416,6 +443,7 @@ async fn exchange_authorization_code(
             ("redirect_uri", REDIRECT_URI),
         ],
         "exchange",
+        DEFAULT_TOKEN_TIMEOUT_MS,
     )
     .await
 }
@@ -425,7 +453,7 @@ async fn refresh_access_token(
     http: &dyn CodexHttp,
     refresh_token: &str,
 ) -> Result<TokenSuccess, String> {
-    token_post(
+    token_post_bounded(
         http,
         &[
             ("grant_type", "refresh_token"),
@@ -433,6 +461,7 @@ async fn refresh_access_token(
             ("client_id", OPENAI_CODEX_CLIENT_ID),
         ],
         "refresh",
+        REFRESH_TIMEOUT_MS,
     )
     .await
 }
@@ -444,6 +473,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt as _;
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -547,7 +577,9 @@ mod tests {
             }
         }
 
-        /// The captured authorization URL (waits for the flow's `onAuth`).
+        /// The captured authorization URL: waits for the flow's
+        /// `onAuth` — observable readiness, bounded by a deadline that
+        /// fails the test (never a green-on-timeout retry loop).
         async fn captured_url(&self) -> String {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -574,7 +606,7 @@ mod tests {
         fn on_manual_code_input(
             &self,
         ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>> {
-            self.manual.as_ref().map(|manual| manual.future())
+            self.manual.as_ref().map(ScriptedAnswer::future)
         }
 
         fn on_prompt(
@@ -633,9 +665,7 @@ mod tests {
     async fn the_exchange_body_matches_the_ts_grant() {
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(
-                "http://localhost:1455/auth/callback?code=abc",
-            )),
+            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
             ScriptedAnswer::ready(),
         );
         let credentials = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -675,9 +705,7 @@ mod tests {
     async fn a_failed_exchange_surfaces_the_ts_message() {
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(
-                "http://localhost:1455/auth/callback?code=abc",
-            )),
+            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -690,9 +718,7 @@ mod tests {
     async fn a_missing_field_exchange_names_the_response() {
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(
-                "http://localhost:1455/auth/callback?code=abc",
-            )),
+            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -731,9 +757,7 @@ mod tests {
     async fn a_token_without_the_account_id_fails_the_login() {
         let http = token_http(&account_jwt(None));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(
-                "http://localhost:1455/auth/callback?code=abc",
-            )),
+            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -774,9 +798,9 @@ mod tests {
     async fn a_state_mismatch_fails_the_paste() {
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(
-                "http://localhost:1455/auth/callback?code=abc&state=not-ours",
-            )),
+            Some(ScriptedAnswer::value(&format!(
+                "{REDIRECT_URI}?code=abc&state=not-ours"
+            ))),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -790,12 +814,13 @@ mod tests {
         // The redirect carries no code: the prompt fallback answers it.
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback")),
+            Some(ScriptedAnswer::value(REDIRECT_URI)),
             ScriptedAnswer::value("prompted-code"),
         );
         let credentials = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
             .await
             .unwrap();
+        assert_eq!(credentials.account_id, "acct-1");
         assert_eq!(
             first_param(&http.seen_bodies(TOKEN_URL)[0], "code"),
             "prompted-code"
@@ -806,7 +831,7 @@ mod tests {
     async fn a_cancelled_prompt_ends_the_login() {
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback")),
+            Some(ScriptedAnswer::value(REDIRECT_URI)),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -819,7 +844,7 @@ mod tests {
     async fn an_empty_prompt_answer_reports_the_missing_code() {
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback")),
+            Some(ScriptedAnswer::value(REDIRECT_URI)),
             ScriptedAnswer::value("  "),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -830,8 +855,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_callback_falls_to_the_prompt_without_a_paste_surface() {
-        // The registered port is held, so the flow's server is dead and
-        // the paste surface is absent: the prompt is the only path.
+        // The app registration's redirect port is the flow's wire
+        // contract (a bind-anywhere test would not exercise it): it is
+        // held here deliberately — a busy port leaves the flow's server
+        // dead either way, so the test stays deterministic — and the
+        // paste surface is absent, so the prompt is the only path.
         let held = std::net::TcpListener::bind(("127.0.0.1", 1455));
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(None, ScriptedAnswer::value("the-code"));
@@ -852,10 +880,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
-        // The real registered port: the flow binds its callback server
-        // and the browser redirect settles the code. Skip when another
-        // process holds the port — the bind-failure path is covered
-        // above.
+        // The app registration's redirect port is the flow's wire
+        // contract (a bind-anywhere test would not exercise the real
+        // listener): the flow binds its callback server and the browser
+        // redirect settles the code. Skip when another process holds the
+        // port — the bind-failure path is covered above.
         let Ok(probe) = std::net::TcpListener::bind(("127.0.0.1", 1455)) else {
             return; // the registered port is busy: this run cannot stage it.
         };
@@ -882,7 +911,6 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", 1455))
             .await
             .expect("the flow's callback server accepts the redirect");
-        use tokio::io::AsyncWriteExt as _;
         stream
             .write_all(
                 format!("GET /auth/callback?code=live-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n")

@@ -540,15 +540,65 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
 // Agent observation
 // ---------------------------------------------------------------------------
 
+/// The family lifecycle status every observation row carries (TS #2493
+/// `AgentFamilyStatus`, the roster's `AgentRosterStatus`): `running` while
+/// the agent has work in flight, `idle` for a resident-but-quiet session,
+/// `inactive` for a family member with no live session in this daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFamilyStatus {
+    Running,
+    Idle,
+    Inactive,
+}
+
+impl AgentFamilyStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentFamilyStatus::Running => "running",
+            AgentFamilyStatus::Idle => "idle",
+            AgentFamilyStatus::Inactive => "inactive",
+        }
+    }
+}
+
+/// What a resident session is doing right now (TS #2493
+/// `AgentObserveActivity`): a separate axis from the family lifecycle in
+/// [`AgentFamilyStatus`], absent for members with no live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentObserveActivity {
+    Tool,
+    Model,
+    Compacting,
+    Busy,
+    User,
+    Idle,
+}
+
+impl AgentObserveActivity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentObserveActivity::Tool => "tool",
+            AgentObserveActivity::Model => "model",
+            AgentObserveActivity::Compacting => "compacting",
+            AgentObserveActivity::Busy => "busy",
+            AgentObserveActivity::User => "user",
+            AgentObserveActivity::Idle => "idle",
+        }
+    }
+}
+
 /// One roster row / agent summary.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentObserveSummary {
     pub active_session_id: Option<String>,
     pub session_id: String,
     pub session_name: Option<String>,
     pub relationship: Option<AgentFamilyRelationship>,
     pub runtime_kind: Option<String>,
-    pub status: String,
+    pub status: AgentFamilyStatus,
+    /// The live activity of a resident session; `None` for family members
+    /// with no live session in this daemon (TS marks the field absent).
+    pub activity: Option<AgentObserveActivity>,
     pub is_current: bool,
     pub is_streaming: bool,
     pub is_compacting: bool,
@@ -559,20 +609,24 @@ pub struct AgentObserveSummary {
 
 impl AgentObserveSummary {
     fn to_value(&self) -> Value {
-        json!({
+        let mut row = json!({
             "activeSessionId": self.active_session_id,
             "sessionId": self.session_id,
             "sessionName": self.session_name,
             "relationship": self.relationship.map(|r| r.as_str()),
             "runtimeKind": self.runtime_kind,
-            "status": self.status,
+            "status": self.status.as_str(),
             "isCurrent": self.is_current,
             "isStreaming": self.is_streaming,
             "isCompacting": self.is_compacting,
             "attachedClients": self.attached_clients,
             "queuedCount": self.queued_count,
             "isSessionActive": self.is_session_active,
-        })
+        });
+        if let Some(activity) = self.activity {
+            row["activity"] = json!(activity.as_str());
+        }
+        row
     }
 }
 
@@ -839,6 +893,46 @@ pub fn register_agent_observe_host_handlers<C: AgentObserveController + 'static>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TS #2493: an observation row carries the typed family status and
+    /// its live activity (a separate axis), and a member with no live
+    /// session omits the activity field entirely.
+    #[test]
+    fn observe_rows_carry_the_typed_status_and_activity() {
+        let mut row = AgentObserveSummary {
+            active_session_id: Some("live-1".to_string()),
+            session_id: "sess-1".to_string(),
+            session_name: Some("worker".to_string()),
+            relationship: Some(AgentFamilyRelationship::Child),
+            runtime_kind: Some("subagent".to_string()),
+            status: AgentFamilyStatus::Running,
+            activity: Some(AgentObserveActivity::Tool),
+            is_current: false,
+            is_streaming: true,
+            is_compacting: false,
+            attached_clients: 1,
+            queued_count: 0,
+            is_session_active: true,
+        };
+        let value = row.to_value();
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["activity"], "tool");
+
+        row.status = AgentFamilyStatus::Idle;
+        row.activity = Some(AgentObserveActivity::User);
+        let value = row.to_value();
+        assert_eq!(value["status"], "idle");
+        assert_eq!(value["activity"], "user");
+
+        row.status = AgentFamilyStatus::Inactive;
+        row.activity = None;
+        let value = row.to_value();
+        assert_eq!(value["status"], "inactive");
+        assert!(
+            value.get("activity").is_none(),
+            "a member with no live session omits the activity field"
+        );
+    }
 
     #[test]
     fn message_ids_and_validation() {

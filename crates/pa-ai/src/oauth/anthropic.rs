@@ -38,6 +38,12 @@ const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessio
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
 /// The credential's expiry skew (TS `5 * 60 * 1000`).
 const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
+/// The refresh grant's request bound: the refresh runs under the auth
+/// store's file lock, which a peer declares stale after 10 seconds — the
+/// request must fit inside that window so a slow endpoint fails the
+/// refresh (kept for a retry) instead of holding the lock past its
+/// staleness.
+pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
 /// TS the `onAuth` instructions line.
 const AUTH_INSTRUCTIONS: &str =
     "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.";
@@ -79,6 +85,11 @@ pub async fn login_anthropic(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<AnthropicCredentials, String> {
+    // An exited surface never starts: no callback port bind, no browser
+    // launch (the #2770 flag is the seam).
+    if ui.is_cancelled() {
+        return Err(LOGIN_CANCELLED.to_string());
+    }
     let (verifier, challenge) = generate_pkce();
     let server = AnthropicCallbackServer::start(&verifier).await?;
     ui.on_auth(
@@ -109,7 +120,16 @@ pub async fn refresh_anthropic_token(
         "refresh_token": refresh_token,
     })
     .to_string();
-    let token = json_token_request(http, TOKEN_URL, &body, "Anthropic token refresh").await?;
+    // The refresh runs under the auth store's lock: the request fits
+    // inside the lock's staleness window (REFRESH_TIMEOUT_MS).
+    let token = json_token_request(
+        http,
+        TOKEN_URL,
+        &body,
+        "Anthropic token refresh",
+        REFRESH_TIMEOUT_MS,
+    )
+    .await?;
     Ok(credentials_from(token))
 }
 
@@ -283,10 +303,14 @@ struct TokenResponse {
 
 /// The credential the response builds (TS the expires arithmetic).
 fn credentials_from(token: TokenResponse) -> AnthropicCredentials {
+    // Saturating: a hostile `expires_in` must not overflow the sum (the
+    // NaN/inf gate already answered the missing-fields error).
     AnthropicCredentials {
         access: token.access,
         refresh: token.refresh,
-        expires: now_ms() + token.expires_in * 1000 - EXPIRY_SKEW_MS,
+        expires: now_ms()
+            .saturating_add(token.expires_in.saturating_mul(1000))
+            .saturating_sub(EXPIRY_SKEW_MS),
     }
 }
 
@@ -315,7 +339,14 @@ async fn exchange_authorization_code(
         "code_verifier": verifier,
     })
     .to_string();
-    let token = json_token_request(http, TOKEN_URL, &body, "Token exchange").await?;
+    let token = json_token_request(
+        http,
+        TOKEN_URL,
+        &body,
+        "Token exchange",
+        DEFAULT_TOKEN_TIMEOUT_MS,
+    )
+    .await?;
     Ok(credentials_from(token))
 }
 
@@ -331,8 +362,9 @@ async fn json_token_request(
     url: &str,
     body: &str,
     label: &str,
+    timeout_ms: u64,
 ) -> Result<TokenResponse, String> {
-    let response = post_json(http, url, body)
+    let response = post_json(http, url, body, timeout_ms)
         .await
         .map_err(|message| format!("{label} request failed. url={url}; details={message}"))?;
     if !response.ok() {
@@ -378,6 +410,7 @@ async fn post_json(
     http: &dyn ProviderHttp,
     url: &str,
     body: &str,
+    timeout_ms: u64,
 ) -> Result<super::provider_http::ProviderHttpResponse, String> {
     http.request(
         ProviderHttpRequest {
@@ -390,7 +423,7 @@ async fn post_json(
             body: Some(body.to_string()),
             follow_redirects: true,
         },
-        DEFAULT_TOKEN_TIMEOUT_MS,
+        timeout_ms,
     )
     .await
 }

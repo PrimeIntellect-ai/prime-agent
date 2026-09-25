@@ -626,8 +626,11 @@ mod tests {
         // The panel adapter's seam: on_auth renders the url block (the
         // Copilot provider adds its waiting line), the placeholder rides
         // the prompt as TS's example line, and the allow-empty prompt
-        // keeps its blank answer. The requests fold through the panel
-        // channel; this test reads them off the receiving side.
+        // keeps its blank answer. The url block sends immediately (a
+        // plain request); the paste/prompt futures are LAZY (the request
+        // sends on first poll), so the test spawns them and reads the
+        // requests off the channel's receiving side, bounded by a recv
+        // timeout that fails the test — never a green-on-timeout retry.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let panel = AuthPanelHandle::new(tx);
         let copilot = PanelSubscriptionLoginUi::new(panel, "github-copilot");
@@ -635,49 +638,56 @@ mod tests {
             "https://github.com/login/device",
             Some("Enter code: ABCD-1234"),
         );
+        let url_request = rx.recv().await.expect("the url block sends");
+        match url_request {
+            pa_tui::auth_panel::AuthPanelRequest::AuthUrl { url, instructions } => {
+                assert_eq!(url, "https://github.com/login/device");
+                assert_eq!(instructions.as_deref(), Some("Enter code: ABCD-1234"));
+            }
+            _ => panic!("expected the url block request"),
+        }
+        // TS `showWaiting` for the Copilot device flow.
+        let waiting = rx.recv().await.expect("the waiting line sends");
+        match waiting {
+            pa_tui::auth_panel::AuthPanelRequest::Progress { message } => {
+                assert_eq!(message, "Waiting for browser authentication...");
+            }
+            _ => panic!("expected the waiting line request"),
+        }
+        // The domain prompt: spawned (the boxed future sends its
+        // PastePrompt on first poll, then pends on the answer this test
+        // never gives).
         let domain = copilot.on_prompt(&OAuthPrompt {
             message: "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
             placeholder: Some("company.ghe.com".to_string()),
             allow_empty: true,
         });
-        let mut requests = Vec::new();
-        while let Ok(request) = rx.try_recv() {
-            match request {
-                pa_tui::auth_panel::AuthPanelRequest::AuthUrl { url, instructions } => {
-                    requests.push(format!(
-                        "auth url: {url} | {}",
-                        instructions.unwrap_or_default()
-                    ));
-                }
-                pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } => {
-                    requests.push(format!("paste: {prompt}"));
-                }
-                pa_tui::auth_panel::AuthPanelRequest::Progress { message } => {
-                    requests.push(format!("progress: {message}"));
-                }
-                pa_tui::auth_panel::AuthPanelRequest::SelectTeam { .. }
-                | pa_tui::auth_panel::AuthPanelRequest::ProviderSettled { .. }
-                | pa_tui::auth_panel::AuthPanelRequest::McpSettled { .. }
-                | pa_tui::auth_panel::AuthPanelRequest::TracesSettled { .. } => {}
+        let domain_task = tokio::spawn(async move {
+            let _ = domain.await;
+        });
+        let prompt_request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the prompt request sends once polled")
+            .expect("the channel stays open");
+        match prompt_request {
+            // TS `showPrompt` renders the placeholder as an example.
+            pa_tui::auth_panel::AuthPanelRequest::PastePrompt {
+                prompt,
+                allow_empty,
+                ..
+            } => {
+                assert_eq!(
+                    prompt,
+                    "GitHub Enterprise URL/domain (blank for github.com) (e.g. company.ghe.com)"
+                );
+                assert!(allow_empty, "the blank entry is the valid default");
             }
+            _ => panic!("expected the paste prompt request"),
         }
-        assert_eq!(
-            requests[0],
-            "auth url: https://github.com/login/device | Enter code: ABCD-1234"
-        );
-        // TS `showWaiting` for the Copilot device flow.
-        assert_eq!(
-            requests[1],
-            "progress: Waiting for browser authentication..."
-        );
-        // TS `showPrompt` renders the placeholder as an example.
-        assert_eq!(
-            requests[2],
-            "paste: GitHub Enterprise URL/domain (blank for github.com) (e.g. company.ghe.com)"
-        );
-        // The pending prompt future is dropped: no answer is expected
+        // The pending prompt task is dropped: no answer is expected
         // (the test never mounts the panel).
-        drop(domain);
+        domain_task.abort();
+
         // The Anthropic adapter renders the url block without the
         // waiting line and arms the TS manual paste.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -687,32 +697,36 @@ mod tests {
             "https://claude.ai/oauth/authorize",
             Some("Complete login in your browser."),
         );
+        let url_request = rx.recv().await.expect("the url block sends");
+        match url_request {
+            pa_tui::auth_panel::AuthPanelRequest::AuthUrl { url, instructions } => {
+                assert_eq!(url, "https://claude.ai/oauth/authorize");
+                assert_eq!(
+                    instructions.as_deref(),
+                    Some("Complete login in your browser.")
+                );
+            }
+            _ => panic!("expected the url block request"),
+        }
         let manual = anthropic
             .on_manual_code_input()
             .expect("the panel supplies the paste");
-        let mut requests = Vec::new();
-        while let Ok(request) = rx.try_recv() {
-            match request {
-                pa_tui::auth_panel::AuthPanelRequest::AuthUrl { url, instructions } => {
-                    requests.push(format!(
-                        "auth url: {url} | {}",
-                        instructions.unwrap_or_default()
-                    ));
-                }
-                pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } => {
-                    requests.push(format!("paste: {prompt}"));
-                }
-                _ => {}
+        let manual_task = tokio::spawn(async move {
+            let _ = manual.await;
+        });
+        let paste_request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the paste request sends once polled")
+            .expect("the channel stays open");
+        match paste_request {
+            pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } => {
+                assert_eq!(
+                    prompt,
+                    "Paste redirect URL below, or complete login in browser:"
+                );
             }
+            _ => panic!("expected the paste request"),
         }
-        assert_eq!(
-            requests[0],
-            "auth url: https://claude.ai/oauth/authorize | Complete login in your browser."
-        );
-        assert_eq!(
-            requests[1],
-            "paste: Paste redirect URL below, or complete login in browser:"
-        );
-        drop(manual);
+        manual_task.abort();
     }
 }

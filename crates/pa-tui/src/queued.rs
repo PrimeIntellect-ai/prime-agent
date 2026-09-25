@@ -1,5 +1,7 @@
 //! The queued-message strip above the prompt dock (TS
-//! `updatePendingMessagesDisplay`): every human-typed steering/follow-up
+//! `updatePendingMessagesDisplay`): the picked-up prompt whose turn is
+//! still preparing renders as the "Starting" row (TS #2063), then every
+//! human-typed steering/follow-up
 //! message parked behind the running turn renders as a preview row - dim,
 //! with the TS prompt-highlight styling on top (a leading slash command
 //! in accent, `@path`/`--flag` argument tokens in their own colors) - with
@@ -34,6 +36,10 @@ use crate::Line;
 pub const STEERING_LABEL: &str = "Steering";
 /// The dim preview label for messages parked on the follow-up lane.
 pub const FOLLOW_UP_LABEL: &str = "Follow-up";
+/// The dim preview label for the picked-up prompt whose turn is preparing
+/// (TS #2063 `Starting`): the queued strip keeps showing the prompt the
+/// pump selected while it is still on its way into the conversation.
+pub const STARTING_LABEL: &str = "Starting";
 
 /// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
 /// with their own visible label render as-is (no lane label prepended).
@@ -82,6 +88,14 @@ pub struct QueuedMessages {
     pub steering: Vec<String>,
     /// Messages delivered when the run goes idle (the follow-up key).
     pub follow_ups: Vec<String>,
+    /// The picked-up prompt whose turn is still preparing (TS #2063
+    /// `sessionActions.active` with `kind: "turn"` and
+    /// `phase: "preparing"`): the strip keeps it visible as its
+    /// "Starting" row until the turn's rows land — the prompt left its
+    /// lane at pickup, so without the row it would be visible nowhere
+    /// until the turn renders it. Not browsable: the browse affordances
+    /// walk the parked lanes only (the prompt is already delivered).
+    pub starting: Option<String>,
 }
 
 impl QueuedMessages {
@@ -123,10 +137,14 @@ pub struct QueueSelectionItem {
     pub text: String,
 }
 
-/// The strip rows (TS `queuedMessagesContainer`): one blank spacer, a
-/// truncated dim preview per human-typed queued message, the one
-/// condensed internal-prompt row, and the queue hint. Empty input renders
-/// no rows at all. `browse_key` is the effective binding display for
+/// The strip rows (TS `queuedMessagesContainer`): one blank spacer, the
+/// "Starting" row of a preparing turn (TS #2063) above a truncated dim
+/// preview per human-typed queued message, the one condensed
+/// internal-prompt row, and the queue hint. Empty input renders no rows
+/// at all — a preparing turn alone still renders its row (the strip is
+/// the only place the picked-up prompt is visible until its turn runs),
+/// but never the hint (there is nothing parked to browse).
+/// `browse_key` is the effective binding display for
 /// `app.message.navigateOlder` (user overrides show).
 pub fn render_queue(
     theme: &Theme,
@@ -134,12 +152,19 @@ pub fn render_queue(
     browse_key: &str,
     width: usize,
 ) -> Vec<Line> {
-    if queue.is_empty() {
+    if queue.is_empty() && queue.starting.is_none() {
         return Vec::new();
     }
     let mut rows = vec![Vec::new()];
-    // The human-typed previews (the non-labeled messages) render first
-    // and individually, so what the user parked stays explicit and
+    // The preparing turn's prompt renders first (TS #2063: a queued
+    // prompt leaves its lane at pickup, and its own pre-turn work can
+    // hold it out of the conversation for a while — the "Starting" row
+    // keeps it visible there until the turn begins).
+    if let Some(starting) = queue.starting.as_deref() {
+        rows.push(preview_row(theme, STARTING_LABEL, starting, width));
+    }
+    // The human-typed previews (the non-labeled messages) render
+    // individually, so what the user parked stays explicit and
     // prioritized above the condensed row.
     for message in queue
         .steering
@@ -157,6 +182,10 @@ pub fn render_queue(
     }
     if let Some(count) = condensed_count(queue) {
         rows.push(condensed_row(theme, count, width));
+    }
+    if queue.is_empty() {
+        // A starting row alone carries no parked messages to browse.
+        return rows;
     }
     let hint = format!("\u{2570}\u{2500} {browse_key} to browse and edit queued messages");
     let hint_line: crate::Line = vec![
@@ -411,12 +440,66 @@ mod tests {
         QueuedMessages {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["then summarize".to_string()],
+            starting: None,
         }
     }
 
     #[test]
     fn empty_queue_renders_no_rows() {
         assert!(render_queue(&theme(), &QueuedMessages::default(), "alt+up", 80).is_empty());
+    }
+
+    /// TS #2063 (RES-1306): a picked-up prompt leaves its lane at
+    /// delivery, so while its turn is still preparing the strip is the
+    /// only place it is visible — it renders as the "Starting" row, the
+    /// first row of the strip, and never carries the browse hint (nothing
+    /// is parked to browse).
+    #[test]
+    fn a_preparing_turn_renders_the_starting_row_alone() {
+        let queue = QueuedMessages {
+            steering: Vec::new(),
+            follow_ups: Vec::new(),
+            starting: Some("queued before compaction".to_string()),
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 2, "spacer + the starting row, no hint");
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text.trim(), "Starting: queued before compaction");
+    }
+
+    /// The "Starting" row renders above the parked lanes, and the hint
+    /// follows the parked lanes as before.
+    #[test]
+    fn the_starting_row_renders_above_the_parked_lanes() {
+        let queue = QueuedMessages {
+            steering: Vec::new(),
+            follow_ups: vec!["then summarize".to_string()],
+            starting: Some("queued before compaction".to_string()),
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 4, "spacer + starting + follow-up + hint");
+        let starting: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(starting.trim(), "Starting: queued before compaction");
+        let follow_up: String = rows[2].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(follow_up.trim(), "Follow-up: then summarize");
+        assert!(crate::ansi::line_to_ansi(&rows[3]).contains("to browse and edit queued messages"));
+    }
+
+    /// The strip drops the "Starting" row the moment the projection no
+    /// longer reports a preparing turn (the phase left `preparing`).
+    #[test]
+    fn the_starting_row_drops_with_the_projection() {
+        let rows = render_queue(
+            &theme(),
+            &QueuedMessages {
+                steering: Vec::new(),
+                follow_ups: Vec::new(),
+                starting: None,
+            },
+            "alt+up",
+            80,
+        );
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -456,6 +539,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["/hotkeys".to_string()],
             follow_ups: vec!["fix @Cargo.toml --quiet".to_string()],
+            starting: None,
         };
         let theme = theme();
         let rows = render_queue(&theme, &queue, "alt+up", 80);
@@ -493,6 +577,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["x".repeat(100)],
             follow_ups: Vec::new(),
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -514,6 +599,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["first line\nsecond line".to_string()],
             follow_ups: Vec::new(),
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
@@ -543,6 +629,7 @@ mod tests {
                 "Agent message received: the research is done".to_string(),
             ],
             follow_ups: vec!["Goal context: milestone".to_string()],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -584,6 +671,7 @@ mod tests {
                 "then summarize".to_string(),
                 "Background command finished: sleep done".to_string(),
             ],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -622,6 +710,7 @@ mod tests {
                 "Agent message received: done".to_string(),
             ],
             follow_ups: vec![],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -644,6 +733,7 @@ mod tests {
                 "turn right".to_string(),
             ],
             follow_ups: vec!["then summarize".to_string()],
+            starting: None,
         };
         let mut selection = QueueSelection::default();
         // Browsing still walks every queued item newest-first, the
@@ -723,6 +813,7 @@ mod tests {
         let changed = QueuedMessages {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["edited".to_string()],
+            starting: None,
         };
         assert_eq!(
             selection.refresh_at(&changed, QueueLane::FollowUp, 0, "then summarize"),
@@ -736,6 +827,7 @@ mod tests {
         let mut queue = QueuedMessages {
             steering: vec!["one".to_string(), "two".to_string()],
             follow_ups: vec!["later".to_string()],
+            starting: None,
         };
         mirror_lane_move(&mut queue, QueueLane::Steering, 0, 1);
         assert_eq!(queue.steering, vec!["two", "one"]);
