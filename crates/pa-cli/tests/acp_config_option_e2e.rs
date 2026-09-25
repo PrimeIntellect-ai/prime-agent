@@ -158,10 +158,10 @@ fn select_params(session_id: &str, config_id: &str, value: Value) -> Value {
 }
 
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
+    use std::io::Write as _;
     let Ok(mut stream) = pa_types::platform::transport::connect_blocking(socket) else {
         return;
     };
-    use std::io::Write as _;
     let frame = format!(
             "{{\"type\":\"command\",\"id\":\"shutdown-test\",\"protocol\":{{\"name\":\"prime-agent.daemon\",\"version\":{}}},\"command\":{{\"type\":\"shutdown\"}}}}\n",
             pa_types::daemon::DAEMON_PROTOCOL_VERSION
