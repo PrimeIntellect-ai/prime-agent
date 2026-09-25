@@ -234,6 +234,14 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
             crate::tool_card::PanelStatus::Error => failed = true,
             crate::tool_card::PanelStatus::Done => {}
         }
+        // An ipython card whose final result carries a still-running
+        // background shell keeps the run live: the cell settled, but
+        // the renderer's own status for the card is Running (the
+        // no-exit-code shell case) - the block keeps animating and the
+        // wall-clock keeps running.
+        if crate::tool_card::ipython::background_shell_running(card) {
+            live = true;
+        }
     }
     let wall_ms = wire_wall_ms(&cards).or_else(|| instant_wall_ms(&cards, live));
     let mut classes: Vec<ClassCount> = Vec::new();

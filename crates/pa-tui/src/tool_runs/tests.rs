@@ -407,3 +407,43 @@ fn rebuild_from_keeps_the_prefix() {
         })
     );
 }
+
+#[test]
+fn a_run_with_a_running_background_shell_stays_live() {
+    // An ipython cell that launched a background shell settles itself
+    // (the final result lands) while the spawned shell keeps working:
+    // the renderer's own status for the card is Running (the
+    // no-exit-code shell case), so the condensed block stays live -
+    // the working icon animates and the wall-clock runs on instead of
+    // showing a settled checkmark.
+    let mut chat: Vec<ChatEntry> = Vec::new();
+    for index in 0..4 {
+        chat.push(settled_card(&format!("c{index}"), "ipython"));
+    }
+    chat.push(ChatEntry::Tool(Box::new(ToolCallCard {
+        id: "c4".to_string(),
+        name: "ipython".to_string(),
+        args: serde_json::json!({"code": "bash('sleep 60')"}),
+        started: true,
+        started_at: Some(std::time::Instant::now()),
+        ended_at: Some(std::time::Instant::now()),
+        result: Some(ToolResultView {
+            content: Vec::new(),
+            details: serde_json::json!({
+                "result": "<BashHandle pid=123 running command='sleep 60'>"
+            }),
+            is_error: false,
+        }),
+        result_partial: false,
+        ..Default::default()
+    })));
+    let map = run_map(&chat);
+    let run = map
+        .run_at(0)
+        .expect("the five-call run condenses (the settled background-shell cell is a member)");
+    let summary = run_summary(&chat, run);
+    assert!(
+        summary.live,
+        "the run stays live while the background shell runs"
+    );
+}

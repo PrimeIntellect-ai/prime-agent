@@ -215,13 +215,17 @@ impl RunsView {
             self.selected = Some(run.start);
         }
         if let Mode::Detail { start } = self.mode {
-            let stays = runs.iter().any(|run| run.start == start)
-                || by_key(self.detail_key.as_deref()).is_some();
-            if !stays {
+            // Identity first, exactly like the cursor: the viewed run
+            // survives wherever its first-card id lands. When the
+            // identity is GONE, the detail drops to the list even if
+            // another run now occupies the stored start - that
+            // impostor is not the run the pane was showing (and
+            // refresh_keys must never adopt it).
+            if let Some(keyed) = by_key(self.detail_key.as_deref()) {
+                self.mode = Mode::Detail { start: keyed };
+            } else if !runs.iter().any(|run| run.start == start) {
                 self.mode = Mode::List;
                 self.scroll_from_end = 0;
-            } else if let Some(keyed) = by_key(self.detail_key.as_deref()) {
-                self.mode = Mode::Detail { start: keyed };
             }
         }
         self.refresh_keys(chat, runs);

@@ -366,6 +366,62 @@ fn an_impostor_run_on_the_same_start_loses_to_identity() {
     );
 }
 
+#[test]
+fn a_dropped_run_loses_the_detail_even_to_an_impostor_start() {
+    // The viewed run VANISHED in the rebuild and a different run now
+    // starts at the stored start: the identity is gone, so the detail
+    // drops to the list instead of showing the impostor's cards (and
+    // refresh_keys never adopts the impostor's key).
+    let mut view = view_with_run(5);
+    view.push_entry(crate::chat::ChatEntry::User {
+        text: "again".to_string(),
+    });
+    for index in 0..6 {
+        view.push_entry(settled_card(&format!("e{index}"), "bash"));
+    }
+    let runs = view.condensed_runs();
+    let mut pane = RunsView::new(24, &view.chat, &runs);
+    let kb = KeybindingsManager::new();
+    pane.handle_key("up", &kb, &view.chat, &runs);
+    pane.handle_key("enter", &kb, &view.chat, &runs);
+    // The rebuild drops the c-run entirely: the e-run now starts at the
+    // stored start (1).
+    let mut rebuilt = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+    rebuilt.push_entry(crate::chat::ChatEntry::User {
+        text: "run it".to_string(),
+    });
+    for index in 0..6 {
+        rebuilt.push_entry(settled_card(&format!("e{index}"), "bash"));
+    }
+    rebuilt.push_entry(crate::chat::ChatEntry::Assistant(Box::new(
+        AssistantMessage {
+            blocks: vec![MessageBlock::Text("done".to_string())],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        },
+    )));
+    let shifted = rebuilt.condensed_runs();
+    assert_eq!(shifted.len(), 1, "the rebuilt chat holds the e-run alone");
+    assert_eq!(shifted[0].start, 1, "the e-run occupies the stored start");
+    assert_eq!(
+        pane.reconcile(&rebuilt.chat, &shifted),
+        None,
+        "the pane stays open"
+    );
+    let rows = pane.render(&rebuilt, 80, &kb);
+    let text = flat(&rows);
+    assert!(
+        text.iter().any(|row| row.contains("move")),
+        "the detail fell back to the list (the impostor never shows): {text:?}"
+    );
+    assert!(
+        !text.iter().any(|row| row.contains("scroll")),
+        "no drill-in rides on the impostor: {text:?}"
+    );
+}
+
 fn kb() -> KeybindingsManager {
     KeybindingsManager::new()
 }
