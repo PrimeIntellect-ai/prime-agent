@@ -1789,7 +1789,7 @@ mod tests {
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let mut session = session_with_turns(tmp.path(), 3);
-        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let sink_deltas = std::sync::Arc::clone(&deltas);
         let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
             sink_deltas.lock().unwrap().push(delta.to_string());
@@ -1898,7 +1898,7 @@ mod tests {
                 pa_ai::faux::FauxAssistantMessageOptions::default(),
             )),
         ]);
-        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let sink_deltas = std::sync::Arc::clone(&deltas);
         let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
             sink_deltas.lock().unwrap().push(delta.to_string());

@@ -9412,7 +9412,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
     let first = updates.first().unwrap().0;
     let last = updates.last().unwrap().0;
     assert!(
-        last.duration_since(first) >= std::time::Duration::from_millis(200),
+        (last - first) >= std::time::Duration::from_millis(200),
         "updates must spread across the stream, got {first:?}..{last:?}"
     );
     // Content grows monotonically: every update carries the full partial

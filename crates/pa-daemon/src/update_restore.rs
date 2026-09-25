@@ -1003,7 +1003,7 @@ mod tests {
                 next_turn: Vec::new(),
                 actions: serde_json::json!({}),
             },
-            in_flight: UpdateRosterInFlight::default(),
+            in_flight: pa_types::daemon::update_flow::UpdateRosterInFlight::default(),
             should_resume: false,
             rest: Map::default(),
         };

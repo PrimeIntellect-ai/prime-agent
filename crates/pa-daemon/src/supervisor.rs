@@ -2244,7 +2244,7 @@ impl Supervisor {
                 // Never leave the spawned worker behind a degraded create:
                 // the shutdown is graceful, and the awaited kill reaps the
                 // child (the monitor that would own it is not spawned yet).
-                let () = self.stop_worker(&resident).await;
+                let _ = self.stop_worker(&resident).await;
                 let _ = child.kill().await;
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(anyhow!("session worker create returned no session file"));
@@ -4441,7 +4441,7 @@ impl Supervisor {
         {
             // Never leave an admitted-but-unrecorded child running: the
             // ledger is the only topology store.
-            let () = self.stop_worker(&resident).await;
+            let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
         // The admission settled: the single-flight may release (a

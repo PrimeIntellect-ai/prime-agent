@@ -431,7 +431,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    #[allow(clippy::unicode_not_nfc)] // deliberate decomposed/non-NFC fixtures: the width/geometry engines must measure the raw sequences
+    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+    #[allow(clippy::unicode_not_nfc)]
     fn geometry_matches_refinement_rows() {
         let theme = theme();
         let mut row = RefinementOutcomeRow {

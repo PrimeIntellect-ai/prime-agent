@@ -5,7 +5,6 @@
 //! `daemon-supervisor.ts`'s roster code; subscribe, worker deltas,
 //! pushes, and stop-passivation live in `supervisor_roster.rs`).
 
-use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -530,6 +529,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::registry::ResidentWorker;
     use crate::rlm_ledger::RlmLedgerEdge;
+    use serde_json::Map;
     use crate::supervisor::ClientRouting;
     use pa_types::daemon::agent_roster::AgentRosterStatus;
 

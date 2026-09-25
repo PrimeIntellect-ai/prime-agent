@@ -140,7 +140,8 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unicode_not_nfc)] // deliberate decomposed/non-NFC fixtures: the width/geometry engines must measure the raw sequences
+    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+    #[allow(clippy::unicode_not_nfc)]
     fn geometry_matches_rendered_generic_cards() {
         let theme = theme();
         let mut cards = vec![ToolCallCard::default(), image_card()];

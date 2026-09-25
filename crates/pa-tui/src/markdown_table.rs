@@ -444,7 +444,8 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unicode_not_nfc)] // deliberate decomposed/non-NFC fixtures: the width/geometry engines must measure the raw sequences
+    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+    #[allow(clippy::unicode_not_nfc)]
     fn table_geometry_matches_rendered_rows() {
         let style = MarkdownStyle::default();
         let mut empty_rendered = Vec::new();

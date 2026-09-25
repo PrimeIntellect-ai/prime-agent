@@ -358,7 +358,8 @@ fn no_output_placeholder() {
 }
 
 #[test]
-#[allow(clippy::unicode_not_nfc)] // deliberate decomposed/non-NFC fixtures: the width/geometry engines must measure the raw sequences
+// deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+#[allow(clippy::unicode_not_nfc)]
 fn geometry_matches_paint_across_cell_branches() {
     let mut cards = vec![image_cell_card(), ToolCallCard::default()];
     for code in [
