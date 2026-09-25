@@ -472,6 +472,23 @@ impl SessionManager {
         Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
     }
 
+    /// Create an in-memory (non-persisted) manager pinned to a session's
+    /// own directory: the daemon worker owns the durable file and mirrors
+    /// the entries, but the session's identity (its directory, the local
+    /// harness state's home) stays the session's own.
+    pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
+        Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false)
+    }
+
+    /// Whether the manager carries a session directory of its own: a
+    /// fresh in-memory manager falls back to the cwd, while every
+    /// session-backed manager (persisted, or the daemon's mirrored
+    /// engine session) holds the session's directory. Session-owned
+    /// artifacts (the local harness state) need it.
+    pub fn has_session_dir(&self) -> bool {
+        self.session_dir != self.cwd
+    }
+
     /// Open an existing session file (repair + migrate), or a fresh one.
     pub fn open(cwd: &Path, session_dir: &Path, session_file: &Path) -> Self {
         Self::new_with(

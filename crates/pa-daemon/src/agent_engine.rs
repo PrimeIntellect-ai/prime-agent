@@ -1403,7 +1403,21 @@ impl AgentSessionEngine {
             std::fs::create_dir_all(session_dir)?;
         }
         let cwd = self.cwd();
-        let session_manager = pa_core::session::manager::SessionManager::in_memory(&cwd);
+        // The engine session carries the session's own directory (the
+        // refine path's local harness state and the session's identity)
+        // while staying non-persisted: the worker owns the durable
+        // session file and mirrors the entries into it.
+        let session_manager = self
+            .config
+            .session_dir
+            .as_deref()
+            .map(|session_dir| {
+                pa_core::session::manager::SessionManager::in_memory_in_session_dir(
+                    &cwd,
+                    session_dir,
+                )
+            })
+            .unwrap_or_else(|| pa_core::session::manager::SessionManager::in_memory(&cwd));
         let session_file = self
             .session_file
             .lock()

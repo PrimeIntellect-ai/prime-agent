@@ -253,12 +253,18 @@ pub async fn execute_refinement(
     } else {
         HarnessScope::Local
     };
+    // A local refinement needs the session's own directory: its harness
+    // state and artifact paths live there. The daemon's engine session is
+    // deliberately non-persisted (the worker owns the durable file and
+    // mirrors the entries) but carries the session's directory, so local
+    // refinement runs; a bare in-memory session with no directory of its
+    // own still bails.
     if options.rollback_id.is_none()
         && requested_scope == HarnessScope::Local
-        && !session.is_persisted()
+        && !session.has_session_dir()
     {
         anyhow::bail!(
-            "Local harness refinement requires a persisted session; use global refinement instead."
+            "Local harness refinement requires a session directory; use global refinement instead."
         );
     }
     // Planning state: global, or merged global+local for local refinements.
