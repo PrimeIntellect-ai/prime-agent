@@ -147,7 +147,7 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 // Hardened cross-platform tree kill for journaled orphans: absolute System32
 // taskkill /T on win32 (a bare name could resolve a planted CWD taskkill.exe),
 // process-group then pid SIGKILL elsewhere.
-export function killOrphanProcess(pid: number): boolean {
+export function killOrphanProcess(pid: number, timeoutMs = 10_000): boolean {
 	if (process.platform === "win32") {
 		// In-kernel bash() kill paths use taskkill /T; the reaper must kill the same tree, not just the shell pid.
 		const result = spawnSyncHidden(
@@ -155,7 +155,7 @@ export function killOrphanProcess(pid: number): boolean {
 			["/F", "/T", "/PID", String(pid)],
 			{
 				stdio: "ignore",
-				timeout: 10_000,
+				timeout: Math.max(1, timeoutMs),
 				env: { ...process.env, NoDefaultCurrentDirectoryInExePath: "1" },
 			},
 		);

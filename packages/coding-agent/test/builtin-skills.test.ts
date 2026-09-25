@@ -103,6 +103,7 @@ describe("builtin skills", () => {
 			["compact", "compact"],
 			["rlm-heartbeat", "rlm_heartbeat"],
 			["edit", "edit"],
+			["system-router", "system_router"],
 		]) {
 			expect(pythonImports.get(name)).toBe(importName);
 		}
