@@ -685,8 +685,8 @@ mod tests {
                 }
             }
         })
-            .await
-            .expect("the prompt request sends once polled");
+        .await
+        .expect("the prompt request sends once polled");
         match prompt_request {
             // TS `showPrompt` renders the placeholder as an example.
             pa_tui::auth_panel::AuthPanelRequest::PastePrompt {
@@ -736,8 +736,8 @@ mod tests {
                 }
             }
         })
-            .await
-            .expect("the paste request sends once polled");
+        .await
+        .expect("the paste request sends once polled");
         match paste_request {
             pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } => {
                 assert_eq!(
