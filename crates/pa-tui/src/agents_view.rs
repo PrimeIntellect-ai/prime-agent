@@ -954,26 +954,25 @@ impl AgentsViewMode {
         // session (the summary's parentActiveSessionId, or the parent
         // row's live session) must exist, or the second press would be a
         // confirmed no-op.
-        if row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some() {
-            if !row
-                .summary
-                .get("parentActiveSessionId")
-                .is_some_and(Value::is_string)
-            {
-                let parent_session = row
-                    .parent_identity
-                    .as_deref()
-                    .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
-                    .and_then(|parent| {
-                        parent
-                            .summary
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                    });
-                if parent_session.is_none() {
-                    return None;
-                }
-            }
+        let parent_session_missing = !row
+            .summary
+            .get("parentActiveSessionId")
+            .is_some_and(Value::is_string)
+            && row
+                .parent_identity
+                .as_deref()
+                .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
+                .and_then(|parent| {
+                    parent
+                        .summary
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                })
+                .is_none();
+        if (row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some())
+            && parent_session_missing
+        {
+            return None;
         }
         Some(PendingDelete {
             identity: row.identity.clone(),
@@ -1100,8 +1099,7 @@ impl AgentsViewMode {
                 saved
                     .get("path")
                     .and_then(Value::as_str)
-                    .map(|saved_path| saved_path != path)
-                    .unwrap_or(true)
+                    .map_or(true, |saved_path| saved_path != path)
             });
             self.rebuild_rows();
         }
@@ -1117,8 +1115,7 @@ impl AgentsViewMode {
                 saved
                     .get("path")
                     .and_then(Value::as_str)
-                    .map(|path| !self.deleted_saved_paths.contains(path))
-                    .unwrap_or(true)
+                    .map_or(true, |path| !self.deleted_saved_paths.contains(path))
             })
             .collect();
         self.saved_fetch_failed = false;
@@ -3250,7 +3247,7 @@ mod tests {
         mode.selected = 0;
         mode.handle_key("ctrl+x");
         let armed = mode.delete_arm_target().expect("an armed target");
-        let key = armed.session_key.clone();
+        let key = armed.session_key;
         assert!(key.is_some());
         // The roster replaces the agent: the same identity, a new live
         // session id.
