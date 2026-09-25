@@ -545,12 +545,8 @@ impl HeartbeatsPicker {
     /// One key id (TS `handleInput`, minus the busy gate: the session UI
     /// awaits the management request itself).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> HeartbeatsPickerAction {
-        // Cancel keys — including the open binding (ctrl+r toggles closed)
-        // — close the view (TS `tui.select.cancel` / `app.heartbeats.open`).
-        if key == "ctrl+c"
-            || kb.matches(key, "tui.select.cancel")
-            || kb.matches(key, "app.heartbeats.open")
-        {
+        // Cancel keys close the view (TS `tui.select.cancel`).
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return HeartbeatsPickerAction::Close;
         }
         // Back (left): the detail pane returns to the list, the list closes.
