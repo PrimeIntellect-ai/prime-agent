@@ -520,7 +520,7 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     // operator reported is gone from the whole flow.
     let window = harness.window_since(mark);
     assert!(
-        !find_subsequence(window, "Model not found".as_bytes()).is_some(),
+        find_subsequence(window, "Model not found".as_bytes()).is_none(),
         "the sign-in route never surfaces the dead-end refusal"
     );
 
