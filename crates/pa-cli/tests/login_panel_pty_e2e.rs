@@ -259,7 +259,7 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
 
     // `/login` opens the provider selector.
     harness.write(b"/login\r");
-    harness.wait_from_start("Providers", "the provider selector panel");
+    harness.wait_from_start("Search providers", "the provider selector panel");
 
     // Enter selects the Prime Inference row: the login flow starts. The
     // window from here to the settled status is the takeover-free proof.
