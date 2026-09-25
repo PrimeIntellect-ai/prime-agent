@@ -283,17 +283,23 @@ fn receipt_listing(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// A recorded JSON file, waiting for the turn that writes it.
+/// A recorded JSON file, waiting for the turn that writes it. The
+/// recording cell writes the receipt non-atomically (`open(w).write`),
+/// so the file can exist while its content is still empty or partial:
+/// readiness is a successful parse, not file existence — a read that
+/// does not parse yet polls on like a missing one until the deadline.
 fn read_recorded(dir: &Path, name: &str) -> Value {
     let path = dir.join(name);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&content).expect("recorded json");
+            if let Ok(value) = serde_json::from_str(&content) {
+                return value;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "record {name} never appeared in {}: existing: {}",
+            "record {name} never appeared or never parsed in {}: existing: {}",
             dir.display(),
             receipt_listing(dir)
         );
