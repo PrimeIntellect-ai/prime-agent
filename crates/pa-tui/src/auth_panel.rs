@@ -106,8 +106,12 @@ pub enum AuthPanelRequest {
         reply: oneshot::Sender<PrimeTeamPick>,
     },
     /// A provider login settled (`/login`'s rows): the outcome row
-    /// applies and the panel unmounts.
-    ProviderSettled { outcome: ProviderAuthOutcome },
+    /// applies and the panel unmounts. `provider` is the row's provider
+    /// id (the model-picker sign-in route keys its parked retry on it).
+    ProviderSettled {
+        provider: String,
+        outcome: ProviderAuthOutcome,
+    },
     /// A `/mcp` view auth command settled: its status line applies.
     McpSettled { note: String },
     /// The `/traces` login settled: the login's outcome applies (the

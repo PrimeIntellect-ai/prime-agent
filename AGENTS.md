@@ -162,6 +162,6 @@ Layering rules:
 
 ## References
 
-- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the session engine port, the completion matrix, the keybindings).
+- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the completion matrix, the keybindings).
 - `docs/FEATURE_PARITY.md` is the exhaustive interactive-mode audit: every TS component walked and verified against the Rust implementation.
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.
