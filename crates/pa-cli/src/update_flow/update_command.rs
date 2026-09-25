@@ -41,6 +41,14 @@ pub struct UpdateCommandOptions {
 
 /// `prime-agent update`: plan, stage, spawn the coordinator, and relay its
 /// terminal status. Returns the process exit code.
+///
+/// # Errors
+/// Returns an error when this binary is not owned by the installer (no
+/// managed install root), when the update lock cannot be acquired, handed
+/// over, or released, when a status-record write fails, when planning,
+/// downloading, staging, or candidate validation fails (a planning failure
+/// records `Aborted` first), or when the detached coordinator cannot be
+/// spawned.
 pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     let socket_path = pa_daemon::socket::default_daemon_socket_path();
@@ -536,6 +544,12 @@ async fn track_update_completed(status: &UpdateStatus) {
 /// --daemon-socket <path> --internal-update-restart-status <path>`): the
 /// detached process that adopts the staged status and drives the FSM to a
 /// terminal state. Returns the process exit code.
+///
+/// # Errors
+/// Returns an error when the coordinator cannot adopt the staged status
+/// record or a status write fails. An invalid invocation (a status path
+/// outside the agent dir's `update-restarts/`) is reported on stderr and
+/// returns `Ok(1)` instead.
 pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     // TS parity: the status file belongs under the agent dir's

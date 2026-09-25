@@ -40,6 +40,9 @@ impl StatusWriter {
     /// the initial record on disk before the caller proceeds (TS
     /// `DaemonUpdateRestartStatusWriter` persists in its constructor, so
     /// a joining process that tails this path never races the first write).
+    ///
+    /// # Errors
+    /// Returns an error when the initial status record cannot be persisted.
     pub fn new(path: &Path, update_id: &UpdateId, socket_path: &str) -> Result<Self> {
         let writer = Self::fresh(path, update_id, socket_path);
         writer
@@ -78,6 +81,9 @@ impl StatusWriter {
     /// Adopt the status file of an earlier writer (the CLI staged through
     /// `Staged`): the epoch continues above the recorded one, so this
     /// process's writes can never be regressed by the predecessor's.
+    ///
+    /// # Errors
+    /// Returns an error when the adopted status record cannot be persisted.
     pub fn adopt(path: &Path, update_id: &UpdateId, socket_path: &str) -> Result<Self> {
         let mut writer = Self::fresh(path, update_id, socket_path);
         if let Some(existing) = read_status(path) {
@@ -92,6 +98,9 @@ impl StatusWriter {
 
     /// Move to `state` (a driver bug to move illegally — pa-types owns the
     /// table) and persist before acting.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_state(&mut self, state: UpdateState) -> Result<()> {
         debug_assert!(
             pa_types::daemon::update_flow::update_transition_allowed(self.status.state, state),
@@ -104,30 +113,50 @@ impl StatusWriter {
         self.persist()
     }
 
+    /// Record the coordinator's status message and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_message(&mut self, message: Option<String>) -> Result<()> {
         self.status.message = message;
         self.touch();
         self.persist()
     }
 
+    /// Record the predecessor identity and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_predecessor(&mut self, identity: UpdateProcessIdentity) -> Result<()> {
         self.status.predecessor = Some(identity);
         self.touch();
         self.persist()
     }
 
+    /// Record the successor identity and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_successor(&mut self, identity: UpdateProcessIdentity) -> Result<()> {
         self.status.successor = Some(identity);
         self.touch();
         self.persist()
     }
 
+    /// Record the session counts and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_counts(&mut self, counts: UpdateStatusCounts) -> Result<()> {
         self.status.counts = counts;
         self.touch();
         self.persist()
     }
 
+    /// Record the failure list and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the status record cannot be written to disk.
     pub fn set_failures(
         &mut self,
         failures: Vec<pa_types::daemon::update_flow::UpdateStatusFailure>,

@@ -34,7 +34,7 @@ pub const GLOBAL_VALUE_FLAGS: [&str; 26] = [
     "--autonomous-timeout-ms",
 ];
 
-/// Value flags that also appear in GLOBAL_VALUE_FLAGS.
+/// Value flags that also appear in `GLOBAL_VALUE_FLAGS`.
 const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
 /// Prompt value flags whose text may look like a long option.
 const PROMPT_VALUE_FLAGS: [&str; 2] = ["--system-prompt", "--append-system-prompt"];
