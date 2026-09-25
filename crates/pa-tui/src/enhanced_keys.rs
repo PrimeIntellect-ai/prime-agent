@@ -152,6 +152,79 @@ fn kitty_action(
     KittyAction::Probe
 }
 
+/// Direct-terminal hints are useful only without a transport that can
+/// forward environment variables while changing or filtering escape replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardCapability {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Default)]
+struct TerminalEnvironment<'a> {
+    term: Option<&'a str>,
+    term_program: Option<&'a str>,
+    kitty_window_id: Option<&'a str>,
+    ghostty_resources_dir: Option<&'a str>,
+    wezterm_pane: Option<&'a str>,
+    tmux: Option<&'a str>,
+    sty: Option<&'a str>,
+    zellij: Option<&'a str>,
+    ssh_connection: Option<&'a str>,
+    ssh_tty: Option<&'a str>,
+}
+
+fn keyboard_capability(env: &TerminalEnvironment<'_>) -> KeyboardCapability {
+    let term = env.term.unwrap_or_default();
+    if env.tmux.is_some()
+        || env.sty.is_some()
+        || env.zellij.is_some()
+        || env.ssh_connection.is_some()
+        || env.ssh_tty.is_some()
+        || term.starts_with("tmux")
+        || term.starts_with("screen")
+    {
+        return KeyboardCapability::Unknown;
+    }
+    if matches!(term, "dumb" | "linux") {
+        return KeyboardCapability::Unsupported;
+    }
+    if env.kitty_window_id.is_some()
+        || env.ghostty_resources_dir.is_some()
+        || env.wezterm_pane.is_some()
+        || matches!(env.term_program, Some("kitty" | "ghostty" | "WezTerm"))
+    {
+        return KeyboardCapability::Supported;
+    }
+    KeyboardCapability::Unknown
+}
+
+fn local_keyboard_capability() -> KeyboardCapability {
+    let term = std::env::var("TERM").ok();
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let kitty_window_id = std::env::var("KITTY_WINDOW_ID").ok();
+    let ghostty_resources_dir = std::env::var("GHOSTTY_RESOURCES_DIR").ok();
+    let wezterm_pane = std::env::var("WEZTERM_PANE").ok();
+    let tmux = std::env::var("TMUX").ok();
+    let sty = std::env::var("STY").ok();
+    let zellij = std::env::var("ZELLIJ").ok();
+    let ssh_connection = std::env::var("SSH_CONNECTION").ok();
+    let ssh_tty = std::env::var("SSH_TTY").ok();
+    keyboard_capability(&TerminalEnvironment {
+        term: term.as_deref(),
+        term_program: term_program.as_deref(),
+        kitty_window_id: kitty_window_id.as_deref(),
+        ghostty_resources_dir: ghostty_resources_dir.as_deref(),
+        wezterm_pane: wezterm_pane.as_deref(),
+        tmux: tmux.as_deref(),
+        sty: sty.as_deref(),
+        zellij: zellij.as_deref(),
+        ssh_connection: ssh_connection.as_deref(),
+        ssh_tty: ssh_tty.as_deref(),
+    })
+}
+
 /// Record the terminal's kitty capability (a probe answered). The
 /// resolution outlives the surface it arrived on: a later start pushes
 /// the flags back from the memory instead of re-querying (the
@@ -187,11 +260,25 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         QUERY_IN_FLIGHT.load(Ordering::SeqCst),
     ) {
         KittyAction::Probe => {
-            // The swap claims the query slot against a concurrent enable;
-            // the latch keeps every later start from re-arming the probe.
-            if !QUERY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-                KITTY_PROBED.store(true, Ordering::SeqCst);
-                spawn_kitty_probe();
+            // Known direct terminals need no query. Ambiguous terminals use
+            // the bounded crossterm reader so typeahead stays in its queue.
+            match local_keyboard_capability() {
+                KeyboardCapability::Supported => {
+                    KITTY_PROBED.store(true, Ordering::SeqCst);
+                    record_kitty_supported();
+                    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                        write_all(out, ENABLE_KITTY_FLAGS)?;
+                    }
+                }
+                KeyboardCapability::Unsupported => {
+                    KITTY_PROBED.store(true, Ordering::SeqCst);
+                }
+                KeyboardCapability::Unknown => {
+                    if !QUERY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                        KITTY_PROBED.store(true, Ordering::SeqCst);
+                        spawn_kitty_probe();
+                    }
+                }
             }
         }
         KittyAction::PushFlags => {
@@ -459,6 +546,35 @@ mod tests {
         // Settled no-kitty: nothing, forever — the second start and every
         // later resume must not run the query again.
         assert_eq!(kitty_action(false, true, false, false), KittyAction::None);
+    }
+
+    #[test]
+    fn only_direct_terminal_markers_skip_the_probe() {
+        for env in [
+            TerminalEnvironment { kitty_window_id: Some("42"), ..Default::default() },
+            TerminalEnvironment { ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
+            TerminalEnvironment { wezterm_pane: Some("3"), ..Default::default() },
+            TerminalEnvironment { term_program: Some("ghostty"), ..Default::default() },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Supported);
+        }
+        for env in [
+            TerminalEnvironment { term: Some("dumb"), ..Default::default() },
+            TerminalEnvironment { term: Some("linux"), ..Default::default() },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Unsupported);
+        }
+        for env in [
+            TerminalEnvironment::default(),
+            TerminalEnvironment { term: Some("xterm-ghostty"), ..Default::default() },
+            TerminalEnvironment { term_program: Some("vscode"), ..Default::default() },
+            TerminalEnvironment { term: Some("tmux-256color"), ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
+            TerminalEnvironment { tmux: Some("/tmp/tmux"), kitty_window_id: Some("42"), ..Default::default() },
+            TerminalEnvironment { ssh_connection: Some("remote"), wezterm_pane: Some("3"), ..Default::default() },
+            TerminalEnvironment { zellij: Some("0"), ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Unknown);
+        }
     }
 
     /// A suspend/resume cycle on a kitty-capable terminal re-applies the
