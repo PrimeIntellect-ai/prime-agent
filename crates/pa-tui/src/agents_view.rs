@@ -316,7 +316,7 @@ impl DeleteAction {
             }
             DeleteAction::StopAgent { .. } => true,
             DeleteAction::DeleteSavedSession { .. } => {
-                data.get("deleted").map(serde_json::Value::as_bool) != Some(Some(false))
+                data.get("ok").map(serde_json::Value::as_bool) != Some(Some(false))
             }
         }
     }
@@ -331,7 +331,7 @@ fn spawn_delete_dispatch(
     client: &DaemonClient,
     ui_tx: mpsc::UnboundedSender<UiInput>,
     action: DeleteAction,
-) {
+) -> tokio::task::JoinHandle<()> {
     let client = client.clone();
     tokio::spawn(async move {
         let request = match &action {
@@ -406,14 +406,7 @@ fn spawn_delete_dispatch(
             Err(error) => format!("{} failed: {error}", action.fail_word()),
         };
         let _ = ui_tx.send(UiInput::DeleteResult { message: outcome });
-    });
-}
-
-/// The row's stop-or-delete word: true while the row has live work (the
-/// running section - TS `hasLiveWork`), false otherwise. The confirm's
-/// hint and the execution gate both derive from the CURRENT row state.
-fn delete_arm_word(row: &AgentsViewRow) -> bool {
-    row.section == crate::agents_view_state::Section::Running
+    })
 }
 
 /// The agents view state: roster + catalog data, search, selection, and
@@ -882,18 +875,26 @@ impl AgentsViewMode {
     /// [`PendingDelete`]), `None` for rows with no stop-or-delete action
     /// (summary rows, and rows carrying neither a live session nor a
     /// saved file). `stop` is true while the row has live work (TS
-    /// `hasLiveWork`: the running section, or a subagent under a live
-    /// parent).
+    /// `hasLiveWork`).
     fn delete_arm_target(&self) -> Option<PendingDelete> {
         let row = self.rows.get(self.selected)?;
-        let stop = row.section == crate::agents_view_state::Section::Running;
+        let stop = self.delete_arm_word(row);
         match row.kind {
             RowKind::SubagentSummary => None,
-            RowKind::Agent if stop => row
+            // An agent with a live session stops (TS `stopAgentForDeletion`
+            // keys on the session's existence — an idle-but-live row still
+            // stops, never deletes its file); a saved-only row deletes.
+            RowKind::Agent if row.summary.get("activeSessionId").is_some() => row
                 .summary
                 .get("activeSessionId")
                 .map(Value::as_str)
                 .map(|_| ()),
+            // A scoped view's promoted direct child is an Agent-kind row
+            // carrying the child id: it rides the child arms, never the
+            // agent arms.
+            RowKind::Agent if row.summary.get("rlmChildId").is_some() => {
+                row.summary.get("rlmChildId").map(Value::as_str).map(|_| ())
+            }
             RowKind::Agent => row
                 .summary
                 .get("sessionFile")
@@ -907,18 +908,74 @@ impl AgentsViewMode {
         })
     }
 
+    /// The row's stop-or-delete word (the hint + the execution gate's
+    /// shared derivation): true while the row rides a live session or
+    /// the running section (TS `hasLiveWork`), false for a saved-only
+    /// row.
+    fn delete_arm_word(&self, row: &AgentsViewRow) -> bool {
+        let live_session = row.summary.get("activeSessionId").is_some();
+        let child = row.summary.get("rlmChildId").is_some();
+        row.section == crate::agents_view_state::Section::Running || live_session && child
+    }
+
     /// The executed dispatch for the armed row (the second press): the
     /// wire variant follows the row kind, exactly TS
     /// `handleDeleteSelected`'s branches.
     fn delete_action_for_selected(&self) -> Option<DeleteAction> {
         let row = self.rows.get(self.selected)?;
         let name = row.title.clone();
+        // A promoted direct child (an Agent-kind row carrying rlmChildId)
+        // rides the child arms with its own id.
+        let child_id = row
+            .summary
+            .get("rlmChildId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let active_session_id = row
+            .summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // Subagent rows (and promoted children) target the child through
+        // the parent's live session.
+        if let Some(child_id) = child_id {
+            if row.kind == RowKind::SubagentSummary {
+                return None;
+            }
+            let parent = row
+                .parent_identity
+                .as_deref()
+                .and_then(|identity| self.rows.iter().find(|row| row.identity == identity));
+            let active_session_id = parent
+                .and_then(|parent| {
+                    parent
+                        .summary
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                })
+                .or(active_session_id.as_deref())?
+                .to_string();
+            if self.delete_arm_word(row) {
+                return Some(DeleteAction::StopSubagent {
+                    active_session_id,
+                    child_id,
+                    name,
+                });
+            }
+            return Some(DeleteAction::DeleteSubagent {
+                active_session_id,
+                child_id,
+                name,
+            });
+        }
+        // Agent rows: a live session stops (idle-but-live included — TS
+        // `stopAgentForDeletion` keys on the session's existence); a
+        // saved-only row deletes its file.
         match row.kind {
             RowKind::SubagentSummary => None,
-            RowKind::Agent => {
-                if row.section == crate::agents_view_state::Section::Running {
-                    let active_session_id =
-                        row.summary.get("activeSessionId")?.as_str()?.to_string();
+            RowKind::Subagent => None,
+            _ => {
+                if let Some(active_session_id) = active_session_id {
                     Some(DeleteAction::StopAgent {
                         active_session_id,
                         name,
@@ -926,32 +983,6 @@ impl AgentsViewMode {
                 } else {
                     let session_path = row.summary.get("sessionFile")?.as_str()?.to_string();
                     Some(DeleteAction::DeleteSavedSession { session_path, name })
-                }
-            }
-            RowKind::Subagent => {
-                let child_id = row.summary.get("rlmChildId")?.as_str()?.to_string();
-                let parent = row
-                    .parent_identity
-                    .as_deref()
-                    .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))?;
-                let active_session_id = parent
-                    .summary
-                    .get("activeSessionId")
-                    .and_then(Value::as_str)
-                    .or_else(|| row.summary.get("activeSessionId").and_then(Value::as_str))?
-                    .to_string();
-                if row.section == crate::agents_view_state::Section::Running {
-                    Some(DeleteAction::StopSubagent {
-                        active_session_id,
-                        child_id,
-                        name,
-                    })
-                } else {
-                    Some(DeleteAction::DeleteSubagent {
-                        active_session_id,
-                        child_id,
-                        name,
-                    })
                 }
             }
         }
@@ -963,9 +994,21 @@ impl AgentsViewMode {
         self.pending_delete_action.take()
     }
 
-    /// One landed stop-or-delete outcome: the status line reports it.
+    /// One landed stop-or-delete outcome: the status line reports it,
+    /// and a deleted saved row leaves the catalog immediately (the live
+    /// roster push covers the other arms; saved rows have no push).
     fn delete_result(&mut self, message: String) {
         self.status = Some(message);
+        if message.starts_with("Deleted session ") {
+            self.saved.retain(|saved| {
+                saved
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|path| !message.contains(path))
+                    .unwrap_or(true)
+            });
+            self.rebuild_rows();
+        }
     }
 
     /// Whether the loop must re-arm the saved-catalog fetch (one retry
@@ -1260,7 +1303,7 @@ impl AgentsViewMode {
                     // idle) re-arms rather than executing the stale word
                     // (the hint said stop; the row now deletes - the
                     // confirm rides the CURRENT state).
-                    && delete_arm_word(&row) == pending.stop
+                    && self.delete_arm_word(row) == pending.stop
             }) {
                 if let Some(action) = self.delete_action_for_selected() {
                     self.pending_delete_action = Some(action);
@@ -2322,6 +2365,11 @@ async fn run_agents_view_surface(
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
     let mut saved_flush: Option<tokio::time::Instant> = None;
+    // The in-flight stop-or-delete dispatch: the view's teardown waits
+    // for it (bounded) so an exit right after the second ctrl+x cannot
+    // drop the request on the floor (the loop's client close would take
+    // the connection down before the detached task ever sent).
+    let mut delete_dispatch: Option<tokio::task::JoinHandle<()>> = None;
 
     while mode.running {
         let mut redraw = false;
@@ -2354,7 +2402,8 @@ async fn run_agents_view_surface(
                     // line (the roster push refreshes the rows behind
                     // it).
                     if let Some(action) = mode.take_delete_action() {
-                        spawn_delete_dispatch(&client, ui_tx.clone(), action);
+                        delete_dispatch =
+                            Some(spawn_delete_dispatch(&client, ui_tx.clone(), action));
                     }
                 }
                 UiInput::Resize | UiInput::Settled => {}
