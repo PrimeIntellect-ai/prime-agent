@@ -184,6 +184,15 @@ fn faux_models_fixture() -> serde_json::Value {
                 "apiKey": "sk-faux",
                 "models": [
                     {
+                        "id": "faux-1",
+                        "name": "Faux Model",
+                        "api": "faux",
+                        "baseUrl": "http://localhost:0",
+                        "reasoning": true,
+                        "contextWindow": 128_000,
+                        "maxTokens": 4_096,
+                    },
+                    {
                         "id": "plain-model",
                         "name": "Plain Model",
                         "api": "faux",
