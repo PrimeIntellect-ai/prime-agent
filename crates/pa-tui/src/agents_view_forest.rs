@@ -92,7 +92,7 @@ pub(crate) fn session_status_label(summary: &Value) -> String {
     {
         return "replied".to_string();
     }
-    ""
+    String::new()
 }
 
 /// The model column text: the bare model id plus `:level` when a thinking
