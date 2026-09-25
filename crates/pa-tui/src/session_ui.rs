@@ -7349,15 +7349,16 @@ impl SessionUi {
                 },
             )
             .await;
-        if let Ok(data) = state {
-            let model_id = data
+        let model_id = match state {
+            Ok(data) => data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string);
-            view.chrome.model_id = Some(model_id);
-            self.dirty = true;
-        }
+                .map_or_else(|| picked_model_id.to_string(), str::to_string),
+            Err(_) => picked_model_id.to_string(),
+        };
+        view.chrome.model_id = Some(model_id);
+        self.dirty = true;
     }
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
