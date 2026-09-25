@@ -69,10 +69,11 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
         prompt: &OAuthPrompt,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         let panel = self.panel.clone();
+        let message = prompt.message.clone();
         let message = match &prompt.placeholder {
             // TS `showPrompt` renders the placeholder as an example.
-            Some(placeholder) => format!("{} (e.g. {placeholder})", prompt.message),
-            None => prompt.message.clone(),
+            Some(placeholder) => format!("{message} (e.g. {placeholder})"),
+            None => message,
         };
         Box::pin(async move {
             if prompt.allow_empty {
@@ -310,7 +311,7 @@ mod tests {
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
+                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
             )
         }
     }
@@ -401,7 +402,7 @@ mod tests {
                 "https://api.github.com/copilot_internal/v2/token",
                 vec![ScriptedHttp::entry(
                     200,
-                    r#"{"token":"copilot-token","expires_at":4000000000}"#,
+                    r#"{"token":"copilot-token","expires_at":4_000_000_000}"#,
                 )],
             )
     }

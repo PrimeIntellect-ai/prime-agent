@@ -2,7 +2,7 @@
 //! `packages/ai/src/utils/oauth/xai.ts`: the device-code flow against
 //! the xAI auth endpoints with strict response validation (a
 //! https-only verification URI, validated field types, the bounded
-//! `expires_in`), the slow_down backoff, and the token refresh that
+//! `expires_in`), the `slow_down` backoff, and the token refresh that
 //! keeps the prior refresh token when the endpoint omits one. The
 //! credentials the flow returns carry the TS shape (`access`,
 //! `refresh`, `expires`) and persist under the provider id `xai`.
@@ -120,8 +120,9 @@ pub async fn login_xai(
         .get("interval")
         .and_then(serde_json::Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-        .map(|seconds| ((seconds * 1000.0) as u64).max(1000))
-        .unwrap_or(DEFAULT_POLL_INTERVAL_MS);
+        .map_or(DEFAULT_POLL_INTERVAL_MS, |seconds| {
+            ((seconds * 1000.0) as u64).max(1000)
+        });
     ui.on_auth(&url, Some(&format!("Enter code: {user_code}")));
 
     while std::time::Instant::now() < deadline {
@@ -144,10 +145,10 @@ pub async fn login_xai(
         )
         .await?;
         if token.ok {
-            return Ok(credentials_from_response(&token.body, None)?);
+            return credentials_from_response(&token.body, None);
         }
         match token.body.get("error").and_then(serde_json::Value::as_str) {
-            Some("authorization_pending") => continue,
+            Some("authorization_pending") => {}
             Some("slow_down") => {
                 let next = token
                     .body
@@ -159,7 +160,6 @@ pub async fn login_xai(
                     Some(next_ms) => (interval_ms + 5000).max(next_ms),
                     None => interval_ms + 5000,
                 };
-                continue;
             }
             Some("access_denied" | "authorization_denied") => {
                 return Err("xAI device authorization was denied".to_string());
@@ -266,7 +266,7 @@ async fn post_form(
         return Err(LOGIN_CANCELLED.to_string());
     }
     let parsed: serde_json::Value = serde_json::from_str(&response.body)
-        .map_err(|_| format!("xAI OAuth returned invalid JSON (HTTP {})", response.status))?;
+        .map_err(|_| format!("xAI OAuth returned invalid JSON (HTTP {response.status})"))?;
     let body = match parsed {
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
@@ -402,14 +402,14 @@ mod tests {
     /// A scripted transport: queued responses per url (popped in
     /// order); every request is recorded.
     struct ScriptedHttp {
-        queued: HashMap<String, VecDeque<ScriptedResponse>>,
+        queued: Mutex<HashMap<String, VecDeque<ScriptedResponse>>>,
         requests: Mutex<Vec<ProviderHttpRequest>>,
     }
 
     impl ScriptedHttp {
         fn new() -> Self {
             ScriptedHttp {
-                queued: HashMap::new(),
+                queued: Mutex::new(HashMap::new()),
                 requests: Mutex::new(Vec::new()),
             }
         }
@@ -422,7 +422,7 @@ mod tests {
         }
 
         fn queue(mut self, url: &str, responses: Vec<ScriptedResponse>) -> Self {
-            self.queued.insert(
+            self.queued.lock().unwrap().insert(
                 url.to_string(),
                 responses.into_iter().collect::<VecDeque<_>>(),
             );
@@ -449,10 +449,12 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let response = self
                 .queued
+                .lock()
+                .unwrap()
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
+                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
             )
         }
     }
@@ -719,21 +721,25 @@ mod tests {
         let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http = Arc::new(http);
-            let flow_http = Arc::clone(&flow_http);
             tokio::spawn(async move { login_xai(flow_http.as_ref(), flow_ui.as_ref()).await })
         };
         // Wait for the device flow to present its URL, then cancel.
-        loop {
-            if flow_ui.auth_url.lock().unwrap().is_some() {
-                break;
-            }
+        // Readiness-wait for the URL (bounded: a missing URL fails the
+        // test instead of hanging the cancel flip).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while flow_ui.auth_url.lock().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flow never presented its url"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         flow_ui.cancelled.store(true, Ordering::Relaxed);
         let error = tokio::time::timeout(Duration::from_secs(10), flow)
             .await
             .expect("the cancelled poll settles promptly")
-            .unwrap();
+            .unwrap()
+            .unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 

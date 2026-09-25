@@ -1046,7 +1046,7 @@ mod tests {
             "github-copilot": {
                 "type": "oauth",
                 "access": "tid=1;exp=2;proxy-ep=proxy.enterprise.githubcopilot.com",
-                "refresh": "gh", "expires": 4102444800000
+                "refresh": "gh", "expires": 4_102_444_800_000
             }
         }));
         let registry = ModelRegistry::in_memory(auth);
@@ -1061,7 +1061,7 @@ mod tests {
         let auth = auth_without_env(serde_json::json!({
             "github-copilot": {
                 "type": "oauth",
-                "access": "plain-token", "refresh": "gh", "expires": 4102444800000,
+                "access": "plain-token", "refresh": "gh", "expires": 4_102_444_800_000,
                 "enterpriseUrl": "company.ghe.com"
             }
         }));
@@ -1077,7 +1077,7 @@ mod tests {
     #[test]
     fn a_stored_xai_subscription_switches_its_models_onto_responses() {
         let auth = auth_without_env(serde_json::json!({
-            "xai": { "type": "oauth", "access": "grok", "refresh": "r", "expires": 4102444800000 }
+            "xai": { "type": "oauth", "access": "grok", "refresh": "r", "expires": 4_102_444_800_000 }
         }));
         let registry = ModelRegistry::in_memory(auth);
         let grok_46 = registry

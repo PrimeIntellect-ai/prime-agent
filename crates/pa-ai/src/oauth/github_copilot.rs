@@ -3,7 +3,7 @@
 //! `copilot-client-version.ts`): the optional GitHub Enterprise
 //! domain prompt, the device-code flow against the GitHub login
 //! endpoints (with the client impersonation headers and the
-//! slow_down backoff), the Copilot internal token exchange, the
+//! `slow_down` backoff), the Copilot internal token exchange, the
 //! model-policy enabling after login, and the token refresh. The
 //! credentials the flow returns carry the TS shape (`access`, the
 //! GitHub `refresh` token, `expires`, the `enterpriseUrl`) and
@@ -175,7 +175,7 @@ pub async fn login_github_copilot(
     let device = start_device_flow(http, &domain).await?;
     ui.on_auth(
         &device.verification_uri,
-        Some(&format!("Enter code: {}", device.user_code)),
+        Some(&format!("Enter code: {device.user_code}")),
     );
     let github_access_token = poll_for_github_access_token(http, &domain, &device, ui).await?;
     let credentials =
@@ -263,7 +263,7 @@ async fn enable_all_github_copilot_models(
 ) {
     let base_url = get_github_copilot_base_url(Some(token), enterprise_domain);
     for model in crate::models_generated::get_models("github-copilot") {
-        let url = format!("{}/models/{}/policy", base_url, model.id);
+        let url = format!("{base_url}/models/{}/policy", model.id);
         let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("Authorization".to_string(), format!("Bearer {token}")),
@@ -374,8 +374,8 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
 }
 
 /// TS `pollForGitHubAccessToken`: the device-code grant poll with the
-/// TS backoff (the 1.2x initial multiplier, the 1.4x slow_down
-/// multiplier, and the slow_down interval bump) and the cooperative
+/// TS backoff (the 1.2x initial multiplier, the 1.4x `slow_down`
+/// multiplier, and the `slow_down` interval bump) and the cooperative
 /// cancel between the wait steps.
 async fn poll_for_github_access_token(
     http: &dyn ProviderHttp,
@@ -598,7 +598,7 @@ mod tests {
                 .or_else(|| self.fixed.get(&request.url).cloned())
                 .or_else(|| self.catch_all.clone());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
+                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
             )
         }
     }
@@ -723,7 +723,7 @@ mod tests {
                 "https://api.github.com/copilot_internal/v2/token",
                 ScriptedHttp::entry(
                     200,
-                    r#"{"token":"copilot-token","expires_at":4000000000}"#,
+                    r#"{"token":"copilot-token","expires_at":4_000_000_000}"#,
                 ),
             )
             .catch_all(ScriptedHttp::entry(200, "{}"))
@@ -816,7 +816,7 @@ mod tests {
             )
             .fixed(
                 "https://api.company.ghe.com/copilot_internal/v2/token",
-                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4000000000}"#),
+                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4_000_000_000}"#),
             )
             .catch_all(ScriptedHttp::entry(200, "{}"));
         let ui = ScriptedUi::new(ScriptedAnswer::value("company.ghe.com"));
@@ -869,17 +869,19 @@ mod tests {
         let flag = Arc::clone(&ui.cancelled);
         let flow_ui = Arc::clone(&ui);
         let flow = {
-            let flow_http: Arc<ScriptedHttp> = Arc::new(http);
-            let flow_http = Arc::clone(&flow_http);
+            let flow_http = Arc::new(http);
             tokio::spawn(
                 async move { login_github_copilot(flow_http.as_ref(), flow_ui.as_ref()).await },
             )
         };
-        // Wait for the device flow to present its URL, then cancel.
-        loop {
-            if flow_ui.auth_url.lock().unwrap().is_some() {
-                break;
-            }
+        // Readiness-wait for the URL (bounded: a missing URL fails the
+        // test instead of hanging the cancel flip).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while flow_ui.auth_url.lock().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flow never presented its url"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         flag.store(true, Ordering::Relaxed);
@@ -951,7 +953,10 @@ mod tests {
     async fn the_refresh_exchanges_the_stored_github_token() {
         let http = ScriptedHttp::new().fixed(
             "https://api.github.com/copilot_internal/v2/token",
-            ScriptedHttp::entry(200, r#"{"token":"copilot-fresh","expires_at":4000000000}"#),
+            ScriptedHttp::entry(
+                200,
+                r#"{"token":"copilot-fresh","expires_at":4_000_000_000}"#,
+            ),
         );
         let credentials = refresh_github_copilot_token(&http, "gh-old", None)
             .await
