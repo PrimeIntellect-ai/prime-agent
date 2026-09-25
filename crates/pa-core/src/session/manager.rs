@@ -517,13 +517,25 @@ impl SessionManager {
     /// # Errors
     ///
     /// Returns a human-readable error string when the source session file is
-    /// empty or invalid, has no header, or when the forked session file
-    /// cannot be flushed.
+    /// not a regular file, is empty or invalid, has no header, or when the
+    /// forked session file cannot be flushed.
     pub fn fork_from(
         source_path: &Path,
         target_cwd: &Path,
         session_dir: &Path,
     ) -> Result<Self, String> {
+        // A non-regular source (a FIFO or a device) blocks the copy's read
+        // until a writer appears; the fork reads regular files, so reject
+        // the rest up front. A missing path falls through to the
+        // empty-or-invalid contract (TS loadEntriesFromFile).
+        if let Ok(metadata) = std::fs::metadata(source_path) {
+            if !metadata.is_file() {
+                return Err(format!(
+                    "Cannot fork: source session file is not a regular file: {}",
+                    source_path.display()
+                ));
+            }
+        }
         // Read-only: repairing would REWRITE the source (dropping a torn
         // row mid-append into a live file); the copy just skips a torn
         // tail like TS's `loadEntriesFromFile` (read + parse, no repair).
@@ -2160,5 +2172,23 @@ mod tests {
             .err()
             .expect("fork rejects a missing source");
         assert!(error.starts_with("Cannot fork: source session file is empty or invalid:"));
+    }
+
+    #[test]
+    fn fork_from_rejects_a_non_regular_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_source = tmp.path().join("not-a-session");
+        std::fs::create_dir_all(&dir_source).unwrap();
+        let error =
+            SessionManager::fork_from(&dir_source, tmp.path(), &tmp.path().join("sessions"))
+                .err()
+                .expect("fork rejects a non-regular source");
+        assert_eq!(
+            error,
+            format!(
+                "Cannot fork: source session file is not a regular file: {}",
+                dir_source.display()
+            )
+        );
     }
 }

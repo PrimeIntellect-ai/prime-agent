@@ -838,6 +838,7 @@ mod tests {
                     access: "pinned-access".to_string(),
                     refresh: Some("pinned-refresh".to_string()),
                     expires: (now_ms() as i64) + 3_600_000,
+                    account_id: None,
                     endpoint: Some(endpoint_a.to_string()),
                     token_endpoint: None,
                     client_id: None,

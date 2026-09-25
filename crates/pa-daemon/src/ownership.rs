@@ -74,8 +74,17 @@ impl Supervisor {
         }
         // TS `stopWorker`: the owned stop tears the worker down; the
         // ephemeral schedule cancel (`cancelEphemeralWorkerScheduledJobs`)
-        // rides `stop_worker` itself, keyed on the descriptor's owner.
-        self.stop_worker(&resident).await;
+        // rides `stop_worker` itself, keyed on the descriptor's owner. The
+        // stop's durable intent persists before the worker is told, and a
+        // persist failure fails the owned stop (TS throws) instead of
+        // stopping an untombstoned worker.
+        if let Err(error) = self.stop_worker(&resident).await {
+            return self.owned_failure(
+                command_id,
+                type_name,
+                &format!("Failed to persist the session stop: {error:#}"),
+            );
+        }
         (
             vec![response_line(&response_success(
                 Some(command_id),

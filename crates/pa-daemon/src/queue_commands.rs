@@ -304,6 +304,7 @@ mod tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Background,
                 message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
                 preview: Some(
                     "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
@@ -362,6 +363,7 @@ mod tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Background,
                 message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
                 preview: Some(
                     "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
@@ -589,6 +591,7 @@ mod tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Human,
                 message: "waiting prompt".to_string(),
                 preview: None,
                 custom_message: None,
@@ -657,6 +660,7 @@ mod tests {
             .unwrap()
             .steering
             .push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Human,
                 preview: None,
                 message: "plain prompt".to_string(),
                 custom_message: None,

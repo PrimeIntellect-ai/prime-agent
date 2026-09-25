@@ -6,7 +6,24 @@
 //! Supervisors connect over a private-framed Unix socket and authenticate
 //! with the bootstrap token before any command.
 
+mod config;
+mod env;
+mod session_core;
+
+pub(crate) use config::WorkerConfig;
+use env::KillCloseReason;
+pub use env::{
+    WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV, WORKER_INSTANCE_ID_ENV,
+    WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
+    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
+    WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
+};
+pub(crate) use session_core::SessionCore;
+
 use std::collections::VecDeque;
+// PathBuf is read only by this facade's in-file test modules (via `use super::*`); the
+// lib-target import is flagged unused since the lib users moved out, so allow it deliberately.
+#[allow(unused_imports)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,147 +60,8 @@ use crate::protocol::{
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
 
-/// The close reason one `kill` carries (TS `DaemonSessionClosedReason` at
-/// `closeSessionOnce`): the plain client kill is `killed`; a parent's
-/// child-close cascade passes `shutdown` or `replaced` through the
-/// `rlmCloseReason` rest marker, and the close arms differ exactly like
-/// TS — `killed` cancels the session's scheduled jobs and archives the
-/// state, `shutdown` keeps the resume entry (the jobs survive for the
-/// later wake), `replaced` keeps the plain cron jobs but cancels the RLM
-/// heartbeats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KillCloseReason {
-    Killed,
-    Shutdown,
-    Replaced,
-}
-
-impl KillCloseReason {
-    /// The `rlmCloseReason` marker of a child-close cascade (the plain
-    /// client kill carries none).
-    fn from_payload(payload: &Value) -> Self {
-        match payload.get("rlmCloseReason").and_then(Value::as_str) {
-            Some("shutdown") => Self::Shutdown,
-            Some("replaced") => Self::Replaced,
-            _ => Self::Killed,
-        }
-    }
-
-    /// The wire `session_closed` reason.
-    fn session_closed_reason(self) -> DaemonSessionClosedReason {
-        match self {
-            Self::Killed => DaemonSessionClosedReason::Killed,
-            Self::Shutdown => DaemonSessionClosedReason::Shutdown,
-            Self::Replaced => DaemonSessionClosedReason::Replaced,
-        }
-    }
-
-    /// The recovery journal's close operation.
-    fn recovery_operation(self) -> &'static str {
-        match self {
-            Self::Killed => "killed",
-            Self::Shutdown => "shutdown",
-            Self::Replaced => "replaced",
-        }
-    }
-}
 use crate::setting_switches::{effective_service_tier, supports_fast_mode};
 use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
-
-/// TS-parity worker environment variables (`daemon-worker-protocol.ts`).
-pub const WORKER_ROLE_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
-pub const WORKER_TOKEN_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
-pub const WORKER_INSTANCE_ID_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_INSTANCE_ID";
-pub const WORKER_ACTIVE_SESSION_ID_ENV: &str =
-    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
-/// Worker process cwd (the create command's `cwd`).
-pub const WORKER_CWD_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_CWD";
-pub const WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
-pub const WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
-/// Scripted-engine script file for faux sessions (integration harness).
-pub const WORKER_SCRIPT_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SCRIPT";
-/// Worker socket path (supervisor passes it explicitly).
-pub const WORKER_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SOCKET";
-/// Telemetry opt-out for the worker's sessions (supervisor passes the create
-/// command's `telemetryDisabled` through here, TS descriptor parity).
-pub const WORKER_TELEMETRY_DISABLED_ENV: &str =
-    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TELEMETRY_DISABLED";
-/// Supervisor-lost exit window (ms): a session worker whose supervisor
-/// socket stays unreachable for this long exits instead of lingering
-/// orphaned (TS `WORKER_SUPERVISOR_LOST_EXIT_MS_ENV` wire parity; the
-/// supervisor's environment flows to the workers it spawns).
-pub const WORKER_SUPERVISOR_LOST_EXIT_MS_ENV: &str =
-    "PRIME_AGENT_INTERNAL_WORKER_SUPERVISOR_LOST_EXIT_MS";
-
-#[derive(Debug, Clone)]
-pub struct WorkerConfig {
-    pub socket_path: PathBuf,
-    pub supervisor_socket_path: PathBuf,
-    pub token: String,
-    pub worker_instance_id: String,
-    pub active_session_id: String,
-    pub agent_dir: PathBuf,
-    pub recovery_journal_path: PathBuf,
-    pub script: Option<Value>,
-    /// Telemetry opt-out inherited from the create command ("1" = disabled;
-    /// absent/other = enabled). Sessions created on this worker install no
-    /// telemetry subscriber.
-    pub telemetry_disabled: Option<bool>,
-}
-
-impl WorkerConfig {
-    /// Read the worker spawn env pair into a config: the socket path,
-    /// the authentication token, the root active session id, and the
-    /// agent dir; the script, the telemetry-disabled flag, the supervisor
-    /// socket path, and the recovery journal path all default when unset
-    /// or unreadable.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required env pair is missing (the socket
-    /// path, the authentication token, or the root active session id),
-    /// or the agent dir cannot be resolved.
-    pub fn from_env() -> Result<Self> {
-        let socket_path: PathBuf = std::env::var_os(WORKER_SOCKET_ENV)
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow!("worker socket path is required ({WORKER_SOCKET_ENV})"))?;
-        let token =
-            std::env::var(WORKER_TOKEN_ENV).context("worker authentication token is required")?;
-        let active_session_id = std::env::var(WORKER_ACTIVE_SESSION_ID_ENV)
-            .context("worker root active session id is required")?;
-        let supervisor_socket_path = std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let agent_dir = paths::agent_dir()?;
-        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV).map_or_else(
-            || {
-                agent_dir
-                    .join("daemon-workers")
-                    .join(format!("{active_session_id}.recovery.jsonl"))
-            },
-            PathBuf::from,
-        );
-        let script = std::env::var_os(WORKER_SCRIPT_ENV)
-            .map(PathBuf::from)
-            .and_then(|path| {
-                let content = std::fs::read_to_string(path).ok()?;
-                serde_json::from_str::<Value>(&content).ok()
-            });
-        let telemetry_disabled =
-            std::env::var_os(WORKER_TELEMETRY_DISABLED_ENV).map(|value| value == "1");
-        Ok(WorkerConfig {
-            socket_path,
-            supervisor_socket_path,
-            token,
-            worker_instance_id: std::env::var(WORKER_INSTANCE_ID_ENV).unwrap_or_default(),
-            active_session_id,
-            agent_dir,
-            recovery_journal_path,
-            script,
-            telemetry_disabled,
-        })
-    }
-}
 
 /// Result of one connection's authentication command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,9 +199,42 @@ impl TurnSettle {
     }
 }
 
+/// Priority is applied only at admission. Existing lane positions (including user
+/// moves and restored snapshots) remain authoritative until another item arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePriority {
+    Human,
+    Pinned,
+    #[serde(other)]
+    Background,
+}
+
+impl QueuePriority {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Human => 1,
+            Self::Pinned => 2,
+        }
+    }
+}
+
+/// TS `ActionStore` priority insertion: walk back only across a lower-priority
+/// suffix. Never re-sort a lane: explicit moves and restored order can cross
+/// priority boundaries, and equal-priority arrivals remain FIFO.
+pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem) {
+    let mut index = lane.len();
+    while index > 0 && lane[index - 1].priority.rank() < item.priority.rank() {
+        index -= 1;
+    }
+    lane.insert(index, item);
+}
+
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
+    pub(crate) priority: QueuePriority,
     /// The labeled queue-strip row (TS `payload.preview`): the queue
     /// snapshot serves it instead of `message` when the delivery carries
     /// one, and the active-action label reads it too (TS #2063
@@ -391,161 +302,6 @@ pub(crate) fn parse_prompt_images(payload: &Value) -> Vec<pa_agent::types::Image
             })
         })
         .collect()
-}
-
-/// The live session: store, queue, sequencing. Shared by the connection tasks,
-/// the turn runner, and the compaction manager; every access is through the
-/// core mutex.
-pub(crate) struct SessionCore {
-    pub(crate) active_session_id: String,
-    pub(crate) generation: String,
-    pub(crate) last_event_sequence: u64,
-    pub(crate) store: Option<SessionFile>,
-    pub(crate) cwd: String,
-    pub(crate) steering: VecDeque<QueuedItem>,
-    pub(crate) follow_up: VecDeque<QueuedItem>,
-    pub(crate) busy: bool,
-    pub(crate) created: bool,
-    attached_client_ids: Vec<String>,
-    pub(crate) abort_requested: bool,
-    /// A flow that detaches from the interrupted turn's events (TS
-    /// `compact()`'s `_disconnectFromAgent()` before `abort()` — and the
-    /// branch-navigation interrupt, the same teardown shape) swallowed the
-    /// aborted turn's assistant row on the TS wire and in the session
-    /// file, so the gate's aborted-row exception stays closed while such a
-    /// flow settles its turn. Owned by the interrupt-and-settle helper that
-    /// set it; cleared once the turn settled.
-    pub(crate) suppress_aborted_row: bool,
-    pub(crate) shutdown_requested: bool,
-    /// True while a compaction run is in flight (TS `isCompacting`).
-    pub(crate) compacting: bool,
-    /// The turn's tool calls in flight, keyed by tool-call id (TS
-    /// `session.state.pendingToolCalls`): the tool-execution frames add
-    /// and remove ids, and the roster summary derives `isRunningTools`
-    /// (`isStreaming && pendingToolCalls.size > 0`) from its size.
-    pub(crate) running_tool_calls: std::collections::HashSet<String>,
-    /// TS `autoCompactionEnabled` (settings default: on).
-    pub(crate) auto_compaction_enabled: bool,
-    /// The last broadcast queue snapshot (TS `_lastSessionActionSnapshot`):
-    /// `session_action_update` fires only when the projection changed.
-    last_action_snapshot: Option<SessionActionSnapshot>,
-    /// This session's RLM recursion depth (children run at depth + 1).
-    rlm_depth: u32,
-    /// `top-level` | `subagent` (summary `runtimeKind`).
-    pub(crate) runtime_kind: String,
-    /// The subagent runtime identity (create `runtimeMetadata`): the child
-    /// id under its parent and the parent's live/persisted ids, carried on
-    /// every summary so the roster keys children `parentPath#childId`.
-    pub(crate) rlm_child_id: Option<String>,
-    parent_active_session_id: Option<String>,
-    parent_session_id: Option<String>,
-    /// The create command's harness `childScript` (the TS child runtime
-    /// inherits the parent's `sessionConfig`; the Rust replacement keeps
-    /// the seam across the runtime swap so a replacement session's
-    /// children stay scripted). `None` for product sessions.
-    pub(crate) child_script: Option<String>,
-    /// The session's service-tier preference (TS `_serviceTierPreference`;
-    /// `None` is the settings default "auto"). The effective tier clamps
-    /// `priority` to `default` on models without fast mode.
-    pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
-    /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
-    /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
-    /// (every queued steer co-delivers as ONE turn at the next
-    /// tool-call boundary; `"one-at-a-time"` stays selectable via the
-    /// setting). The follow-up default is `"one-at-a-time"` (follow-ups
-    /// drain when the session goes idle, one per turn).
-    pub(crate) steering_mode: String,
-    pub(crate) follow_up_mode: String,
-    /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
-    /// on the session, armed by `abortAndSendQueued`): while armed, armed
-    /// steering items co-deliver as ONE batched turn at the next boundary
-    /// — even under queue mode "one-at-a-time". Disarms when no armed
-    /// item remains queued (TS `_forcedAllSteeringBatch`'s disarm read).
-    pub(crate) forced_all_steering: bool,
-    /// The scoped model list (TS `_scopedModels`): wire entries
-    /// `{ model, thinkingLevel? }` the model cycler cycles within.
-    pub(crate) scoped_models: Vec<Value>,
-    /// A retry in flight was aborted (`abort_retry`); the turn's abort
-    /// probe reads it and the next turn start clears it.
-    pub(crate) retry_abort_requested: bool,
-    /// TS `_sessionInputPumpSuspended`: `requestAbort`/`abortForUpdateRestart`
-    /// (and manual `compact()`, which aborts first) suspend queued-input
-    /// admission. While set, the turn runner drains nothing and a plain
-    /// prompt (`prompt`/`prompt_and_wait` without `streamingBehavior`, TS
-    /// `resumeIfIdle: command.streamingBehavior !== undefined`) is rejected
-    /// with the TS admission error. Cleared by the TS resume sites: a
-    /// `steer`/`follow_up` command or a prompt carrying
-    /// `streamingBehavior`, `resume_queue`, an applied queued-message
-    /// mutation, a cron/heartbeat fire (TS `promptHeartbeat` passes
-    /// `resumeIfIdle: true`), and a successful compact with an active
-    /// goal (TS `compact()`'s `resumeQueuedWork()` branch).
-    pub(crate) queued_input_suspended: bool,
-    /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
-    /// `restore_next_turn`): delivered as prefix rows with the next turn.
-    pub(crate) pending_next_turn: Vec<Value>,
-    /// The queue projection's active action (TS `getSessionActionSnapshot`
-    /// reads the store's first active action): the runner sets the phase
-    /// transitions of a queue-visible delivery (`preparing` at pickup,
-    /// `committing` at the turn's first row — the prompt becomes visible
-    /// in the conversation then, TS's commit fence — `running` at the
-    /// turn's first assistant frame) and clears it once the delivered
-    /// turn settles. The `preparing` projection is what a client renders
-    /// as the queued strip's "Starting" row (TS #2063). The label rides
-    /// the snapshot (TS #2063 `compactRlmText(queuedAgentMessagePreview(
-    /// active))`: the delivery's labeled preview, else the message text).
-    pub(crate) active_action: Option<crate::types::SessionActionActive>,
-}
-
-impl SessionCore {
-    /// Whether a turn, compaction, or queued action is in flight — the TS
-    /// `hasOngoingSessionWork` predicate. An active run owns the worker a
-    /// little longer; the supervisor-lost exit waits for it to settle.
-    pub(crate) fn has_ongoing_work(&self) -> bool {
-        self.busy || self.compacting || !self.steering.is_empty() || !self.follow_up.is_empty()
-    }
-
-    /// A created session core for command modules' unit tests (the private
-    /// bookkeeping fields stay owned here).
-    #[cfg(test)]
-    pub(crate) fn test_core(store: Option<SessionFile>, cwd: String) -> Self {
-        SessionCore {
-            active_session_id: store.as_ref().map_or_else(
-                || "test-session".to_string(),
-                |store| store.session_id().to_string(),
-            ),
-            generation: String::new(),
-            last_event_sequence: 0,
-            store,
-            cwd,
-            steering: VecDeque::new(),
-            follow_up: VecDeque::new(),
-            busy: false,
-            created: true,
-            attached_client_ids: Vec::new(),
-            abort_requested: false,
-            suppress_aborted_row: false,
-            shutdown_requested: false,
-            compacting: false,
-            running_tool_calls: std::collections::HashSet::new(),
-            auto_compaction_enabled: true,
-            last_action_snapshot: Some(SessionActionSnapshot::default()),
-            rlm_depth: 0,
-            runtime_kind: "top-level".to_string(),
-            rlm_child_id: None,
-            parent_active_session_id: None,
-            parent_session_id: None,
-            child_script: None,
-            service_tier: None,
-            steering_mode: "all".to_string(),
-            follow_up_mode: "one-at-a-time".to_string(),
-            forced_all_steering: false,
-            scoped_models: Vec::new(),
-            retry_abort_requested: false,
-            queued_input_suspended: false,
-            pending_next_turn: Vec::new(),
-            active_action: None,
-        }
-    }
 }
 
 /// One outbound frame: the serialized JSON payload plus its private-frame
@@ -1579,20 +1335,7 @@ impl Worker {
                         self.write_response_frame(&sink, &request_id, &response)
                             .await;
                         if response.success {
-                            // Shutdown keeps the resume entry and exits the
-                            // process, like the TS close path
-                            // (`closeKeepsResumeEntry("shutdown")`).
-                            let _ = self.record_recovery(false, "shutdown");
-                            // A graceful exit owns its socket file: remove
-                            // it now so a respawn does not wait out the
-                            // stale-socket path (a killed worker cannot
-                            // clean up, but its killer relaunches through
-                            // `prepare_socket_path`).
-                            crate::socket::cleanup_socket_path(
-                                &self.config.socket_path,
-                                crate::socket::socket_identity(&self.config.socket_path),
-                            );
-                            std::process::exit(0);
+                            self.exit_after_close();
                         }
                         continue;
                     }
@@ -2814,6 +2557,20 @@ impl Worker {
             Ok(custom_message) => custom_message,
             Err(error) => return response_failure(None, "prompt", &error, None),
         };
+        // The reserved child-status kinds are daemon provenance (the
+        // queue-fold anti-spoof): the notice injection rides the
+        // follow-up route only, so a prompt row claiming one is always a
+        // spoof — answered loudly, never parked.
+        if let Some(row) = custom_message.as_ref() {
+            if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+                return response_failure(
+                    None,
+                    "prompt",
+                    &crate::child_status_notices::reserved_intake_error(),
+                    None,
+                );
+            }
+        }
         let images = parse_prompt_images(payload);
         // TS daemon prompts map `resumeIfIdle` to
         // `command.streamingBehavior !== undefined`: while the queued-input
@@ -2872,7 +2629,14 @@ impl Worker {
                     }
                 }
             };
+            // This RPC command is human-origin only for a plain user row.
+            // Caller-supplied custom rows never gain human priority.
             let item = QueuedItem {
+                priority: if custom_message.is_some() {
+                    QueuePriority::Background
+                } else {
+                    QueuePriority::Human
+                },
                 preview: None,
                 message: message.to_string(),
                 custom_message,
@@ -2890,8 +2654,8 @@ impl Worker {
                 forced_batch: false,
             };
             match lane {
-                Lane::Steering => core.steering.push_back(item),
-                Lane::FollowUp => core.follow_up.push_back(item),
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
             let snapshot = self.snapshot_locked(&core);
             (snapshot, queued_behind_work)
@@ -2934,13 +2698,36 @@ impl Worker {
             Ok(custom_message) => custom_message,
             Err(error) => return response_failure(None, lane.as_str(), &error, None),
         };
+        // The reserved child-status kinds are daemon provenance, not
+        // client data (the queue-fold anti-spoof): a caller-supplied row
+        // claiming one is answered loudly — it never parks, so the strip's
+        // typed classification only ever sees daemon-authentic rows. The
+        // daemon's own notice injection rides this same command with the
+        // one-shot capability it minted in this process
+        // (`child_status_notices`), the only thing the admission accepts.
+        if let Some(row) = custom_message.as_ref() {
+            if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+                let minted = crate::child_status_notices::consume(
+                    payload.get("rlmNoticeNonce").and_then(Value::as_str),
+                );
+                if !minted {
+                    return response_failure(
+                        None,
+                        lane.as_str(),
+                        &crate::child_status_notices::reserved_intake_error(),
+                        None,
+                    );
+                }
+            }
+        }
         let mut core = self.core.lock().unwrap();
         let images = parse_prompt_images(payload);
-        match lane {
-            Lane::Steering => &mut core.steering,
-            Lane::FollowUp => &mut core.follow_up,
-        }
-        .push_back(QueuedItem {
+        let item = QueuedItem {
+            priority: if custom_message.is_some() {
+                QueuePriority::Background
+            } else {
+                QueuePriority::Human
+            },
             preview: None,
             message: message.to_string(),
             custom_message,
@@ -2952,7 +2739,11 @@ impl Worker {
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
-        });
+        };
+        match lane {
+            Lane::Steering => enqueue_priority(&mut core.steering, item),
+            Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+        }
         let snapshot = self.snapshot_locked(&core);
         drop(core);
         // The queue-write checkpoint (busy=true): an undelivered lane is
@@ -3110,11 +2901,8 @@ impl Worker {
                         timestamp: crate::util::now_ms(),
                     },
                 );
-            match lane {
-                Lane::Steering => &mut core.steering,
-                Lane::FollowUp => &mut core.follow_up,
-            }
-            .push_back(QueuedItem {
+            let item = QueuedItem {
+                priority: QueuePriority::Background,
                 // The labeled queue-strip row (TS `queuedAgentMessagePreview`:
                 // an agent-session-message custom row previews as
                 // "Agent message received: <details.message>").
@@ -3134,7 +2922,11 @@ impl Worker {
                 queue_visible: true,
                 policy: TurnPolicy::Injected,
                 forced_batch: false,
-            });
+            };
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
             let snapshot = self.snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
@@ -3293,6 +3085,45 @@ impl Worker {
             .and_then(|store| store.lease.take());
         drop(lease);
         response_success(None, "shutdown", None)
+    }
+
+    /// The durable tail of a successful close: the resume entry, the
+    /// worker's own socket cleanup, and the process exit. The routed
+    /// `shutdown` arm and the registration-retirement path share it
+    /// (`std::process::exit` runs no destructors, so the caller must
+    /// have settled the close first).
+    fn exit_after_close(&self) -> ! {
+        // Shutdown keeps the resume entry and exits the process, like the
+        // TS close path (`closeKeepsResumeEntry("shutdown")`).
+        let _ = self.record_recovery(false, "shutdown");
+        // A graceful exit owns its socket file: remove it now so a respawn
+        // does not wait out the stale-socket path (a killed worker cannot
+        // clean up, but its killer relaunches through
+        // `prepare_socket_path`).
+        crate::socket::cleanup_socket_path(
+            &self.config.socket_path,
+            crate::socket::socket_identity(&self.config.socket_path),
+        );
+        std::process::exit(0)
+    }
+
+    /// The refused-registration self-heal: the supervisor definitively
+    /// rejected this worker's identity (the unknown-worker verdict — no
+    /// descriptor exists for it), so no daemon will ever adopt or route to
+    /// this process again. The worker retires with the same graceful
+    /// close a routed `shutdown` runs — abort and settle the session,
+    /// dispose the kernel, keep the resume entry — releasing the runtime
+    /// session lease its session file needs back: a retired worker that
+    /// kept running would hold the lease against every future resume
+    /// while staying invisible to every roster, the leftover-holder
+    /// [`crate::boot_reap`] documents and clears on `/proc` platforms.
+    pub(crate) async fn exit_refused_registration(&self) {
+        eprintln!(
+            "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
+            std::process::id()
+        );
+        let _ = self.handle_shutdown().await;
+        self.exit_after_close();
     }
 
     /// Wait until no turn or compaction run is in flight (the awaited
@@ -3811,6 +3642,7 @@ impl Worker {
                         {
                             let mut core = self.core.lock().unwrap();
                             core.follow_up.push_back(QueuedItem {
+                                priority: QueuePriority::Background,
                                 preview: None,
                                 message: continuation.request.message,
                                 custom_message: continuation.request.custom_message,
@@ -4716,6 +4548,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
         lane.iter()
             .map(|item| crate::journal::WorkerQueueItemRecord {
                 message: item.message.clone(),
+                priority: Some(item.priority),
                 preview: item.preview.clone(),
                 custom_message: item.custom_message.clone(),
                 queue_key: item.queue_key.clone(),
@@ -4817,6 +4650,13 @@ fn restore_queue_snapshot(
                 QueuedItem {
                     preview: record.preview,
                     message: record.message,
+                    priority: record.priority.unwrap_or_else(|| {
+                        if record.custom_message.is_some() {
+                            QueuePriority::Background
+                        } else {
+                            QueuePriority::Human
+                        }
+                    }),
                     custom_message: record.custom_message,
                     agent_message: None,
                     queue_key: record.queue_key,
@@ -4948,6 +4788,7 @@ pub(crate) fn admit_autonomous_follow_up(
     {
         let mut core = core.lock().unwrap();
         core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Background,
             preview: None,
             message: text,
             custom_message: None,
@@ -5006,6 +4847,7 @@ pub(crate) fn admit_goal_follow_up(
     {
         let mut core = core.lock().unwrap();
         let item = QueuedItem {
+            priority: QueuePriority::Background,
             preview: None,
             message: follow_up.request.message,
             custom_message: follow_up.request.custom_message,
@@ -5019,8 +4861,8 @@ pub(crate) fn admit_goal_follow_up(
             forced_batch: false,
         };
         match lane {
-            Lane::Steering => core.steering.push_back(item),
-            Lane::FollowUp => core.follow_up.push_back(item),
+            Lane::Steering => enqueue_priority(&mut core.steering, item),
+            Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
     }
     // The admission checkpoint (busy=true, TS's queue strings by lane):
@@ -5088,6 +4930,7 @@ pub(crate) fn admit_bash_completion_notice(
     };
     {
         core_guard.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
             // TS `previewLabel` (`injectedMessagePreviewLabel` ->
             // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
             // reads `Background command finished: <content>` (the TUI's
@@ -6245,6 +6088,19 @@ pub async fn run_worker() -> Result<()> {
     // because workers re-present their identity (liveness watch + backoff).
     let registration = crate::registration::start(&config);
     let worker = Arc::new(Worker::new(config, registration));
+    // The refused-registration self-heal: a supervisor that destroyed this
+    // worker's durable identity (its descriptor) can never adopt it again,
+    // so the registration loop's definitive rejection retires the worker —
+    // the graceful close releasing its session lease instead of the
+    // invisible lease-holder it would otherwise remain (the macOS case of
+    // the leftover-holder the boot reap cannot enumerate).
+    if let Some(handle) = worker.registration.clone() {
+        let worker = Arc::clone(&worker);
+        tokio::spawn(async move {
+            handle.retired().await;
+            worker.exit_refused_registration().await;
+        });
+    }
     worker.serve().await
 }
 
@@ -6479,23 +6335,59 @@ pub(crate) fn session_summary(
 
 /// The queue snapshot for one core (TS `sessionActions`).
 fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
+    // TS `queuedAgentMessagePreview`: a parked row reads the
+    // delivery's labeled preview when it carries one, else the
+    // message text.
+    let lane = |items: &std::collections::VecDeque<QueuedItem>| {
+        items
+            .iter()
+            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
+            .collect::<Vec<String>>()
+    };
+    // The RLM child status notices fold by TYPED provenance: the indices
+    // derive from the parked rows' injected custom rows, so the
+    // classification rides the wire and a user-typed message that
+    // merely looks like a notice preview never marks.
+    let rlm_child_status = |items: &std::collections::VecDeque<QueuedItem>| {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| is_rlm_child_status_item(item))
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>()
+    };
     SessionActionSnapshot {
         queued_count: (core.steering.len() + core.follow_up.len()) as u32,
-        // TS `queuedAgentMessagePreview`: a parked row reads the
-        // delivery's labeled preview when it carries one, else the
-        // message text.
-        steering: core
-            .steering
-            .iter()
-            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
-            .collect(),
-        follow_ups: core
-            .follow_up
-            .iter()
-            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
-            .collect(),
+        steering: lane(&core.steering),
+        follow_ups: lane(&core.follow_up),
+        rlm_child_status: crate::types::RlmChildStatusIndices {
+            steering: rlm_child_status(&core.steering),
+            follow_up: rlm_child_status(&core.follow_up),
+        },
         active: core.active_action.clone(),
     }
+}
+
+/// Whether one parked queue item is an RLM child status notice: the
+/// injected custom row's kind (the terminal-notice and failure custom
+/// types) proves it — client command surfaces answer any
+/// caller-supplied row claiming either reserved kind LOUDLY (the
+/// prompt/steer/follow-up parse and the `restore_actions` validation),
+/// and the one producer (`rlm_children::deliver_terminal_notice`) rides
+/// the same follow-up route with a one-shot minted capability
+/// (`child_status_notices`), so within the queue the kinds are
+/// daemon-authentic: a client-steered message can never carry the row.
+/// This is the queue strip's typed provenance: the notice previews stay
+/// the raw `[child-exited: ...]` texts, so nothing about the string
+/// decides the classification.
+fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
+    let Some(row) = item.custom_message.as_ref() else {
+        return false;
+    };
+    // One reserved-kind predicate, owned by the intake module (review
+    // round 3): the queue's classification and every client surface read
+    // the same exact match, so the kinds can never desync.
+    crate::child_status_notices::is_reserved_child_status_custom_type(row)
 }
 
 /// The active action's queue label (TS `compactRlmText(text, 160)`):
@@ -6557,6 +6449,7 @@ mod update_snapshot_tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
                 preview: Some(
                     "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
@@ -6573,6 +6466,7 @@ mod update_snapshot_tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 message: "plain queued prompt".to_string(),
                 preview: None,
                 custom_message: None,
@@ -6644,6 +6538,341 @@ mod update_snapshot_tests {
             data["queue"]["actions"]["steering"][0], "finish the build",
             "the lane snapshot and the actions projection agree"
         );
+    }
+    /// The wire text of one RLM child terminal notice (the exact row
+    /// `rlm_children::deliver_terminal_notice` rides): the follow-up
+    /// command's `message` plus the injected custom row.
+    fn child_status_notice_wire(kind: &str) -> Value {
+        let notice = if kind == "failure" {
+            pa_core::session_engine::rlm_notices::create_rlm_child_failure_message(
+                "sub-1", "lane", "boom", 1_000,
+            )
+        } else {
+            pa_core::session_engine::rlm_notices::create_rlm_child_terminal_notice(
+                &pa_core::session_engine::rlm_notices::RlmChildTerminalNotice::CompletedWithoutReply {
+                    child_id: "sub-1".to_string(),
+                    session_name: "lane".to_string(),
+                    last_assistant_text_preview: Some("done".to_string()),
+                },
+                1_000,
+            )
+        };
+        serde_json::to_value(pa_types::session::AgentMessage::Custom(notice)).unwrap()
+    }
+
+    fn queued_user_item(message: &str) -> QueuedItem {
+        QueuedItem {
+            priority: QueuePriority::Human,
+            message: message.to_string(),
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        }
+    }
+
+    /// The queue-fold bug (operator 2026-09-25): parked RLM child status
+    /// notices projected as user-like rows — one per exited child behind
+    /// a busy turn. The snapshot now carries TYPED provenance: the lane
+    /// strings stay the raw notice texts (the TS
+    /// `queuedAgentMessagePreview` projection is unchanged), and the
+    /// `rlmChildStatus` rider holds the indices of exactly the injected
+    /// rows — a user-typed row with the same text never flags.
+    #[tokio::test]
+    async fn the_action_snapshot_flags_parked_child_status_notices() {
+        let (worker, _) = snapshot_after_create().await;
+        let notice_text =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        let failure_text = "[child-failed child:lane]\n\nboom".to_string();
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering.push_back(queued_user_item("turn right"));
+            core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
+                message: notice_text.clone(),
+                custom_message: Some(child_status_notice_wire("terminal")),
+                ..queued_user_item(&notice_text)
+            });
+            // A user-typed row with the exact notice text: unflagged.
+            core.steering.push_back(queued_user_item(&notice_text));
+            core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Background,
+                message: failure_text.clone(),
+                custom_message: Some(child_status_notice_wire("failure")),
+                ..queued_user_item(&failure_text)
+            });
+            core.follow_up.push_back(queued_user_item("then summarize"));
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.steering,
+            vec!["turn right", notice_text.as_str(), notice_text.as_str()],
+            "the lane strings stay the raw texts"
+        );
+        assert_eq!(
+            snapshot.follow_ups,
+            vec![failure_text.as_str(), "then summarize"],
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.steering,
+            vec![1],
+            "only the injected terminal-notice row flags"
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.follow_up,
+            vec![0],
+            "the failure row flags on the follow-up lane"
+        );
+        assert_eq!(snapshot.queued_count, 5);
+    }
+
+    /// The real delivery route: the notice rides the follow-up command
+    /// with the one-shot capability the daemon mints in this same worker
+    /// process, and the parked row carries the typed provenance. The
+    /// exact spoofs are answered loudly instead — the same command
+    /// without a mint, and a replay of the consumed mint — while the
+    /// same-text user row still parks as a plain row. That user row is
+    /// human class while the minted notice is background, so admission
+    /// priority parks the user row ahead of the notice; the rider names
+    /// only the notice's lane slot, whichever position it holds.
+    #[tokio::test]
+    async fn a_follow_up_notice_parks_with_typed_provenance() {
+        let (worker, _) = snapshot_after_create().await;
+        let content =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        let nonce = crate::child_status_notices::mint();
+        let notice = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": nonce,
+                }),
+            )
+            .await;
+        assert!(notice.success, "the notice follow-up parks: {notice:?}");
+        let replay = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": nonce,
+                }),
+            )
+            .await;
+        assert!(
+            !replay.success,
+            "the consumed mint is replay-proof: {replay:?}"
+        );
+        let spoofed = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                }),
+            )
+            .await;
+        assert!(
+            !spoofed.success,
+            "a caller-supplied reserved-kind row is rejected, never parked: {spoofed:?}"
+        );
+        let plain = worker
+            .dispatch("follow_up", &json!({ "message": content }))
+            .await;
+        assert!(plain.success, "the plain follow-up parks: {plain:?}");
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.follow_ups,
+            vec![content.as_str(), content.as_str()],
+            "the notice and the same-text user row park their raw text"
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.follow_up,
+            vec![1],
+            "only the minted notice row flags: the same-text human row parks ahead of it"
+        );
+    }
+
+    /// The spoof matrix (the operator's anti-spoof mandate): the exact
+    /// reserved kinds are refused on every client admission surface —
+    /// with no mint, with a guessed mint, and on `steer`/`prompt`
+    /// regardless — while lookalike kinds (prefix, case, and fused
+    /// variants) park as ordinary custom rows that never flag.
+    #[tokio::test]
+    async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
+        let (worker, _) = snapshot_after_create().await;
+        let content = "[child-exited: no-reply child:lane]".to_string();
+        // No mint: both queue lanes refuse the exact reserved kinds.
+        for command in ["steer", "follow_up"] {
+            let spoof = worker
+                .dispatch(
+                    command,
+                    &json!({
+                        "message": content,
+                        "customMessage": child_status_notice_wire("failure"),
+                    }),
+                )
+                .await;
+            assert!(
+                !spoof.success,
+                "{command} refuses the exact reserved kind: {spoof:?}"
+            );
+        }
+        // A guessed mint is not a live mint.
+        let guessed = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": "00000000-0000-4000-8000-000000000000",
+                }),
+            )
+            .await;
+        assert!(
+            !guessed.success,
+            "a guessed nonce is no capability: {guessed:?}"
+        );
+        // The notice route is follow-up only: `prompt` refuses the
+        // reserved kinds outright.
+        let prompted = worker
+            .dispatch(
+                "prompt",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                }),
+            )
+            .await;
+        assert!(
+            !prompted.success,
+            "prompt refuses the reserved kinds: {prompted:?}"
+        );
+        // Lookalike kinds are ordinary custom rows: they park, and the
+        // rider never flags them (exact, case-sensitive matching).
+        for lookalike in [
+            "rlm_child_terminal_notice_v2",
+            "RLM_CHILD_TERMINAL_NOTICE",
+            "rlmchildterminalnotice",
+        ] {
+            let parked = worker
+                .dispatch(
+                    "follow_up",
+                    &json!({
+                        "message": content,
+                        "customMessage": {
+                            "role": "custom",
+                            "customType": lookalike,
+                            "content": "spoof",
+                        },
+                    }),
+                )
+                .await;
+            assert!(
+                parked.success,
+                "the lookalike {lookalike} parks as an ordinary row: {parked:?}"
+            );
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.follow_ups.len(),
+            3,
+            "the three lookalikes parked their raw text"
+        );
+        assert!(
+            snapshot.rlm_child_status.follow_up.is_empty(),
+            "no lookalike ever flags as child status"
+        );
+    }
+
+    /// The rider serializes only when a notice is parked: a notice-free
+    /// projection keeps the TS wire shape byte-for-byte (the field is
+    /// skipped), and a parked notice rides the camelCase indices.
+    #[test]
+    fn the_rider_serializes_only_when_a_notice_is_parked() {
+        let empty = SessionActionSnapshot::default();
+        let wire = serde_json::to_value(&empty).unwrap();
+        assert!(
+            wire.get("rlmChildStatus").is_none(),
+            "a notice-free projection stays the TS wire shape: {wire}"
+        );
+        let parked = SessionActionSnapshot {
+            queued_count: 1,
+            steering: vec!["[child-exited: no-reply child:lane]".to_string()],
+            follow_ups: Vec::new(),
+            rlm_child_status: crate::types::RlmChildStatusIndices {
+                steering: vec![0],
+                follow_up: Vec::new(),
+            },
+            active: None,
+        };
+        let wire = serde_json::to_value(&parked).unwrap();
+        assert_eq!(
+            wire["rlmChildStatus"],
+            json!({ "steering": [0] }),
+            "the rider carries the lane indices in camelCase, the empty lane omitted"
+        );
+    }
+
+    /// The journal round-trip preserves the typed provenance: the restore
+    /// re-derives the flag from the parked row's injected custom row (the
+    /// record carries it), so a respawned worker's strip still folds the
+    /// notice (operator safeguard: journal restore must preserve that).
+    #[tokio::test]
+    async fn restored_lane_rows_keep_the_child_status_provenance() {
+        let (worker, _) = snapshot_after_create().await;
+        let content =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        worker.persist_queue_snapshot(
+            "target-session",
+            &QueueLanes {
+                steering: vec![crate::journal::WorkerQueueItemRecord {
+                    priority: Some(QueuePriority::Background),
+                    message: content,
+                    preview: None,
+                    custom_message: Some(child_status_notice_wire("terminal")),
+                    queue_key: None,
+                    queue_visible: true,
+                    policy: "queued".to_string(),
+                }],
+                follow_up: Vec::new(),
+            },
+        );
+        let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
+        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        assert_eq!(steering.len(), 1);
+        assert!(follow_up.is_empty());
+        assert!(
+            is_rlm_child_status_item(&steering[0]),
+            "the restored row is still a flagged notice"
+        );
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering = steering;
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(snapshot.rlm_child_status.steering, vec![0]);
     }
 }
 
@@ -6884,6 +7113,7 @@ mod agent_message_tests {
             let mut core = worker.core.lock().unwrap();
             for _ in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
                 core.follow_up.push_back(QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "occupied".to_string(),
                     custom_message: None,
@@ -7011,6 +7241,23 @@ mod prompt_image_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
+        QueuedItem {
+            message: message.to_string(),
+            priority: QueuePriority::Human,
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy,
+            forced_batch: false,
+        }
+    }
 
     /// The delivery's relationship label is edge-derived: a subagent
     /// sender whose durable parent edge points at this session is a
@@ -7816,6 +8063,7 @@ mod tests {
             let mut core = worker.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "parked queued work".to_string(),
                 custom_message: None,
@@ -8829,6 +9077,296 @@ mod tests {
     }
 
     #[test]
+    fn queue_priority_interleaves_lanes_fifo_and_preserves_explicit_order() {
+        let mut core = SessionCore::test_core(None, "/tmp".to_string());
+        core.steering_mode = "one-at-a-time".to_string();
+        core.follow_up_mode = "one-at-a-time".to_string();
+        let add = |core: &mut SessionCore, lane: Lane, text: &str, priority| {
+            let mut item = priority_test_item(text, TurnPolicy::Queued);
+            item.priority = priority;
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
+        };
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "machine follow 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 2",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 2",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 2",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human steer 1",
+                "human steer 2",
+                "machine steer 1",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            session_snapshot(&core).follow_ups,
+            ["human follow 1", "human follow 2", "machine follow 1"]
+        );
+        core.steering.swap(0, 2); // explicit user reorder crosses priority boundary
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 3",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "machine steer 1",
+                "human steer 2",
+                "human steer 1",
+                "human steer 3",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "machine steer 1"
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "human steer 2"
+        );
+        core.steering.clear();
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::FollowUp)[0].message,
+            "human follow 1"
+        );
+    }
+
+    #[test]
+    fn queue_priority_drains_four_tiers_and_pinned_front() {
+        let mut core = SessionCore::test_core(None, "/tmp".to_string());
+        core.steering_mode = "one-at-a-time".to_string();
+        core.follow_up_mode = "one-at-a-time".to_string();
+        for (lane, text, priority) in [
+            (Lane::FollowUp, "machine follow", QueuePriority::Background),
+            (Lane::Steering, "machine steer", QueuePriority::Background),
+            (Lane::FollowUp, "human follow", QueuePriority::Human),
+            (Lane::Steering, "human steer", QueuePriority::Human),
+            (Lane::FollowUp, "pinned follow", QueuePriority::Pinned),
+        ] {
+            let mut item = priority_test_item(text, TurnPolicy::Queued);
+            item.priority = priority;
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
+        }
+        let mut delivered = Vec::new();
+        while !core.steering.is_empty() || !core.follow_up.is_empty() {
+            let lane = if core.steering.is_empty() {
+                Lane::FollowUp
+            } else {
+                Lane::Steering
+            };
+            delivered.push(gather_delivery_batch(&mut core, lane).remove(0).message);
+        }
+        assert_eq!(
+            delivered,
+            [
+                "human steer",
+                "machine steer",
+                "pinned follow",
+                "human follow",
+                "machine follow"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
+        let worker = created_dispatch_worker().await;
+        let pause = worker.dispatch("acquire_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "leaseKey": "source-test", "clientId": "test"
+        })).await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        let custom = |content: &str| {
+            json!({
+                "role": "custom", "customType": "user", "content": content
+            })
+        };
+        for (command, message, row) in [
+            (
+                "steer",
+                "machine via steer",
+                Some(custom("machine via steer")),
+            ),
+            (
+                "prompt",
+                "machine via prompt",
+                Some(custom("machine via prompt")),
+            ),
+            ("steer", "human via steer", None),
+            ("prompt", "human via prompt", None),
+        ] {
+            let mut payload =
+                json!({ "activeSessionId": "suspension-session", "message": message });
+            if let Some(row) = row {
+                payload["customMessage"] = row;
+            }
+            let admitted = worker.dispatch(command, &payload).await;
+            assert!(admitted.success, "{command}: {admitted:?}");
+        }
+        let core = worker.core.lock().unwrap();
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human via steer",
+                "human via prompt",
+                "machine via steer",
+                "machine via prompt"
+            ]
+        );
+        assert_eq!(
+            core.steering
+                .iter()
+                .map(|item| item.priority)
+                .collect::<Vec<_>>(),
+            [
+                QueuePriority::Human,
+                QueuePriority::Human,
+                QueuePriority::Background,
+                QueuePriority::Background,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_rpc_prompt_overtakes_background_steer_and_settles() {
+        let worker = created_dispatch_worker().await;
+        let pause = worker.dispatch("acquire_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "leaseKey": "priority-test", "clientId": "test"
+        })).await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.busy = true; // a prompt admitted behind work is queue-visible
+            let mut background = priority_test_item("machine steer", TurnPolicy::Injected);
+            background.priority = QueuePriority::Background;
+            enqueue_priority(&mut core.steering, background);
+        }
+        let waiting_worker = std::sync::Arc::clone(&worker);
+        let waiting = tokio::spawn(async move {
+            waiting_worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "suspension-session",
+                        "message": "human steer",
+                        "streamingBehavior": "steer",
+                    }),
+                )
+                .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if worker.core.lock().unwrap().steering.len() == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting prompt was not queued"
+            );
+            tokio::task::yield_now().await;
+        }
+        {
+            let core = worker.core.lock().unwrap();
+            assert_eq!(
+                session_snapshot(&core).steering,
+                ["human steer", "machine steer"]
+            );
+        }
+        let released = worker.dispatch("release_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "pauseId": pause.data.as_ref().unwrap()["pauseId"],
+            "clientId": "test"
+        })).await;
+        assert!(released.success, "release failed: {released:?}");
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("prompt_and_wait did not settle")
+            .expect("dispatch task panicked");
+        assert!(settled.success, "waiting prompt failed: {settled:?}");
+    }
+
+    #[test]
+    fn legacy_queue_record_priority_defaults_by_row_and_keeps_order() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("priority-recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        let machine: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "machine", "custom_message": {"role": "custom", "customType": "notice"}
+        }))
+        .unwrap();
+        let human: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "human"
+        }))
+        .unwrap();
+        let future: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "future machine", "priority": "new_tier"
+        }))
+        .unwrap();
+        journal
+            .record_queue_snapshot("legacy", &[machine, human, future], &[])
+            .unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        let (lane, _) = restore_queue_snapshot(&reopened, "legacy");
+        assert_eq!(
+            lane.iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            ["machine", "human", "future machine"]
+        );
+        assert_eq!(lane[0].priority, QueuePriority::Background);
+        assert_eq!(lane[1].priority, QueuePriority::Human);
+        assert_eq!(lane[2].priority, QueuePriority::Background);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn queue_snapshot_round_trips_through_the_recovery_journal() {
         let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8845,6 +9383,7 @@ mod tests {
         );
         let heartbeat = crate::journal::WorkerQueueItemRecord {
             message: content.to_string(),
+            priority: Some(QueuePriority::Background),
             preview: Some(labeled_preview),
             custom_message: Some(json!({
                 "role": "custom",
@@ -8859,6 +9398,7 @@ mod tests {
         };
         let plain = crate::journal::WorkerQueueItemRecord {
             message: "follow-me".to_string(),
+            priority: Some(QueuePriority::Human),
             preview: None,
             custom_message: None,
             queue_key: None,
@@ -8877,12 +9417,14 @@ mod tests {
         let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-a");
         assert_eq!(steering.len(), 1);
         assert_eq!(steering[0].message, heartbeat.message);
+        assert_eq!(steering[0].priority, QueuePriority::Background);
         assert_eq!(steering[0].preview, heartbeat.preview);
         assert_eq!(steering[0].custom_message, heartbeat.custom_message);
         assert_eq!(steering[0].queue_key, heartbeat.queue_key);
         assert!(steering[0].queue_visible);
         assert_eq!(follow_up.len(), 1);
         assert_eq!(follow_up[0].message, "follow-me");
+        assert_eq!(follow_up[0].priority, QueuePriority::Human);
         // Compaction (triggered by an all-idle record) keeps the snapshot
         // with its full rows.
         let mut compacting = WorkerRecoveryJournal::open(&journal_path).unwrap();
@@ -8932,6 +9474,7 @@ mod tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "steer one".to_string(),
                 custom_message: None,
@@ -8945,6 +9488,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 preview: None,
                 message: "agent message row".to_string(),
                 custom_message: None,
@@ -8958,6 +9502,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 preview: None,
                 message: "injected custom row".to_string(),
                 custom_message: Some(json!({ "role": "custom", "customType": "x" })),
@@ -8971,6 +9516,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "steer two".to_string(),
                 custom_message: None,
@@ -9253,6 +9799,7 @@ mod turn_stream_tests {
             let mut core = runner.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "parked steer".to_string(),
                 custom_message: None,
@@ -9312,6 +9859,7 @@ mod turn_stream_tests {
     /// A queued plain-prompt item for the pump tests.
     fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
         QueuedItem {
+            priority: QueuePriority::Human,
             preview: None,
             message: message.to_string(),
             custom_message: None,
@@ -10068,6 +10616,7 @@ mod turn_stream_tests {
                 .run_turn(
                     engine,
                     vec![QueuedItem {
+                        priority: QueuePriority::Human,
                         preview: None,
                         message: "burst".to_string(),
                         custom_message: None,
@@ -10222,6 +10771,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "run the tool".to_string(),
                     custom_message: None,
@@ -10307,6 +10857,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "burst".to_string(),
                     custom_message: None,
@@ -10344,6 +10895,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Background,
                     preview: None,
                     message: "[child-exited: no-reply child:lane]".to_string(),
                     custom_message: Some(custom_message),

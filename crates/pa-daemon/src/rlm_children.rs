@@ -891,6 +891,7 @@ impl SupervisorChildSessionsInner {
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
+                rlm_notice_nonce: None,
             },
             rest: Default::default(),
         };
@@ -1108,7 +1109,13 @@ impl SupervisorChildSessionsInner {
     /// Deliver one terminal notice into the parent session: the notice rides
     /// the supervisor's `follow_up` route as an injected custom turn (the
     /// row renders in the parent transcript and the turn runs on the
-    /// notice content, the TS `followUp` notice action).
+    /// notice content, the TS `followUp` notice action). The reserved
+    /// custom kinds are daemon provenance, so the command carries the
+    /// one-shot notice capability minted in this same worker process
+    /// (`child_status_notices`): the parent's queue admission accepts a
+    /// reserved-kind row exclusively with a live mint, and answers
+    /// anything a caller sends — with or without a guessed nonce —
+    /// loudly instead.
     async fn deliver_terminal_notice(&self, notice: &RlmChildTerminalNotice) {
         let message = create_rlm_child_terminal_notice(notice, now_ms());
         let Some(content) = custom_message_text(&message) else {
@@ -1117,6 +1124,7 @@ impl SupervisorChildSessionsInner {
         };
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
+        let nonce = crate::child_status_notices::mint();
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
@@ -1133,6 +1141,7 @@ impl SupervisorChildSessionsInner {
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
+                rlm_notice_nonce: Some(nonce),
             },
             rest: Default::default(),
         };
@@ -2328,6 +2337,10 @@ mod watch_tests {
         let custom = &follow_up["customMessage"];
         assert_eq!(custom["role"], "custom");
         assert_eq!(custom["customType"], "rlm_child_terminal_notice");
+        assert!(
+            follow_up["rlmNoticeNonce"].as_str().is_some(),
+            "the notice carries the one-shot capability the parent's queue admission consumes"
+        );
         assert_eq!(
             custom["content"],
             "[child-exited: no-reply child:f20-worker]\n\nLast assistant text: the child final answer"

@@ -677,8 +677,12 @@ fn build_session_manager_with_lease(
     // project's session copied into this cwd) — with no daemon-active
     // guard: the copy writes a fresh file, never the hosted source.
     if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
         let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
             ResolvedSession::Path(path)
             | ResolvedSession::Local(path)
@@ -869,7 +873,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),

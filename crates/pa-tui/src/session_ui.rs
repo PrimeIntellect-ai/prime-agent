@@ -435,6 +435,12 @@ pub(crate) struct SessionUi {
     /// panel through it; the run loop owns the receiving side and folds
     /// each request into the mounted panel).
     auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
+    /// The running panel login's cooperative cancel signal (#2770):
+    /// armed only by the flows that check it between their poll steps
+    /// (the codex subscription login); Esc/ctrl+c on the mounted panel
+    /// marks it and unmounts, and a cancelled flow never writes its
+    /// credential.
+    auth_panel_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
@@ -751,6 +757,7 @@ impl SessionUi {
             provider_auth: options.provider_auth.clone(),
             pending_model_sign_in: None,
             auth_panel_notes,
+            auth_panel_cancel: None,
             pending_update: None,
             update_commands: options.update_commands.clone(),
             exit_requested: false,
@@ -1163,7 +1170,8 @@ impl SessionUi {
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
         let dock = crate::chrome::ActivityDock {
-            subagents_running: counts.running,
+            subagents_running_direct: counts.running_direct,
+            subagents_running_nested: counts.running_nested,
             subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
@@ -2425,6 +2433,7 @@ impl SessionUi {
                             queue_key: None,
                             prefix_messages: None,
                             admission_id: None,
+                            rlm_notice_nonce: None,
                         },
                         rest: Default::default(),
                     },
@@ -3678,12 +3687,14 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
-                        // The unported OAuth subscription stubs: the
-                        // error row is the whole flow (nothing drives
-                        // the panel).
+                        // The menu marks unported subscription rows
+                        // unavailable and Enter never selects them; a row
+                        // reaching here answers the silent cancel — no
+                        // after-selection error wall.
                         let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, &provider.id, view).await;
                     }
@@ -3703,12 +3714,22 @@ impl SessionUi {
         Ok(())
     }
 
+    /// The auth panel's request channel (TS the login dialog's surface
+    /// seam): the onboarding phase drives its flows against the same
+    /// channel the run loop services after the pane ends.
+    pub(crate) fn auth_panel_handle(&self) -> crate::auth_panel::AuthPanelHandle {
+        crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone())
+    }
+
     /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
-    /// Inference login): mount the inline auth panel (TS `showAuthPanel`
-    /// mounts the login dialog as the flow starts) and spawn the flow
-    /// against it. The flow's requests fold into the panel through the
-    /// run loop's channel arm; the settled outcome lands the same way
-    /// (the flow never touches the terminal).
+    /// Inference login, the Codex Subscription login): mount the inline
+    /// auth panel (TS `showAuthPanel` mounts the login dialog as the
+    /// flow starts) and spawn the flow against it. The flow's requests
+    /// fold into the panel through the run loop's channel arm; the
+    /// settled outcome lands the same way (the flow never touches the
+    /// terminal). Flows that check the cooperative cancel (#2770: the
+    /// codex subscription login) arm its shared flag so Esc/ctrl+c on
+    /// the mounted panel ends the flow without writing credentials.
     fn start_provider_panel_login(
         &mut self,
         provider: &crate::provider_auth::ProviderRow,
@@ -3720,13 +3741,29 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        // A still-running previous flow ends before its replacement arms:
+        // its flag marks the blocking body out of the way, and its late
+        // settle is skipped below so it can never close the newer panel.
+        if let Some(previous) = self.auth_panel_cancel.take() {
+            previous.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+            .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
             let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
-                provider: provider.id.clone(),
-                outcome,
-            });
+            // The driving surface already exited (Esc, or a newer login
+            // re-armed): the panel is unmounted, the outcome is cancelled
+            // or errored by the flow's own checks, and applying a stale
+            // settle would close the NEWER flow's panel — so it never
+            // lands (TS the cancelled dialog's outcome is dropped with
+            // the dialog).
+            if !panel.cancelled() {
+                panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
+                    provider: provider.id.clone(),
+                    outcome,
+                });
+            }
         });
     }
 
@@ -3743,9 +3780,20 @@ impl SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
+        let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            let kb = view.editor.keybindings();
             panel.handle_key(&id, kb);
+        }
+        // A cancel key on an armed panel flow ends it cooperatively
+        // (#2770): the flag marks the blocking body (no credential write
+        // after the exit), the panel unmounts, and the settled outcome
+        // is the silent cancel.
+        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
+        if cancel_key {
+            if let Some(cancel) = self.auth_panel_cancel.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                view.auth_panel = None;
+            }
         }
         self.dirty = true;
         Ok(())
@@ -3757,7 +3805,7 @@ impl SessionUi {
     /// a failed or cancelled flow — or a settled login for a different
     /// provider, which abandons the route the user left — drops the park
     /// (the outcome's own rows render as usual).
-    async fn apply_auth_outcome(
+    pub(crate) async fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
         provider: &str,
@@ -3839,6 +3887,7 @@ impl SessionUi {
                 }
             }
             AuthPanelRequest::ProviderSettled { provider, outcome } => {
+                self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, &provider, view).await;
             }
@@ -7165,6 +7214,32 @@ impl SessionUi {
         }
     }
 
+    /// The onboarding default-model apply (TS
+    /// `prepareForModelSelectionAfterLogin`): the switch runs through the
+    /// same `try_set_model` path the model picker uses. A refusal after
+    /// the just-completed sign-in keeps the flow moving (TS's post-login
+    /// "still unavailable" row — never a second sign-in route inside the
+    /// onboarding pane), and every other failure already rendered its
+    /// error row, so the caller never branches.
+    pub(crate) async fn apply_model_selection(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+        view: &mut AgentView,
+    ) {
+        match self.try_set_model(provider, model_id, view).await {
+            // The switch recorded its own `Model: <id>` row; every other
+            // failure already rendered the error row.
+            SetModelOutcome::Switched | SetModelOutcome::Failed => {}
+            SetModelOutcome::NeedsSignIn => {
+                self.error_row(
+                    &format!("Authentication completed, but {provider} is still unavailable."),
+                    view,
+                );
+            }
+        }
+    }
+
     /// Route a picked model whose provider is not signed in to the
     /// provider sign-in flow (TS `ensureModelProviderConfigured`): park
     /// the selection, then mount the `/login` provider menu preselected on
@@ -7317,15 +7392,16 @@ impl SessionUi {
                 },
             )
             .await;
-        if let Ok(data) = state {
-            let model_id = data
+        let model_id = match state {
+            Ok(data) => data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string);
-            view.chrome.model_id = Some(model_id);
-            self.dirty = true;
-        }
+                .map_or_else(|| picked_model_id.to_string(), str::to_string),
+            Err(_) => picked_model_id.to_string(),
+        };
+        view.chrome.model_id = Some(model_id);
+        self.dirty = true;
     }
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
@@ -8830,11 +8906,13 @@ impl SessionUi {
                 steering,
                 follow_ups,
                 starting,
+                rlm_child_status,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
                     starting,
+                    rlm_child_status,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor

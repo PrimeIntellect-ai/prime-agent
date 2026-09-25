@@ -154,20 +154,24 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (a fresh home answers the question and a standing-choice home completes silently — no error/abort path in either yet) |
-| `auth_category` | string | `none` (no auth step in the flow) |
-| `provider_category` | string | `unknown` |
+| `outcome` | string | `success` (the completion marker writes only on a completed flow; an aborted sign-in never completes) |
+| `auth_category` | string | the resolved startup model's credential source (TS `telemetryAuthCategory`): `api_key` / `oauth` / `mcp_static_token` for stored credentials, `runtime_api_key` / `environment` / `prime_cli` / `models_json` / `fallback` / `stale` for their sources, `none` when no model resolved |
+| `provider_category` | string | the resolved startup model's provider (TS `telemetryProviderCategory`), `unknown` when no model resolved |
 
 ### `daemon event`
 
 Supervision lifecycle, emitted by the supervisor process. Counts only,
 never session payload. `session_rebound`: a client command addressed a
 superseded active session id and the supervisor rebound it to the
-session's current worker (the stale-id rebind).
+session's current worker (the stale-id rebind). `registration_refused`:
+a live worker's `worker_register` was refused with the unknown-worker
+verdict (no descriptor exists for its identity) — the refused-
+registration self-heal retires the worker so its session lease releases;
+one event per refusal (the retired worker never re-registers).
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption`, `registration_refused` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
 | `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / how many served saved-session rows carry a usage summary / how many tombstoned ledger edges received the deletion's durable usage amendment / one wedged-worker compaction the supervisor declared aborted |
 | `source` | string | only for `deleted_child_usage_captured`: `rlm_delete` (the kill route's finalize), `saved_delete` (the saved-session delete's pre-unlink tombstone), `adoption` (an interrupted delete finished from the ledger tombstone at boot) |
