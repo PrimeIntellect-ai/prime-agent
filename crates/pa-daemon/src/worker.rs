@@ -342,7 +342,7 @@ impl QueuePriority {
     }
 }
 
-/// TS ActionStore priority insertion: walk back only across a lower-priority
+/// TS `ActionStore` priority insertion: walk back only across a lower-priority
 /// suffix. Never re-sort a lane: explicit moves and restored order can cross
 /// priority boundaries, and equal-priority arrivals remain FIFO.
 pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem) {
@@ -8920,28 +8920,91 @@ mod tests {
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
         };
-        add(&mut core, Lane::FollowUp, "machine follow 1", QueuePriority::Background);
-        add(&mut core, Lane::Steering, "machine steer 1", QueuePriority::Background);
-        add(&mut core, Lane::FollowUp, "human follow 1", QueuePriority::Human);
-        add(&mut core, Lane::Steering, "human steer 1", QueuePriority::Human);
-        add(&mut core, Lane::Steering, "machine steer 2", QueuePriority::Background);
-        add(&mut core, Lane::FollowUp, "human follow 2", QueuePriority::Human);
-        add(&mut core, Lane::Steering, "human steer 2", QueuePriority::Human);
-        assert_eq!(session_snapshot(&core).steering, [
-            "human steer 1", "human steer 2", "machine steer 1", "machine steer 2"
-        ]);
-        assert_eq!(session_snapshot(&core).follow_ups, [
-            "human follow 1", "human follow 2", "machine follow 1"
-        ]);
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "machine follow 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 2",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 2",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 2",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human steer 1",
+                "human steer 2",
+                "machine steer 1",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            session_snapshot(&core).follow_ups,
+            ["human follow 1", "human follow 2", "machine follow 1"]
+        );
         core.steering.swap(0, 2); // explicit user reorder crosses priority boundary
-        add(&mut core, Lane::Steering, "human steer 3", QueuePriority::Human);
-        assert_eq!(session_snapshot(&core).steering, [
-            "machine steer 1", "human steer 2", "human steer 1", "human steer 3", "machine steer 2"
-        ]);
-        assert_eq!(gather_delivery_batch(&mut core, Lane::Steering)[0].message, "machine steer 1");
-        assert_eq!(gather_delivery_batch(&mut core, Lane::Steering)[0].message, "human steer 2");
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 3",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "machine steer 1",
+                "human steer 2",
+                "human steer 1",
+                "human steer 3",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "machine steer 1"
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "human steer 2"
+        );
         core.steering.clear();
-        assert_eq!(gather_delivery_batch(&mut core, Lane::FollowUp)[0].message, "human follow 1");
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::FollowUp)[0].message,
+            "human follow 1"
+        );
     }
 
     #[test]
@@ -8965,12 +9028,23 @@ mod tests {
         }
         let mut delivered = Vec::new();
         while !core.steering.is_empty() || !core.follow_up.is_empty() {
-            let lane = if core.steering.is_empty() { Lane::FollowUp } else { Lane::Steering };
+            let lane = if core.steering.is_empty() {
+                Lane::FollowUp
+            } else {
+                Lane::Steering
+            };
             delivered.push(gather_delivery_batch(&mut core, lane).remove(0).message);
         }
-        assert_eq!(delivered, [
-            "human steer", "machine steer", "pinned follow", "human follow", "machine follow"
-        ]);
+        assert_eq!(
+            delivered,
+            [
+                "human steer",
+                "machine steer",
+                "pinned follow",
+                "human follow",
+                "machine follow"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -8980,16 +9054,27 @@ mod tests {
             "activeSessionId": "suspension-session", "leaseKey": "source-test", "clientId": "test"
         })).await;
         assert!(pause.success, "pause failed: {pause:?}");
-        let custom = |content: &str| json!({
-            "role": "custom", "customType": "user", "content": content
-        });
+        let custom = |content: &str| {
+            json!({
+                "role": "custom", "customType": "user", "content": content
+            })
+        };
         for (command, message, row) in [
-            ("steer", "machine via steer", Some(custom("machine via steer"))),
-            ("prompt", "machine via prompt", Some(custom("machine via prompt"))),
+            (
+                "steer",
+                "machine via steer",
+                Some(custom("machine via steer")),
+            ),
+            (
+                "prompt",
+                "machine via prompt",
+                Some(custom("machine via prompt")),
+            ),
             ("steer", "human via steer", None),
             ("prompt", "human via prompt", None),
         ] {
-            let mut payload = json!({ "activeSessionId": "suspension-session", "message": message });
+            let mut payload =
+                json!({ "activeSessionId": "suspension-session", "message": message });
             if let Some(row) = row {
                 payload["customMessage"] = row;
             }
@@ -8997,13 +9082,27 @@ mod tests {
             assert!(admitted.success, "{command}: {admitted:?}");
         }
         let core = worker.core.lock().unwrap();
-        assert_eq!(session_snapshot(&core).steering, [
-            "human via steer", "human via prompt", "machine via steer", "machine via prompt"
-        ]);
-        assert_eq!(core.steering.iter().map(|item| item.priority).collect::<Vec<_>>(), [
-            QueuePriority::Human, QueuePriority::Human,
-            QueuePriority::Background, QueuePriority::Background,
-        ]);
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human via steer",
+                "human via prompt",
+                "machine via steer",
+                "machine via prompt"
+            ]
+        );
+        assert_eq!(
+            core.steering
+                .iter()
+                .map(|item| item.priority)
+                .collect::<Vec<_>>(),
+            [
+                QueuePriority::Human,
+                QueuePriority::Human,
+                QueuePriority::Background,
+                QueuePriority::Background,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -9022,21 +9121,34 @@ mod tests {
         }
         let waiting_worker = std::sync::Arc::clone(&worker);
         let waiting = tokio::spawn(async move {
-            waiting_worker.dispatch("prompt_and_wait", &json!({
-                "activeSessionId": "suspension-session",
-                "message": "human steer",
-                "streamingBehavior": "steer",
-            })).await
+            waiting_worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "suspension-session",
+                        "message": "human steer",
+                        "streamingBehavior": "steer",
+                    }),
+                )
+                .await
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if worker.core.lock().unwrap().steering.len() == 2 { break; }
-            assert!(std::time::Instant::now() < deadline, "waiting prompt was not queued");
+            if worker.core.lock().unwrap().steering.len() == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting prompt was not queued"
+            );
             tokio::task::yield_now().await;
         }
         {
             let core = worker.core.lock().unwrap();
-            assert_eq!(session_snapshot(&core).steering, ["human steer", "machine steer"]);
+            assert_eq!(
+                session_snapshot(&core).steering,
+                ["human steer", "machine steer"]
+            );
         }
         let released = worker.dispatch("release_session_input_pause", &json!({
             "activeSessionId": "suspension-session", "pauseId": pause.data.as_ref().unwrap()["pauseId"],
@@ -9044,7 +9156,9 @@ mod tests {
         })).await;
         assert!(released.success, "release failed: {released:?}");
         let settled = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
-            .await.expect("prompt_and_wait did not settle").expect("dispatch task panicked");
+            .await
+            .expect("prompt_and_wait did not settle")
+            .expect("dispatch task panicked");
         assert!(settled.success, "waiting prompt failed: {settled:?}");
     }
 
@@ -9056,17 +9170,27 @@ mod tests {
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         let machine: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
             "message": "machine", "custom_message": {"role": "custom", "customType": "notice"}
-        })).unwrap();
+        }))
+        .unwrap();
         let human: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
             "message": "human"
-        })).unwrap();
+        }))
+        .unwrap();
         let future: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
             "message": "future machine", "priority": "new_tier"
-        })).unwrap();
-        journal.record_queue_snapshot("legacy", &[machine, human, future], &[]).unwrap();
+        }))
+        .unwrap();
+        journal
+            .record_queue_snapshot("legacy", &[machine, human, future], &[])
+            .unwrap();
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         let (lane, _) = restore_queue_snapshot(&reopened, "legacy");
-        assert_eq!(lane.iter().map(|item| item.message.as_str()).collect::<Vec<_>>(), ["machine", "human", "future machine"]);
+        assert_eq!(
+            lane.iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            ["machine", "human", "future machine"]
+        );
         assert_eq!(lane[0].priority, QueuePriority::Background);
         assert_eq!(lane[1].priority, QueuePriority::Human);
         assert_eq!(lane[2].priority, QueuePriority::Background);

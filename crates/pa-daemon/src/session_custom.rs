@@ -161,7 +161,10 @@ impl Worker {
                             || pa_core::session_engine::agent_messaging::is_agent_session_message_id(
                                 action.get("agentMessageId").and_then(Value::as_str),
                             )
-                            || !matches!(action.get("source").and_then(Value::as_str), Some("interactive" | "rpc")) =>
+                            || !matches!(
+                                action.get("source").and_then(Value::as_str),
+                                Some("interactive" | "rpc")
+                            ) =>
                         {
                             crate::worker::QueuePriority::Background
                         }
@@ -636,52 +639,77 @@ mod tests {
             "activeSessionId": "custom-session", "leaseKey": "restore-priority", "clientId": "test"
         })).await;
         assert!(pause.success, "pause failed: {pause:?}");
-        let action =
-            |id: &str, source: &str, priority: Option<&str>, agent_id: Option<&str>, custom: bool| {
-                let mut row = json!({
-                    "id": id, "source": source, "delivery": "next_turn_boundary", "wake": "immediate",
-                    "payload": { "kind": "turn", "text": id, "records": [], "queueVisible": true }
+        let action = |id: &str,
+                      source: &str,
+                      priority: Option<&str>,
+                      agent_id: Option<&str>,
+                      custom: bool| {
+            let mut row = json!({
+                "id": id, "source": source, "delivery": "next_turn_boundary", "wake": "immediate",
+                "payload": { "kind": "turn", "text": id, "records": [], "queueVisible": true }
+            });
+            if let Some(priority) = priority {
+                row["priority"] = json!(priority);
+            }
+            if let Some(agent_id) = agent_id {
+                row["agentMessageId"] = json!(agent_id);
+            }
+            if custom {
+                row["payload"]["customMessage"] = json!({
+                    "role": "custom", "customType": "heartbeat_prompt", "content": id
                 });
-                if let Some(priority) = priority {
-                    row["priority"] = json!(priority);
-                }
-                if let Some(agent_id) = agent_id {
-                    row["agentMessageId"] = json!(agent_id);
-                }
-                if custom {
-                    row["payload"]["customMessage"] = json!({
-                        "role": "custom", "customType": "heartbeat_prompt", "content": id
-                    });
-                }
-                row
-            };
-        let restored = worker.dispatch("restore_actions", &json!({
-            "activeSessionId": "custom-session",
-            "snapshot": { "formatVersion": 1, "actions": [
-                action("pinned", "internal", Some("pinned"), None, true),
-                action("user-tag", "internal", Some("user"), None, true),
-                action("background-tag", "rpc", Some("background"), None, false),
-                action("custom-fallback", "rpc", None, None, true),
-                action("agent-id-fallback", "rpc", None, Some("agentmsg_abc"), false),
-                action("internal-fallback", "internal", None, None, false),
-                action("synthetic-waiter", "rpc", None, Some("prompt-waiter-1"), false),
-            ] }
-        })).await;
+            }
+            row
+        };
+        let restored = worker
+            .dispatch(
+                "restore_actions",
+                &json!({
+                    "activeSessionId": "custom-session",
+                    "snapshot": { "formatVersion": 1, "actions": [
+                        action("pinned", "internal", Some("pinned"), None, true),
+                        action("user-tag", "internal", Some("user"), None, true),
+                        action("background-tag", "rpc", Some("background"), None, false),
+                        action("custom-fallback", "rpc", None, None, true),
+                        action("agent-id-fallback", "rpc", None, Some("agentmsg_abc"), false),
+                        action("internal-fallback", "internal", None, None, false),
+                        action("synthetic-waiter", "rpc", None, Some("prompt-waiter-1"), false),
+                    ] }
+                }),
+            )
+            .await;
         assert!(restored.success, "restore failed: {restored:?}");
         let core = worker.core.lock().unwrap();
-        assert_eq!(core.steering.iter().map(|item| item.message.as_str()).collect::<Vec<_>>(), [
-            "pinned", "user-tag", "background-tag", "custom-fallback", "agent-id-fallback",
-            "internal-fallback", "synthetic-waiter"
-        ]);
-        assert_eq!(core.steering.iter().map(|item| item.priority).collect::<Vec<_>>(), [
-            crate::worker::QueuePriority::Pinned,
-            crate::worker::QueuePriority::Human,
-            crate::worker::QueuePriority::Background,
-            crate::worker::QueuePriority::Background,
-            crate::worker::QueuePriority::Background,
-            crate::worker::QueuePriority::Background,
-            crate::worker::QueuePriority::Human,
-        ]);
+        assert_eq!(
+            core.steering
+                .iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "pinned",
+                "user-tag",
+                "background-tag",
+                "custom-fallback",
+                "agent-id-fallback",
+                "internal-fallback",
+                "synthetic-waiter"
+            ]
+        );
+        assert_eq!(
+            core.steering
+                .iter()
+                .map(|item| item.priority)
+                .collect::<Vec<_>>(),
+            [
+                crate::worker::QueuePriority::Pinned,
+                crate::worker::QueuePriority::Human,
+                crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Human,
+            ]
+        );
     }
 
     /// A restored action keeps its labeled preview (TS
