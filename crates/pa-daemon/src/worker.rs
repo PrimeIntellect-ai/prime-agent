@@ -326,9 +326,9 @@ pub(crate) struct QueuedItem {
     pub(crate) message: String,
     /// The labeled queue-strip row (TS `payload.preview`): the queue
     /// snapshot serves it instead of `message` when the delivery carries
-    /// one (TS `queuedAgentMessagePreview` returns
-    /// `payload.preview ?? payload.text`). The active-action label and the
-    /// turn's prompt text stay `message` (TS `compactRlmText(payload.text)`).
+    /// one, and the active-action label reads it too (TS #2063
+    /// `queuedAgentMessagePreview` returns `payload.preview ??
+    /// payload.text`); the turn's prompt text stays `message`.
     pub(crate) preview: Option<String>,
     /// An injected custom row that replaces this turn's user message (the
     /// RLM child terminal notices ride the follow-up lane this way).
@@ -486,9 +486,13 @@ pub(crate) struct SessionCore {
     /// The queue projection's active action (TS `getSessionActionSnapshot`
     /// reads the store's first active action): the runner sets the phase
     /// transitions of a queue-visible delivery (`preparing` at pickup,
-    /// `committing` before the turn dispatch, `running` at the turn's
-    /// `agent_start`) and clears it once the delivered turn settles. The
-    /// label rides the snapshot (TS `compactRlmText(active.payload.text)`).
+    /// `committing` at the turn's first row — the prompt becomes visible
+    /// in the conversation then, TS's commit fence — `running` at the
+    /// turn's first assistant frame) and clears it once the delivered
+    /// turn settles. The `preparing` projection is what a client renders
+    /// as the queued strip's "Starting" row (TS #2063). The label rides
+    /// the snapshot (TS #2063 `compactRlmText(queuedAgentMessagePreview(
+    /// active))`: the delivery's labeled preview, else the message text).
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
 }
 
@@ -1165,6 +1169,28 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The live compaction summary-delta sink (the
+                // `compaction_summary_delta` broadcast, the operator's
+                // "stream the compacted summary" feature): every
+                // summarizer text delta the engine's compactions stream
+                // reaches the attached clients as one ephemeral
+                // session-event frame between the owning
+                // `compaction_start` and the settling `compaction_end`.
+                // The frames sequence + broadcast exactly like the
+                // worker's other session events (never persisted, never
+                // a roster trigger), so the ordering contract with the
+                // compaction loader's start/end pair holds.
+                let summary_core = Arc::clone(&core);
+                let summary_events = events.clone();
+                let summary_sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink =
+                    Arc::new(move |delta| {
+                        emit_worker_event_with(
+                            &summary_core,
+                            &summary_events,
+                            crate::compaction::compaction_summary_delta_event(delta),
+                        );
+                    });
+                concrete.set_compaction_summary_sink(summary_sink);
                 // The bash-completion wake seam (TS
                 // `_promptInjectedMessage` for `bash.completed` and
                 // `_withdrawAsyncBashCompletionNotice` for
@@ -3526,9 +3552,9 @@ impl Worker {
     /// delivery record is a user message, not an accepted agent message or
     /// an injected custom row — deliver as ONE batched turn at the next
     /// boundary, even under queue mode "one-at-a-time". Returns whether
-    /// anything armed; an empty lane (or an all-injected one) arms nothing
-    /// and the caller falls back to the plain abort (TS
-    /// `queuedSteering.length === 0 || !canResume`).
+    /// anything armed; an empty lane (or an all-injected one) arms
+    /// nothing and the caller decides from the surviving queue whether
+    /// the abort keeps the pump flowing.
     // Called by the `abort_and_send_queued` funnel (the wire command's
     // body, #2599's handler once rebased).
     pub(crate) fn arm_forced_all_steering(&self) -> bool {
@@ -3548,17 +3574,31 @@ impl Worker {
         true
     }
 
-    /// TS `abortAndSendQueued` (agent-session.ts): abort the active run
-    /// and deliver every queued plain-user steering message together as
-    /// the next batched turn; abort-only when no armable steering sits
-    /// queued or the scheduler must stay parked (a held admission pause
-    /// or a pending shutdown — TS `canResume`). The follow-up lane never
-    /// merges in: it stays queued behind the delivered batch and drains
-    /// when the session goes idle. `steeringMode` is never changed.
+    /// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): abort
+    /// the active run and keep the queue flowing behind the settled turn
+    /// — the armed plain-user steering rows co-deliver as the next
+    /// batched turn, then the follow-up lane drains when the session
+    /// goes idle, one turn per completed turn. `steeringMode` is never
+    /// changed, and the follow-up lane never merges into the batch.
+    ///
+    /// Abort-only — the queue parks behind the suspension, like the bare
+    /// `abort` — when no queue-visible work survives or the scheduler
+    /// must stay parked (a held admission pause or a pending shutdown —
+    /// TS `canResume`).
+    ///
+    /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the
+    /// queue whenever the steering lane has nothing armable
+    /// (`queuedSteering.length === 0`), so a follow-up-only queue sits
+    /// parked until an outside resume site fires; here the abort
+    /// resumes whenever queue-visible work survived, and a follow-up
+    /// parked behind an aborted turn starts promptly once the turn
+    /// settles. The bare `abort` command keeps the TS park.
     ///
     /// The `abort_and_send_queued` wire command (schema 29) and the
-    /// Ctrl+C trigger dispatch through this funnel (`handle_abort_and_send_queued`
-    /// below — the abort-parity lane's command surface, #2599).
+    /// Ctrl+C trigger dispatch through this funnel
+    /// (`handle_abort_and_send_queued` below — the abort-parity lane's
+    /// command surface, #2599). Returns whether the queue was resumed
+    /// to drain behind the abort (the abort-only arm answers `false`).
     pub(crate) fn abort_and_send_queued(&self) -> bool {
         // TS `canResume`: no disposal in flight, no admission pause held —
         // and the arm only fires in the send arm (`queuedSteering.length
@@ -3572,14 +3612,23 @@ impl Worker {
         }
         // TS `queuedSteering` + the arm: the visible plain-user steering
         // rows carry the forced-batch flag; an empty (or all-injected)
-        // lane arms nothing and the abort below runs abort-only.
-        let armed = self.arm_forced_all_steering();
-        // TS runs `requestAbort()` in both arms (the suspension parks
-        // the queue), then arms + resumes only in the send arm: the
-        // resumed pump — not this funnel — owns the batch's delivery at
-        // the boundary.
+        // lane arms nothing.
+        self.arm_forced_all_steering();
+        // TS runs `requestAbort()` in both arms (the suspension parks the
+        // queue). The cancel sweep keeps only the queue-visible rows, so
+        // the emptiness read below measures exactly the work the abort
+        // leaves behind.
         self.request_abort();
-        if !armed {
+        // The resume gate: the abort keeps the queue flowing whenever
+        // queue-visible work survived — the armed steering batch or a
+        // follow-up-only lane alike. The resumed pump — not this funnel —
+        // owns the delivery at the settled turn's boundary: steers first
+        // (one batched turn), then the follow-up lane.
+        let queued_work = {
+            let core = self.core.lock().unwrap();
+            !core.steering.is_empty() || !core.follow_up.is_empty()
+        };
+        if !queued_work {
             return false;
         }
         self.resume_queued_input();
@@ -3646,19 +3695,17 @@ impl Worker {
     }
 
     /// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): abort
-    /// the active run and deliver the queued steering at the boundary;
-    /// abort-only when the visible steering queue is empty or the
-    /// scheduler must stay parked. The queue lanes drain through the turn
-    /// runner once the aborted run settles (steering first, then
-    /// follow-ups when idle), like the TS resumed pump's
-    /// next-turn-boundary-then-when-idle selection order.
+    /// the active run and keep the queue flowing at the boundary — the
+    /// armed steering rows deliver as ONE co-delivered turn, then the
+    /// follow-up lane drains one turn per completed turn; abort-only
+    /// when no queue-visible work survives or the scheduler must stay
+    /// parked (the abort-only arm leaves the suspension set, so an
+    /// emptied queue stays parked like the bare `abort`).
     fn handle_abort_and_send_queued(&self) -> DaemonResponse {
-        // The command is the TS `abortAndSendQueued` funnel (above): the
-        // arm classifies the visible plain-user steering rows, the abort
-        // parks the scheduler, and the resume - the send arm only - lets
-        // the pump deliver the armed batch as ONE co-delivered turn at
-        // the boundary (the abort-only arm leaves the suspension set, so
-        // the parked queue survives untouched).
+        // The funnel above owns the arm, the abort, and the conditional
+        // resume; the response acknowledges the abort itself, never the
+        // deliveries the resumed pump runs asynchronously at the settled
+        // turn's boundary.
         self.abort_and_send_queued();
         response_success(None, "abort_and_send_queued", None)
     }
@@ -4801,6 +4848,59 @@ fn restore_queue_snapshot(
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+/// Record one durable custom row of the background compact-trigger
+/// review and broadcast its `message_start`/`message_end` pair (the TS
+/// `_emit` for rows the session appends outside a turn): the same shape
+/// `Worker::emit_custom_row` persists for the `/refine` command's rows.
+///
+/// `review_session_id` fences the row against the session moves a branch
+/// navigation or replacement makes while the review's model call was in
+/// flight (the round's branch-version check already drops its harness
+/// edits; this drops the ROWS): the worker's live store answers with a
+/// different session id — the review resolved against the abandoned
+/// conversation, so its rows never persist or broadcast into the
+/// moved-to session. Returns whether the row landed.
+fn emit_refinement_row(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    message: Value,
+) -> bool {
+    {
+        let mut core = core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                serde_json::Value::Null,
+            );
+            return false;
+        }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_start", "message": message }),
+    );
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_end", "message": message }),
+    );
+    true
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
@@ -5184,38 +5284,38 @@ impl TurnRunner {
                 // message for the whole turn (dogfood P0: the steered
                 // message sends but still shows in the queue) and a browse
                 // edit addressed at the stale row is rejected as changed.
-                // A queue-visible delivery carries the active action through
-                // its TS phase transitions (`selected`/`preparing` projects
-                // first, then the `committing` transition before the turn
-                // dispatch, `running` once the turn's `agent_start` lands,
-                // cleared at the settle); an invisible item (an idle
-                // session's direct prompt admission, injected goal and
-                // autonomous continuations) projects the plain pickup like
-                // TS's `queueVisible` filter.
-                // The batch's active action is the first queue-visible row
-                // (TS `visibleSessionActionProjection(activeActions())[0]`):
-                // an all-invisible batch (injected continuations) projects
-                // nothing, like TS's `queueVisible` filter.
+                // A queue-visible delivery carries the active action
+                // through its TS phase transitions: `preparing` projects
+                // here at pickup, then `committing` at the turn's first
+                // row (the moment the prompt becomes visible in the
+                // conversation — TS's commit fence) and `running` at the
+                // turn's first assistant frame, both emitted by the
+                // runner's event path, cleared at the settle. The
+                // `preparing` projection is what a client renders as the
+                // queued strip's "Starting" row (TS #2063): the prompt
+                // left its lane, and until the turn's rows land the strip
+                // is the only place it is visible. An invisible item (an
+                // idle session's direct prompt admission, injected goal
+                // and autonomous continuations) projects the plain pickup
+                // like TS's `queueVisible` filter, so an all-invisible
+                // batch sets no active action at all.
+                // The active label is the delivery's labeled preview when
+                // it carries one (TS #2063 `queuedAgentMessagePreview`:
+                // `payload.preview ?? payload.text`) — an agent-message
+                // delivery shows its "Agent message received: ..." row,
+                // not the raw envelope.
                 let visible_index = items.iter().position(|item| item.queue_visible);
                 let anchor = visible_index.map(|index| &items[index]);
-                let queue_visible = anchor.is_some();
                 {
                     let mut core = self.core.lock().unwrap();
                     if let Some(anchor) = anchor {
                         core.active_action = Some(crate::types::SessionActionActive {
                             kind: "turn".to_string(),
                             phase: "preparing".to_string(),
-                            label: Some(compact_action_label(&anchor.message)),
+                            label: Some(compact_action_label(
+                                anchor.preview.as_deref().unwrap_or(&anchor.message),
+                            )),
                         });
-                    }
-                    let snapshot = self.snapshot_from(&core);
-                    drop(core);
-                    let _ = self.emit_action_update(&snapshot);
-                }
-                if queue_visible {
-                    let mut core = self.core.lock().unwrap();
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "committing".to_string();
                     }
                     let snapshot = self.snapshot_from(&core);
                     drop(core);
@@ -5256,19 +5356,6 @@ impl TurnRunner {
             self.prompt_admissions.commit(admission_id);
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
-        // The active action's `running` phase lands right after the turn's
-        // `agent_start` (TS marks the action running once the primary
-        // message starts the run): a queue-visible delivery projects it,
-        // and every later queue snapshot mid-turn carries it too.
-        if items.iter().any(|item| item.queue_visible) {
-            let mut core = self.core.lock().unwrap();
-            if let Some(active) = core.active_action.as_mut() {
-                active.phase = "running".to_string();
-            }
-            let snapshot = self.snapshot_from(&core);
-            drop(core);
-            let _ = self.emit_action_update(&snapshot);
-        }
         self.emit_turn_event(json!({ "type": "turn_start" }));
 
         let prompt_index = {
@@ -5321,6 +5408,18 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
+        // The settle tail's background compact-trigger servicing owns its
+        // own engine clone (the turn closure below moves the shadowing
+        // clone), and fences its rows on the session identity it serviced
+        // (a branch move or replacement swaps the store mid-review).
+        let review_engine = std::sync::Arc::clone(&engine);
+        let review_session_id = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default()
+        };
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -5361,6 +5460,22 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // TS #2063: whether this run's active action already flipped
+            // to `committing`/`running` — each flip rides the first event
+            // that marks the moment (the turn's first row commits it, the
+            // first assistant frame runs it), so the queue's `preparing`
+            // projection spans the real pickup -> rows-land window a
+            // client renders as the strip's "Starting" row.
+            let mut active_committed = false;
+            let mut active_running = false;
+            // Restored next-turn rows ride this delivery as PREFIX rows
+            // (before the accepted prompt): they render in the
+            // conversation, but they are not the prompt's rows-land moment
+            // — the "Starting" row must survive them and drop at the
+            // accepted row (the bots' commit-fence finding). The flip
+            // closure reads the flag while the prefix loop writes it, so
+            // it is a Cell (the runner is single-threaded here).
+            let emitting_prefix_rows = std::cell::Cell::new(false);
             // The last error of the active retry episode (the
             // `auto_retry_start` errorMessage): the episode's durable
             // outcome row names it on success too — the final event
@@ -5442,6 +5557,12 @@ impl TurnRunner {
                 } = event
                 {
                     if !entry.is_null() {
+                        let repin_started = std::time::Instant::now();
+                        let durable_entries = core
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.branch().len().checked_sub(1))
+                            .unwrap_or(0);
                         if let Some(id) = core.store.as_ref().and_then(|store| {
                             store.durable_first_kept_entry_id(keep_recent_tokens(
                                 &core.cwd, &agent_dir,
@@ -5454,6 +5575,13 @@ impl TurnRunner {
                                 result.insert("firstKeptEntryId".to_string(), json!(id));
                             }
                         }
+                        pa_core::session_engine::compaction_trace::trace(
+                            "emit.compaction_repin",
+                            serde_json::json!({
+                                "durableEntries": durable_entries,
+                                "micros": repin_started.elapsed().as_micros(),
+                            }),
+                        );
                     }
                 }
                 match &event {
@@ -5500,7 +5628,14 @@ impl TurnRunner {
                         // A skipped compaction carries a null entry (the
                         // skip shape): publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
+                            let persist_started = std::time::Instant::now();
                             let _ = store.persist_entry("compaction", entry.clone());
+                            pa_core::session_engine::compaction_trace::trace(
+                                "emit.compaction_persist",
+                                serde_json::json!({
+                                    "micros": persist_started.elapsed().as_micros(),
+                                }),
+                            );
                         }
                     }
                     // The durable mirror of a goal-state change (TS
@@ -5521,12 +5656,49 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
+                // TS #2063: the active action's `committing`/`running`
+                // transitions ride the events that mark the moments — the
+                // turn's first row commits it (the prompt becomes visible
+                // in the conversation exactly then, the boundary TS's
+                // strip drops its "Starting" row at: the commit fence),
+                // the first assistant frame runs it.
+                let mut action_frame: Option<SessionActionSnapshot> = None;
+                if !emitting_prefix_rows.get()
+                    && !active_committed
+                    && matches!(
+                        event,
+                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
+                    )
+                {
+                    active_committed = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "committing".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                } else if !active_running
+                    && matches!(
+                        event,
+                        EngineEvent::AssistantUpdate { .. } | EngineEvent::AssistantMessage(_)
+                    )
+                {
+                    active_running = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "running".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
                         // The turn boundary releases RLM child prompt tasks
                         // waiting on it (the parent's continuation request
                         // is in flight before any child's first turn).
                         engine.on_turn_done();
+                        pa_core::session_engine::compaction_trace::trace(
+                            "turn.done_emitted",
+                            serde_json::json!({
+                                "ok": matches!(result, Ok(())),
+                            }),
+                        );
                         Some(match result {
                             Ok(()) => TurnSettle::Completed,
                             Err(error) => TurnSettle::Failed(error.clone()),
@@ -5542,7 +5714,7 @@ impl TurnRunner {
                 };
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
-                let frames: Vec<Value> = match event {
+                let mut frames: Vec<Value> = match event {
                     EngineEvent::UserMessage(message) => {
                         // TS emits the accepted user message as a
                         // message_start + message_end pair (the row is
@@ -5736,6 +5908,20 @@ impl TurnRunner {
                         ]
                     }
                 };
+                // The phase flip's queue-update frame rides the same batch
+                // (after the row frames it follows, so a client sees the
+                // prompt land and then the strip drop its "Starting" row):
+                // an unchanged projection stays silent, like every queue
+                // emit (TS `_emitQueueUpdate`).
+                if let Some(snapshot) = action_frame {
+                    if core.last_action_snapshot.as_ref() != Some(&snapshot) {
+                        core.last_action_snapshot = Some(snapshot.clone());
+                        frames.push(json!({
+                            "type": "session_action_update",
+                            "actions": snapshot,
+                        }));
+                    }
+                }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
                 if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
@@ -5836,16 +6022,20 @@ impl TurnRunner {
             };
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
-            // same durable-row path as in-turn custom rows.
+            // same durable-row path as in-turn custom rows. They are not
+            // the delivery's rows-land moment, so the committing flip
+            // waits for the accepted row behind them.
             let parked = {
                 let mut core = core.lock().unwrap();
                 std::mem::take(&mut core.pending_next_turn)
             };
+            emitting_prefix_rows.set(!parked.is_empty());
             for row in parked {
                 if !emit(EngineEvent::CustomMessage(row)) {
                     break;
                 }
             }
+            emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
@@ -5908,6 +6098,80 @@ impl TurnRunner {
             for done in items_done {
                 let _ = done.send(result.clone());
             }
+        }
+        // The compact-trigger review a compaction armed this run services
+        // off the settle (TS `_scheduleAutoRefineAfterCompaction` ->
+        // `setTimeout(0)` background `_maybeAutoRefine("compact")`): the
+        // turn settled and the waiting prompts resolved, so the review's
+        // model call runs as a background round and the queued next
+        // prompt's admission never waits on it. The round's own gates
+        // (the armed trigger, queued work) keep the trigger armed for the
+        // next settle when work is queued mid-review.
+        {
+            let engine = review_engine;
+            let core = Arc::clone(&self.core);
+            let events = self.events.clone();
+            let review_session_id = review_session_id.clone();
+            tokio::spawn(async move {
+                // The pending pre-check and the round both take the
+                // engine's session mutex (`blocking_lock`): they run on
+                // the blocking pool, never on this async task — a
+                // `blocking_lock` from the runtime thread deadlocks the
+                // settle when the mutex is contended.
+                let refined = tokio::task::spawn_blocking(move || {
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_started",
+                        serde_json::Value::Null,
+                    );
+                    let outcome = engine.consume_compact_auto_refine();
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_done",
+                        serde_json::json!({ "ran": outcome.is_ok() }),
+                    );
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                });
+                match refined {
+                    Ok(Some(result)) => {
+                        // TS `refine()` appends the TUI outcome row and
+                        // the model-facing notice (when edits applied) as
+                        // durable rows: persist both to the session file
+                        // and broadcast their message pairs like the
+                        // `/refine` command — each row fenced on the
+                        // session identity the review serviced (a branch
+                        // move or replacement swaps the store mid-review;
+                        // the row never lands on the moved-to session).
+                        let outcome_row =
+                            pa_core::session_engine::refine::create_refinement_outcome_message(
+                                &result,
+                            );
+                        if let Ok(value) = serde_json::to_value(
+                            pa_types::session::AgentMessage::Custom(outcome_row),
+                        ) {
+                            emit_refinement_row(&core, &events, &review_session_id, value);
+                        }
+                        if result.applied_edits.iter().any(|edit| edit.applied) {
+                            let notice =
+                                pa_core::session_engine::refine::create_refinement_notice_message(
+                                    &result,
+                                    pa_core::session_engine::refine::RefinementSource::Auto,
+                                );
+                            if let Ok(value) = serde_json::to_value(
+                                pa_types::session::AgentMessage::Custom(notice),
+                            ) {
+                                emit_refinement_row(&core, &events, &review_session_id, value);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    }
+                }
+            });
         }
     }
 
@@ -7216,13 +7480,15 @@ mod tests {
         assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
     }
 
-    /// A follow-up-only queue stays parked (TS ENG-5991: the forced batch
-    /// spans the next-turn-boundary lane only, so a when-idle follow-up
-    /// does not arm the send): the abort answers abort-only and the
-    /// follow-up survives undelivered behind the suspension.
+    /// A follow-up-only queue keeps flowing after the abort (the
+    /// sanctioned divergence): the abort ends the running turn cleanly
+    /// and the OLDEST queued follow-up starts the next turn right after
+    /// the aborted turn settles; later follow-ups stay queued and drain
+    /// one per completed turn, each row delivered exactly once, in
+    /// enqueue order.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
-    async fn abort_and_send_queued_with_only_follow_ups_stays_abort_only() {
+    async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7241,7 +7507,8 @@ mod tests {
                 "engine": "faux",
                 "responses": [
                     { "text": "held reply", "delayMs": 60000 },
-                    "follow-up reply that must not run yet",
+                    { "text": "follow-up one reply", "delayMs": 1500 },
+                    "follow-up two reply",
                 ],
             })),
         };
@@ -7253,6 +7520,7 @@ mod tests {
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
+        let mut subscription = worker.events.subscribe();
         let prompt = worker
             .dispatch(
                 "prompt",
@@ -7275,20 +7543,41 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let follow = worker
-            .dispatch("follow_up", &json!({ "message": "follow-up parked" }))
-            .await;
-        assert!(follow.success, "follow_up failed: {follow:?}");
+        // Two follow-ups park behind the running turn and the steering
+        // lane stays empty — the interrupt keeps nothing armable, the
+        // exact shape of the follow-up-only abort.
+        for message in ["follow-up one", "follow-up two"] {
+            let follow = worker
+                .dispatch("follow_up", &json!({ "message": message }))
+                .await;
+            assert!(follow.success, "follow_up failed: {follow:?}");
+        }
+        // The interrupt: the abort ends the held turn and the queue
+        // keeps flowing — the follow-up lane never parks behind the
+        // abort's suspension.
         let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
         assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
-        // The held turn settles on its abort; the follow-up stays parked
-        // behind the still-set suspension (wait_for_idle would hang on
-        // the parked lane, so poll the runner's busy flag instead).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while worker.core.lock().unwrap().busy {
+        assert_eq!(aborted.command, "abort_and_send_queued");
+        assert!(
+            !worker.core.lock().unwrap().queued_input_suspended,
+            "the abort must resume a follow-up-only queue"
+        );
+        // The OLDEST follow-up starts the next turn right after the
+        // aborted turn settles (its paced reply holds the turn open):
+        // while it runs, the second follow-up stays queued — the lane
+        // drains one turn per completed turn, never as one batch.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (busy, queued) = {
+                let core = worker.core.lock().unwrap();
+                (core.busy, core.follow_up.len())
+            };
+            if busy && queued == 1 {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the aborted turn never settled"
+                "the oldest follow-up never started while the second stayed queued"
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -7296,13 +7585,105 @@ mod tests {
         assert!(queue.success, "get_queue failed: {queue:?}");
         assert_eq!(
             queue.data.as_ref().expect("the queue lanes")["followUp"],
-            json!(["follow-up parked"]),
-            "the follow-up was consumed by the abort: {queue:?}"
+            json!(["follow-up two"]),
+            "the second follow-up must stay queued behind the first: {queue:?}"
         );
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            worker.dispatch("wait_for_idle", &json!({})),
+        )
+        .await;
         assert!(
-            worker.core.lock().unwrap().queued_input_suspended,
-            "the abort-only arm must keep the suspension set"
+            idle.is_ok(),
+            "the follow-up-only queue never drained after the abort"
         );
+        assert!(idle.unwrap().success, "wait_for_idle failed");
+        // Both follow-ups delivered in enqueue order, each row exactly
+        // once, each in its own turn behind the aborted run.
+        let messages = worker.dispatch("get_messages", &json!({})).await;
+        assert!(messages.success, "get_messages failed: {messages:?}");
+        let wire_messages = messages
+            .data
+            .as_ref()
+            .and_then(|data| data.get("messages"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let texts: Vec<String> = wire_messages
+            .iter()
+            .filter(|message| crate::types::message_role(message) == Some("user"))
+            .map(crate::types::message_text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "held turn for the follow-up abort probe",
+                "follow-up one",
+                "follow-up two",
+            ],
+            "the follow-ups never drained in enqueue order: {texts:?}"
+        );
+        let events = session_events_since(&mut subscription);
+        let agent_start_indexes: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            agent_start_indexes.len(),
+            3,
+            "one turn per follow-up, never a merged batch: {events:?}"
+        );
+        let aborted_row = events
+            .iter()
+            .position(|event| {
+                event.get("type").and_then(Value::as_str) == Some("message_end")
+                    && event["message"]["role"] == "assistant"
+                    && event["message"].get("stopReason").and_then(Value::as_str) == Some("aborted")
+            })
+            .expect("the held turn never surfaced its aborted row");
+        assert!(
+            aborted_row < agent_start_indexes[1],
+            "the abort must end the held turn before the first follow-up's turn starts: {events:?}"
+        );
+        let replies: Vec<String> = events
+            .iter()
+            .filter(|event| {
+                event.get("type").and_then(Value::as_str) == Some("message_end")
+                    && event["message"]["role"] == "assistant"
+                    && event["message"].get("stopReason").and_then(Value::as_str) != Some("aborted")
+            })
+            .filter_map(|event| {
+                let message = event.get("message")?;
+                let content = message.get("content")?;
+                content
+                    .as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                "follow-up one reply".to_string(),
+                "follow-up two reply".to_string()
+            ],
+            "one reply per follow-up turn: {events:?}"
+        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(
+                core.steering.is_empty() && core.follow_up.is_empty(),
+                "the queue must fully drain"
+            );
+            assert!(
+                !core.queued_input_suspended,
+                "the resume never cleared the suspension"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9309,9 +9690,9 @@ mod turn_stream_tests {
     /// messages send together as the next batched turn — the follow-up
     /// lane stays queued behind it (never discarded, never merged), then
     /// runs in order once the session goes idle; the arm co-delivers
-    /// under any mode (the product default is "all"), and with nothing
-    /// armable queued the abort runs abort-only (the queue parks behind
-    /// the suspension).
+    /// under any mode (the product default is "all"), and the queue
+    /// parks only when the abort leaves nothing visible behind (the
+    /// plain-abort shape).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
@@ -9490,37 +9871,44 @@ mod turn_stream_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The abort-only arm (TS `queuedSteering.length === 0`): with no
-    /// armable steering queued the funnel aborts and the queue parks
-    /// behind the suspension — a follow-up never rides a forced batch.
+    /// The abort's acknowledgment never waits for the queue's delivery:
+    /// with the aborted turn AND the queued follow-up's reply both held,
+    /// `abort_and_send_queued` answers immediately and the resumed pump
+    /// starts the follow-up's own turn behind the ack. A second, bare
+    /// `abort` (the API surface) then ends that turn cleanly, delivers
+    /// no duplicate of the follow-up's row, and parks the emptied queue
+    /// behind the suspension like the TS plain abort.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
-    async fn abort_and_send_queued_with_no_steering_aborts_only_and_parks_the_queue() {
+    async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
-            std::env::temp_dir().join(format!("pa-worker-abort-only-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("pa-worker-abort-ack-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = WorkerConfig {
             socket_path: dir.join("worker.sock"),
             supervisor_socket_path: PathBuf::new(),
             token: "token".to_string(),
             worker_instance_id: String::new(),
-            active_session_id: "abort-only-family".to_string(),
+            active_session_id: "abort-ack-session".to_string(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({
                 "engine": "faux",
-                "responses": [{ "text": "held again", "delayMs": 600_000 }, "later"]
+                "responses": [
+                    { "text": "held reply", "delayMs": 60000 },
+                    { "text": "follow-up reply", "delayMs": 60000 },
+                ],
             })),
         };
         let worker = std::sync::Arc::new(Worker::new(config, None));
         let created = worker
             .dispatch(
                 "create",
-                &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-only-family" }),
+                &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-ack" }),
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
@@ -9528,8 +9916,8 @@ mod turn_stream_tests {
             .dispatch(
                 "prompt",
                 &json!({
-                    "activeSessionId": "abort-only-family",
-                    "message": "held turn for the abort-only arm",
+                    "activeSessionId": "abort-ack-session",
+                    "message": "held turn for the ack probe",
                 }),
             )
             .await;
@@ -9546,27 +9934,116 @@ mod turn_stream_tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        // Only a follow-up parks (nothing armable in the steering lane).
         let follow = worker
-            .dispatch("follow_up", &json!({ "message": "follow up parked" }))
+            .dispatch("follow_up", &json!({ "message": "ack follow-up" }))
             .await;
         assert!(follow.success, "follow_up failed: {follow:?}");
-        let sent = worker.abort_and_send_queued();
-        assert!(!sent, "nothing armable: the funnel ran abort-only");
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // The ack: the aborted turn's settle AND the follow-up's own
+        // reply are both held, so a funnel that awaited the settle or
+        // the delivery would never answer inside the bound.
+        let aborted = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            worker.dispatch("abort_and_send_queued", &json!({})),
+        )
+        .await;
+        assert!(
+            aborted.is_ok(),
+            "the abort ack never arrived while everything downstream was held"
+        );
+        let aborted = aborted.unwrap();
+        assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+        assert_eq!(aborted.command, "abort_and_send_queued");
+        // The follow-up starts promptly behind the ack: its turn runs
+        // (the paced reply holds it) and its row left the queue.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (busy, queued) = {
+                let core = worker.core.lock().unwrap();
+                (core.busy, core.follow_up.len())
+            };
+            if busy && queued == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the follow-up never started after the abort ack"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let messages = worker.dispatch("get_messages", &json!({})).await;
+        assert!(messages.success, "get_messages failed: {messages:?}");
+        let texts: Vec<String> = messages
+            .data
+            .as_ref()
+            .and_then(|data| data.get("messages"))
+            .and_then(Value::as_array)
+            .map(|wire| {
+                wire.iter()
+                    .filter(|message| crate::types::message_role(message) == Some("user"))
+                    .map(crate::types::message_text)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            texts,
+            [
+                "held turn for the ack probe".to_string(),
+                "ack follow-up".to_string()
+            ],
+            "the follow-up row must deliver exactly once: {texts:?}"
+        );
+        // The API abort surface: a bare `abort` ends the follow-up's
+        // own turn cleanly and parks the emptied queue behind the
+        // suspension (the TS plain-abort park the Ctrl+C funnel
+        // deliberately does not take).
+        let aborted_again = worker.dispatch("abort", &json!({})).await;
+        assert!(
+            aborted_again.success,
+            "the bare abort failed: {aborted_again:?}"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while worker.core.lock().unwrap().busy {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the follow-up's turn never settled on the bare abort"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
         {
             let core = worker.core.lock().unwrap();
             assert!(
+                core.steering.is_empty() && core.follow_up.is_empty(),
+                "the queue must stay drained"
+            );
+            assert!(
                 core.queued_input_suspended,
-                "the abort parked the queue behind the suspension"
+                "the bare abort parks the queue behind the suspension"
             );
-            assert_eq!(
-                core.follow_up.len(),
-                1,
-                "the parked follow-up survived the abort, undelivered"
-            );
-            assert!(core.steering.is_empty(), "the steering lane stays empty");
         }
+        // The second abort ends the follow-up's turn — it never
+        // re-delivers or duplicates the follow-up's row.
+        let messages = worker.dispatch("get_messages", &json!({})).await;
+        assert!(messages.success, "get_messages failed: {messages:?}");
+        let texts: Vec<String> = messages
+            .data
+            .as_ref()
+            .and_then(|data| data.get("messages"))
+            .and_then(Value::as_array)
+            .map(|wire| {
+                wire.iter()
+                    .filter(|message| crate::types::message_role(message) == Some("user"))
+                    .map(crate::types::message_text)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            texts,
+            [
+                "held turn for the ack probe".to_string(),
+                "ack follow-up".to_string()
+            ],
+            "the follow-up row survived the bare abort exactly once: {texts:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
