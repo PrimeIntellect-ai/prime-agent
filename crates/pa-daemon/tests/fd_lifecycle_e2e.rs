@@ -730,3 +730,54 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         final_fds.len()
     );
 }
+
+/// The supervisor config is persisted at boot: after the bind (the accept
+/// contract) but before the accept loop starts, so a client that has seen
+/// the `daemon_hello` line has waited out the write. The descriptor dir
+/// must then hold a valid `supervisor-config` for this supervisor's
+/// socket (version 1, this socket path, the resolved default session
+/// dir) — the write is diagnostic state with no serving-path reader, and
+/// this pins that it still happens exactly once per boot.
+#[test]
+fn booted_supervisor_persists_its_config() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(descriptor_dir.join("supervisor-config"))
+            .expect("supervisor config persisted at boot"),
+    )
+    .expect("supervisor config is valid json");
+    assert_eq!(config["version"], 1, "config version: {config}");
+    assert_eq!(
+        config["socketPath"], socket.to_string_lossy(),
+        "config names this supervisor's socket: {config}"
+    );
+    assert_eq!(
+        config["defaultSessionDir"],
+        agent_dir.join("sessions").to_string_lossy(),
+        "config carries the resolved default session dir: {config}"
+    );
+
+    // The hello line implies the accept loop already started, so the write
+    // must be settled: no temp file may linger beside the config.
+    let lingering: Vec<_> = std::fs::read_dir(&descriptor_dir)
+        .expect("descriptor dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with("supervisor-config.tmp"))
+        .collect();
+    assert!(
+        lingering.is_empty(),
+        "supervisor config temp files lingered: {lingering:?}"
+    );
+    client.send_command("l", serde_json::json!({ "type": "list" }));
+    assert_eq!(client.read_response("l")["success"], true);
+}
+
