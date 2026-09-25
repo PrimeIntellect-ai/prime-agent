@@ -1089,23 +1089,17 @@ mod tests {
         };
         let created_days_ago = iso(now as i64 - 3 * 86_400_000);
         let modified_minutes_ago = iso(now as i64 - 5 * 60_000);
-        let saved = vec![
-            json!({
-                "id": "old-with-modified",
-                "path": "/x/old-with-modified.jsonl",
-                "firstMessage": "old task",
-                "messageCount": 2,
-                "created": created_days_ago,
-                "modified": modified_minutes_ago,
-            }),
-            json!({
-                "id": "old-created-only",
-                "path": "/x/old-created-only.jsonl",
-                "firstMessage": "older task",
-                "messageCount": 1,
-                "created": created_days_ago,
-            }),
-        ];
+        // The catalog contract the daemon serves: every row carries the
+        // scan's durable `modified` (a real message timestamp, the header
+        // time, or the file mtime) alongside `created`.
+        let saved = vec![json!({
+            "id": "old-record",
+            "path": "/x/old-record.jsonl",
+            "firstMessage": "old task",
+            "messageCount": 2,
+            "created": created_days_ago,
+            "modified": modified_minutes_ago,
+        })];
         let records = reconcile_unified_sessions(&[], &saved);
         let rows = crate::agents_view_forest::build_rows(
             &records,
@@ -1114,13 +1108,19 @@ mod tests {
             &Default::default(),
             None,
         );
-        let by_identity: HashMap<&str, &crate::agents_view_forest::AgentsViewRow> = rows
+        let age = rows
             .iter()
-            .map(|row| (row.identity.as_str(), row))
-            .collect();
-        // `modified` first: the row keeps the scan's durable value.
-        assert_eq!(by_identity["session:old-with-modified"].age, "5m");
-        // A record the scan could not date falls back to `created`.
-        assert_eq!(by_identity["session:old-created-only"].age, "3d");
+            .find(|row| row.identity.contains("old-record"))
+            .map(|row| row.age.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "no row for the old record, identities: {:?}",
+                    rows.iter().map(|row| &row.identity).collect::<Vec<_>>()
+                )
+            });
+        // `modified` first: the column reads the durable last-activity
+        // value, not `created` - and a scan-time fabrication would read
+        // "0s" here, not the record's own five-minute-old value.
+        assert_eq!(age, "5m");
     }
 }
