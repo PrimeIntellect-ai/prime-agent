@@ -216,16 +216,20 @@ impl RunsView {
         }
         if let Mode::Detail { start } = self.mode {
             // Identity first, exactly like the cursor: the viewed run
-            // survives wherever its first-card id lands. When the
-            // identity is GONE, the detail drops to the list even if
-            // another run now occupies the stored start - that
-            // impostor is not the run the pane was showing (and
-            // refresh_keys must never adopt it).
-            if let Some(keyed) = by_key(self.detail_key.as_deref()) {
-                self.mode = Mode::Detail { start: keyed };
-            } else if !runs.iter().any(|run| run.start == start) {
-                self.mode = Mode::List;
-                self.scroll_from_end = 0;
+            // survives wherever its first-card id lands. When a cached
+            // identity matches nothing the detail ALWAYS drops to the
+            // list - an impostor run occupying the stored start is not
+            // the run the pane was showing, and refresh_keys must
+            // never adopt its key. Without any cached identity (never
+            // in practice - every open refreshes the key) the
+            // positional stay remains the fallback.
+            match by_key(self.detail_key.as_deref()) {
+                Some(keyed) => self.mode = Mode::Detail { start: keyed },
+                None if self.detail_key.is_some() || !runs.iter().any(|run| run.start == start) => {
+                    self.mode = Mode::List;
+                    self.scroll_from_end = 0;
+                }
+                None => {}
             }
         }
         self.refresh_keys(chat, runs);
