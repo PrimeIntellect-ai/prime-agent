@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==8.4.2", "ruff==0.16.5"]
+dev = ["pytest==9.0.3", "ruff==0.16.5"]
 
 [tool.uv]
 package = false
