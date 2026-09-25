@@ -415,13 +415,16 @@ fn a_live_run_extends_the_wire_span_to_now() {
     // extends to now instead of freezing at the last settled stamp.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or_default();
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let wire_card = |id: &str, shell: bool| {
         ChatEntry::Tool(Box::new(ToolCallCard {
             id: id.to_string(),
             name: "ipython".to_string(),
-            args: serde_json::json!({"code": "print(1)"}),
+            args: if shell {
+                serde_json::json!({"code": "bash('sleep 60')"})
+            } else {
+                serde_json::json!({"code": "print(1)"})
+            },
             started: true,
             started_ms: Some(now - 60_000),
             ended_ms: Some(now - 50_000),

@@ -226,8 +226,7 @@ fn wall_ms(cards: &[&ToolCallCard], live: bool) -> Option<u64> {
         Some((start, end)) => Some(if live {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(end);
+                .map_or(end, |elapsed| elapsed.as_millis() as u64);
             now.max(end).saturating_sub(start)
         } else {
             end.saturating_sub(start)

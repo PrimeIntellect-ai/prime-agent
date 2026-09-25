@@ -200,31 +200,30 @@ impl RunsView {
                     .map(|run| run.start)
             })
         };
-        match by_key(self.selected_key.as_deref()) {
-            Some(start) => self.selected = Some(start),
-            None => {
-                // A cached identity that matches nothing ALWAYS re-falls
-                // to a surviving neighbor - an impostor run occupying
-                // the stored start is not the cursor's run, and the
-                // refresh must adopt the neighbor's own identity, never
-                // the impostor's coincidence. Without any cached
-                // identity (never in practice - the open seeds the key)
-                // the positional stay remains the fallback.
-                let positional_ok = self.selected_key.is_none()
-                    && self
-                        .selected
-                        .is_some_and(|start| runs.iter().any(|run| run.start == start));
-                if !positional_ok {
-                    if let Some(start) = self.selected {
-                        self.selected = runs
-                            .iter()
-                            .map(|run| run.start)
-                            .filter(|run_start| *run_start <= start)
-                            .max()
-                            .or_else(|| runs.first().map(|run| run.start));
-                    } else if let Some(run) = runs.last() {
-                        self.selected = Some(run.start);
-                    }
+        if let Some(start) = by_key(self.selected_key.as_deref()) {
+            self.selected = Some(start);
+        } else {
+            // A cached identity that matches nothing ALWAYS re-falls
+            // to a surviving neighbor - an impostor run occupying
+            // the stored start is not the cursor's run, and the
+            // refresh must adopt the neighbor's own identity, never
+            // the impostor's coincidence. Without any cached
+            // identity (never in practice - the open seeds the key)
+            // the positional stay remains the fallback.
+            let positional_ok = self.selected_key.is_none()
+                && self
+                    .selected
+                    .is_some_and(|start| runs.iter().any(|run| run.start == start));
+            if !positional_ok {
+                if let Some(start) = self.selected {
+                    self.selected = runs
+                        .iter()
+                        .map(|run| run.start)
+                        .filter(|run_start| *run_start <= start)
+                        .max()
+                        .or_else(|| runs.first().map(|run| run.start));
+                } else if let Some(run) = runs.last() {
+                    self.selected = Some(run.start);
                 }
             }
         }
