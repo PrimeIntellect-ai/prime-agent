@@ -1,8 +1,17 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lock } from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const spawnMocks = vi.hoisted(() => ({ spawnHidden: vi.fn() }));
+
+vi.mock("../src/utils/child-process.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/child-process.js")>();
+	return { ...actual, spawnHidden: spawnMocks.spawnHidden };
+});
+
 import { getSessionsDir } from "../src/config.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
@@ -1332,5 +1341,45 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(response).toMatchObject({ success: true });
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 		expect(existsSync(stopped.descriptorPath)).toBe(false);
+	});
+});
+
+describe("daemon supervisor tcp teardown", () => {
+	it("fences the TCP listener and releases the port before a relaunch rebinds it", async () => {
+		const fenced = makeSupervisor() as unknown as { tcpServer: Server; fenceSupervisorSocket(): void };
+		const fenceTcp = createServer(() => {});
+		await new Promise<void>((resolve) => fenceTcp.listen(0, "127.0.0.1", () => resolve()));
+		fenced.tcpServer = fenceTcp;
+
+		fenced.fenceSupervisorSocket();
+
+		expect(fenceTcp.listening).toBe(false);
+
+		const restarting = makeSupervisor() as any;
+		restarting.tcpPortFlag = 4100;
+		restarting.tcpBindHostFlag = "100.101.102.103";
+		const relaunchTcp = createServer(() => {});
+		await new Promise<void>((resolve) => relaunchTcp.listen(0, "127.0.0.1", () => resolve()));
+		restarting.tcpServer = relaunchTcp;
+		restarting.catalog.stop = vi.fn(async () => undefined);
+		const spawnCalls: { args: string[]; portReleased: boolean }[] = [];
+		spawnMocks.spawnHidden.mockImplementation((_command: string, args: readonly string[]) => {
+			spawnCalls.push({ args: [...args], portReleased: !relaunchTcp.listening });
+			return { unref: vi.fn() };
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
+			throw new Error(`exit ${code}`);
+		}) as typeof process.exit);
+		try {
+			await expect(restarting.shutdown(0, false, true)).rejects.toThrow("exit 0");
+			expect(spawnCalls).toHaveLength(1);
+			expect(spawnCalls[0]!.portReleased).toBe(true);
+			expect(spawnCalls[0]!.args).toEqual(
+				expect.arrayContaining(["--mode", "daemon", "--daemon-port", "4100", "--daemon-bind", "100.101.102.103"]),
+			);
+		} finally {
+			exit.mockRestore();
+			if (relaunchTcp.listening) relaunchTcp.close();
+		}
 	});
 });

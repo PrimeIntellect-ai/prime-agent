@@ -138,6 +138,18 @@ import {
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
 import {
+	checkDaemonTcpLineAuth,
+	DAEMON_TCP_AUTH_TIMEOUT_MS,
+	DAEMON_TCP_IDLE_TIMEOUT_MS,
+	DAEMON_TCP_MAX_CONNECTIONS,
+	DAEMON_TCP_MAX_LINE_CHARS,
+	DAEMON_TCP_PRE_READY_TIMEOUT_MS,
+	isWildcardBindHost,
+	loadOrCreateDaemonTcpToken,
+	resolveDaemonTcpListenerHost,
+	resolveDaemonTcpPort,
+} from "./daemon-tcp.js";
+import {
 	DaemonWorkerAuthenticationError,
 	DaemonWorkerClient,
 	DaemonWorkerProbeTimeoutError,
@@ -220,6 +232,12 @@ export const WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS = 60_000;
 export const HEARTBEATS_CHANGED_COALESCE_MS = 100;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
+/**
+ * Grace window for closing the TCP listener during shutdown: sockets are
+ * already ended, so a remote peer that never closes its side must not hold
+ * the port (or the shutdown) past this bound before a relaunch rebinds it.
+ */
+const DAEMON_TCP_CLOSE_GRACE_MS = 1000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // The whole pre-commit prepare (drain + worker fencing) must finish inside the
 // caller's 120s prepare_update_restart request timeout, or roll back; otherwise
@@ -438,6 +456,10 @@ interface DaemonSupervisorOptions {
 	socketPath?: string;
 	defaultSessionConfig: AgentSessionRuntimeConfig;
 	descriptorDir?: string;
+	/** Explicit `--daemon-port` override; env and settings resolve inside the supervisor. */
+	tcpPort?: number;
+	/** Explicit `--daemon-bind` override; env, settings, and the tailnet address resolve inside the supervisor. */
+	tcpBindHost?: string;
 }
 
 interface PersistedSupervisorConfig {
@@ -742,6 +764,13 @@ export async function runDaemonSupervisorMode(options: DaemonSupervisorOptions):
 
 export class DaemonSupervisor {
 	private server?: Server;
+	/** Optional token-authenticated TCP listener; never set unless a port resolves. */
+	private tcpServer?: Server;
+	private tcpPort?: number;
+	/** The `--daemon-port` CLI flag verbatim, so a relaunch restores it; env/settings-derived ports re-resolve on their own. */
+	private tcpPortFlag?: number;
+	/** The `--daemon-bind` CLI flag verbatim, for the same reason as `tcpPortFlag`. */
+	private tcpBindHostFlag?: string;
 	private readonly ready: Promise<void>;
 	private markReady: () => void = () => {};
 	private rejectReady: (error: Error) => void = () => {};
@@ -841,6 +870,10 @@ export class DaemonSupervisor {
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);
 		this.catalog = new DaemonCatalogClient((message) => this.log(message));
 		this.settingsManager = SettingsManager.create(process.cwd(), this.defaultSessionConfig.agentDir ?? agentDir);
+		this.tcpPort = resolveDaemonTcpPort(options.tcpPort, this.settingsManager.getDaemonPort());
+		this.tcpPortFlag =
+			options.tcpPort !== undefined && this.tcpPort === options.tcpPort ? options.tcpPort : undefined;
+		this.tcpBindHostFlag = options.tcpBindHost;
 	}
 
 	async start(): Promise<void> {
@@ -884,6 +917,7 @@ export class DaemonSupervisor {
 			restrictDaemonSocketPath(this.socketPath);
 
 			this.registerSignalHandlers();
+			await this.startTcpListener();
 			const ownedSessionFiles = new Set(
 				[...this.workers.values()]
 					.flatMap((worker) => [worker.descriptor.sessionFile, worker.descriptor.createCommand.sessionPath])
@@ -951,6 +985,59 @@ export class DaemonSupervisor {
 			this.server?.once("listening", onListening);
 			this.server?.listen(this.socketPath);
 		});
+	}
+
+	/**
+	 * Optional TCP listener for tailnet peers. Enabled only when `tcpPort`
+	 * resolved (CLI flag > env > settings) at construction. Serves the same
+	 * JSONL protocol and command dispatch as the unix socket; the only
+	 * difference is that every command line must carry the per-machine token.
+	 * Binding failures (busy port, corrupt token file) fail startup loudly
+	 * instead of leaving a silently unreachable mesh daemon.
+	 *
+	 * The token and every authenticated command cross this socket in plaintext,
+	 * so the listener defaults to this machine's Tailscale address: the tailnet
+	 * encrypts node-to-node traffic, while a wildcard bind would hand the same
+	 * token to every on-path peer on the LAN. A wider interface requires an
+	 * explicit bind host, and a missing tailnet address refuses to start
+	 * (fail closed) rather than falling back to 0.0.0.0.
+	 */
+	private async startTcpListener(): Promise<void> {
+		const port = this.tcpPort;
+		if (port === undefined) {
+			return;
+		}
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) {
+			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		const host = resolveDaemonTcpListenerHost(this.tcpBindHostFlag, this.settingsManager.getDaemonTcpBindHost());
+		if (isWildcardBindHost(host)) {
+			this.log(
+				`Daemon TCP listener is binding every interface (${host}): the per-machine token and its commands travel in plaintext, so any on-path peer can capture them. Use the tailnet address unless this network is trusted.`,
+			);
+		}
+		const tokenRecord = loadOrCreateDaemonTcpToken(agentDir);
+		const server = createServer((socket) => this.handleConnection(socket, { tcpAuthToken: tokenRecord.token }));
+		// Remote sockets are untrusted until a line authenticates; cap how many
+		// can be held open so idle peers cannot exhaust file descriptors.
+		server.maxConnections = DAEMON_TCP_MAX_CONNECTIONS;
+		await new Promise<void>((resolveListen, rejectListen) => {
+			const onError = (error: Error) => {
+				server.off("listening", onListening);
+				rejectListen(error);
+			};
+			const onListening = () => {
+				server.off("error", onError);
+				resolveListen();
+			};
+			server.once("error", onError);
+			server.once("listening", onListening);
+			server.listen({ port, host });
+		});
+		this.tcpServer = server;
+		server.on("error", (error) => this.log(`Daemon TCP listener error: ${error.message}`));
+		this.log(`Prime Agent daemon TCP listener listening on ${host}:${port} (token file: ${tokenRecord.tokenPath})`);
 	}
 
 	private log(message: string): void {
@@ -1763,7 +1850,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private handleConnection(socket: Socket): void {
+	private handleConnection(socket: Socket, connectionOptions: { tcpAuthToken?: string } = {}): void {
 		const client: DaemonSocketClient = {
 			id: createActiveSessionId(),
 			socket,
@@ -1780,37 +1867,92 @@ export class DaemonSupervisor {
 		this.sessionInputPauseEpochs.set(client, 0);
 		this.detachingInputPauseSessions.set(client, new Set());
 		this.clients.add(client);
+		// Remote TCP sockets are the only untrusted connection source: a short
+		// admission deadline, a line-length bound, and per-line auth keep a remote
+		// peer from parking unbounded sockets or unterminated lines in memory.
+		const tcpAuthToken = connectionOptions.tcpAuthToken;
+		let tcpAuthenticated = false;
+		// The admission deadline is an explicit timer, not `socket.setTimeout`:
+		// Node refreshes a socket timeout on any I/O, so a peer dribbling bytes
+		// without ever completing a line would renew its own window and hold a
+		// connection slot until it filled `maxConnections`.
+		let admissionTimer: ReturnType<typeof setTimeout> | undefined;
+		const clearAdmissionDeadline = () => {
+			if (admissionTimer !== undefined) {
+				clearTimeout(admissionTimer);
+				admissionTimer = undefined;
+			}
+		};
+		const armAdmissionDeadline = (ms: number) => {
+			clearAdmissionDeadline();
+			admissionTimer = setTimeout(() => {
+				this.log("Closed unauthenticated TCP client connection");
+				socket.destroy();
+			}, ms);
+			admissionTimer.unref();
+		};
 		void this.ready.then(
 			() => {
 				if (!client.socket.destroyed && this.clients.has(client)) {
-					this.write(client, {
-						type: "daemon_hello",
-						socketPath: this.socketPath,
-						protocol: DAEMON_PROTOCOL_INFO,
-						schemaId: DAEMON_SCHEMA_ID,
-						schemaRevision: DAEMON_SCHEMA_REVISION,
-						appVersion: VERSION,
-						runtime: getDaemonRuntimeIdentity(),
-						supervisorGeneration: this.generation,
-						supervisorOwnerToken: this.ownership?.record.token,
-						supervisorPid: process.pid,
-						supervisorProcessStartId: this.ownership?.record.processStartId,
-						supervisorSocketPath: this.ownership?.record.socketPath,
-						clientId: client.id,
-						serverCapabilities: SUPERVISOR_SERVER_CAPABILITIES,
-					});
+					this.write(client, this.daemonHello(client, tcpAuthToken === undefined));
+					// daemon_hello is written only once startup completes, and the TCP
+					// listener binds before worker adoption, which can spend the whole
+					// connect budget; mesh clients wait for hello before sending their
+					// first token. The auth deadline therefore runs from hello, not
+					// from accept, so a pre-ready client is not closed before it ever
+					// saw the handshake. An already-authenticated line keeps the idle
+					// window instead.
+					if (tcpAuthToken !== undefined && !tcpAuthenticated) {
+						armAdmissionDeadline(DAEMON_TCP_AUTH_TIMEOUT_MS);
+					}
 				}
 			},
 			() => client.socket.destroy(),
 		);
 
-		client.detachInput = attachJsonlLineReader(socket, (line) => void this.handleLine(client, line));
+		if (tcpAuthToken !== undefined) {
+			// Absolute admission budget from accept: it only matters when startup
+			// hangs before hello can re-arm the short deadline above.
+			armAdmissionDeadline(DAEMON_TCP_PRE_READY_TIMEOUT_MS);
+			// `socket.setTimeout` covers only the authenticated idle window, which
+			// is meant to reset on traffic.
+			socket.on("timeout", () => {
+				this.log("Closed idle TCP client connection");
+				socket.destroy();
+			});
+		}
+		client.detachInput = attachJsonlLineReader(
+			socket,
+			(line) => {
+				if (tcpAuthToken !== undefined) {
+					if (!this.authorizeDaemonTcpLine(client, line, tcpAuthToken)) {
+						return;
+					}
+					tcpAuthenticated = true;
+					clearAdmissionDeadline();
+					socket.setTimeout(DAEMON_TCP_IDLE_TIMEOUT_MS);
+				}
+				void this.handleLine(client, line);
+			},
+			tcpAuthToken === undefined
+				? undefined
+				: {
+						maxLineLength: DAEMON_TCP_MAX_LINE_CHARS,
+						onLineOverflow: () => {
+							this.log(
+								`Refused TCP command line longer than ${DAEMON_TCP_MAX_LINE_CHARS} chars; closing connection`,
+							);
+							socket.destroy();
+						},
+					},
+		);
 		let cleaned = false;
 		const cleanup = () => {
 			if (cleaned) {
 				return;
 			}
 			cleaned = true;
+			clearAdmissionDeadline();
 			clearTimeout(client.catchupRetryTimer);
 			client.catchupRetryTimer = undefined;
 			client.detachInput();
@@ -1843,6 +1985,59 @@ export class DaemonSupervisor {
 				);
 			}
 		});
+	}
+
+	/**
+	 * The connect greeting. A TCP peer is untrusted until it authenticates, so
+	 * it receives the protocol banner only: the supervisor's ownership token,
+	 * pid, process start id, and local paths describe this machine's local
+	 * trust domain and are useless to a remote client. Local connections skip
+	 * TCP auth entirely and keep the full identity, which the update-restart
+	 * coordinator fences on.
+	 */
+	private daemonHello(
+		client: DaemonSocketClient,
+		localPeer: boolean,
+	): Extract<DaemonOutbound, { type: "daemon_hello" }> {
+		const banner = {
+			type: "daemon_hello" as const,
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaId: DAEMON_SCHEMA_ID,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			appVersion: VERSION,
+			clientId: client.id,
+			serverCapabilities: SUPERVISOR_SERVER_CAPABILITIES,
+		};
+		if (!localPeer) {
+			return banner;
+		}
+		return {
+			...banner,
+			socketPath: this.socketPath,
+			runtime: getDaemonRuntimeIdentity(),
+			supervisorGeneration: this.generation,
+			supervisorOwnerToken: this.ownership?.record.token,
+			supervisorPid: process.pid,
+			supervisorProcessStartId: this.ownership?.record.processStartId,
+			supervisorSocketPath: this.ownership?.record.socketPath,
+		};
+	}
+
+	/**
+	 * Auth gate for TCP connections. Each line must carry the per-machine token;
+	 * a refused line gets a correlatable failure response and the socket is
+	 * ended. Failures are logged and never propagate to the listener.
+	 */
+	private authorizeDaemonTcpLine(client: DaemonSocketClient, line: string, expectedToken: string): boolean {
+		const verdict = checkDaemonTcpLineAuth(line, expectedToken);
+		if (verdict.ok) {
+			return true;
+		}
+		const commandName = verdict.command ?? "tcp_auth";
+		this.log(`Refused TCP ${commandName} command (${verdict.reason})`);
+		this.write(client, failure(verdict.id, commandName, "TCP authentication failed", { code: "tcp_auth_failed" }));
+		client.socket.end();
+		return false;
 	}
 
 	private cancelOwnedWorkerCleanup(clientId: string): void {
@@ -7382,6 +7577,11 @@ export class DaemonSupervisor {
 		} catch {
 			// The server may already be closed by a concurrent shutdown.
 		}
+		try {
+			this.tcpServer?.close();
+		} catch {
+			// The TCP listener may already be closed by a concurrent shutdown.
+		}
 		for (const client of this.clients) {
 			client.detachInput();
 			client.socket.destroy();
@@ -7447,6 +7647,20 @@ export class DaemonSupervisor {
 				resolveClose();
 			}
 		});
+		const tcpServer = this.tcpServer;
+		this.tcpServer = undefined;
+		const tcpServerClosed = new Promise<void>((resolveClose) => {
+			if (!tcpServer?.listening) {
+				resolveClose();
+				return;
+			}
+			try {
+				tcpServer.close(() => resolveClose());
+			} catch (error) {
+				this.reportCleanupFailure("daemon tcp server", error);
+				resolveClose();
+			}
+		});
 		for (const client of this.clients) {
 			client.attachedActiveSessionIds.clear();
 			await this.runCleanupStep(`daemon client input ${client.id}`, () => client.detachInput());
@@ -7488,6 +7702,7 @@ export class DaemonSupervisor {
 		this.catalogOpeningWorkers.clear();
 		await this.runCleanupStep("daemon catalog", () => this.catalog.stop());
 		await this.runCleanupStep("daemon server", () => serverClosed);
+		await this.runCleanupStep("daemon tcp server", () => tcpServerClosed);
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());
 		await this.runCleanupStep("supervisor cache", () => {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });
@@ -7572,6 +7787,22 @@ export class DaemonSupervisor {
 			client.socket.end();
 		}
 		await new Promise<void>((resolveClose) => this.server?.close(() => resolveClose()) ?? resolveClose());
+		// Release the mesh port before a relaunch rebinds it; a remote peer that
+		// never closes its socket must not hang shutdown past the grace window.
+		const tcpServer = this.tcpServer;
+		this.tcpServer = undefined;
+		await new Promise<void>((resolveClose) => {
+			if (!tcpServer?.listening) {
+				resolveClose();
+				return;
+			}
+			const grace = setTimeout(resolveClose, DAEMON_TCP_CLOSE_GRACE_MS);
+			grace.unref?.();
+			tcpServer.close(() => {
+				clearTimeout(grace);
+				resolveClose();
+			});
+		});
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());
 		await this.runCleanupStep("supervisor cache", () => {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });
@@ -7583,7 +7814,14 @@ export class DaemonSupervisor {
 		this.ownership = undefined;
 		await this.runCleanupStep("daemon ownership", async () => ownership?.release());
 		if (relaunch) {
-			const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", this.socketPath]);
+			const launch = createCliSubprocessLaunchSpec([
+				"--mode",
+				"daemon",
+				"--daemon-socket",
+				this.socketPath,
+				...(this.tcpPortFlag !== undefined ? ["--daemon-port", String(this.tcpPortFlag)] : []),
+				...(this.tcpBindHostFlag !== undefined ? ["--daemon-bind", this.tcpBindHostFlag] : []),
+			]);
 			const environment = createCliSubprocessEnv();
 			delete environment[DAEMON_CATALOG_ROLE_ENV];
 			delete environment[DAEMON_WORKER_ROLE_ENV];
