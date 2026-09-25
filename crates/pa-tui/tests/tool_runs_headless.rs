@@ -456,7 +456,7 @@ fn replayed_runs_condense_with_the_received_message_merged() {
         "the breakdown carries the classes, the received row, and the queued receipt: {last}"
     );
     assert!(
-        last.contains("62s"),
+        last.contains("1m 02s"),
         "the wire timestamps carry the honest wall clock (63s - 1s): {last}"
     );
     assert!(

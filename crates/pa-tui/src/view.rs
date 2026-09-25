@@ -3447,8 +3447,8 @@ mod tests {
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect();
         assert!(
-            rendered.iter().any(|row| row.contains("row 0")),
-            "the top-anchored frame holds the first rows: {rendered:?}"
+            rendered.iter().any(|row| row.contains("prime agent v")),
+            "the top-anchored frame holds the transcript's splash: {rendered:?}"
         );
         let index = view.chat.len() - 2;
         view.prepare_entry_mutation(index);

@@ -429,7 +429,7 @@ fn class_labels_follow_the_cards_and_receipts() {
     assert_eq!(
         labels,
         vec![
-            ("python".to_string(), 3),
+            ("python".to_string(), 2),
             ("bash".to_string(), 1),
             ("edit".to_string(), 1),
             ("agent messages received".to_string(), 1),

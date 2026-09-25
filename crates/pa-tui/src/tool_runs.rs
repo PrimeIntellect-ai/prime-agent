@@ -550,10 +550,10 @@ impl ToolRuns {
     /// receipt-free replayed card extend by one call; an
     /// agent-message notice extends by one message; every other shape
     /// - the threshold crossing, hidden-assistant glue that binds
-    /// later, a receipt-carrying card (the run's dedupe needs the
-    /// whole run's receipt ids), an orphan result - re-derives through
-    /// `rebuild_from`, so the map returns `false` for the caller to
-    /// fall back on.
+    ///   later, a receipt-carrying card (the run's dedupe needs the
+    ///   whole run's receipt ids), an orphan result - re-derives
+    ///   through `rebuild_from`, so the map returns `false` for the
+    ///   caller to fall back on.
     pub fn append_tail(&mut self, chat: &[ChatEntry]) -> bool {
         let len = chat.len();
         let Some(entry) = chat.last() else {
