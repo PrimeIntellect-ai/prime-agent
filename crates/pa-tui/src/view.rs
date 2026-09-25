@@ -448,7 +448,16 @@ impl AgentView {
             self.invalidate_run_suffix(start);
             if let Some((start, before)) = before {
                 let after = self.suffix_rows(start, self.layout_width);
-                self.sparse_tail_delta(after as isize - before as isize, start);
+                // A qualifying run grew its block - the run's owning
+                // index carries the whole change. Without one (a short
+                // uncondensed sequence, or a standalone card) the push's
+                // own slot owns its rows: the fold lands there, never
+                // at the sequence's first card.
+                let fold = match self.run_map.run_at(start) {
+                    Some(_) => start,
+                    None => self.chat.len() - 1,
+                };
+                self.sparse_tail_delta(after as isize - before as isize, fold);
             }
         } else {
             // A non-glue entry never joins a run: keep the map in
@@ -698,8 +707,23 @@ impl AgentView {
                 // glue card's state change folds through the run's
                 // owning index - the block's shape moved there.
                 let fold = match was_glue {
+                    // An assistant that kept its glue state only grew
+                    // its own rows (the streaming case); a flip (the
+                    // merge/split) reshaped the block - the run's
+                    // owning index carries the whole change.
                     Some(was) if crate::tool_runs::is_run_glue(&self.chat[index]) == was => index,
-                    _ => start,
+                    Some(_) => start,
+                    // A card inside a qualifying run moves the BLOCK's
+                    // rows (they live at the run's start); a solo card
+                    // (a short uncondensed sequence, or a standalone
+                    // card) moves only its own rows - the fold lands
+                    // there, never at the sequence's first card.
+                    None => match self.run_map.slot(index) {
+                        Some(
+                            crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
+                        ) => start,
+                        _ => index,
+                    },
                 };
                 self.sparse_tail_delta(after as isize - before as isize, fold);
             }

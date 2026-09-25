@@ -703,6 +703,149 @@ fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
 }
 
 #[test]
+fn a_short_sequence_push_folds_at_the_pushed_slot() {
+    // [user, status rows..., T x3 (an UNCONDENSED tail sequence)]: the
+    // window pauses with a selection on a card row of the sequence,
+    // then one more card lands at the tail. The sequence never reaches
+    // the condensing threshold, so the push owns its own slot exactly
+    // like a plain append - the walk used to fold through the
+    // sequence's first card, treating the new rows as inserted above
+    // the selection's content, so the copy jumped.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": format!("echo out {id}")}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": "done"
+                })],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    view.push_entry(ChatEntry::User {
+        text: "the question".into(),
+    });
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    for index in 0..3 {
+        view.push_entry(card(&format!("a{index}")));
+    }
+    let frame = view.render_frame(80, 12);
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out a2"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    let expected = row_text(&frame, row).trim_end().to_string();
+    // The push: a fourth card lands at the tail (the sequence stays
+    // under the condensing threshold).
+    view.push_entry(card("a3"));
+    view.render_frame(80, 12);
+    view.render_frame(80, 12);
+    assert_eq!(
+        view.end_active_selection(),
+        Some(expected),
+        "the paused selection keeps its content across the append"
+    );
+}
+
+#[test]
+fn a_solo_card_growth_folds_at_its_own_slot() {
+    // [status rows..., T x4 (an UNCONDENSED tail sequence)]: the window
+    // pauses with a selection on a card row, then the card MUTATES in
+    // place (its output grows). No qualifying block covers the
+    // sequence, so the mutation folds at the card's own slot exactly
+    // like every other self-contained mutation; the walk used to fold
+    // through the sequence's first card, so the copy jumped.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": format!("echo out {id}")}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": "done"
+                })],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    for index in 0..4 {
+        view.push_entry(card(&format!("b{index}")));
+    }
+    let frame = view.render_frame(80, 12);
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b3"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    let expected = row_text(&frame, row).trim_end().to_string();
+    // The mutation: the LAST card's output grows (the sequence never
+    // condenses).
+    view.prepare_entry_mutation(33);
+    if let ChatEntry::Tool(owned) = &mut view.chat[33] {
+        owned.result = Some(crate::chat::ToolResultView {
+            content: vec![
+                serde_json::json!({"type": "text", "text": "done"}),
+                serde_json::json!({"type": "text", "text": "grown\nmore"}),
+            ],
+            details: serde_json::Value::Null,
+            is_error: false,
+        });
+    }
+    view.mark_entry_stale(33);
+    view.render_frame(80, 12);
+    view.render_frame(80, 12);
+    assert_eq!(
+        view.end_active_selection(),
+        Some(expected),
+        "the paused selection keeps its content while the card's rows grow"
+    );
+}
+
+#[test]
 fn a_background_shell_run_keeps_its_block_uncached() {
     // An ipython cell whose final result carries a still-running
     // background shell keeps its run LIVE: the block re-renders on

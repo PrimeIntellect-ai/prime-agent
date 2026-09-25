@@ -462,6 +462,66 @@ fn a_live_run_extends_the_wire_span_to_now() {
 }
 
 #[test]
+fn receipts_count_only_parseable_ipython_entries() {
+    // The receipt classes mirror the rows the renderer shows: a
+    // malformed `sentAgentMessages` entry is not a receipt (never a
+    // phantom `queued` class), and a non-ipython tool never carries
+    // them.
+    let mut chat: Vec<ChatEntry> = Vec::new();
+    for index in 0..3 {
+        chat.push(settled_card(&format!("c{index}"), "ipython"));
+    }
+    // A bash tool whose result details carry a delivered receipt: the
+    // generic renderer never shows it, so the breakdown never counts it.
+    let mut foreign = settled_card("c3", "bash");
+    if let ChatEntry::Tool(card) = &mut foreign {
+        card.result = Some(ToolResultView {
+            content: vec![serde_json::json!({"type": "text", "text": "out"})],
+            details: serde_json::json!({
+                "sentAgentMessages": [
+                    { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" }
+                ]
+            }),
+            is_error: false,
+        });
+    }
+    chat.push(foreign);
+    // An ipython cell whose receipts include a malformed entry: the
+    // parseable one counts, the malformed one never becomes a phantom
+    // `queued` class.
+    let mut cell = settled_card("c4", "ipython");
+    if let ChatEntry::Tool(card) = &mut cell {
+        card.result = Some(ToolResultView {
+            content: vec![serde_json::json!({"type": "text", "text": "out"})],
+            details: serde_json::json!({
+                "sentAgentMessages": [
+                    { "id": "m2", "message": "b", "deliveryStatus": "delivered", "receiverRole": "parent" },
+                    { "id": "x" }
+                ]
+            }),
+            is_error: false,
+        });
+    }
+    chat.push(cell);
+    let map = run_map(&chat);
+    let summary = run_summary(&chat, map.run_at(0).expect("the five-call run condenses"));
+    let labels: Vec<String> = summary
+        .classes
+        .iter()
+        .map(|class| class.label.clone())
+        .collect();
+    assert!(
+        !labels.iter().any(|label| label.contains("queued")),
+        "the malformed entry never counts: {labels:?}"
+    );
+    assert_eq!(
+        labels.iter().filter(|label| label.contains("sent")).count(),
+        1,
+        "exactly one parseable receipt counts (the bash tool's never does): {labels:?}"
+    );
+}
+
+#[test]
 fn a_run_with_a_running_background_shell_stays_live() {
     // An ipython cell that launched a background shell settles itself
     // (the final result lands) while the spawned shell keeps working:

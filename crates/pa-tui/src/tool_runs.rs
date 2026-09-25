@@ -160,17 +160,22 @@ fn class_label(card: &ToolCallCard) -> String {
 fn message_receipts(cards: &[&ToolCallCard]) -> (usize, usize) {
     let (mut sent, mut queued) = (0, 0);
     for card in cards {
+        // The receipts ride the ipython cell details only (the generic
+        // renderer never shows them), and a malformed entry is not a
+        // receipt: the counts never invent classes the rows themselves
+        // do not carry.
+        if card.name != "ipython" {
+            continue;
+        }
         let Some(result) = &card.result else {
             continue;
         };
         let details = crate::tool_card::ipython_details::IpythonDetails::parse(&result.details);
         for receipt in &details.sent_agent_messages {
-            if crate::tool_card::ipython_details::parse_sent_agent_message(receipt)
-                .is_some_and(|parsed| parsed.delivered)
-            {
-                sent += 1;
-            } else {
-                queued += 1;
+            match crate::tool_card::ipython_details::parse_sent_agent_message(receipt) {
+                Some(parsed) if parsed.delivered => sent += 1,
+                Some(_) => queued += 1,
+                None => {}
             }
         }
     }
