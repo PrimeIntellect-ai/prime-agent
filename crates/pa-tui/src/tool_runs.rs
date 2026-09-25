@@ -432,6 +432,12 @@ impl ToolRuns {
         self.slots.get(index).copied()
     }
 
+    /// The map's slots in chat order (the layout tests' comparison
+    /// view: the incremental patch against a full rebuild).
+    pub fn slots(&self) -> &[RunSlot] {
+        &self.slots
+    }
+
     /// The qualifying run whose block starts at `index`.
     pub fn run_at(&self, index: usize) -> Option<ToolRun> {
         match self.slot(index) {
@@ -453,6 +459,51 @@ impl ToolRuns {
             }),
             _ => None,
         }
+    }
+
+    /// The O(1) tail append: the chat just grew by one GLUE entry and
+    /// nothing before it moved. When the pushed card extends a
+    /// QUALIFYING run that already owns the tail (its last member is
+    /// the immediately preceding entry), the map patches in place -
+    /// the run's start widens its extent by one and the pushed slot
+    /// becomes a Member - instead of rescanning the run from its first
+    /// card (an N-card stream otherwise pays O(N²) in the synchronous
+    /// TUI update loop). Every other shape - the condensing threshold
+    /// crossing, hidden-assistant glue that binds later, an orphan
+    /// result - re-derives through `rebuild_from`, so the map returns
+    /// `false` for the caller to fall back on.
+    pub fn append_tail(&mut self, chat: &[ChatEntry]) -> bool {
+        let len = chat.len();
+        let Some(entry) = chat.last() else {
+            return false;
+        };
+        if len < 2 || !is_run_glue(entry) {
+            return false;
+        }
+        // Only a real card extends a run's extent; hidden-assistant
+        // glue joins when the NEXT card binds it (the rebuild path).
+        if !matches!(entry, ChatEntry::Tool(card) if !card.unmatched_result) {
+            return false;
+        }
+        let Some(owner) = self.block_owner(len - 2) else {
+            return false;
+        };
+        let Some(RunSlot::Start(run)) = self.slots.get(owner).copied() else {
+            return false;
+        };
+        // The run must already own the tail: its end sits exactly at
+        // the pushed slot (no trailing provisional glue between), and
+        // it already condenses (the threshold crossing re-derives).
+        if run.end != len - 1 || !run.qualifies() {
+            return false;
+        }
+        self.slots[owner] = RunSlot::Start(ToolRun {
+            start: run.start,
+            end: len,
+            calls: run.calls + 1,
+        });
+        self.slots.push(RunSlot::Member);
+        true
     }
 
     /// Rebuild the map's suffix from `from` over `chat`: the prefix keeps
@@ -526,7 +577,14 @@ fn scan_run(chat: &[ChatEntry], start: usize) -> Option<ToolRun> {
                 {
                     probe += 1;
                 }
-                if matches!(chat.get(probe), Some(ChatEntry::Tool(_))) {
+                // Only a REAL card binds the hidden thinking between
+                // cards: an orphan result card breaks the run instead
+                // (it keeps its standalone row), so the thinking before
+                // an orphan never joins.
+                if matches!(
+                    chat.get(probe),
+                    Some(ChatEntry::Tool(card)) if !card.unmatched_result
+                ) {
                     end = probe;
                 } else {
                     break;

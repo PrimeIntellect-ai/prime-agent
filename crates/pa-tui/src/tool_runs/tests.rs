@@ -549,6 +549,33 @@ fn receipts_count_only_parseable_ipython_entries() {
 }
 
 #[test]
+fn a_trailing_thinking_before_an_orphan_never_joins_a_run() {
+    // An orphan result card is not a call: the hidden thinking between
+    // cards binds only when a REAL card follows it, so the thinking
+    // before an orphan stays its own (zero-row) entry and no run
+    // forms.
+    let mut orphan = settled_card("o0", "bash");
+    if let ChatEntry::Tool(card) = &mut orphan {
+        card.unmatched_result = true;
+    }
+    let chat = vec![
+        settled_card("c0", "ipython"),
+        settled_card("c1", "ipython"),
+        settled_card("c2", "ipython"),
+        settled_card("c3", "ipython"),
+        thinking_assistant(),
+        orphan,
+    ];
+    let map = run_map(&chat);
+    assert!(
+        map.run_at(0).is_none(),
+        "the orphan breaks the run: nothing condenses"
+    );
+    assert_eq!(map.slot(4), Some(RunSlot::Solo), "the thinking stays solo");
+    assert_eq!(map.slot(5), Some(RunSlot::Solo), "the orphan stays solo");
+}
+
+#[test]
 fn a_run_with_a_running_background_shell_stays_live() {
     // An ipython cell that launched a background shell settles itself
     // (the final result lands) while the spawned shell keeps working:

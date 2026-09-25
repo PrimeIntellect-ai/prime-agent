@@ -5965,6 +5965,7 @@ impl SessionUi {
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
+            || view.runs_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()

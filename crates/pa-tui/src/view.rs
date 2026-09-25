@@ -444,8 +444,21 @@ impl AgentView {
         self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
         if let Some((start, before)) = captured {
-            self.run_map.rebuild_from(&self.chat, start);
-            self.invalidate_run_suffix(start);
+            if self.run_map.append_tail(&self.chat) {
+                // The O(1) tail patch widened the owning run's extent:
+                // only its block's cached rows (at the start slot)
+                // re-render - the members' rows never left their empty
+                // caches, and the pushed slot has none yet.
+                if let Some(slot) = self.entry_layout.get_mut(start) {
+                    *slot = [None, None, None];
+                }
+                if let Some(slot) = self.entry_heights.get_mut(start) {
+                    *slot = [None, None, None];
+                }
+            } else {
+                self.run_map.rebuild_from(&self.chat, start);
+                self.invalidate_run_suffix(start);
+            }
             if let Some((start, before)) = before {
                 let after = self.suffix_rows(start, self.layout_width);
                 // A qualifying run grew its block - the run's owning
@@ -515,7 +528,16 @@ impl AgentView {
             self.invalidate_run_suffix(start);
             if let Some((start, before)) = before {
                 let after = self.suffix_rows(start, self.layout_width);
-                self.sparse_tail_delta(after as isize - before as isize, start);
+                // A qualifying run shrank its block - the run's owning
+                // index carries the whole change. Without one (a solo
+                // card leaving a short uncondensed sequence) the popped
+                // slot owns its rows: the fold lands there, never at
+                // the sequence's first card.
+                let fold = match self.run_map.run_at(start) {
+                    Some(_) => start,
+                    None => index,
+                };
+                self.sparse_tail_delta(after as isize - before as isize, fold);
             }
         }
         popped

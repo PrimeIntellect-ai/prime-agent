@@ -65,12 +65,30 @@ pub struct Reconstructed {
 
 impl Reconstructed {
     /// Fold one raw message into the chat entries. A `toolResult` message
-    /// does not add a row: it completes the pending tool card its
-    /// `toolCallId` refers to (the TS transcript replay updates the pending
-    /// tool component instead of rendering a new row).
+    /// does not add a row WHEN it completes the pending tool card its
+    /// `toolCallId` refers to (the TS transcript replay updates the
+    /// pending tool component instead of rendering a new row); a result
+    /// that matches no pending card keeps its standalone card exactly
+    /// like the live `AgentView::push` path (the orphan never
+    /// disappears from the rebuilt transcript).
     pub fn push_message(&mut self, message: &Value) {
         if let Some(result) = tool_result_message_view(message) {
-            apply_tool_result(&mut self.chat, result);
+            if let Some(view) = apply_tool_result(&mut self.chat, result) {
+                self.chat
+                    .push(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+                        id: view.id,
+                        name: view.name,
+                        args: serde_json::Value::Null,
+                        started: true,
+                        ended_ms: (view.timestamp > 0).then_some(view.timestamp),
+                        result: Some(view.view),
+                        // An orphan keeps its own standalone row: it
+                        // never joins a condensed run (it is not a
+                        // call).
+                        unmatched_result: true,
+                        ..Default::default()
+                    })));
+            }
             return;
         }
         self.chat.extend(message_value_to_entries(message));
@@ -81,6 +99,9 @@ impl Reconstructed {
 /// completes plus the result view rendered on the matching card.
 struct ToolResultReplay {
     tool_call_id: String,
+    /// The wire `toolName` (the orphan card's own name when no pending
+    /// card matches).
+    tool_name: String,
     view: crate::chat::ToolResultView,
     /// The message's wire `timestamp` (Unix milliseconds; 0 when absent):
     /// reading an existing field for the condensed runs' wall-clock - no
@@ -97,6 +118,11 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
     Some(ToolResultReplay {
         tool_call_id: message
             .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        tool_name: message
+            .get("toolName")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -119,12 +145,15 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
     })
 }
 
-/// Complete the first pending tool card matching `result`'s tool call id
-/// (the TS `renderedPendingTools` replay: results land on the card, never
-/// as a new transcript row).
-fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
+/// Complete the first pending tool card matching `result`'s tool call
+/// id (the TS `renderedPendingTools` replay: results land on the card,
+/// never as a new transcript row). A result that matches no pending
+/// card comes back whole: the caller keeps its standalone orphan card
+/// (the live `AgentView::push` path's twin).
+fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option<OrphanResult> {
     let ToolResultReplay {
         tool_call_id,
+        tool_name,
         view,
         timestamp,
     } = result;
@@ -141,10 +170,24 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
                 card.ended_ms = (timestamp > 0).then_some(timestamp);
                 card.result = Some(view);
                 card.result_partial = false;
-                return;
+                return None;
             }
         }
     }
+    Some(OrphanResult {
+        id: tool_call_id,
+        name: tool_name,
+        view,
+        timestamp,
+    })
+}
+
+/// An unmatched replay result: keeps its standalone card.
+struct OrphanResult {
+    id: String,
+    name: String,
+    view: crate::chat::ToolResultView,
+    timestamp: u64,
 }
 
 /// Replay a whole transcript: map every message to its rows, then fold
@@ -225,6 +268,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
         tool_call_id,
         view,
         timestamp,
+        ..
     } in tool_results
     {
         let Some(index) = card_index.get(&tool_call_id).copied() else {
@@ -1581,6 +1625,40 @@ mod tests {
             "lastEventCursor": { "generation": "g", "sequence": 9 },
             "client": { "id": "c1", "capabilities": ["attach_snapshot", "event_sequence", "slim_attach"] },
         })
+    }
+
+    #[test]
+    fn an_unmatched_replay_result_keeps_its_standalone_card() {
+        // A `toolResult` whose call never landed on a pending card
+        // keeps its orphan card exactly like the live push path - the
+        // rebuilt transcript never drops the standalone result.
+        let mut rebuilt = Reconstructed::default();
+        rebuilt.push_message(&json!({
+            "role": "user",
+            "content": "run it",
+        }));
+        rebuilt.push_message(&json!({
+            "role": "toolResult",
+            "toolCallId": "orphan",
+            "toolName": "bash",
+            "content": [{ "type": "text", "text": "orphan output" }],
+            "isError": false,
+            "timestamp": 123,
+        }));
+        assert_eq!(rebuilt.chat.len(), 2, "the orphan card lands");
+        match &rebuilt.chat[1] {
+            ChatEntry::Tool(card) => {
+                assert_eq!(card.id, "orphan");
+                assert_eq!(card.name, "bash");
+                assert!(card.unmatched_result, "the orphan never joins a run");
+                assert_eq!(
+                    card.ended_ms,
+                    Some(123),
+                    "the wire timestamp rides the card"
+                );
+            }
+            other => panic!("the orphan is a card: {other:?}"),
+        }
     }
 
     #[test]

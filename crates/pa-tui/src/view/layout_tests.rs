@@ -846,6 +846,122 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
 }
 
 #[test]
+fn a_short_sequence_pop_folds_at_the_popped_slot() {
+    // [status rows..., T x4 (an UNCONDENSED tail sequence)]: the window
+    // pauses with a selection on a card row, then the LAST card pops
+    // (the retry-episode collapse). No qualifying block covers the
+    // sequence, so the shrink folds at the popped card's own slot -
+    // the walk used to fold through the sequence's first card, so the
+    // copy jumped.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": format!("echo out {id}")}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": "done"
+                })],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    for index in 0..4 {
+        view.push_entry(card(&format!("b{index}")));
+    }
+    // A taller viewport: the whole tail sequence stays visible with
+    // the dock riding under it.
+    let frame = view.render_frame(80, 30);
+    // The selection sits on a card ABOVE the popped one (the popped
+    // card's own content vanishes with it).
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b1"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    let expected = row_text(&frame, row).trim_end().to_string();
+    // The pop: the TAIL card (b3, below the selection) leaves - the
+    // sequence stays uncondensed.
+    view.pop_chat_entry();
+    view.render_frame(80, 30);
+    view.render_frame(80, 30);
+    assert_eq!(
+        view.end_active_selection(),
+        Some(expected),
+        "the paused selection keeps its content across the pop"
+    );
+}
+
+#[test]
+fn a_qualifying_tail_append_patches_the_map_incrementally() {
+    // The O(1) tail append must produce the EXACT map the full rebuild
+    // derives: the run's extent widens by one and the pushed slot is a
+    // member.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "echo done"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "ok"})],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..5 {
+        view.push_entry(card(&format!("c{index}")));
+    }
+    // The sixth card lands through the O(1) path (the run owns the
+    // tail already).
+    view.push_entry(card("c5"));
+    let mut fresh = crate::tool_runs::ToolRuns::default();
+    fresh.rebuild_from(&view.chat, 0);
+    assert_eq!(
+        view.run_map.slots(),
+        fresh.slots(),
+        "the incremental tail patch matches the full rebuild"
+    );
+    assert_eq!(
+        view.run_map.run_at(0),
+        Some(crate::tool_runs::ToolRun {
+            start: 0,
+            end: 6,
+            calls: 6
+        }),
+        "the run's extent widened by the pushed card"
+    );
+}
+
+#[test]
 fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
     // [status rows..., T x4 (an UNCONDENSED sequence of QUEUED cards)]:
     // the window pauses with a selection on a card row, then the
