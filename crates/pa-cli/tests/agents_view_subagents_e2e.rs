@@ -361,15 +361,25 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the agents-back key returned to the view"
     );
 
-    // View run 2 (the flow's carried state): the drilled-in child is now a
-    // live session. TS parity for a CLI-resumed subagent file: its roster
-    // summary is a top-level runtime (TS `metadata.kind` defaults — the
-    // agents view does not re-nest it under its original parent), it keeps
-    // its persisted `rlmDepth` from the session header, and its own saved
-    // descendants (the grandchild) stay behind its collapsed summary row.
+    // View run 2 (the flow's carried state): the drilled-in child is now
+    // a live session that STAYS a child row: the live `top-level` runtime
+    // carries the opened file's spawn-time parent binding one level below
+    // the parent, so the view renders it behind the parent's summary (in
+    // the parent's aggregate — a top-level flip would leave the grandchild
+    // alone behind it), revealed by the expansion with its persisted
+    // `rlmDepth` and its own saved descendants (the grandchild) behind its
+    // own collapsed summary row.
+    // Expand the parent from its own selected row (the child sits hidden
+    // behind the collapsed summary, so the carried selection falls back to
+    // the parent and re-syncs to it), then walk to the child — its summary
+    // row, then the child — and open it.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
+            AgentsStep::Key("alt+right".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+            AgentsStep::Key("down".to_string()),
+            AgentsStep::Key("down".to_string()),
             AgentsStep::Key("enter".to_string()),
         ],
         width: 120,
@@ -393,16 +403,29 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // mount frame predates the saved rows and their summary markers).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
-        returned.contains("\u{25b8} 1 subagent"),
-        "the resumed child's own subtree stays behind its collapsed summary row:\n{returned}"
+        returned.contains("\u{25b8} 2 subagents"),
+        "the opened child rides the parent's aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
     );
     assert!(
-        !returned.contains("nested alpha child"),
-        "the grandchild stays hidden until the resumed child expands:\n{returned}"
+        returned.contains("agents 0 running, 0 idle, 1 inactive"),
+        "the live child renders no top-level agent row of its own (the only agent row is the saved parent):\n{returned}"
+    );
+    let expanded = frame_of(&back.frames, "worker alpha");
+    assert!(
+        expanded.contains("\u{25be} 2 subagents"),
+        "the expanded parent tree carries the live child:\n{expanded}"
     );
     assert!(
-        returned.contains("orchestrator chat"),
-        "the parent stays reachable as its own saved-catalog row:\n{returned}"
+        !expanded.contains("nested alpha child"),
+        "the grandchild stays hidden until the resumed child expands:\n{expanded}"
+    );
+    assert!(
+        expanded.contains("\u{25b8} 1 subagent"),
+        "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
+    );
+    assert!(
+        expanded.contains("orchestrator chat"),
+        "the parent stays reachable as its own saved-catalog row:\n{expanded}"
     );
     // The carried selection restored onto the resumed child's live row:
     // Enter re-opened that session (its live active id), and the open
