@@ -28,8 +28,11 @@
 # lands in exactly one shard on every run (never rebalanced mid-suite), so
 # flake attribution stays put when tests are added or renamed. The union
 # covers exactly what the serial `cargo test --workspace` built and ran:
-# lib/bin/doc unittests, every tests/ integration target, and the
-# example/bench compile targets (compile parity, `--no-run`). The summary
+# lib/bin/doc unittests, every tests/ integration target, the
+# example/bench compile targets (compile parity, `--no-run`), and the
+# workspace bins the serial build left in the profile dir as a side effect
+# (each shard links them up front — the e2e suites look each other's
+# binaries up there). The summary
 # job audits the shard manifests — same enumeration, disjoint shards, every
 # assigned unit executed — and merges the failure reports into one table
 # naming the failing binaries; the gate is green only when all shards are.
@@ -143,6 +146,15 @@ jobs:
         run: |
           python3 -m pip install --user uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Sibling-binary parity: the serial `cargo test --workspace` built every
+      # workspace bin into the shared profile dir as a side effect, and the
+      # e2e suites look each other's binaries up there (pa-cli's
+      # daemon_commands_e2e spawns pa-daemon this way). A shard builds its
+      # test subset only, so the bins are built explicitly once up front —
+      # first measured on run 36085993711, where the missing pa-daemon bin
+      # failed exactly this suite.
+      - name: Build the workspace bins (sibling-binary parity for the e2e suites)
+        run: cargo build --locked --workspace --bins
       - name: Run this shard's test subset
         run: |
           python3 scripts/ci_test_shard.py             --shard ${{ matrix.shard }} --total 4             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
