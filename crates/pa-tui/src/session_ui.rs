@@ -826,7 +826,7 @@ impl SessionUi {
             // (its supervisor connection and reader task) running for the
             // process's lifetime: close it, and the reconnect driver
             // installs a fresh one on its next attempt.
-            self.client.close();
+            self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
         let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
@@ -835,9 +835,10 @@ impl SessionUi {
             Ok(Err(error)) => {
                 // A failed reattach must not leave the half-installed
                 // client (its supervisor connection and reader task)
-                // running: close it, and the reconnect driver installs a
-                // fresh one on its next attempt.
-                self.client.close();
+                // running: dispose it outright (the writer drops, the
+                // socket shuts down, the reader EOFs), and the reconnect
+                // driver installs a fresh one on its next attempt.
+                self.client.hard_close();
                 return Err(
                     error.context(format!("reattaching session {durable} after the update"))
                 );
@@ -848,7 +849,7 @@ impl SessionUi {
                 // disposal, but the expiry is a RETRY outcome — the
                 // driver's next attempt owns the recovery, never a fatal
                 // exit.
-                self.client.close();
+                self.client.hard_close();
                 return Ok(ReattachOutcome::AttachBudgetExceeded);
             }
         }

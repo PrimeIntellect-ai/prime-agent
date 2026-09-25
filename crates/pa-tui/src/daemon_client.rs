@@ -802,6 +802,21 @@ impl DaemonClient {
         self.drop_direct();
         let _ = self.writer.send(String::new());
     }
+
+    /// Dispose the connection outright: like [`Self::close`], but the
+    /// writer sender is DROPPED too (a replacement dummy takes its
+    /// place), so the writer task finishes its queue, shuts the socket's
+    /// write half down, and the reader EOFs — a half-attached client is
+    /// never left running through the reconnect window. The failure
+    /// paths that replace an installed client use this (the plain
+    /// `close` keeps the writer alive for teardown-order cases).
+    pub fn hard_close(&mut self) {
+        self.direct.take_event_sender();
+        self.drop_direct();
+        let (replacement, _) = mpsc::unbounded_channel::<String>();
+        let writer = std::mem::replace(&mut self.writer, replacement);
+        let _ = writer.send(String::new());
+    }
 }
 
 /// Why a direct request failed: `NotSent` never reached the worker (safe to

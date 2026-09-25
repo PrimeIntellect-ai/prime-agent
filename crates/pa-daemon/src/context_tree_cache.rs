@@ -665,10 +665,18 @@ mod tests {
         let children = cache.serve_children(Some("session-a"), &[snapshot("sub-late", "working")]);
         assert_eq!(children.len(), 1);
         assert_eq!(children[0]["id"], json!("sub-late"));
-        assert_eq!(children[0]["status"], json!("working"));
-        assert!(
-            !children[0]["label"].as_str().unwrap_or_default().is_empty(),
-            "the persisted row's identity/body served the live row: {children:?}"
+        assert_eq!(
+            children[0]["status"],
+            json!("working"),
+            "the fresh live identity"
+        );
+        // The body came from the persisted row (its label differs from
+        // both the live nodes' "child" label and the empty fallback) —
+        // exactly the overlay this test proves.
+        assert_eq!(
+            children[0]["label"],
+            json!("persisted child"),
+            "the persisted row's body served the live row: {children:?}"
         );
     }
 
