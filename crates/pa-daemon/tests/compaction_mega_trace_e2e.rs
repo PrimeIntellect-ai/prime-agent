@@ -339,7 +339,7 @@ fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
 // Measurement harness, not a correctness test: seeds a ~50MB session
 // and prints the phase table; run explicitly with --ignored.
 #[test]
-#[ignore] // measurement harness: seeds ~50MB and prints the phase table
+#[ignore = "measurement harness: seeds ~50MB and prints the phase table"]
 fn mega_session_threshold_compaction_phase_measurement() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
