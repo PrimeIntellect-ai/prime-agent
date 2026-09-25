@@ -449,6 +449,10 @@ impl AgentSession {
     /// Returns the abort error when the run was aborted, or the compaction
     /// failure when the summarizer call or the compaction entry's persist
     /// fails. A skip is a normal `Ok` outcome carrying the skip message.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the compaction summary sink slot's mutex is poisoned.
     pub async fn compact(
         &self,
         custom_instructions: Option<&str>,
