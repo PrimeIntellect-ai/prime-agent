@@ -321,19 +321,41 @@ replay folds tool-result messages onto their pending tool cards
 
 ## 18. First-run onboarding - complete
 
-Splash + "Share agent traces with Prime Intellect?" notice, answerable,
-persisted completion flag (`pa-tui/src/onboarding.rs`;
-`pa-tui/src/interactive.rs`). Battery-verified
-(`runs/20260917T062810Z` f1: "first-run splash + trace-sharing notice
-rendered and answerable on both sides"). Divergences (operator rulings,
-Kevin, 2026-09-24): sharing is OPT-IN (the later ruling
-reversing the #2699 pre-configured-ON divergence; TS parity restored on
-the default), and the question is first-run-only: a fresh home (no trace
-choice written) is asked exactly once — the opt-in moment — while a home
-that already carries a standing choice (a provisioned/copied config, or
-a `/traces` change) never sees the question: the standing choice stands
-and the flow completes silently (TS #2368 asks such homes; deliberately
-not ported).
+The full first-run flow (TS #2340): the welcome splash with its
+description paragraphs and single "Log in with Prime Intellect" action,
+the Prime Inference sign-in through the inline auth panel (the merged
+#2730 surface), the default GLM 5.3 model apply after the sign-in, the
+connect-more-providers picker (searchable, pinned Continue row,
+connected marks, per-provider key prompts), and the "Share agent traces
+with Prime Intellect?" question ending the flow
+(`pa-tui/src/onboarding.rs` + `pa-tui/src/onboarding_flow.rs` +
+`pa-tui/src/onboarding_choice.rs`; `pa-tui/src/interactive.rs`
+run_onboarding_phase; the startup gate and readiness probe
+`pa-cli/src/interactive_mode.rs`). First run is the
+settings flag alone (TS `shouldRunOnboarding` parity): a home with a
+ready startup model skips to the question, a not-ready home runs the
+sign-in flow, and an aborted flow (a cancelled or failed sign-in) leaves
+the flag unset so the next launch retries. The original
+battery-verified claim (`runs/20260917T062810Z` f1: "first-run splash +
+trace-sharing notice rendered and answerable on both sides") covered the
+model-ready branch; the full-flow branch is e2e-verified
+(`fresh_home_runs_the_full_sign_in_flow_to_completion`).
+Divergences (operator rulings, Kevin, 2026-09-24): sharing is OPT-IN
+(the later ruling reversing the #2699 pre-configured-ON divergence; TS
+parity restored on the default), and the question is first-run-only: a
+fresh home (no trace choice written) is asked exactly once — the opt-in
+moment — while a home that already carries a standing choice (a
+provisioned/copied config, or a `/traces` change) never sees the
+question: the standing choice stands and the flow still completes
+(TS #2368 asks such homes; deliberately not ported — and in the
+not-ready branch the standing choice skips only the question: the
+sign-in still runs, so an aborted flow's next-launch retry is never
+swallowed by the standing choice). Product divergences from TS: the
+browser OAuth challenge stays unported (the Prime login's paste prompt
+is the sign-in entry, same as the `/login` panel), and the
+default-model apply resolves through the daemon's `set_model` (its
+registry reads the just-stored credential; TS re-resolves client-side
+against the live available models).
 The completion flag gates both the startup task mount and the phase
 itself (the agents-view flow re-runs the phase per session with the same
 task, so the phase re-reads the persisted marker and never re-shows);

@@ -602,6 +602,9 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Enter answers the mounted question on its pre-selected `Share` row;
     // the submission that follows must reach the editor, not the dialog.
@@ -680,6 +683,9 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // No key step answers anything: the flow must complete before the
     // plan's submission reaches the editor.
@@ -721,6 +727,321 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
     drop(supervisor);
 }
 
+/// The scripted provider-auth surface the full-flow verifier drives: the
+/// Prime Inference row and its panel-driven login (a progress line, the
+/// paste prompt, the store), one api-key provider row (the picker's
+/// connect step), and one `mcp:` service row (the picker's exclusion).
+/// Credentials persist through the real auth store so the model-readiness
+/// probe and the connected marks read them like the product does.
+struct FullFlowProviderAuth {
+    agent_dir: PathBuf,
+}
+
+impl FullFlowProviderAuth {
+    fn stored(&self, provider: &str) -> bool {
+        pa_core::auth::AuthStorage::create(&self.agent_dir)
+            .get_all()
+            .credential(provider)
+            .is_some()
+    }
+}
+
+impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
+    fn login_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        let rows = vec![
+            pa_tui::provider_auth::ProviderRow {
+                id: pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID.to_string(),
+                name: "Prime Inference".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: Some(pa_tui::provider_auth::AuthStatusIndicator {
+                    style: pa_tui::provider_auth::AuthStatusStyle::Success,
+                    label: "configured".to_string(),
+                }),
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: self.stored(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "faux-key".to_string(),
+                name: "Faux Key".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::ApiKeyPrompt,
+                configured: self.stored("faux-key"),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "mcp:faux".to_string(),
+                name: "Faux MCP".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::Oauth,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: false,
+                available: true,
+            },
+        ];
+        Box::pin(async move { rows })
+    }
+
+    fn logout_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn login(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        api_key: Option<&str>,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        let key = api_key.map(str::to_string);
+        Box::pin(async move {
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: key.unwrap_or_default(),
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to save API key for {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}"
+            ))
+        })
+    }
+
+    fn login_on_panel(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        Box::pin(async move {
+            // Only the Prime row runs here (the flow's sign-in step);
+            // anything else cancels.
+            if provider_id != pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            }
+            panel.progress("Checking Prime Inference access...");
+            let Some(api_key) = panel
+                .paste_prompt(
+                    "Paste a Prime API key below:",
+                    pa_tui::auth_panel::PasteStyle::Visible,
+                )
+                .await
+            else {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            };
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: api_key,
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}. Credentials saved to {}.",
+                agent_dir.join("auth.json").display()
+            ))
+        })
+    }
+
+    fn logout(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+}
+
+/// The full first-run flow on a fresh home with no usable model (TS
+/// #2340's `runOnboardingFlow` not-ready branch): the welcome screen's
+/// login action starts the flow, the Prime Inference sign-in runs through
+/// the inline auth panel (a progress line, the paste prompt), the default
+/// GLM 5.3 model applies behind the pane, the connect-more-providers
+/// picker connects one more provider through its key prompt and
+/// re-mounts with the connected mark, and the trace question ends the
+/// flow — every answer, both credentials, and the completion flag
+/// persist together, and the released pane runs the submitted turn.
+#[tokio::test]
+async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello full flow", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    // The readiness probe mirrors the flow's contract: the home is not
+    // ready until the sign-in stores its credential (the model-ready
+    // gate at flow end).
+    let probe_agent_dir = agent_dir.clone();
+    let model_ready = std::sync::Arc::new(move || {
+        pa_core::auth::AuthStorage::create(&probe_agent_dir)
+            .get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some()
+    });
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+        model_ready,
+        current_model: None,
+        provider_auth: Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+            std::sync::Arc::new(FullFlowProviderAuth {
+                agent_dir: agent_dir.clone(),
+            }),
+        )),
+    });
+    let enter = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    let down = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    // The plan waits on observable readiness, not fixed sleeps: each
+    // barrier holds the queued batch until a frame rendered after arming
+    // contains the condition, so a loaded runner cannot fire keys at a
+    // pane whose field or picker has not mounted yet (the pane drive
+    // implements the same WaitRender contract the run loop's session
+    // steps use).
+    let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 5_000,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The welcome screen's login action starts the flow.
+            enter(),
+            // The Prime sign-in: the paste prompt mounts with the flow.
+            wait_render("Paste a Prime API key below:"),
+            pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
+            enter(),
+            // The model applies behind the pane, then the picker mounts.
+            wait_render("Connect other providers, or continue."),
+            // Down to the provider row: Enter runs its key prompt.
+            down(),
+            enter(),
+            wait_render("Enter API key"),
+            pa_tui::interactive::HeadlessStep::Type("faux-key".to_string()),
+            enter(),
+            // The picker re-mounts with the connected mark; Enter on the
+            // pinned Continue row ends the step.
+            wait_render("\u{2713}"),
+            enter(),
+            // The trace question: Enter on the pre-selected Share row.
+            wait_render("Share agent traces"),
+            enter(),
+            // The released pane runs the submitted turn.
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Log in with Prime Intellect"),
+        "the welcome screen's action rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Login with Prime Intellect"),
+        "the login dialog's heading replaced the brand line:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Paste a Prime API key below:"),
+        "the paste prompt mounted inside the pane:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Connect other providers, or continue."),
+        "the providers picker rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Share agent traces"),
+        "the trace question ended the flow:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("hello full flow"),
+        "the completed flow released the pane and the first turn ran:\n{rendered}"
+    );
+    // The default-model apply's round trip: the scripted engine refuses
+    // live model switches by design (Engine::switch_model returns false
+    // for the harness), so the daemon's refusal row is the proof the
+    // apply REQUEST reached it and its failure surfaced like TS's
+    // applySelectedModel error path — the flow still completes and the
+    // marker still writes (the readiness probe reads the registry, not
+    // the session).
+    assert!(
+        rendered.contains("This session does not support model switching"),
+        "the apply round-tripped and the scripted engine's refusal surfaced:\n{rendered}"
+    );
+    // The connected provider's status row shows the store outcome.
+    assert!(
+        rendered.contains("Saved API key for Faux Key"),
+        "the provider login's status row applied:\n{rendered}"
+    );
+
+    // Everything persisted together: the flag, the answer, both
+    // credentials.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        settings.get_onboarding_shown(),
+        "the completed flow marked onboarding shown"
+    );
+    assert!(
+        settings.get_agent_traces_enabled(),
+        "the Share answer persisted"
+    );
+    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    assert!(
+        auth.get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some(),
+        "the Prime sign-in stored its credential"
+    );
+    assert!(
+        auth.get_all().credential("faux-key").is_some(),
+        "the provider login stored its key"
+    );
+    drop(supervisor);
+}
+
 /// A failed completion write surfaces a warning row and never kills the
 /// run: a provisioned home whose settings write fails still completes the
 /// flow for this run (the session stays usable), the warning names the
@@ -754,6 +1075,9 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -825,6 +1149,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Down + Enter answers `Not now` (the answer that used to re-show the
     // question on every later session open), then the turn runs.
@@ -3403,6 +3730,7 @@ fn empty_prompt_input() -> pa_types::daemon::PromptInput {
         queue_key: None,
         prefix_messages: None,
         admission_id: None,
+        rlm_notice_nonce: None,
     }
 }
 

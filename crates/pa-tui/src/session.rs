@@ -373,7 +373,7 @@ mod tests {
         };
         match chat_entry {
             crate::chat::ChatEntry::AgentMessage(row) => {
-                assert_eq!(row.participant, "from child lane");
+                assert_eq!(row.counterpart, "lane");
                 assert_eq!(row.message, "hi");
             }
             other => panic!("agent row: {other:?}"),

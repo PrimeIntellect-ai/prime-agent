@@ -765,8 +765,8 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
     // A prompt admitted while the review is still in flight runs against
     // the COMPACTED context: the summary rides the request, the
     // compacted-away bulk does not. The assertion targets the last TURN
-    // request — the background review and the status-line recap make
-    // their own provider calls around the settle (the review deliberately
+    // request — the background review makes
+    // its own provider calls around the settle (the review deliberately
     // reads the full trajectory), so `requests.last()` is not the turn.
     prompt_and_wait(
         &mut client,
