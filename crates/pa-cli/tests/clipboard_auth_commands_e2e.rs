@@ -760,10 +760,18 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
-            // Frames settle with the coalesced toast on screen.
-            pa_tui::interactive::HeadlessStep::WaitMs(300),
-            // Past the toast's TTL: the overlay dismisses.
-            pa_tui::interactive::HeadlessStep::WaitMs(3_500),
+            // The coalesced count-bump toast renders (observed, not
+            // slept-for): the third copy's ack is the (x3) label.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Copied last agent message to clipboard (x3)".to_string(),
+                timeout_ms: 10_000,
+            },
+            // Past the toast's TTL: the overlay dismisses (the newest
+            // frame stops carrying the ack).
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "Copied last agent message to clipboard".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 120,
         height: 36,
@@ -797,7 +805,8 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
         "every copy ran the OSC 52 chain"
     );
     // The coalesced toast acknowledges the count: three consecutive copies
-    // read as one "(x3)" toast, never stacked duplicate rows.
+    // read as one "(x3)" toast, never stacked duplicate rows (the plan's
+    // WaitRender observed the label land; the run's frames confirm).
     let coalesced_label = format!("{label} (x3)");
     assert!(
         outcome
