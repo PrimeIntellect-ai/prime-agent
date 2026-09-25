@@ -235,6 +235,11 @@ pub struct SupervisorChildSessions {
     inner: Arc<SupervisorChildSessionsInner>,
 }
 
+/// The `delete_subagent` completion hook (the worker wires its
+/// context-tree cache invalidation): called once per completed delete
+/// with the deleted child's id.
+pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -262,6 +267,11 @@ struct SupervisorChildSessionsInner {
     /// into it — the producer owns the target row and the durable
     /// append).
     usage_sink: std::sync::Mutex<Option<std::sync::Arc<dyn RlmChildUsageSink>>>,
+    /// The delete notification hook (wired by the worker with its
+    /// context-tree cache handle): a deleted child must leave the cached
+    /// `/context` children immediately, not ride out the next background
+    /// refresh.
+    delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -291,8 +301,20 @@ impl SupervisorChildSessions {
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
+                delete_notifier: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Wire the delete notification hook (the worker's context-tree cache
+    /// invalidation): called once per completed `delete_subagent` with
+    /// the deleted child's id.
+    pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
+        *self
+            .inner
+            .delete_notifier
+            .lock()
+            .expect("delete notifier lock") = Some(notifier);
     }
 
     /// The worker saw the parent's turn end: release prompt tasks waiting
@@ -986,26 +1008,25 @@ impl SupervisorChildSessionsInner {
             // Still running (a timed-out slice or a re-queued continuation):
             // re-check liveness so a dead worker cannot spin the watch.
             let busy = self.child_busy(&active_session_id).await;
-            match busy {
-                Ok(_) => unreachable_polls = 0,
-                Err(_) => {
-                    unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                        {
-                            let mut state = record.lock().await;
-                            if state.closed_by_parent || state.notice_delivered {
-                                return;
-                            }
-                            state.settled_status = Some("error");
-                            state.error = Some("Child worker unreachable".to_string());
+            if busy.is_ok() {
+                unreachable_polls = 0;
+            } else {
+                unreachable_polls += 1;
+                if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                    {
+                        let mut state = record.lock().await;
+                        if state.closed_by_parent || state.notice_delivered {
+                            return;
                         }
-                        // A dead child keeps whatever rows its file already
-                        // holds; capture them before the terminal notice.
-                        self.emit_child_usage(record).await;
-                        self.deliver_settle_notice(record).await;
-                        self.fire_settle_hook();
-                        return;
+                        state.settled_status = Some("error");
+                        state.error = Some("Child worker unreachable".to_string());
                     }
+                    // A dead child keeps whatever rows its file already
+                    // holds; capture them before the terminal notice.
+                    self.emit_child_usage(record).await;
+                    self.deliver_settle_notice(record).await;
+                    self.fire_settle_hook();
+                    return;
                 }
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
@@ -1241,22 +1262,12 @@ impl SupervisorChildSessionsInner {
                         turn_started = true;
                         break;
                     }
-                    Ok(false) if Instant::now() >= start_deadline => break,
-                    Ok(false) => {}
-                    Err(_) if Instant::now() >= start_deadline => break,
-                    Err(_) => {}
+                    Ok(false) | Err(_) if Instant::now() >= start_deadline => break,
+                    Ok(false) | Err(_) => {}
                 }
                 tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
             }
-            if !turn_started {
-                // The turn never showed busy: it either completed
-                // between two polls (its rows are on disk — bill them) or
-                // the delivery never started a turn (the cursor walk is a
-                // no-op). Observe once before the tail decides whether
-                // another delivery is owed — the TS subscription never
-                // stops observing a live child.
-                self.emit_child_usage(&record).await;
-            } else {
+            if turn_started {
                 // Phase 2: slice-wait until the turn settles (the
                 // task-run watcher's cadence, minus its settle
                 // bookkeeping).
@@ -1301,6 +1312,14 @@ impl SupervisorChildSessionsInner {
                     }
                     tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
                 }
+            } else {
+                // The turn never showed busy: it either completed
+                // between two polls (its rows are on disk — bill them) or
+                // the delivery never started a turn (the cursor walk is a
+                // no-op). Observe once before the tail decides whether
+                // another delivery is owed — the TS subscription never
+                // stops observing a live child.
+                self.emit_child_usage(&record).await;
             }
             // The tail: a delivery that arrived while this watcher was
             // live re-arms it for another turn (the flag was set instead
@@ -1907,6 +1926,26 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
+            // The deletion commits BEFORE the best-effort terminal
+            // notice: the notice's supervisor delivery can ride its full
+            // timeout, and a deleted child must leave the registry and the
+            // cached context tree immediately, not after it.
+            this.children
+                .lock()
+                .await
+                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
+            // The cached context-tree rows must not outlive the child: a
+            // deleted subagent leaves `/context` immediately (the
+            // background refresh would otherwise resurrect it through the
+            // settled-children backfill until its next walk).
+            if let Some(notify) = this
+                .delete_notifier
+                .lock()
+                .expect("delete notifier lock")
+                .clone()
+            {
+                notify(&entry.rlm_child_id);
+            }
             // A still-running child was cut short by the delete: the parent
             // session receives the cancelled terminal notice (TS
             // `completeDeletion`, reason `Deleted by parent orchestrator`).
@@ -1927,10 +1966,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     this.deliver_terminal_notice(&notice).await;
                 }
             }
-            this.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),

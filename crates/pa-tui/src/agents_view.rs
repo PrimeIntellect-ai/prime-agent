@@ -76,6 +76,12 @@ pub struct AgentsViewOptions {
     /// `AgentsViewMode` creates its own `KeybindingsManager`), the same
     /// contract as the session view.
     pub keybindings: crate::keybindings::KeybindingsManager,
+    /// The `showHardwareCursor` setting snapshot the view mounts with (TS
+    /// `AgentsViewMode` constructs its TUI with
+    /// `settingsManager.getShowHardwareCursor()`, default false): the
+    /// hardware cursor is positioned at the search caret for IME every
+    /// frame, but only shown when this is set.
+    pub show_hardware_cursor: bool,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -210,7 +216,7 @@ pub struct AgentsViewLink {
 
 impl AgentsViewLink {
     async fn connect(socket_path: &std::path::Path) -> Result<Self> {
-        let (client, events) = DaemonClient::connect(socket_path).await?;
+        let (client, events) = DaemonClient::connect_with_retry(socket_path).await?;
         Ok(Self { client, events })
     }
 
@@ -241,6 +247,12 @@ struct AgentsViewMode {
     selected: usize,
     query: String,
     status: Option<String>,
+    /// A multi-line notice from the previous run (a daemon refusal whose
+    /// ways out span lines, like the cross-product lease hold): rendered
+    /// as a dismissible panel above the hint line instead of the one-line
+    /// status truncation, so the full text — both ways out included —
+    /// stays readable.
+    notice: Option<String>,
     /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
     /// scope root is not on the roster (the view falls back to the global
     /// list with a status message, TS scope-resolution fallback).
@@ -313,7 +325,13 @@ impl AgentsViewMode {
     fn new(options: AgentsViewOptions) -> Self {
         let theme = crate::app::load_theme(&options.theme);
         let query = options.query.clone().unwrap_or_default();
-        let status = options.status_message.clone();
+        // A notice with lines to show (the refusal families) renders as
+        // the dismissible panel; a single-line notice keeps the hint-line
+        // status.
+        let (status, notice) = match options.status_message.clone() {
+            Some(message) if message.contains('\n') => (None, Some(message)),
+            status => (status, None),
+        };
         let pending_ancestors =
             (!options.expanded_ancestors.is_empty()).then(|| options.expanded_ancestors.clone());
         let selected_identity = options.selected_row_identity.clone();
@@ -347,6 +365,7 @@ impl AgentsViewMode {
             selected: 0,
             query,
             status,
+            notice,
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
@@ -388,13 +407,12 @@ impl AgentsViewMode {
         // status message.
         let mut scope_active = false;
         let scoped = match &self.options.scope {
-            Some(scope) if !self.scope_dropped => match scope_to_subtree(&records, scope) {
-                Some(scoped) => {
+            Some(scope) if !self.scope_dropped => {
+                if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
                     self.scope_depth = scope_depth(&records, scope);
                     Some(scoped)
-                }
-                None => {
+                } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
                     self.status = Some(
@@ -402,7 +420,7 @@ impl AgentsViewMode {
                     );
                     None
                 }
-            },
+            }
             _ => None,
         };
         self.scope_active = scope_active;
@@ -912,6 +930,15 @@ impl AgentsViewMode {
     /// the same contract as the session view (#184).
     fn handle_key(&mut self, key: &str) {
         let was_armed = self.exit_armed;
+        // The notice panel: any key closes it (the refusal's ways out
+        // stay copy-pasteable while it is up), except the exit key,
+        // which falls through so the double-press exit convention keeps
+        // working with the panel open.
+        if self.notice.is_some() && !self.keybindings.matches(key, "app.clear") {
+            self.notice = None;
+            return;
+        }
+        self.notice = None;
         // Any other key clears the exit hint (TS `clearCtrlCExitHint`).
         self.exit_armed = false;
         let has_query = !self.query.is_empty();
@@ -1127,16 +1154,114 @@ impl AgentsViewMode {
         lines.push(prompt);
         lines.push(vec![]);
 
-        let list_rows = height.saturating_sub(lines.len() + 1);
+        // The notice panel (a multi-line refusal from the previous run)
+        // takes its rows between the list and the hint line, so the list
+        // window shrinks while the full text stays visible. A budget that
+        // cannot hold the borders and one content row (a degenerate pane)
+        // falls back to the hint-line status with the notice's first line.
+        let budget = height.saturating_sub(lines.len() + 1);
+        // The panel is built and the notice's borrow ends here (render_list
+        // below takes the mode mutably).
+        let notice_panel = self
+            .notice
+            .as_deref()
+            .filter(|_| budget >= 4)
+            .map(|notice| self.render_notice(notice, width, budget));
+        // Owned: the fallback's borrow of the notice must end before the
+        // mutable list render below.
+        let status_fallback: Option<String> = notice_panel
+            .is_none()
+            .then(|| {
+                self.notice
+                    .as_deref()
+                    .and_then(|notice| notice.lines().next())
+            })
+            .flatten()
+            .map(str::to_string);
+        let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
+        let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
         lines.extend(self.render_list(width, list_rows));
+        if let Some(panel) = notice_panel {
+            lines.extend(panel);
+        }
         while lines.len() < height.saturating_sub(1) {
             lines.push(vec![]);
         }
-        lines.push(self.render_hints(width));
+        lines.push(self.render_hints(width, status_fallback.as_deref()));
         while lines.len() > height {
             lines.pop();
         }
         (lines, cursor)
+    }
+
+    /// The notice panel: the notice's own lines wrapped to the pane's
+    /// inner width inside a bordered box, with the dismissal row last. The
+    /// content fits the budget (the borders and the dismissal row are the
+    /// fixed three); an overflow names the cap instead of silently
+    /// cutting the refusal.
+    fn render_notice(&self, notice: &str, width: usize, budget: usize) -> Vec<Line> {
+        let theme = &self.theme;
+        let inner = width.saturating_sub(4).max(1);
+        let mut content: Vec<Line> = Vec::new();
+        for line in notice.split('\n') {
+            if line.trim().is_empty() {
+                content.push(vec![]);
+                continue;
+            }
+            content.extend(crate::width::wrap_text(line, inner));
+        }
+        // The fixed rows: the borders and the dismissal row. The notice's
+        // content fits what is left; an overflow names the cap (the marker
+        // wraps with the same width, so a narrow pane never overflows the
+        // border).
+        let cap = budget.saturating_sub(3).max(1);
+        if content.len() > cap {
+            // One row of room carries the marker alone: a truncated
+            // refusal never renders without the indication.
+            if cap == 1 {
+                content.clear();
+            } else {
+                content.truncate(cap - 1);
+            }
+            content.extend(crate::width::wrap_text(
+                "… the notice continues — a taller pane shows it whole",
+                inner,
+            ));
+            content.truncate(cap);
+        }
+        content.push(vec![crate::Span::styled(
+            "any key dismisses".to_string(),
+            theme.fg_style(ThemeColor::Dim),
+        )]);
+        let border = |left: &str, right: &str| {
+            let row = vec![
+                crate::Span::styled(left.to_string(), theme.fg_style(ThemeColor::Dim)),
+                crate::Span::styled(
+                    "─".repeat(width.saturating_sub(2)),
+                    theme.fg_style(ThemeColor::Dim),
+                ),
+                crate::Span::styled(right.to_string(), theme.fg_style(ThemeColor::Dim)),
+            ];
+            crate::width::pad_line(row, width)
+        };
+        let mut panel = Vec::with_capacity(content.len() + 2);
+        panel.push(border("┌", "┐"));
+        for line in content {
+            let mut row = vec![crate::Span::styled(
+                "│ ".to_string(),
+                theme.fg_style(ThemeColor::Dim),
+            )];
+            row.extend(line);
+            let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
+            row.push(crate::Span::raw(" ".repeat(width.saturating_sub(used + 2))));
+            row.push(crate::Span::styled(
+                " │".to_string(),
+                theme.fg_style(ThemeColor::Dim),
+            ));
+            panel.push(crate::width::pad_line(row, width));
+        }
+        panel.push(border("└", "┘"));
+        panel
     }
 
     /// The sectioned session list (TS `renderSessionRows`): the rows group
@@ -1149,6 +1274,14 @@ impl AgentsViewMode {
     /// headings count top-level agents only (TS `getDisplayRowsForSection`
     /// / `countRowsBySection`).
     fn render_list(&mut self, width: usize, max_rows: usize) -> Vec<Line> {
+        /// One rendered display entry of the sectioned list (TS
+        /// `DisplayItem`): the spacer between section blocks, a section
+        /// heading, or one row.
+        enum DisplayItem<'a> {
+            Spacer,
+            Heading(Section),
+            Row(&'a AgentsViewRow),
+        }
         if max_rows == 0 {
             return Vec::new();
         }
@@ -1159,14 +1292,6 @@ impl AgentsViewMode {
                 "No sessions match your search."
             };
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
-        }
-        /// One rendered display entry of the sectioned list (TS
-        /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row.
-        enum DisplayItem<'a> {
-            Spacer,
-            Heading(Section),
-            Row(&'a AgentsViewRow),
         }
         let layout = build_layout(&self.rows, width);
         // The display-item sequence (TS `displayItems`): each non-empty
@@ -1189,9 +1314,7 @@ impl AgentsViewMode {
         // relevance-ordered run of hits (per-row icons carry the status),
         // not status section blocks. Without a query the sectioned
         // layout stays TS-identical.
-        if !self.query.trim().is_empty() {
-            display.extend(self.rows.iter().map(DisplayItem::Row));
-        } else {
+        if self.query.trim().is_empty() {
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -1210,6 +1333,8 @@ impl AgentsViewMode {
                     }
                 }
             }
+        } else {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
         }
         // The viewport (TS `renderSessionRows`): reserve the column header
         // and its spacer, center the slice on the selected row, and clip
@@ -1228,8 +1353,7 @@ impl AgentsViewMode {
             .position(
                 |item| matches!(item, DisplayItem::Row(row) if Some(row.identity.as_str()) == selected_identity),
             )
-            .map(|index| index as isize)
-            .unwrap_or(-1);
+            .map_or(-1, |index| index as isize);
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
@@ -1250,8 +1374,7 @@ impl AgentsViewMode {
                     let count = counts
                         .iter()
                         .find(|(count_section, _)| count_section == section)
-                        .map(|(_, count)| *count)
-                        .unwrap_or(0);
+                        .map_or(0, |(_, count)| *count);
                     vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
@@ -1383,8 +1506,9 @@ impl AgentsViewMode {
         line
     }
 
-    /// The bottom hint/status line.
-    fn render_hints(&self, width: usize) -> Line {
+    /// The bottom hint/status line. `status_override` carries the
+    /// notice's first line when the degenerate pane skipped the panel.
+    fn render_hints(&self, width: usize, status_override: Option<&str>) -> Line {
         let theme = &self.theme;
         if self.exit_armed {
             // TS `renderHints`: the exit hint renders the effective
@@ -1399,8 +1523,8 @@ impl AgentsViewMode {
             };
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        if let Some(status) = &self.status {
-            return truncate_line(vec![theme.fg(ThemeColor::Error, status.clone())], width);
+        if let Some(status) = status_override.or(self.status.as_deref()) {
+            return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
         }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
@@ -1461,7 +1585,13 @@ fn truncate_line(line: Line, width: usize) -> Line {
 }
 
 enum Renderer {
-    Terminal(ratatui::Terminal<crate::hyperlinks::LinkBackend>),
+    Terminal {
+        term: ratatui::Terminal<crate::hyperlinks::LinkBackend>,
+        /// The `showHardwareCursor` setting snapshot the surface mounted
+        /// with (TS constructs the agents-view TUI with the live
+        /// `settingsManager.getShowHardwareCursor()`).
+        show_hardware_cursor: bool,
+    },
     Headless {
         width: u16,
         height: u16,
@@ -1475,6 +1605,7 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: crate::exit_guard::ExitGuard,
         surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        show_hardware_cursor: bool,
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
@@ -1523,16 +1654,23 @@ impl Renderer {
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
                 // never reach the pane on its own: queue it with the
-                // cursor show and let the first draw's single flush carry
+                // cursor hide and let the first draw's single flush carry
                 // clear + frame together. A separate clear-and-flush here
                 // shows a blank pane for the whole render gap — a visible
-                // flicker on every surface switch.
+                // flicker on every surface switch. The cursor hides with
+                // the mount (TS `TUI.start` writes hideCursor, never a
+                // show): a shown cursor here sits visible at a stale
+                // position until the first frame decides the visibility,
+                // the exact window the cursor glitch shows in.
                 crossterm::queue!(
                     std::io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Show
+                    crossterm::cursor::Hide
                 )?;
-                Ok(Renderer::Terminal(terminal))
+                Ok(Renderer::Terminal {
+                    term: terminal,
+                    show_hardware_cursor,
+                })
             }
             AgentsViewUiMode::Headless(plan) => {
                 let steps = plan.steps;
@@ -1570,16 +1708,27 @@ impl Renderer {
 
     fn draw(&mut self, mode: &mut AgentsViewMode) -> Option<(usize, usize)> {
         match self {
-            Renderer::Terminal(terminal) => {
-                let area = terminal.size().expect("terminal size");
+            Renderer::Terminal {
+                term,
+                show_hardware_cursor,
+            } => {
+                let area = term.size().expect("terminal size");
                 let (lines, cursor) = mode.render_frame(area.width as usize, area.height as usize);
                 crate::hyperlinks::install_frame(&lines);
-                terminal
-                    .draw(|f| {
-                        let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
-                        let rendered: Vec<ratatui::text::Line<'static>> =
-                            lines.iter().map(crate::markdown::to_ratatui_line).collect();
-                        f.render_widget(ratatui::text::Text::from(rendered), area);
+                // TS cursor control: the hardware cursor is positioned at
+                // the focused caret for IME on every frame, but only shown
+                // when `showHardwareCursor` is on (default off). ratatui's
+                // `set_cursor_position` shows unconditionally, so only the
+                // show case may hand it the caret; the hidden case queues
+                // the bare MoveTo after the paint instead (TS positions
+                // the caret while the cursor stays hidden).
+                let show = *show_hardware_cursor;
+                term.draw(|f| {
+                    let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
+                    let rendered: Vec<ratatui::text::Line<'static>> =
+                        lines.iter().map(crate::markdown::to_ratatui_line).collect();
+                    f.render_widget(ratatui::text::Text::from(rendered), area);
+                    if show {
                         if let Some((row, col)) = cursor {
                             if row < area.height as usize && col < area.width as usize {
                                 f.set_cursor_position(ratatui::layout::Position::new(
@@ -1587,8 +1736,23 @@ impl Renderer {
                                 ));
                             }
                         }
-                    })
-                    .expect("draw frame");
+                    }
+                })
+                .expect("draw frame");
+                if !show {
+                    if let Some((row, col)) = cursor {
+                        if row < area.height as usize && col < area.width as usize {
+                            // execute! (not queue!): the position write must
+                            // flush now — the paint backend's flush already
+                            // ran inside `draw`, so a queued write would sit
+                            // in the stdout buffer until the next frame.
+                            let _ = crossterm::execute!(
+                                std::io::stdout(),
+                                crossterm::cursor::MoveTo(col as u16, row as u16)
+                            );
+                        }
+                    }
+                }
                 None
             }
             Renderer::Headless {
@@ -1619,7 +1783,14 @@ impl Renderer {
     /// onto the main screen.
     fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
-            Renderer::Terminal(_) => {
+            Renderer::Terminal { term, .. } => {
+                // ratatui's `Terminal` drop restores the cursor its last
+                // frame hid (the `hidden_cursor` flag): run the drop
+                // before the handoff's hide so the hide is the final
+                // word — TS `stop(preserveAltScreen)` leaves the cursor
+                // hidden for the surface taking the screen over. The
+                // real-exit arm ends shown for the shell either way.
+                drop(term);
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).
@@ -1660,14 +1831,13 @@ async fn open_roster_link(
     mpsc::UnboundedReceiver<DaemonClientEvent>,
     Vec<Value>,
 )> {
-    let (mut client, mut events) = match link {
-        Some(AgentsViewLink { client, events }) => (client, events),
-        None => {
-            let link = AgentsViewLink::connect(&options.socket_path)
-                .await
-                .with_context(|| "the agents view could not attach to the daemon")?;
-            (link.client, link.events)
-        }
+    let (mut client, mut events) = if let Some(AgentsViewLink { client, events }) = link {
+        (client, events)
+    } else {
+        let link = AgentsViewLink::connect(&options.socket_path)
+            .await
+            .with_context(|| "the agents view could not attach to the daemon")?;
+        (link.client, link.events)
     };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
@@ -1719,8 +1889,8 @@ fn spawn_saved_catalog_fetch(
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
 ) -> String {
-    let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let client = client.clone();
     // The id rides the supervisor reader's `daemon_` namespace: the
     // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
     // the fetch too, or a dead connection leaves the long-running scan's
@@ -1841,7 +2011,13 @@ async fn run_agents_view_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone(), &surface_mounted)?;
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx.clone(),
+        exit_guard.clone(),
+        &surface_mounted,
+        options.show_hardware_cursor,
+    )?;
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below
@@ -2030,7 +2206,7 @@ async fn run_agents_view_surface(
     // its teardown may take its full drain second while the app simply
     // waits, so the deadline covers only the leaves that end this process.
     let handing_off = mode.opened.is_some() || mode.new_session;
-    if matches!(renderer, Renderer::Terminal(_)) && !handing_off {
+    if matches!(renderer, Renderer::Terminal { .. }) && !handing_off {
         exit_guard.arm_for_exit();
     }
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
@@ -2083,7 +2259,7 @@ async fn run_agents_view_surface(
             selected_row_identity: opened.as_ref().map(|row| row.selected_row_identity.clone()),
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
-            opened_has_children: opened.as_ref().map(|row| row.has_children).unwrap_or(false),
+            opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
@@ -2137,6 +2313,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -2338,6 +2515,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2364,10 +2542,92 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();
         mode
+    }
+
+    /// One mode over the given notice (the previous run's failure).
+    fn mode_with_notice(notice: &str) -> AgentsViewMode {
+        let mut mode = AgentsViewMode::new(AgentsViewOptions {
+            socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+            cwd: PathBuf::from("/tmp"),
+            session_dir: None,
+            theme: "prime".to_string(),
+            version: "0.0.0".to_string(),
+            anchor_session_id: None,
+            scope: None,
+            query: None,
+            expanded_ancestors: Vec::new(),
+            selected_row_identity: None,
+            selected_key: None,
+            status_message: Some(notice.to_string()),
+            keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
+        });
+        mode.rebuild_rows();
+        mode
+    }
+
+    /// A multi-line notice — the cross-product lease refusal with its two
+    /// ways out — renders as the panel: the full text stays visible and
+    /// wrapped, never truncated to the single hint line, and any key
+    /// dismisses it.
+    #[test]
+    fn a_multiline_refusal_notice_renders_as_a_dismissible_panel() {
+        let refusal = "This session is currently open in another Rust build of Prime Agent \
+(active in 6b558be357e3) — another daemon or window of this product holds the file's \
+runtime lease.\n\n• Continue where you left off:\n  prime-agent-rust --daemon-socket \
+<socket> --resume 'sess-1'\n  (<socket> is that instance's daemon socket, from the \
+shell where you started it — that daemon owns this session)\n\n• Take over on this \
+daemon:\n  kill 4242 # the holder is prime-agent\n  Then retry — the file unlocks when \
+the holder exits.";
+        let render = |mode: &mut AgentsViewMode| {
+            let (lines, _) = mode.render_frame(120, 40);
+            lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .map(|span| span.content.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut mode = mode_with_notice(refusal);
+        let shown = render(&mut mode);
+        for way_out in [
+            "Continue where you left off",
+            "--daemon-socket <socket> --resume 'sess-1'",
+            "Take over on this daemon",
+            "kill 4242 # the holder is prime-agent",
+        ] {
+            assert!(
+                shown.contains(way_out),
+                "the panel shows {way_out:?} in full:\n{shown}"
+            );
+        }
+        // Any key dismisses the panel; the hint line returns.
+        mode.handle_key("down");
+        let dismissed = render(&mut mode);
+        assert!(
+            !dismissed.contains("Take over on this daemon"),
+            "the panel leaves the frame on any key:\n{dismissed}"
+        );
+    }
+
+    /// A single-line notice keeps the hint-line status: the panel arms only
+    /// for notices with lines to show.
+    #[test]
+    fn a_single_line_notice_keeps_the_status_line() {
+        let mode = mode_with_notice("Saved sessions unavailable: no such directory");
+        assert!(mode.notice.is_none());
+        assert_eq!(
+            mode.status.as_deref(),
+            Some("Saved sessions unavailable: no such directory")
+        );
     }
 
     /// A fresh open (the agents-back handoff) anchors the entry selection
@@ -2646,6 +2906,7 @@ mod tests {
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -2679,6 +2940,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2764,6 +3026,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2880,7 +3143,10 @@ mod tests {
         // `renderHints`: `Press ${keyText("app.clear")} again to exit`).
         mode.handle_key("ctrl+q");
         assert!(mode.exit_armed);
-        assert_eq!(flat(&mode.render_hints(120)), "Press Ctrl+Q again to exit");
+        assert_eq!(
+            flat(&mode.render_hints(120, None)),
+            "Press Ctrl+Q again to exit"
+        );
         // The default ctrl+c no longer arms the exit flow.
         mode.exit_armed = false;
         mode.handle_key("ctrl+c");
@@ -2898,12 +3164,12 @@ mod tests {
         // Defaults: TS `renderHints` with the stock keys.
         let mode = mode_with_parent_and_child();
         assert_eq!(
-            flat(&mode.render_hints(120)),
+            flat(&mode.render_hints(120, None)),
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+N new"
         );
         // A user override moves the hint with the handler.
         let mode = mode_with_user_bindings(&[("app.agents.new", "ctrl+t")]);
-        let hints = flat(&mode.render_hints(120));
+        let hints = flat(&mode.render_hints(120, None));
         assert_eq!(
             hints,
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+T new"
@@ -2964,6 +3230,7 @@ mod tests {
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2997,6 +3264,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3109,6 +3377,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();

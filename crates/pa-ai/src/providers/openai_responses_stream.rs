@@ -932,7 +932,6 @@ fn map_responses_stop_reason(status: Option<&str>) -> StopReason {
     match status {
         None | Some("completed" | "in_progress" | "queued") => StopReason::Stop,
         Some("incomplete") => StopReason::Length,
-        Some("failed" | "cancelled") => StopReason::Error,
         Some(_) => StopReason::Error,
     }
 }

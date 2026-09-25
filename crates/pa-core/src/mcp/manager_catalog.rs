@@ -182,9 +182,7 @@ fn now_ms() -> u64 {
 
 fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
-        return std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("~"));
+        return std::env::var("HOME").map_or_else(|_| PathBuf::from("~"), PathBuf::from);
     }
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {

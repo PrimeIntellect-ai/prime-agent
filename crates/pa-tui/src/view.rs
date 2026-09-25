@@ -123,14 +123,17 @@ pub struct AgentView {
     /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam):
     /// while set, it owns the whole frame like the model picker.
     pub effort_picker: Option<crate::effort_picker::EffortPicker>,
-    /// The `/mcp` inline connections view (TS the configuration menu's
-    /// MCP Connections tab): while set, it owns the editor dock like the
-    /// model picker.
+    /// The `/mcp` inline connections view (the MCP surface's own
+    /// picker): while set, it owns the editor dock like the model
+    /// picker.
     pub mcp_view: Option<crate::mcp_view::McpView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
     pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
+    /// The read-only goal panel (the dock's `Pursuing goal` row): while
+    /// `Some`, the panel owns the frame exactly like the docked pickers.
+    pub goal_panel: Option<crate::goal_surface::GoalPanel>,
     /// The dedicated bash view (the dock's Bash group's destination):
     /// while set, it owns the editor dock like the inline pickers.
     pub bash_view: Option<crate::bash_view::BashView>,
@@ -159,6 +162,13 @@ pub struct AgentView {
     /// the fullscreen compose pins the top bar; the inline surface (TS
     /// `fullscreen rendering off`) renders without it.
     pub fullscreen: bool,
+    /// The `showHardwareCursor` setting (TS default false): the hardware
+    /// cursor is positioned at the focused caret for IME on every frame
+    /// either way, but only shown when this is set — TS keeps the
+    /// terminal's own cursor hidden by default so frame paints never drag
+    /// a visible cursor across the pane (`positionHardwareCursor` and the
+    /// paint tail move it while hidden).
+    pub show_hardware_cursor: bool,
     pub(crate) scroll_top: usize,
     following: bool,
     /// The transcript-tail offset of the last composed frame (TS
@@ -302,6 +312,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             heartbeats_picker: None,
+            goal_panel: None,
             bash_view: None,
             share_loader: None,
             reload_box: None,
@@ -310,6 +321,7 @@ impl AgentView {
             shortcut_guide: None,
             show_images: true,
             fullscreen: true,
+            show_hardware_cursor: false,
             scroll_top: 0,
             following: true,
             last_max_scroll: 0,
@@ -674,10 +686,9 @@ impl AgentView {
             match &self.chat[idx] {
                 ChatEntry::Assistant(message) => {
                     match self.assistant_spacing_content(message) {
-                        SpacingContent::Hidden => continue,
+                        SpacingContent::Hidden => {}
                         SpacingContent::ToolOnly => {
                             tool_separator = true;
-                            continue;
                         }
                         SpacingContent::Visible => {
                             // TS `hasTrailingSpace` on the visible body
@@ -796,9 +807,6 @@ impl AgentView {
                     width,
                 ));
                 rows
-            }
-            ChatEntry::SlashCommandResult { content } => {
-                crate::chat_slash::render_slash_command_result(content, &self.theme, width)
             }
             ChatEntry::CompactionSummary {
                 summary,
@@ -1251,6 +1259,15 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
+        } else if let Some(panel) = &self.goal_panel {
+            let mut dock = prompt_context;
+            dock.extend(crate::goal_surface::render_goal_panel(
+                panel,
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+            ));
+            Some(dock)
         } else if let Some(view) = self.bash_view.as_ref() {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
@@ -1456,6 +1473,7 @@ impl AgentView {
             || self.model_picker.is_some()
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
+            || self.goal_panel.is_some()
             || self.bash_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
@@ -2568,7 +2586,7 @@ mod tests {
         let mut view = view_with(vec![agent_message_row(), shell_completion_row()]);
         view.detail = Detail::All;
         let text = transcript_text(&mut view, 80);
-        assert!(text.contains("Agent message received \u{b7} from child lane"));
+        assert!(text.contains("Agent message received \u{b7} \u{2190} child lane"));
         assert!(text.contains("\u{2570}\u{2500} hi"));
         assert!(text.contains("Background shell command finished"));
         assert!(text.contains("[bash-done]"));

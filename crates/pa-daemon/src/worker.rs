@@ -144,13 +144,14 @@ impl WorkerConfig {
             .map(PathBuf::from)
             .unwrap_or_default();
         let agent_dir = paths::agent_dir()?;
-        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
+        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV).map_or_else(
+            || {
                 agent_dir
                     .join("daemon-workers")
                     .join(format!("{active_session_id}.recovery.jsonl"))
-            });
+            },
+            PathBuf::from,
+        );
         let script = std::env::var_os(WORKER_SCRIPT_ENV)
             .map(PathBuf::from)
             .and_then(|path| {
@@ -248,7 +249,6 @@ pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
         .and_then(|policy| policy.get("nextTurnContextTiming"))
         .and_then(Value::as_str);
     match timing {
-        Some("commit") => TurnPolicy::Queued,
         Some("preparation") => {
             let preserved = payload
                 .get("executionPolicy")
@@ -494,10 +494,10 @@ impl SessionCore {
     #[cfg(test)]
     pub(crate) fn test_core(store: Option<SessionFile>, cwd: String) -> Self {
         SessionCore {
-            active_session_id: store
-                .as_ref()
-                .map(|store| store.session_id().to_string())
-                .unwrap_or_else(|| "test-session".to_string()),
+            active_session_id: store.as_ref().map_or_else(
+                || "test-session".to_string(),
+                |store| store.session_id().to_string(),
+            ),
             generation: String::new(),
             last_event_sequence: 0,
             store,
@@ -816,6 +816,11 @@ pub struct Worker {
     pub(crate) compaction: crate::compaction::CompactionManager,
     /// Session-tree navigation: `/tree` moves, branch summaries, forks.
     pub(crate) tree_navigation: crate::branch_navigation::TreeNavigation,
+    /// The `get_context_tree` children cache: the artifact-tree walk is a
+    /// multi-second disk read on a grown session store (the operator's
+    /// `/context` timeout), so it runs as a background refresh and the
+    /// request serves the cached snapshot (`context_tree_cache`).
+    pub(crate) context_tree: std::sync::Arc<crate::context_tree_cache::ContextTreeCache>,
     /// Session export: the `/export` HTML and JSONL branches.
     exports: crate::session_export::ExportCommands,
     /// Session-scoped ACP MCP servers for engines without their own store
@@ -1367,6 +1372,7 @@ impl Worker {
             peer_grants: PeerGrantStore::new(),
             compaction,
             tree_navigation,
+            context_tree: std::sync::Arc::new(crate::context_tree_cache::ContextTreeCache::new()),
             exports,
             acp_mcp: std::sync::Arc::new(std::sync::Mutex::new(acp_mcp)),
             user_bash,
@@ -1535,7 +1541,7 @@ impl Worker {
                                     }
                                     sink.mark_flushed(frame.seq);
                                 }
-                                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {}
                                 Err(broadcast::error::RecvError::Closed) => {
                                     sink.mark_closed();
                                     break;
@@ -2648,6 +2654,21 @@ impl Worker {
             let _ = registry.refresh_available_models().await;
         });
         self.work_notify.notify_one();
+        // Warm the context-tree cache at session open: the background walk
+        // fills the cache while the client settles, so an early `/context`
+        // answers from it instead of walking the artifact tree inline.
+        self.poke_context_tree_refresh();
+        // The delete boundary invalidates the cache's rows for the deleted
+        // child immediately (the next background refresh would otherwise
+        // keep its last row through the settled-children backfill).
+        if let Some(agent_engine) = &self.agent_engine {
+            if let Some(children) = &agent_engine.children {
+                let cache = std::sync::Arc::clone(&self.context_tree);
+                children.set_delete_notifier(std::sync::Arc::new(move |child_id| {
+                    cache.invalidate_child(child_id);
+                }));
+            }
+        }
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
         if interrupted_compaction_requested {
             data["interruptedCompactionPersisted"] =
@@ -2714,6 +2735,12 @@ impl Worker {
         if let Err(response) = self.require_created("attach") {
             return response;
         }
+        // Warm the context-tree cache at every (re)attach (the operators'
+        // Esc agents-view round trip re-attaches): the background walk
+        // fills the cache while the client rebuilds its view, so the
+        // next `/context` finds it ready instead of walking the artifact
+        // tree inline.
+        self.poke_context_tree_refresh();
         let client_id = payload
             .get("clientId")
             .and_then(Value::as_str)
@@ -2722,7 +2749,7 @@ impl Worker {
         let capabilities = payload
             .get("capabilities")
             .and_then(Value::as_array)
-            .map(|array| {
+            .map_or_else(default_client_capabilities, |array| {
                 normalize_client_capabilities(
                     &array
                         .iter()
@@ -2730,8 +2757,7 @@ impl Worker {
                         .map(str::to_string)
                         .collect::<Vec<_>>(),
                 )
-            })
-            .unwrap_or_else(default_client_capabilities);
+            });
         let resume_cursor = payload
             .get("resumeCursor")
             .cloned()
@@ -2875,14 +2901,7 @@ impl Worker {
                 // steering lane - otherwise a steering delivery that
                 // arrives in the same window would jump the prompt's turn
                 // (the runner drains steering first).
-                Some(_) => {
-                    if core.busy {
-                        Lane::FollowUp
-                    } else {
-                        Lane::Steering
-                    }
-                }
-                None => {
+                Some(_) | None => {
                     if core.busy {
                         Lane::FollowUp
                     } else {
@@ -4327,8 +4346,7 @@ impl Worker {
             .as_ref()
             .and_then(|model| model.get("id"))
             .and_then(Value::as_str)
-            .map(supports_fast_mode)
-            .unwrap_or(false);
+            .is_some_and(supports_fast_mode);
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -4367,13 +4385,9 @@ impl Worker {
                 .map(|p| p.to_string_lossy().to_string()),
             leaf_id: store.and_then(|s| s.leaf_id().map(str::to_string)),
             auto_compaction_enabled: core.auto_compaction_enabled,
-            message_count: store
-                .map(super::session_store::SessionFile::message_count)
-                .unwrap_or(0) as u32,
+            message_count: store.map_or(0, super::session_store::SessionFile::message_count) as u32,
             session_actions: session_snapshot(core),
-            compaction_count: store
-                .map(|store| store.compaction_count() as u32)
-                .unwrap_or(0),
+            compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
             goal: self.engine.goal_state_value(),
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
@@ -4410,9 +4424,7 @@ impl Worker {
         let store = core.store.as_ref();
         journal.record(
             &core.active_session_id,
-            store
-                .map(super::session_store::SessionFile::session_id)
-                .unwrap_or(""),
+            store.map_or("", super::session_store::SessionFile::session_id),
             store
                 .map(|s| s.path.to_string_lossy().to_string())
                 .as_deref(),
@@ -4810,8 +4822,6 @@ fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
-    let mut steering = VecDeque::new();
-    let mut follow_up = VecDeque::new();
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
         // Images on a queued prompt do not survive the worker restart:
         // the recovery journal stores the delivery rows without the
@@ -4841,6 +4851,9 @@ fn restore_queue_snapshot(
             })
             .collect()
     }
+
+    let mut steering = VecDeque::new();
+    let mut follow_up = VecDeque::new();
     if let Some((steering_lanes, follow_up_lanes)) =
         journal.latest_queue_snapshot(active_session_id)
     {
@@ -5331,8 +5344,7 @@ impl TurnRunner {
             let core = self.core.lock().unwrap();
             core.store
                 .as_ref()
-                .map(super::session_store::SessionFile::message_count)
-                .unwrap_or(0)
+                .map_or(0, super::session_store::SessionFile::message_count)
                 / 2
         };
         let request = PromptRequest {
@@ -5514,15 +5526,12 @@ impl TurnRunner {
                     }
                 }
                 match &event {
-                    EngineEvent::UserMessage(message) | EngineEvent::AssistantMessage(message) => {
-                        if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry("message", json!({ "message": message }));
-                        }
-                    }
                     // The session-file form of a tool result: a `message`
                     // entry with the `role: "toolResult"` payload (TS
                     // `_processAgentEvent` appendMessage path).
-                    EngineEvent::ToolResultMessage(message) => {
+                    EngineEvent::UserMessage(message)
+                    | EngineEvent::AssistantMessage(message)
+                    | EngineEvent::ToolResultMessage(message) => {
                         if let Some(store) = core.store.as_mut() {
                             let _ = store.persist_entry("message", json!({ "message": message }));
                         }
@@ -5664,16 +5673,13 @@ impl TurnRunner {
                         "result": result,
                         "isError": is_error,
                     })],
-                    EngineEvent::ToolResultMessage(message) => vec![
+                    EngineEvent::ToolResultMessage(message)
+                    | EngineEvent::CustomMessage(message) => vec![
                         json!({ "type": "message_start", "message": message }),
                         json!({ "type": "message_end", "message": message }),
                     ],
-                    EngineEvent::CustomMessage(message) => vec![
-                        json!({ "type": "message_start", "message": message }),
-                        json!({ "type": "message_end", "message": message }),
-                    ],
-                    EngineEvent::CompactionStart { event } => vec![event],
-                    EngineEvent::Compaction { event, .. } => vec![event],
+                    EngineEvent::CompactionStart { event }
+                    | EngineEvent::Compaction { event, .. } => vec![event],
                     EngineEvent::GoalUpdate { goal } => vec![json!({
                         "type": "goal_update",
                         "goal": goal,
@@ -5710,16 +5716,14 @@ impl TurnRunner {
                     EngineEvent::Done(Ok(())) if !engine_turn_ended => {
                         vec![json!({ "type": "turn_end" })]
                     }
-                    EngineEvent::Done(Ok(())) => Vec::new(),
                     EngineEvent::Done(Err(error)) if !engine_turn_ended => {
                         vec![json!({ "type": "turn_end", "error": error })]
                     }
-                    EngineEvent::Done(Err(_)) => Vec::new(),
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
                     })],
-                    EngineEvent::DoneAborted => Vec::new(),
+                    EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
@@ -6248,9 +6252,7 @@ pub(crate) fn session_summary(
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         attached_clients: core.attached_client_ids.len() as u32,
-        message_count: store
-            .map(super::session_store::SessionFile::message_count)
-            .unwrap_or(0) as u32,
+        message_count: store.map_or(0, super::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),
         streaming_message: None,
         created: store.map(|s| s.header.timestamp.clone()),
@@ -6304,8 +6306,8 @@ fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
 /// The active action's queue label (TS `compactRlmText(text, 160)`):
 /// collapse whitespace and cap at 160 chars with an ellipsis.
 fn compact_action_label(text: &str) -> String {
-    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_CHARS: usize = 160;
+    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.chars().count() <= MAX_CHARS {
         return compact;
     }
@@ -10177,8 +10179,7 @@ mod turn_stream_tests {
         assert!(
             events[turn_ends[0]]
                 .as_object()
-                .map(|object| object.len() == 1)
-                .unwrap_or(false),
+                .is_some_and(|object| object.len() == 1),
             "the fallback turn_end carries no payload: {events:?}"
         );
         let agent_ends = positions_of(&events, "agent_end");
@@ -10186,8 +10187,7 @@ mod turn_stream_tests {
         assert!(
             events[agent_ends[0]]
                 .as_object()
-                .map(|object| object.len() == 1)
-                .unwrap_or(false),
+                .is_some_and(|object| object.len() == 1),
             "the fallback agent_end carries no payload: {events:?}"
         );
         assert!(
@@ -10205,6 +10205,17 @@ mod turn_stream_tests {
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     #[tokio::test]
     async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
+        fn roles_of(frame: &Value) -> Vec<String> {
+            frame["messages"]
+                .as_array()
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .map(|message| message["role"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10305,17 +10316,6 @@ mod turn_stream_tests {
             2,
             "one agent_end per agent run: {events:?}"
         );
-        fn roles_of(frame: &Value) -> Vec<String> {
-            frame["messages"]
-                .as_array()
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .map(|message| message["role"].as_str().unwrap_or_default().to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
         let first = &events[agent_ends[0]];
         assert_eq!(
             roles_of(first),

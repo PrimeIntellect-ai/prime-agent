@@ -112,7 +112,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => {
                     return serde_json::from_str(line.trim()).expect("parse response line");
                 }
@@ -276,8 +276,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     let removed_update = client_b.next_roster_update(|line| {
         line["removed"]
             .as_array()
-            .map(|ids| ids.iter().any(|id| id == agent_id.as_str()))
-            .unwrap_or(false)
+            .is_some_and(|ids| ids.iter().any(|id| id == agent_id.as_str()))
     });
     // TS always carries `changed` (empty for a removal-only push) and
     // omits `removed` when there are no removals.
@@ -327,6 +326,13 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     let log = std::fs::File::create(dir.path().join("daemon.log")).expect("log file");
     // Underscore keeps the kill guard alive for the test's scope.
     let _daemon = {
+        struct LoggedDaemon(Child);
+        impl Drop for LoggedDaemon {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         #[allow(clippy::zombie_processes)]
         let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
             .arg("supervisor")
@@ -353,13 +359,6 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
-        }
-        struct LoggedDaemon(Child);
-        impl Drop for LoggedDaemon {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
         }
         LoggedDaemon(child)
     };
@@ -464,14 +463,11 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     );
     let _ = client.read_response("p1");
     let update = client_b.next_roster_update(|line| {
-        line["changed"]
-            .as_array()
-            .map(|entries| {
-                entries.iter().any(|entry| {
-                    entry["agentId"] == serde_json::Value::String(child_agent_id.clone())
-                })
-            })
-            .unwrap_or(false)
+        line["changed"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["agentId"] == serde_json::Value::String(child_agent_id.clone()))
+        })
     });
     let changed = update["changed"].as_array().cloned().unwrap_or_default();
     let changed_child = changed
@@ -491,8 +487,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     let removal = client_b.next_roster_update(|line| {
         line["removed"]
             .as_array()
-            .map(|ids| ids.contains(&serde_json::Value::String(child_agent_id.clone())))
-            .unwrap_or(false)
+            .is_some_and(|ids| ids.contains(&serde_json::Value::String(child_agent_id.clone())))
     });
     assert!(
         removal["removed"]

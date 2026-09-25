@@ -1,6 +1,8 @@
 //! The inline panel frame of the `/model` picker: bordered search field,
-//! effort rows, scroll indicator, selection detail, key hint. Geometry is
-//! the TS `ModelSelectorComponent` inline path (menu-panel.ts primitives).
+//! effort rows, scroll indicator, selection detail, key hint, one blank
+//! line below the hint (the operator's 2026-09-24 spacing directive).
+//! Geometry is the TS `ModelSelectorComponent` inline path (menu-panel.ts
+//! primitives).
 
 use pa_types::ai::{Model, ModelThinkingLevel};
 
@@ -79,6 +81,11 @@ pub(super) fn render(
     }
 
     lines.push(hint_line(theme, width, kb));
+    // One blank line of spacing below the shortcuts (the operator's
+    // 2026-09-24 directive on the `/model` view: the hint is the
+    // frame's last content row, a single blank rides under it — never
+    // a rule).
+    lines.push(Vec::new());
     lines
 }
 
@@ -161,8 +168,7 @@ fn effort_square_spans(
         on_levels
             .iter()
             .position(|level| *level == effort)
-            .map(|position| position + 1)
-            .unwrap_or(0)
+            .map_or(0, |position| position + 1)
     };
     let mut spans: Line = Vec::with_capacity(on_levels.len() + 1);
     for (index, _) in on_levels.iter().enumerate() {
@@ -268,30 +274,24 @@ fn detail_lines(theme: &Theme, width: usize, model: &Model) -> Vec<Line> {
 fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
     let select_key = kb
         .first_key("tui.select.confirm")
-        .map(|key| format_key_text(&key))
-        .unwrap_or_else(|| "Enter".to_string());
+        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
     let close_key = kb
         .first_key("tui.select.cancel")
-        .map(|key| format_key_text(&key))
-        .unwrap_or_else(|| "Esc".to_string());
+        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
     let hint = if width >= 70 {
         let navigate = format!(
             "{}/{}",
             kb.first_key("tui.select.up")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2191}".to_string()),
+                .map_or_else(|| "\u{2191}".to_string(), |key| format_key_text(&key)),
             kb.first_key("tui.select.down")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2193}".to_string())
+                .map_or_else(|| "\u{2193}".to_string(), |key| format_key_text(&key))
         );
         let effort = format!(
             "{}/{}",
             kb.first_key("tui.editor.cursorLeft")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2190}".to_string()),
+                .map_or_else(|| "\u{2190}".to_string(), |key| format_key_text(&key)),
             kb.first_key("tui.editor.cursorRight")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2192}".to_string())
+                .map_or_else(|| "\u{2192}".to_string(), |key| format_key_text(&key))
         );
         format!("{navigate} model \u{b7} {effort} effort \u{b7} {select_key} select \u{b7} {close_key} close")
     } else {

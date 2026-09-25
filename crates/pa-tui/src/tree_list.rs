@@ -412,8 +412,7 @@ impl TreeList {
                     .data
                     .entry
                     .id()
-                    .map(|id| !skip.contains(id))
-                    .unwrap_or(true)
+                    .is_none_or(|id| !skip.contains(id))
             });
         }
         self.recalculate_visual_structure();
@@ -753,12 +752,12 @@ impl TreeList {
                 action = TreeListAction::Select(id);
             }
         } else if kb.matches(id, "tui.select.cancel") {
-            if !self.search_query.is_empty() {
+            if self.search_query.is_empty() {
+                action = TreeListAction::Cancel;
+            } else {
                 self.search_query.clear();
                 self.folded.clear();
                 self.apply_filter();
-            } else {
-                action = TreeListAction::Cancel;
             }
         } else if kb.matches(id, "app.tree.filter.default") {
             self.filter_mode = FilterMode::Default;
@@ -936,23 +935,19 @@ impl TreeList {
             } else {
                 Span::raw("")
             };
-            let label = node
-                .data
-                .label
-                .as_ref()
-                .map(|label| theme.fg_span(ThemeColor::Warning, format!("[{label}] ")))
-                .unwrap_or(Span::raw(""));
+            let label = node.data.label.as_ref().map_or(Span::raw(""), |label| {
+                theme.fg_span(ThemeColor::Warning, format!("[{label}] "))
+            });
             let label_timestamp = if self.show_label_timestamps && node.data.label.is_some() {
-                node.data
-                    .label_timestamp
-                    .as_deref()
-                    .map(|timestamp| {
+                node.data.label_timestamp.as_deref().map_or_else(
+                    || Span::raw(""),
+                    |timestamp| {
                         theme.fg_span(
                             ThemeColor::Muted,
                             format!("{} ", format_label_timestamp(timestamp)),
                         )
-                    })
-                    .unwrap_or_else(|| Span::raw(""))
+                    },
+                )
             } else {
                 Span::raw("")
             };

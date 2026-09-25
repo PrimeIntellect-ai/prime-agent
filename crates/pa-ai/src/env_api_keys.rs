@@ -50,11 +50,7 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     let env_vars = get_api_key_env_vars(provider)?;
     let found: Vec<String> = env_vars
         .into_iter()
-        .filter(|env_var| {
-            std::env::var_os(env_var)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-        })
+        .filter(|env_var| std::env::var_os(env_var).is_some_and(|v| !v.is_empty()))
         .map(std::string::ToString::to_string)
         .collect();
     if found.is_empty() {
@@ -82,17 +78,15 @@ pub fn get_env_api_key(provider: &str) -> Option<String> {
         let has_credentials = has_vertex_adc_credentials();
         let has_project = ["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"]
             .iter()
-            .any(|var| std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false));
-        let has_location = std::env::var("GOOGLE_CLOUD_LOCATION")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
+            .any(|var| std::env::var(var).is_ok_and(|v| !v.is_empty()));
+        let has_location = std::env::var("GOOGLE_CLOUD_LOCATION").is_ok_and(|v| !v.is_empty());
         if has_credentials && has_project && has_location {
             return Some("<authenticated>".to_string());
         }
     }
 
     if provider == "amazon-bedrock" {
-        let env = |name: &str| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false);
+        let env = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty());
         if env("AWS_PROFILE")
             || (env("AWS_ACCESS_KEY_ID") && env("AWS_SECRET_ACCESS_KEY"))
             || env("AWS_BEARER_TOKEN_BEDROCK")
