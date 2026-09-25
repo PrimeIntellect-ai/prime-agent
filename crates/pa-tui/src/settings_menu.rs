@@ -681,27 +681,33 @@ impl SettingsMenu {
 }
 
 /// The menu's key hint: the shared hint-row grammar, this surface's
-/// vocabulary (the search field types, Enter/Space cycles a row).
+/// vocabulary (the search field types, Enter/Space cycles a row; Space is
+/// a literal key the menu always handles, an unbound Enter drops its
+/// label, an unbound Esc drops the close segment).
 fn hint(kb: &KeybindingsManager) -> String {
-    let select_key = kb
-        .first_key("tui.select.confirm")
-        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
-    let close_key = kb
-        .first_key("tui.select.cancel")
-        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
-    format!("Type to search · {select_key}/Space change · {close_key} close")
+    let mut segments = vec!["Type to search".to_string()];
+    segments.push(match kb.first_key("tui.select.confirm") {
+        Some(key) => format!("{}/Space change", format_key_text(&key)),
+        None => "Space change".to_string(),
+    });
+    if let Some(close) = crate::menu_panel::key_hint(kb, &["tui.select.cancel"], "close") {
+        segments.push(close);
+    }
+    segments.join(" · ")
 }
 
 /// The submenu's key hint (TS `SelectSubmenu`'s back row): the selected
-/// value applies, the cancel binding goes back.
+/// value applies, the cancel binding goes back (an unbound action is
+/// omitted, never advertised with a default key).
 fn submenu_hint(kb: &KeybindingsManager) -> String {
-    let select_key = kb
-        .first_key("tui.select.confirm")
-        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
-    let back_key = kb
-        .first_key("tui.select.cancel")
-        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
-    format!("{select_key} select · {back_key} back")
+    [
+        crate::menu_panel::key_hint(kb, &["tui.select.confirm"], "select"),
+        crate::menu_panel::key_hint(kb, &["tui.select.cancel"], "back"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join(" · ")
 }
 
 #[cfg(test)]

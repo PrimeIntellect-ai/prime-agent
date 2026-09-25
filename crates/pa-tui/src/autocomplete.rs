@@ -466,10 +466,12 @@ impl PathCompletionProvider {
                 };
                 (dir, String::new())
             } else {
-                let file = std::path::Path::new(&expanded_prefix)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                // TS `basename`: the component after the last `/` — a
+                // trailing `.`/`..` IS the file component (TS
+                // `basename("src/.")` is `.`), unlike `Path::file_name`,
+                // which normalizes the trailing reference away and
+                // mis-splits the dot-name browse prefixes.
+                let file = expanded_prefix.rsplit('/').next().unwrap_or_default();
                 let raw_dir = match expanded_prefix.rfind('/') {
                     Some(index) if index > 0 => std::path::PathBuf::from(&expanded_prefix[..index]),
                     Some(_) => std::path::PathBuf::from("/"),
@@ -488,15 +490,17 @@ impl PathCompletionProvider {
                 (dir, file)
             };
         // The filename anchor the entries must complete: the typed
-        // component after the last `/` of the prefix. Dot entries list
-        // only when that anchor is an explicit dot prefix of a filename
-        // (`.z`, `./.claude`, `src/.h`) — never for the directory
-        // references `.`/`..` or an empty browse anchor: a directory
-        // browse must not surface the cwd's dotfiles as completion
-        // candidates (the operator's 2026-09-25 directive: the menu's
-        // "useless stuff" starting with a `.claude` directory).
+        // component after the last `/` of the prefix. Hidden entries
+        // list exactly when that anchor is dot-typed (`.`, `.z`,
+        // `src/.h`, `~/.`) — the bash semantics: you see the dotfiles
+        // precisely when the thing you are completing starts with a
+        // dot. A directory browse (`./`, `src/`, `../`, `~/`, the empty
+        // prefix) has an empty anchor and must not surface the cwd's
+        // dotfiles as completion candidates (the operator's 2026-09-25
+        // directive: the menu's "useless stuff" starting with a
+        // `.claude` directory).
         let anchor = raw_prefix.rsplit('/').next().unwrap_or_default();
-        let dot_anchor = anchor.starts_with('.') && anchor != "." && anchor != "..";
+        let dot_anchor = anchor.starts_with('.');
         let Ok(entries) = std::fs::read_dir(&search_dir) else {
             return Vec::new();
         };
@@ -1087,6 +1091,7 @@ mod tests {
         std::fs::create_dir_all(base.join(".claude")).expect("mkdir");
         std::fs::create_dir_all(base.join("src")).expect("mkdir");
         std::fs::write(base.join("src").join("module.rs"), "pub fn m() {}").expect("write");
+        std::fs::write(base.join("src").join(".local"), "x").expect("write");
         std::fs::write(base.join(".hidden"), "x").expect("write");
         std::fs::write(base.join("main.rs"), "fn main() {}").expect("write");
         let provider = provider(base.to_str().unwrap());
@@ -1109,20 +1114,22 @@ mod tests {
         // the same class of listing.
         assert_eq!(values("src/"), ["src/module.rs"]);
         assert_eq!(values(""), ["src/", "main.rs"]);
-        // The directory references `.`/`..` browse with an empty filename
-        // anchor (their file_name component is None), so they resolve
-        // against the base like the root browse: the dot entries stay
-        // hidden either way.
-        assert_eq!(values("."), ["src/", "main.rs"]);
-        assert_eq!(
-            values(".."),
-            ["src/", "main.rs"],
-            "the `..` browse hides the dot entries"
-        );
+        // A bare `.` is the dot-name browse (the bash `.`-then-Tab): the
+        // dot entries list. A bare `..` searches a `..` filename prefix
+        // (TS basename parity), so nothing matches and no menu opens.
+        assert_eq!(values("."), [".claude/", ".hidden"]);
+        assert!(provider
+            .get_suggestions(&["..".to_string()], 0, 2, true)
+            .is_none());
         // A typed dot prefix is the explicit hidden-path browse: dot
         // entries list again.
         assert_eq!(values("./.cl"), ["./.claude/"]);
         assert_eq!(values(".h"), [".hidden"]);
+        // A trailing `.` after a separator is the same explicit dot-name
+        // browse (`src/.`, `~/.` are the natural next keystrokes after a
+        // directory browse when completing a hidden name).
+        assert_eq!(values("src/."), ["src/.local"]);
+        assert_eq!(values("./."), ["./.claude/", "./.hidden"]);
     }
 
     #[test]

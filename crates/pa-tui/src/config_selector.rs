@@ -467,28 +467,34 @@ impl ConfigSelector {
         }
     }
 
-    /// The key hint: the shared hint-row grammar, this surface's vocabulary.
+    /// The key hint: the shared hint-row grammar, this surface's
+    /// vocabulary (an unbound action is omitted, never advertised with a
+    /// default key).
     fn hint_text(&self, kb: &KeybindingsManager) -> String {
         let (_, hints) = self.kind.header();
         hints
             .iter()
-            .map(|(key, action)| format!("{} {action}", raw_key_text(kb, key)))
+            .filter_map(|(key, action)| raw_key_hint(kb, key, action))
             .collect::<Vec<String>>()
             .join(" \u{b7} ")
     }
 }
 
-/// The hint row's key label for a static hint key (TS `rawKeyHint`).
-fn raw_key_text(kb: &KeybindingsManager, key: &str) -> String {
-    match key {
+/// One hint segment (TS `rawKeyHint`): the key's label when the action is
+/// available — the literal Space key always is — and None when the
+/// action's binding is unconfigured.
+fn raw_key_hint(kb: &KeybindingsManager, key: &str, action: &str) -> Option<String> {
+    let label = match key {
+        "space" => "Space".to_string(),
         "escape" => kb
             .first_key("tui.select.cancel")
-            .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key)),
+            .map(|key| format_key_text(&key))?,
         "enter" => kb
             .first_key("tui.select.confirm")
-            .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key)),
+            .map(|key| format_key_text(&key))?,
         other => format_key_text(other),
-    }
+    };
+    Some(format!("{label} {action}"))
 }
 
 /// Options for the selector's terminal loop.

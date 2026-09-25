@@ -4,8 +4,8 @@
 //! renders with) over the title, the message as its description lines,
 //! and a small option list that answers the pending question.
 
-use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hint_row, menu_row};
+use crate::keybindings::KeybindingsManager;
+use crate::menu_panel::{hint_row, key_hint, menu_row};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::Line;
@@ -101,22 +101,18 @@ impl ConfirmPanel {
 }
 
 /// The pane's key hint: the shared hint-row grammar, this surface's
-/// vocabulary.
+/// vocabulary (an unbound action is omitted, never advertised with a
+/// default key).
 fn hint(kb: &KeybindingsManager) -> String {
-    let navigate = format!(
-        "{}/{}",
-        kb.first_key("tui.select.up")
-            .map_or_else(|| "↑".to_string(), |key| format_key_text(&key)),
-        kb.first_key("tui.select.down")
-            .map_or_else(|| "↓".to_string(), |key| format_key_text(&key))
-    );
-    let select_key = kb
-        .first_key("tui.select.confirm")
-        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
-    let close_key = kb
-        .first_key("tui.select.cancel")
-        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
-    format!("{navigate} navigate · {select_key} select · {close_key} close")
+    [
+        key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
+        key_hint(kb, &["tui.select.confirm"], "select"),
+        key_hint(kb, &["tui.select.cancel"], "close"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join(" · ")
 }
 
 #[cfg(test)]
