@@ -252,7 +252,9 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         config.cwd.clone(),
         config.agent_dir.clone(),
         model.clone(),
-        resolve_thinking_level(config, &model),
+        pa_core::session_engine::provider_adapter::model_thinking_level(resolve_thinking_level(
+            config, &model,
+        )),
     );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
