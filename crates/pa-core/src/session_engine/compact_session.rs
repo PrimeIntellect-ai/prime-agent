@@ -1794,7 +1794,7 @@ mod tests {
             .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text("threshold crossing turn".to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .unwrap();
         session
@@ -1865,7 +1865,7 @@ mod tests {
                 display: true,
                 details: None,
                 timestamp: summary_timestamp + 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         }
         assert!(!super::super::compaction::threshold_compaction_due(

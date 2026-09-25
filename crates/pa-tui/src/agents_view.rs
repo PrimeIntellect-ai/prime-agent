@@ -7,7 +7,6 @@
 //! section). The reply composer, rename, delete, and kill-subagent actions
 //! wait on the Stage-3 reply machinery.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

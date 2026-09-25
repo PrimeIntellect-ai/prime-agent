@@ -2215,7 +2215,7 @@ mod tests {
         let rows = build_rows(
             &records,
             None,
-            &Default::default(),
+            &HashSet::default(),
             &expanded,
             &rollups,
             None,

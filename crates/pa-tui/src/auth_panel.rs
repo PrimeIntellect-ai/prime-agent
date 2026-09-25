@@ -256,7 +256,7 @@ impl AuthPanelHandle {
         });
         tokio::select! {
             answered = answer => answered.unwrap_or(None),
-            _ = self.cancelled_wait() => None,
+            () = self.cancelled_wait() => None,
         }
     }
 
@@ -281,7 +281,7 @@ impl AuthPanelHandle {
         });
         tokio::select! {
             picked = answer => picked.unwrap_or(PrimeTeamPick::Cancelled),
-            _ = self.cancelled_wait() => PrimeTeamPick::Cancelled,
+            () = self.cancelled_wait() => PrimeTeamPick::Cancelled,
         }
     }
 
