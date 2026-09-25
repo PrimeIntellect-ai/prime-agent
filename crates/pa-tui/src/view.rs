@@ -2231,6 +2231,9 @@ mod tests {
             error: None,
             aborted: false,
         }))]);
+        // The hidden-thinking scenario starts at the collapsed overview
+        // level (the startup level is the middle details since TS #2447).
+        view.detail = Detail::Overview;
         let overview = transcript_text(&mut view, 80);
         view.detail = view.detail.next();
         let details = transcript_text(&mut view, 80);
