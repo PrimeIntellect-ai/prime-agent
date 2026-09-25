@@ -129,14 +129,18 @@ impl MockSupervisor {
                     }
                     // The scripted answer queue first (one entry per
                     // create): the update-restart window's refusal
-                    // sequence. An exhausted queue falls through.
+                    // sequence. The head entry serves this create, then
+                    // pops for the next (a single trailing entry serves
+                    // every later create). An exhausted queue falls
+                    // through.
                     let queued = if self.create_answers.is_empty() {
                         None
                     } else {
+                        let head = self.create_answers.first().cloned();
                         if self.create_answers.len() > 1 {
                             self.create_answers.remove(0);
                         }
-                        self.create_answers.first().cloned()
+                        head
                     };
                     if let Some(answer) = queued {
                         match answer {

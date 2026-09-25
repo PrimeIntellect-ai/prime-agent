@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_route_runs_one_attempt() {
         let mut attempts = 0;
-        let error = wait_through_update_restart(true, 5_000, 1, || {
+        let error = wait_through_update_restart(false, 5_000, 1, || {
             attempts += 1;
             std::future::ready(Err::<&'static str, anyhow::Error>(preparing_rejection()))
         })
@@ -470,7 +470,7 @@ mod tests {
         // The civil-from-days conversion round-trips the epoch and a leap
         // year (the same algorithm the direct transport parses with).
         assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_673), (2026, 9, 24));
+        assert_eq!(civil_from_days(20_720), (2026, 9, 24));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
     }
 }
