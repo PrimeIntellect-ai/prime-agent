@@ -6,6 +6,20 @@
 //! Supervisors connect over a private-framed Unix socket and authenticate
 //! with the bootstrap token before any command.
 
+mod config;
+mod env;
+mod session_core;
+
+pub use env::{
+    WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV, WORKER_INSTANCE_ID_ENV,
+    WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
+    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV, WORKER_TELEMETRY_DISABLED_ENV,
+    WORKER_TOKEN_ENV,
+};
+pub(crate) use config::WorkerConfig;
+pub(crate) use session_core::SessionCore;
+use env::KillCloseReason;
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,147 +57,8 @@ use crate::protocol::{
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
 
-/// The close reason one `kill` carries (TS `DaemonSessionClosedReason` at
-/// `closeSessionOnce`): the plain client kill is `killed`; a parent's
-/// child-close cascade passes `shutdown` or `replaced` through the
-/// `rlmCloseReason` rest marker, and the close arms differ exactly like
-/// TS — `killed` cancels the session's scheduled jobs and archives the
-/// state, `shutdown` keeps the resume entry (the jobs survive for the
-/// later wake), `replaced` keeps the plain cron jobs but cancels the RLM
-/// heartbeats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KillCloseReason {
-    Killed,
-    Shutdown,
-    Replaced,
-}
-
-impl KillCloseReason {
-    /// The `rlmCloseReason` marker of a child-close cascade (the plain
-    /// client kill carries none).
-    fn from_payload(payload: &Value) -> Self {
-        match payload.get("rlmCloseReason").and_then(Value::as_str) {
-            Some("shutdown") => Self::Shutdown,
-            Some("replaced") => Self::Replaced,
-            _ => Self::Killed,
-        }
-    }
-
-    /// The wire `session_closed` reason.
-    fn session_closed_reason(self) -> DaemonSessionClosedReason {
-        match self {
-            Self::Killed => DaemonSessionClosedReason::Killed,
-            Self::Shutdown => DaemonSessionClosedReason::Shutdown,
-            Self::Replaced => DaemonSessionClosedReason::Replaced,
-        }
-    }
-
-    /// The recovery journal's close operation.
-    fn recovery_operation(self) -> &'static str {
-        match self {
-            Self::Killed => "killed",
-            Self::Shutdown => "shutdown",
-            Self::Replaced => "replaced",
-        }
-    }
-}
 use crate::setting_switches::{effective_service_tier, supports_fast_mode};
 use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
-
-/// TS-parity worker environment variables (`daemon-worker-protocol.ts`).
-pub const WORKER_ROLE_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
-pub const WORKER_TOKEN_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
-pub const WORKER_INSTANCE_ID_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_INSTANCE_ID";
-pub const WORKER_ACTIVE_SESSION_ID_ENV: &str =
-    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
-/// Worker process cwd (the create command's `cwd`).
-pub const WORKER_CWD_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_CWD";
-pub const WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
-pub const WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
-/// Scripted-engine script file for faux sessions (integration harness).
-pub const WORKER_SCRIPT_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SCRIPT";
-/// Worker socket path (supervisor passes it explicitly).
-pub const WORKER_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SOCKET";
-/// Telemetry opt-out for the worker's sessions (supervisor passes the create
-/// command's `telemetryDisabled` through here, TS descriptor parity).
-pub const WORKER_TELEMETRY_DISABLED_ENV: &str =
-    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TELEMETRY_DISABLED";
-/// Supervisor-lost exit window (ms): a session worker whose supervisor
-/// socket stays unreachable for this long exits instead of lingering
-/// orphaned (TS `WORKER_SUPERVISOR_LOST_EXIT_MS_ENV` wire parity; the
-/// supervisor's environment flows to the workers it spawns).
-pub const WORKER_SUPERVISOR_LOST_EXIT_MS_ENV: &str =
-    "PRIME_AGENT_INTERNAL_WORKER_SUPERVISOR_LOST_EXIT_MS";
-
-#[derive(Debug, Clone)]
-pub struct WorkerConfig {
-    pub socket_path: PathBuf,
-    pub supervisor_socket_path: PathBuf,
-    pub token: String,
-    pub worker_instance_id: String,
-    pub active_session_id: String,
-    pub agent_dir: PathBuf,
-    pub recovery_journal_path: PathBuf,
-    pub script: Option<Value>,
-    /// Telemetry opt-out inherited from the create command ("1" = disabled;
-    /// absent/other = enabled). Sessions created on this worker install no
-    /// telemetry subscriber.
-    pub telemetry_disabled: Option<bool>,
-}
-
-impl WorkerConfig {
-    /// Read the worker spawn env pair into a config: the socket path,
-    /// the authentication token, the root active session id, and the
-    /// agent dir; the script, the telemetry-disabled flag, the supervisor
-    /// socket path, and the recovery journal path all default when unset
-    /// or unreadable.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required env pair is missing (the socket
-    /// path, the authentication token, or the root active session id),
-    /// or the agent dir cannot be resolved.
-    pub fn from_env() -> Result<Self> {
-        let socket_path: PathBuf = std::env::var_os(WORKER_SOCKET_ENV)
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow!("worker socket path is required ({WORKER_SOCKET_ENV})"))?;
-        let token =
-            std::env::var(WORKER_TOKEN_ENV).context("worker authentication token is required")?;
-        let active_session_id = std::env::var(WORKER_ACTIVE_SESSION_ID_ENV)
-            .context("worker root active session id is required")?;
-        let supervisor_socket_path = std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let agent_dir = paths::agent_dir()?;
-        let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV).map_or_else(
-            || {
-                agent_dir
-                    .join("daemon-workers")
-                    .join(format!("{active_session_id}.recovery.jsonl"))
-            },
-            PathBuf::from,
-        );
-        let script = std::env::var_os(WORKER_SCRIPT_ENV)
-            .map(PathBuf::from)
-            .and_then(|path| {
-                let content = std::fs::read_to_string(path).ok()?;
-                serde_json::from_str::<Value>(&content).ok()
-            });
-        let telemetry_disabled =
-            std::env::var_os(WORKER_TELEMETRY_DISABLED_ENV).map(|value| value == "1");
-        Ok(WorkerConfig {
-            socket_path,
-            supervisor_socket_path,
-            token,
-            worker_instance_id: std::env::var(WORKER_INSTANCE_ID_ENV).unwrap_or_default(),
-            active_session_id,
-            agent_dir,
-            recovery_journal_path,
-            script,
-            telemetry_disabled,
-        })
-    }
-}
 
 /// Result of one connection's authentication command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,161 +266,6 @@ pub(crate) fn parse_prompt_images(payload: &Value) -> Vec<pa_agent::types::Image
             })
         })
         .collect()
-}
-
-/// The live session: store, queue, sequencing. Shared by the connection tasks,
-/// the turn runner, and the compaction manager; every access is through the
-/// core mutex.
-pub(crate) struct SessionCore {
-    pub(crate) active_session_id: String,
-    pub(crate) generation: String,
-    pub(crate) last_event_sequence: u64,
-    pub(crate) store: Option<SessionFile>,
-    pub(crate) cwd: String,
-    pub(crate) steering: VecDeque<QueuedItem>,
-    pub(crate) follow_up: VecDeque<QueuedItem>,
-    pub(crate) busy: bool,
-    pub(crate) created: bool,
-    attached_client_ids: Vec<String>,
-    pub(crate) abort_requested: bool,
-    /// A flow that detaches from the interrupted turn's events (TS
-    /// `compact()`'s `_disconnectFromAgent()` before `abort()` — and the
-    /// branch-navigation interrupt, the same teardown shape) swallowed the
-    /// aborted turn's assistant row on the TS wire and in the session
-    /// file, so the gate's aborted-row exception stays closed while such a
-    /// flow settles its turn. Owned by the interrupt-and-settle helper that
-    /// set it; cleared once the turn settled.
-    pub(crate) suppress_aborted_row: bool,
-    pub(crate) shutdown_requested: bool,
-    /// True while a compaction run is in flight (TS `isCompacting`).
-    pub(crate) compacting: bool,
-    /// The turn's tool calls in flight, keyed by tool-call id (TS
-    /// `session.state.pendingToolCalls`): the tool-execution frames add
-    /// and remove ids, and the roster summary derives `isRunningTools`
-    /// (`isStreaming && pendingToolCalls.size > 0`) from its size.
-    pub(crate) running_tool_calls: std::collections::HashSet<String>,
-    /// TS `autoCompactionEnabled` (settings default: on).
-    pub(crate) auto_compaction_enabled: bool,
-    /// The last broadcast queue snapshot (TS `_lastSessionActionSnapshot`):
-    /// `session_action_update` fires only when the projection changed.
-    last_action_snapshot: Option<SessionActionSnapshot>,
-    /// This session's RLM recursion depth (children run at depth + 1).
-    rlm_depth: u32,
-    /// `top-level` | `subagent` (summary `runtimeKind`).
-    pub(crate) runtime_kind: String,
-    /// The subagent runtime identity (create `runtimeMetadata`): the child
-    /// id under its parent and the parent's live/persisted ids, carried on
-    /// every summary so the roster keys children `parentPath#childId`.
-    pub(crate) rlm_child_id: Option<String>,
-    parent_active_session_id: Option<String>,
-    parent_session_id: Option<String>,
-    /// The create command's harness `childScript` (the TS child runtime
-    /// inherits the parent's `sessionConfig`; the Rust replacement keeps
-    /// the seam across the runtime swap so a replacement session's
-    /// children stay scripted). `None` for product sessions.
-    pub(crate) child_script: Option<String>,
-    /// The session's service-tier preference (TS `_serviceTierPreference`;
-    /// `None` is the settings default "auto"). The effective tier clamps
-    /// `priority` to `default` on models without fast mode.
-    pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
-    /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
-    /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
-    /// (every queued steer co-delivers as ONE turn at the next
-    /// tool-call boundary; `"one-at-a-time"` stays selectable via the
-    /// setting). The follow-up default is `"one-at-a-time"` (follow-ups
-    /// drain when the session goes idle, one per turn).
-    pub(crate) steering_mode: String,
-    pub(crate) follow_up_mode: String,
-    /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
-    /// on the session, armed by `abortAndSendQueued`): while armed, armed
-    /// steering items co-deliver as ONE batched turn at the next boundary
-    /// — even under queue mode "one-at-a-time". Disarms when no armed
-    /// item remains queued (TS `_forcedAllSteeringBatch`'s disarm read).
-    pub(crate) forced_all_steering: bool,
-    /// The scoped model list (TS `_scopedModels`): wire entries
-    /// `{ model, thinkingLevel? }` the model cycler cycles within.
-    pub(crate) scoped_models: Vec<Value>,
-    /// A retry in flight was aborted (`abort_retry`); the turn's abort
-    /// probe reads it and the next turn start clears it.
-    pub(crate) retry_abort_requested: bool,
-    /// TS `_sessionInputPumpSuspended`: `requestAbort`/`abortForUpdateRestart`
-    /// (and manual `compact()`, which aborts first) suspend queued-input
-    /// admission. While set, the turn runner drains nothing and a plain
-    /// prompt (`prompt`/`prompt_and_wait` without `streamingBehavior`, TS
-    /// `resumeIfIdle: command.streamingBehavior !== undefined`) is rejected
-    /// with the TS admission error. Cleared by the TS resume sites: a
-    /// `steer`/`follow_up` command or a prompt carrying
-    /// `streamingBehavior`, `resume_queue`, an applied queued-message
-    /// mutation, a cron/heartbeat fire (TS `promptHeartbeat` passes
-    /// `resumeIfIdle: true`), and a successful compact with an active
-    /// goal (TS `compact()`'s `resumeQueuedWork()` branch).
-    pub(crate) queued_input_suspended: bool,
-    /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
-    /// `restore_next_turn`): delivered as prefix rows with the next turn.
-    pub(crate) pending_next_turn: Vec<Value>,
-    /// The queue projection's active action (TS `getSessionActionSnapshot`
-    /// reads the store's first active action): the runner sets the phase
-    /// transitions of a queue-visible delivery (`preparing` at pickup,
-    /// `committing` at the turn's first row — the prompt becomes visible
-    /// in the conversation then, TS's commit fence — `running` at the
-    /// turn's first assistant frame) and clears it once the delivered
-    /// turn settles. The `preparing` projection is what a client renders
-    /// as the queued strip's "Starting" row (TS #2063). The label rides
-    /// the snapshot (TS #2063 `compactRlmText(queuedAgentMessagePreview(
-    /// active))`: the delivery's labeled preview, else the message text).
-    pub(crate) active_action: Option<crate::types::SessionActionActive>,
-}
-
-impl SessionCore {
-    /// Whether a turn, compaction, or queued action is in flight — the TS
-    /// `hasOngoingSessionWork` predicate. An active run owns the worker a
-    /// little longer; the supervisor-lost exit waits for it to settle.
-    pub(crate) fn has_ongoing_work(&self) -> bool {
-        self.busy || self.compacting || !self.steering.is_empty() || !self.follow_up.is_empty()
-    }
-
-    /// A created session core for command modules' unit tests (the private
-    /// bookkeeping fields stay owned here).
-    #[cfg(test)]
-    pub(crate) fn test_core(store: Option<SessionFile>, cwd: String) -> Self {
-        SessionCore {
-            active_session_id: store.as_ref().map_or_else(
-                || "test-session".to_string(),
-                |store| store.session_id().to_string(),
-            ),
-            generation: String::new(),
-            last_event_sequence: 0,
-            store,
-            cwd,
-            steering: VecDeque::new(),
-            follow_up: VecDeque::new(),
-            busy: false,
-            created: true,
-            attached_client_ids: Vec::new(),
-            abort_requested: false,
-            suppress_aborted_row: false,
-            shutdown_requested: false,
-            compacting: false,
-            running_tool_calls: std::collections::HashSet::new(),
-            auto_compaction_enabled: true,
-            last_action_snapshot: Some(SessionActionSnapshot::default()),
-            rlm_depth: 0,
-            runtime_kind: "top-level".to_string(),
-            rlm_child_id: None,
-            parent_active_session_id: None,
-            parent_session_id: None,
-            child_script: None,
-            service_tier: None,
-            steering_mode: "all".to_string(),
-            follow_up_mode: "one-at-a-time".to_string(),
-            forced_all_steering: false,
-            scoped_models: Vec::new(),
-            retry_abort_requested: false,
-            queued_input_suspended: false,
-            pending_next_turn: Vec::new(),
-            active_action: None,
-        }
-    }
 }
 
 /// One outbound frame: the serialized JSON payload plus its private-frame
