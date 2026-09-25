@@ -670,6 +670,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             .keep_recent_tokens
             .unwrap_or(crate::session_engine::compaction::DEFAULT_KEEP_RECENT_TOKENS),
     });
+    // TS #2411: the session's summarizer passes (compaction summaries;
+    // branch summaries route through the same context at the daemon seam)
+    // resolve their model through the `auxiliaryModel` setting with the
+    // session model as fallback, so their one-off prompts stay off the
+    // session's prompt-cache prefix.
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd,
+            agent_dir: config.agent_dir.clone(),
+        },
+    );
     // The kernel-state probe behind the post-compaction `ipython_state`
     // notice (TS `AgentSession._ipythonKernelProvisioner`): the engine's
     // provisioner is the session's kernel whether it added the `ipython`
@@ -808,31 +819,6 @@ impl SessionEngine {
             .manager()
             .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
         manager.bash_activity(action, activity_id, lines).await
-    }
-
-    /// Per-server MCP tool listing through the session's kernel (the
-    /// runtime `mcp_status` request): one entry per requested server —
-    /// its tools, or the error string when that server failed or timed
-    /// out. `None` when the kernel cannot serve the listing (disposed, or
-    /// startup still failing under the caller's deadline). The session's
-    /// kernel is ensured first (the create-time prewarm may still be in
-    /// flight, so the view never races it), and the listing opens each
-    /// not-yet-connected server bounded by `per_server_timeout_ms` —
-    /// callers bound the whole call with their own deadline. The host's
-    /// MCP connections view reads this; the kernel's `mcp.config` host
-    /// handlers resolve each server against the engine's MCP manager.
-    pub async fn mcp_tool_listing(
-        &self,
-        servers: &[String],
-        per_server_timeout_ms: u64,
-    ) -> Option<Vec<serde_json::Value>> {
-        if servers.is_empty() {
-            return Some(Vec::new());
-        }
-        let manager = self.provisioner.ensure(None, None).await.ok()?;
-        manager
-            .mcp_tool_listing(servers, per_server_timeout_ms)
-            .await
     }
 }
 

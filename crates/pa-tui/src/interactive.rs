@@ -182,8 +182,18 @@ pub trait InteractionTelemetry: Send + Sync {
 /// only the surface; the composition root (pa-cli) implements the sink
 /// against the settings manager, keeping pa-tui decoupled from pa-core.
 pub trait OnboardingSink: Send + Sync {
-    /// The persisted trace-sharing answer (TS `getAgentTracesEnabled`).
-    fn agent_traces_enabled(&self) -> bool;
+    /// The completion marker, read fresh (TS `getOnboardingShown`): the
+    /// phase's own one-shot gate. The startup gate evaluates the marker
+    /// once, but the agents-view flow re-runs the phase for every session
+    /// it opens with the same task, so a completed flow re-checks the
+    /// persisted marker here and never shows anything again.
+    fn onboarding_shown(&self) -> bool;
+    /// Whether a trace-sharing choice was ever written (TS
+    /// `settings.agentTraces.enabled` presence): a provisioned or
+    /// copied-config home carries one. Such homes never see the question
+    /// — the standing choice stands and the flow completes silently;
+    /// only a fresh home (no choice written) is asked once.
+    fn agent_traces_choice_written(&self) -> bool;
     /// Persist the trace-sharing answer (TS `setAgentTracesEnabled`).
     fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()>;
     /// Mark the onboarding flow completed (TS `markOnboardingShown` +
@@ -390,6 +400,15 @@ pub enum HeadlessStep {
     SettleIdle,
     /// Hold until the current turn finishes (bounded by `timeout_ms`).
     WaitIdle { timeout_ms: u64 },
+    /// Hold until a frame rendered after this step contains `needle`
+    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
+    /// rows (side-question answers, streamed notices), which arrive on
+    /// the event cadence rather than a known wall-clock delay.
+    WaitRender { needle: String, timeout_ms: u64 },
+    /// Hold until the newest frame no longer contains `needle` (bounded by
+    /// `timeout_ms`): the verifier's condition wait for a surface closing
+    /// (the pane going away, a banner clearing).
+    WaitGone { needle: String, timeout_ms: u64 },
     /// Hold the plan for `ms` before the next step: the verifier's timing
     /// window (queue prompts deterministically inside a scripted
     /// `delayMs` hold, where the turn is provably busy).
@@ -431,25 +450,49 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 /// `true` when the exit keys quit the app (TS `onExit` → shutdown).
 async fn run_onboarding_phase(
     task: &OnboardingTask,
+    session: &mut SessionUi,
     view: &mut AgentView,
     ui_rx: &mut mpsc::UnboundedReceiver<UiInput>,
     renderer: &mut Renderer,
     exit_guard: &ExitGuard,
 ) -> Result<bool> {
-    // Sharing is on unless the user opted out, so a fresh install always
-    // takes this branch: the flow completes silently, nothing is drawn,
-    // and the session screen owns the first frame. The question below
-    // mounts only for a home that explicitly opted out before completing
-    // onboarding (TS parity: `askOnboardingTraceOptIn` skips when already
-    // enabled).
-    if task.sink.agent_traces_enabled() {
-        let _ = task.sink.mark_onboarding_complete();
+    // One-shot: the startup gate read the marker once to mount this task,
+    // but the agents-view flow re-runs the phase for every session it
+    // opens with the same task. A flow that already completed (the
+    // marker now persisted) re-checks here and never shows anything again.
+    if task.sink.onboarding_shown() {
+        return Ok(false);
+    }
+    // A home that already carries a trace-sharing choice (a provisioned or
+    // copied-config home, or a `/traces` change made before the flow
+    // completed) never sees the question: the standing choice stands and
+    // the flow completes silently. The question below is the first-run
+    // step for a fresh home only — asked exactly once, then the marker
+    // gates every later run.
+    if task.sink.agent_traces_choice_written() {
+        if let Err(error) = task.sink.mark_onboarding_complete() {
+            warn_onboarding_persist_failure(session, view, &error);
+        }
         return Ok(false);
     }
     let mut screen = crate::onboarding::OnboardingScreen::new();
     let keybindings = view.editor.keybindings().clone();
     let mut exit_requested = false;
     loop {
+        // The pane owns the frame from the mount (TS renders the splash the
+        // moment it opens), so each iteration draws first and waits for
+        // input after — a deciding key that is already queued still leaves
+        // the mounted frame captured.
+        view.onboarding = Some(screen.clone());
+        match renderer {
+            Renderer::Terminal { .. } => {
+                if let Some(renderer) = renderer.is_terminal_mut() {
+                    crate::app::draw(renderer, view)?;
+                }
+            }
+            Renderer::Headless { .. } => renderer.render_headless_pane(view),
+        }
+        view.onboarding = None;
         tokio::select! {
             maybe_input = ui_rx.recv() => {
                 if let Some(UiInput::Key(key)) = maybe_input {
@@ -468,12 +511,22 @@ async fn run_onboarding_phase(
                             // `Share` opts in; `Not now` keeps traces off
                             // (TS finish(index === 0)). A cancel writes no
                             // answer at all, but the flow still completed.
-                            let _ = task.sink.set_agent_traces_enabled(index == 0);
-                            let _ = task.sink.mark_onboarding_complete();
+                            // A write that fails surfaces as a warning row:
+                            // the flow still settled this run, but an
+                            // unpersisted marker re-mounts it next launch —
+                            // the user must know, the run never dies over it.
+                            if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                                warn_onboarding_persist_failure(session, view, &error);
+                            }
+                            if let Err(error) = task.sink.mark_onboarding_complete() {
+                                warn_onboarding_persist_failure(session, view, &error);
+                            }
                             break;
                         }
                         Some(crate::onboarding::OnboardingDecision::Cancelled) => {
-                            let _ = task.sink.mark_onboarding_complete();
+                            if let Err(error) = task.sink.mark_onboarding_complete() {
+                                warn_onboarding_persist_failure(session, view, &error);
+                            }
                             break;
                         }
                         Some(crate::onboarding::OnboardingDecision::Exit) => {
@@ -490,16 +543,30 @@ async fn run_onboarding_phase(
                 screen.tick();
             }
         }
-        view.onboarding = Some(screen.clone());
-        if let Some(renderer) = renderer.is_terminal_mut() {
-            crate::app::draw(renderer, view)?;
-        }
-        view.onboarding = None;
     }
     if exit_requested {
         return Ok(true);
     }
     Ok(false)
+}
+
+/// A failed onboarding persistence write surfaces as a warning row in the
+/// session: the flow still settled for this run, but an unpersisted marker
+/// re-mounts the whole flow on the next launch — the user must know, and the
+/// run never dies over a settings write (the session stays usable; `/traces`
+/// stays the change path).
+fn warn_onboarding_persist_failure(
+    session: &mut SessionUi,
+    view: &mut AgentView,
+    error: &anyhow::Error,
+) {
+    view.push_entry(crate::chat::ChatEntry::Status {
+        text: format!(
+            "\u{26a0} The onboarding answer could not be saved ({error}); the first-run flow may appear again."
+        ),
+        kind: crate::chat::StatusKind::Warning,
+    });
+    session.dirty = true;
 }
 
 /// Result of an interactive run: session identity plus, in headless mode, the
@@ -546,6 +613,18 @@ enum UiInput {
     /// One materialized input-idle tick (the headless `SettleIdle` step).
     SettleIdle,
     WaitIdle {
+        timeout_ms: u64,
+    },
+    /// The headless `WaitRender` barrier's condition: a frame rendered
+    /// after arming must contain `needle`.
+    WaitRender {
+        needle: String,
+        timeout_ms: u64,
+    },
+    /// The headless `WaitGone` barrier's condition: the newest frame must
+    /// no longer contain `needle`.
+    WaitGone {
+        needle: String,
         timeout_ms: u64,
     },
     ScrollTop,
@@ -943,13 +1022,20 @@ async fn run_interactive_surface(
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch). A fresh install ships
-    // trace sharing pre-configured, so this completes silently without
-    // drawing; only an explicit opt-out that never completed onboarding
-    // mounts the splash + trace question.
+    // `runStartupOnboarding`, model-ready branch). The trace question is
+    // the opt-in moment for a fresh home; a home that already carries a
+    // standing choice completes silently, and the phase's own marker
+    // gate keeps it one-shot across the agents-view loop's sessions.
     if let Some(task) = options.onboarding.clone() {
-        let exit_requested =
-            run_onboarding_phase(&task, &mut view, &mut ui_rx, &mut renderer, &exit_guard).await?;
+        let exit_requested = run_onboarding_phase(
+            &task,
+            &mut session,
+            &mut view,
+            &mut ui_rx,
+            &mut renderer,
+            &exit_guard,
+        )
+        .await?;
         if exit_requested {
             // The exit deadline is armed from the moment the run decides to
             // leave: no cleanup below may block past it.
@@ -1011,6 +1097,13 @@ async fn run_interactive_surface(
     let mut running = true;
     let mut headless_done = false;
     let mut wait_idle_deadline: Option<Instant> = None;
+    // The headless render barrier's armed state: its deadline, and the
+    // frames captured at arming (the `WaitRender` condition scans only
+    // frames rendered after the barrier became the queue's head, so a
+    // needle that already scrolled out of an older frame still satisfies
+    // it; `WaitGone` checks only the newest frame).
+    let mut wait_render_deadline: Option<Instant> = None;
+    let mut wait_render_baseline: usize = 0;
     // Spec §10.2: the reconnect loop after a `daemon_closing` update frame.
     // Retry with backoff for up to RECONNECT_WINDOW; each attempt reads the
     // successor's hello (`update_resume`, §10.3) and reattaches by durable
@@ -1105,6 +1198,80 @@ async fn run_interactive_surface(
                 } else {
                     wait_idle_deadline = None;
                     pending.pop_front();
+                }
+            } else if let Some((needle, timeout_ms, present)) = match pending.front() {
+                Some(UiInput::WaitRender { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, true))
+                }
+                Some(UiInput::WaitGone { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, false))
+                }
+                _ => None,
+            } {
+                // The render barrier: `WaitRender` holds until a frame
+                // rendered after arming contains the needle (daemon-driven
+                // rows land on the loop's event/tick cadence, so this rides
+                // out any load latency instead of a fixed wall-clock
+                // window); `WaitGone` holds until the newest frame cleared
+                // it. Frames captured before the barrier reached the queue
+                // head never satisfy it — the baseline is recorded at
+                // arming and only subsequent frames count, except for the
+                // newest frame at arming time (the current state: a
+                // condition that already holds pops immediately instead of
+                // stalling on a repaint that may never come). Like the
+                // idle barrier it holds the whole queued batch behind it,
+                // and its timeout pops with a note (the note never embeds
+                // the needle: the note row renders into frames, and quoting
+                // the needle would make a timed-out wait satisfy the very
+                // condition that failed).
+                let current_state_ok = renderer.headless_frames().is_some_and(|frames| {
+                    frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str()) == present)
+                });
+                if wait_render_deadline.is_none() {
+                    if current_state_ok {
+                        pending.pop_front();
+                    } else {
+                        wait_render_baseline =
+                            renderer.headless_frames().map_or(0, <[String]>::len);
+                        wait_render_deadline =
+                            Some(Instant::now() + Duration::from_millis(timeout_ms));
+                        inputs_pending = false;
+                    }
+                } else {
+                    let satisfied = renderer.headless_frames().is_some_and(|frames| {
+                        if present {
+                            frames
+                                .get(wait_render_baseline..)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|frame| frame.contains(needle.as_str()))
+                        } else {
+                            !frames
+                                .last()
+                                .is_some_and(|frame| frame.contains(needle.as_str()))
+                        }
+                    });
+                    if satisfied {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                    } else if Instant::now() > wait_render_deadline.unwrap() {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                        session.note(
+                            if present {
+                                "timed out waiting for the headless render condition"
+                            } else {
+                                "timed out waiting for the headless render to clear"
+                            },
+                            &mut view,
+                        );
+                    } else {
+                        // The barrier holds the batch while the render
+                        // catches up.
+                        inputs_pending = false;
+                    }
                 }
             } else if let Some(input) = pending.pop_front() {
                 session.dirty = true;
@@ -1252,6 +1419,9 @@ async fn run_interactive_surface(
                         }
                     }
                     UiInput::HeadlessDone => headless_done = true,
+                    UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
+                        unreachable!("render barrier handled above")
+                    }
                     UiInput::ScrollTop => {
                         session.stop_selection_auto_scroll();
                         view.scroll_to_top();
@@ -2362,6 +2532,22 @@ impl Renderer {
                                     return;
                                 }
                             }
+                            HeadlessStep::WaitRender { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitRender { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            HeadlessStep::WaitGone { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitGone { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                             HeadlessStep::WaitMs(ms) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                             }
@@ -2512,6 +2698,35 @@ impl Renderer {
         match self {
             Renderer::Terminal { term, .. } => Some(term),
             Renderer::Headless { .. } => None,
+        }
+    }
+
+    /// Capture one onboarding-pane frame as plain text (headless
+    /// assertions): the onboarding pane replaces the whole session frame,
+    /// and no session exists yet, so the capture renders the view alone.
+    /// The loop's dedup rule matches `render_headless` — a pane that has
+    /// not changed does not add a duplicate frame.
+    fn render_headless_pane(&mut self, view: &mut AgentView) {
+        let Renderer::Headless {
+            width,
+            height,
+            frames,
+        } = self
+        else {
+            return;
+        };
+        let text = crate::app::render_frame_text(view, *width, *height).join("\n");
+        if frames.last().map(String::as_str) != Some(text.as_str()) {
+            frames.push(text);
+        }
+    }
+
+    /// The headless capture's frames (None on a terminal renderer): the
+    /// render barriers wait on these.
+    fn headless_frames(&self) -> Option<&[String]> {
+        match self {
+            Renderer::Headless { frames, .. } => Some(frames),
+            _ => None,
         }
     }
 
