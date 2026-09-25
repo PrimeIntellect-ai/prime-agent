@@ -3126,41 +3126,64 @@ mod tests {
     }
 
     #[test]
-    fn five_cards_condense_into_the_block_four_do_not() {
-        let mut five = condensed_view(run_cards(5));
-        let text = transcript_text(&mut five, 80);
+    fn three_items_condense_into_the_block_two_do_not() {
+        let mut three = condensed_view(run_cards(3));
+        let text = transcript_text(&mut three, 80);
         assert!(
-            text.contains("5 tool calls"),
+            text.contains("3 tool calls"),
             "the block's summary row renders: {text}"
         );
         assert!(
-            text.contains("\u{2570}\u{2500} 5 bash"),
+            text.contains("\u{2570}\u{2500} 3 bash"),
             "the breakdown row hangs on the branch gutter: {text}"
         );
         assert!(
-            text.contains("to expand"),
-            "the drill-in hint rides the breakdown row: {text}"
+            !text.contains("to expand"),
+            "no drill-in hint rides the breakdown row: {text}"
         );
         assert!(
             !text.contains("bash \u{b7} done"),
             "the cards' own panel rows are gone in overview: {text}"
         );
 
-        let mut four = condensed_view(run_cards(4));
-        let text = transcript_text(&mut four, 80);
+        let mut two = condensed_view(run_cards(2));
+        let text = transcript_text(&mut two, 80);
         assert!(
             text.contains("bash \u{b7} done"),
-            "four cards render their own rows: {text}"
+            "two cards render their own rows: {text}"
         );
         assert!(
             !text.contains("tool calls"),
-            "nothing condenses at or below four: {text}"
+            "nothing condenses at or below two items: {text}"
         );
     }
 
     #[test]
-    fn condensing_is_overview_only() {
-        let mut view = condensed_view(run_cards(5));
+    fn condensing_is_overview_only_and_ctrl_o_reveals_every_item() {
+        // The Ctrl+O cycle owns the whole story: overview condenses the
+        // run into one block and hides the thinking; details/all render
+        // every card, every notice, and the thinking itself.
+        let mut entries = run_cards(3);
+        entries.push(thinking_only());
+        entries.push(agent_message_row());
+        let mut view = condensed_view(entries);
+        let text = transcript_text(&mut view, 80);
+        assert!(
+            text.contains("3 tool calls \u{b7} 1 agent message"),
+            "overview condenses the mixed run: {text}"
+        );
+        assert!(
+            text.contains("1 agent messages received"),
+            "the notice merges into the block's breakdown: {text}"
+        );
+        assert!(
+            !text.contains("Agent message received from"),
+            "the notice's own row is gone in overview: {text}"
+        );
+        assert!(
+            !text.contains("hmm"),
+            "collapsed hides the thinking: {text}"
+        );
         for detail in [Detail::Details, Detail::All] {
             view.detail = detail;
             let text = transcript_text(&mut view, 80);
@@ -3172,10 +3195,18 @@ mod tests {
                 text.contains("bash \u{b7}"),
                 "the cards render their own rows at {detail:?}: {text}"
             );
+            assert!(
+                text.contains("Agent message received"),
+                "the notice keeps its own row at {detail:?}: {text}"
+            );
+            assert!(
+                text.contains("hmm"),
+                "the thinking is visible at {detail:?}: {text}"
+            );
         }
         view.detail = Detail::Overview;
         let text = transcript_text(&mut view, 80);
-        assert!(text.contains("5 tool calls"), "overview condenses: {text}");
+        assert!(text.contains("3 tool calls"), "overview condenses: {text}");
     }
 
     #[test]
@@ -3199,35 +3230,44 @@ mod tests {
     }
 
     #[test]
-    fn hidden_thinking_joins_the_run_a_received_message_breaks_it() {
+    fn a_received_notice_merges_into_the_block_and_short_groups_stay_solo() {
+        // The operator's screenshot fix: tool calls, hidden thinking,
+        // and received notices in one stretch condense into ONE block -
+        // the notice neither breaks the run nor renders its own row;
+        // a genuine short group (one card, one notice) keeps both rows.
         let mut entries = run_cards(3);
         entries.push(thinking_only());
-        entries.push(ChatEntry::AgentMessage(Box::new(
-            crate::custom_message::AgentMessageRow {
-                direction: crate::custom_message::AgentMessageDirection::Received,
-                participant: "from parent".to_string(),
-                message: "course correct".to_string(),
-            },
-        )));
-        entries.extend(run_cards(5));
+        entries.push(agent_message_row());
+        entries.extend(run_cards(2));
         let mut view = condensed_view(entries);
         let text = transcript_text(&mut view, 80);
         assert!(
-            text.contains("5 tool calls"),
-            "the five-card side condenses: {text}"
+            text.contains("5 tool calls \u{b7} 1 agent message"),
+            "one aggregate spans the whole interleaved stretch: {text}"
         );
+        assert!(
+            text.contains("1 agent messages received"),
+            "the notice's count rides the breakdown: {text}"
+        );
+        assert!(
+            !text.contains("Agent message received"),
+            "the notice renders nothing of its own inside the run: {text}"
+        );
+        assert!(
+            text.matches("tool calls").count() == 1,
+            "exactly one block, no tiny groups: {text}"
+        );
+
+        let short = vec![run_cards(1).pop().unwrap(), agent_message_row()];
+        let mut view = condensed_view(short);
+        let text = transcript_text(&mut view, 80);
         assert!(
             text.contains("Agent message received"),
-            "the received row keeps its place: {text}"
+            "a two-item group keeps the notice's own row: {text}"
         );
         assert!(
-            text.contains("course correct"),
-            "the received message's content stays visible: {text}"
-        );
-        // The three cards before the message render their own rows.
-        assert!(
-            text.contains("bash \u{b7}"),
-            "the below-threshold side stays uncondensed: {text}"
+            text.contains("bash \u{b7} done"),
+            "a two-item group keeps the card's own rows: {text}"
         );
     }
 
@@ -3289,8 +3329,50 @@ mod tests {
     }
 
     #[test]
+    fn the_block_appears_at_the_third_streamed_card_before_results() {
+        // Staged streaming: the run row first appears when the THIRD
+        // named/id card streams in - before any `tool_execution_end` -
+        // and the count increments immediately on the fourth. The
+        // threshold crossing and the O(1) tail patch both keep the
+        // block's rows current while the run is still running.
+        let streamed = |id: &str| {
+            ChatEntry::Tool(Box::new(ToolCallCard {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": "echo done"}),
+                started: true,
+                started_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            }))
+        };
+        let mut view = condensed_view(Vec::new());
+        view.push_entry(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        view.push_entry(streamed("c0"));
+        view.push_entry(streamed("c1"));
+        let two = transcript_text(&mut view, 80);
+        assert!(
+            !two.contains("tool calls"),
+            "two streamed cards wait for the third: {two}"
+        );
+        view.push_entry(streamed("c2"));
+        let three = transcript_text(&mut view, 80);
+        assert!(
+            three.contains("3 tool calls"),
+            "the block appears at the third streamed card, results pending: {three}"
+        );
+        view.push_entry(streamed("c3"));
+        let four = transcript_text(&mut view, 80);
+        assert!(
+            four.contains("4 tool calls"),
+            "the count increments immediately on the fourth: {four}"
+        );
+    }
+
+    #[test]
     fn condensed_geometry_matches_the_render() {
-        for calls in [5usize, 8] {
+        for calls in [3usize, 8] {
             let mut view = condensed_view(run_cards(calls));
             for width in [0, 1, 10, 40, 80] {
                 for detail in [Detail::Overview, Detail::Details, Detail::All] {
@@ -3312,11 +3394,11 @@ mod tests {
     fn the_block_survives_a_cache_roundtrip() {
         // The settled block is cacheable: a second render serves the
         // cached rows and they match a fresh render byte for byte.
-        let mut view = condensed_view(run_cards(5));
+        let mut view = condensed_view(run_cards(3));
         let first = transcript_text(&mut view, 80);
         let second = transcript_text(&mut view, 80);
         assert_eq!(first, second, "the cached block rows are stable");
-        let mut fresh = condensed_view(run_cards(5));
+        let mut fresh = condensed_view(run_cards(3));
         let fresh_text = transcript_text(&mut fresh, 80);
         assert_eq!(
             first.replace("0s", "").replace("0.0s", ""),

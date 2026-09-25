@@ -167,6 +167,7 @@ fn a_vanished_run_reconciles_to_the_nearest() {
         start: 7,
         end: 12,
         calls: 5,
+        messages: 0,
     }];
     assert_eq!(
         pane.reconcile(&view.chat, &gone),

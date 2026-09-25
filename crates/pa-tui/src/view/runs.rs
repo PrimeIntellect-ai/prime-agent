@@ -14,16 +14,6 @@ use crate::chat::{ChatEntry, Detail};
 use crate::tool_runs::{self, is_run_glue, RunSlot, ToolRun};
 
 impl AgentView {
-    /// The condensed block's drill-in hint: the resolved binding followed
-    /// by ` to expand`.
-    pub(super) fn run_expand_hint(&self) -> String {
-        self.editor
-            .keybindings()
-            .first_key("app.transcript.runs")
-            .map(|key| format!("{} to expand", crate::keybindings::format_key_text(&key)))
-            .unwrap_or_default()
-    }
-
     /// Paint one entry's collapsed-mode rows when a qualifying run covers
     /// it: the block on the run's start, nothing on the other members.
     /// `None` renders the entry itself (no run, or another detail mode).
@@ -34,7 +24,6 @@ impl AgentView {
         match self.run_map.slot(index) {
             Some(RunSlot::Start(run)) => {
                 let summary = tool_runs::run_summary(&self.chat, run);
-                let hint = self.run_expand_hint();
                 let mut rows: Vec<crate::Line> = Vec::new();
                 if self.conversation_leading(index, false) {
                     rows.push(Vec::new());
@@ -42,7 +31,6 @@ impl AgentView {
                 rows.extend(tool_runs::render_run_block(
                     &summary,
                     self.pulse_frame,
-                    &hint,
                     &self.theme,
                     width,
                 ));
@@ -61,12 +49,11 @@ impl AgentView {
         match self.run_map.slot(index) {
             Some(RunSlot::Start(run)) => {
                 let summary = tool_runs::run_summary(&self.chat, run);
-                let hint = self.run_expand_hint();
                 // The block's leading blank rides the same conversation
                 // spacing decision a tool card's row would.
                 Some(
                     usize::from(self.conversation_leading(index, false))
-                        + tool_runs::run_block_rows(&summary, &hint, width),
+                        + tool_runs::run_block_rows(&summary, width),
                 )
             }
             Some(RunSlot::Member) => Some(0),

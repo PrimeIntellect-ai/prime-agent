@@ -1008,7 +1008,8 @@ fn a_qualifying_tail_append_patches_the_map_incrementally() {
         Some(crate::tool_runs::ToolRun {
             start: 0,
             end: 6,
-            calls: 6
+            calls: 6,
+            messages: 0
         }),
         "the run's extent widened by the pushed card"
     );
