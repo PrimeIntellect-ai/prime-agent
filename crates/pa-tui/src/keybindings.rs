@@ -339,10 +339,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
-        "app.heartbeats.open",
-        def!(&["ctrl+r"], "Manage heartbeats"),
-    ),
-    (
         "app.heartbeats.openSelected",
         def!(&["right"], "Open selected heartbeat"),
     ),
@@ -1252,9 +1248,18 @@ mod tests {
             KeybindingsManager::with_user_bindings(cfg(&[("tui.editor.redo", &["ctrl+r"])]));
         assert!(rebound.matches("ctrl+r", "tui.editor.redo"));
         assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
-        // The same-scope freeing still applies: ctrl+r is the heartbeats
-        // key in the app scope, so it keeps its binding there.
-        assert!(rebound.matches("ctrl+r", "app.heartbeats.open"));
+    }
+
+    /// The heartbeats shortcut is gone (the operator's 2026-09-24
+    /// directive: "Remove the shortcut of ctrl+r for heartbeats btw"):
+    /// ctrl+r binds nothing by default (the /heartbeats command and the
+    /// activity dock's heartbeats group own the open paths), and the
+    /// rebind-freeing test no longer keeps an app-scope claim for it.
+    #[test]
+    fn ctrl_r_is_unbound_by_default() {
+        let kb = KeybindingsManager::new();
+        assert!(kb.get_keys("app.heartbeats.open").is_empty());
+        assert!(!kb.matches("ctrl+r", "app.heartbeats.open"));
     }
 
     #[test]
@@ -1456,10 +1461,6 @@ mod tests {
             vec!["up".to_string(), "ctrl+o".to_string()]
         );
         assert!(kb.get_keys("app.tools.expand").is_empty());
-        assert_eq!(
-            kb.get_keys("app.heartbeats.open"),
-            vec!["ctrl+r".to_string()]
-        );
         // No scope => a claim never frees its default.
         assert_eq!(kb.get_keys("app.agents.new"), vec!["ctrl+n".to_string()]);
     }
