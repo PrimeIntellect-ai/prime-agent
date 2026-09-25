@@ -149,11 +149,12 @@ fn current_session_id(session_id: &Arc<std::sync::Mutex<Option<String>>>) -> Opt
 impl RegistrationTask {
     /// Register, hold the connection open as the liveness watch, and repeat
     /// with backoff for as long as the worker lives. The one terminal exit:
-    /// the supervisor's definitive unknown-worker rejection — its descriptor
-    /// for this identity is gone, so no daemon will ever adopt the process
-    /// again, and a worker that kept retrying would hold its session lease
-    /// forever while staying invisible to every roster (the refused-
-    /// registration self-heal retires it instead).
+    /// the supervisor's definitive unknown-worker rejection — on the initial
+    /// registration or the in-place `SessionCreated` re-registration — its
+    /// descriptor for this identity is gone, so no daemon will ever adopt
+    /// the process again, and a worker that kept retrying would hold its
+    /// session lease forever while staying invisible to every roster (the
+    /// refused-registration self-heal retires it instead).
     async fn run(mut self) {
         let mut backoff = BASE_BACKOFF_MS;
         loop {
@@ -162,7 +163,22 @@ impl RegistrationTask {
                 Ok((reader, writer)) => {
                     backoff = BASE_BACKOFF_MS;
                     if let Err(error) = self.hold_connection(reader, writer).await {
-                        debug_log(&format!("registration connection lost: {error:#}"));
+                        // The in-place `SessionCreated` re-registration runs
+                        // on this connection, so its refusal carries the
+                        // same terminal verdict as the initial one: retire
+                        // instead of retrying against a supervisor that
+                        // holds no descriptor for this identity (a worker
+                        // that kept retrying would hold its session lease
+                        // forever while staying invisible to every roster).
+                        let message = format!("{error:#}");
+                        if is_definitive_rejection(&message) {
+                            debug_log(&format!(
+                                "registration refused for good: {message}; retiring"
+                            ));
+                            self.retired.notify_one();
+                            return;
+                        }
+                        debug_log(&format!("registration connection lost: {message}"));
                     }
                     // Immediately retry: the supervisor may just have closed
                     // for a restart, and the first reconnect is cheap.

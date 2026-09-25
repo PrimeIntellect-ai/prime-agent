@@ -4721,7 +4721,10 @@ impl Supervisor {
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
                     if response.success {
-                        self.stop_worker(&resident).await;
+                        // The kill route's own tombstone already persisted
+                        // before the forward; this idempotent re-persist
+                        // never fails the already-succeeded kill.
+                        let _ = self.stop_worker(&resident).await;
                         // TS `stopWorkerUntracked`'s archived-stop finalize
                         // (the plain kill's durable half): the killed
                         // session tree's scheduled jobs cancel durably and
@@ -4792,7 +4795,22 @@ impl Supervisor {
         }
     }
 
-    pub(crate) async fn stop_worker(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    pub(crate) async fn stop_worker(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> anyhow::Result<()> {
+        // The stop's durable intent persists BEFORE the worker is told (TS
+        // `stopWorkerUntracked(removeDescriptor)` ->
+        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or
+        // a worker that survives the escalation below, must never be
+        // adopted as healthy by a later boot — the tombstoned descriptor
+        // routes the boot through the stop-finalization path instead. The
+        // per-session stop never archives (the plain kill's earlier
+        // tombstone keeps its archive intent); a persist failure fails the
+        // stop before the shutdown is forwarded, exactly like TS throws
+        // for non-direct-child stops, so the worker's crash-recovery
+        // contract stays intact.
+        self.persist_stop_tombstone_stop(resident).await?;
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
@@ -4822,6 +4840,7 @@ impl Supervisor {
         // itself are removed). No ledger reseed, no transcript read.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
+        Ok(())
     }
 
     /// Delete one stopped worker's descriptor only after its process is

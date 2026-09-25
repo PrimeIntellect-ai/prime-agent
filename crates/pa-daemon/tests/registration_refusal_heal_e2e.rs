@@ -514,6 +514,32 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
         "k1",
         json!({ "type": "complete_owned_session", "activeSessionId": worker_id }),
     );
+    // The stop's durable intent is observable on disk BEFORE the worker
+    // is told: the routed shutdown waits out its route budget against the
+    // frozen worker, and in that window the descriptor must already carry
+    // its stop tombstone — a supervisor that died mid-stop would adopt
+    // the tombstone (finishing the stop) instead of the worker (a later
+    // boot must never re-adopt a stopped worker as healthy).
+    let descriptor_path = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket)
+        .join(format!("{worker_id}.json"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let descriptor: Value =
+            serde_json::from_str(&std::fs::read_to_string(&descriptor_path).unwrap_or_default())
+                .unwrap_or(Value::Null);
+        if descriptor
+            .get("stopRequestedAt")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the owned stop never persisted its tombstone (the stop must be durable before the shutdown routes): {descriptor}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let stopped = client.read_response("k1");
     assert_eq!(stopped["success"], true, "owned stop failed: {stopped}");
     if !wait_gone(worker_pid, Instant::now() + Duration::from_secs(5)) {

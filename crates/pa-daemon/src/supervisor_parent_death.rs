@@ -145,7 +145,11 @@ impl Supervisor {
             .await
         {
             Ok(response) if response.success => {
-                self.stop_worker(child).await;
+                // The dead parent's child close is best-effort cleanup: a
+                // failed tombstone persist aborts the registry removal, and
+                // the boot reap (or the routed kill already delivered)
+                // owns the rest.
+                let _ = self.stop_worker(child).await;
                 true
             }
             Ok(response) => {
