@@ -231,12 +231,46 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
 
 pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     let ordered = order_messages_for_transcript(messages);
+    // A pre-pass: each call id's LAST call position. A result pairs in
+    // arrival order (the live `rposition` semantics - the last pending
+    // card SEEN SO FAR takes it), so a result whose card may still
+    // arrive defers to the tail pass; one past every call for its id
+    // is a true orphan and keeps its standalone card AT ITS OWN WIRE
+    // POSITION (the live push path's placement).
+    let mut last_call_at: HashMap<&str, usize> = HashMap::new();
+    for (position, message) in ordered.iter().enumerate() {
+        if tool_result_message_view(message).is_some() {
+            continue;
+        }
+        for id in call_ids_of(message) {
+            last_call_at.insert(id, position);
+        }
+    }
     let mut chat: Vec<ChatEntry> = Vec::new();
-    let mut tool_results: Vec<ToolResultReplay> = Vec::new();
+    let mut deferred: Vec<ToolResultReplay> = Vec::new();
     let mut card_index: HashMap<String, Vec<usize>> = HashMap::new();
-    for message in ordered {
+    for (position, message) in ordered.into_iter().enumerate() {
         if let Some(result) = tool_result_message_view(message) {
-            tool_results.push(result);
+            let tool_call_id = result.tool_call_id.clone();
+            match settle_last_pending(
+                &mut chat,
+                card_index.get(&tool_call_id).map(Vec::as_slice),
+                result,
+            ) {
+                None => {}
+                Some(result) => {
+                    let card_comes_later = last_call_at
+                        .get(tool_call_id.as_str())
+                        .is_some_and(|&at| at > position);
+                    if card_comes_later {
+                        deferred.push(result);
+                    } else {
+                        // A true orphan: its standalone card lands at
+                        // its own wire position.
+                        chat.push(orphan_card(result));
+                    }
+                }
+            }
             continue;
         }
         // The retry-episode collapse (SANCTIONED DIVERGENCE, operator
@@ -265,60 +299,99 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             }
         }
     }
-    for ToolResultReplay {
+    // The tail pass: a deferred result settles against the card that
+    // arrived after it; one that still matches nothing keeps its
+    // standalone card (the rare duplicate-result edge) at the tail.
+    for result in deferred {
+        let tool_call_id = result.tool_call_id.clone();
+        if let Some(result) = settle_last_pending(
+            &mut chat,
+            card_index.get(&tool_call_id).map(Vec::as_slice),
+            result,
+        ) {
+            chat.push(orphan_card(result));
+        }
+    }
+    chat
+}
+
+/// The `toolCall` content-block ids of one non-result message (the
+/// pre-pass's call positions).
+fn call_ids_of(message: &Value) -> Vec<&str> {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("toolCall"))
+                        .then(|| block.get("id").and_then(Value::as_str))
+                        .flatten()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Settle one result onto the LAST pending card among `indices` (the
+/// live `rposition` semantics). `Some(result)` hands the result back
+/// whole for the caller's deferral or orphan handling; `None` settled
+/// it.
+fn settle_last_pending(
+    chat: &mut [ChatEntry],
+    indices: Option<&[usize]>,
+    result: ToolResultReplay,
+) -> Option<ToolResultReplay> {
+    let Some(indices) = indices else {
+        return Some(result);
+    };
+    let pending = indices.iter().rev().copied().find(
+        |&index| matches!(chat.get(index), Some(ChatEntry::Tool(card)) if card.result.is_none()),
+    );
+    let Some(index) = pending else {
+        return Some(result);
+    };
+    let ToolResultReplay {
+        tool_call_id: _,
+        tool_name: _,
+        view,
+        timestamp,
+    } = result;
+    if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
+        card.started = true;
+        // Replayed cards never saw the live execution: the timing
+        // collapses to the rebuild instant, so the bash `Took` row
+        // renders the same `0.0s` the TS component does on replay.
+        let now = std::time::Instant::now();
+        card.started_at = Some(now);
+        card.ended_at = Some(now);
+        card.ended_ms = (timestamp > 0).then_some(timestamp);
+        card.result = Some(view);
+        card.result_partial = false;
+    }
+    None
+}
+
+/// The standalone card a true orphan result keeps (the live push
+/// path's twin).
+fn orphan_card(result: ToolResultReplay) -> ChatEntry {
+    let ToolResultReplay {
         tool_call_id,
         tool_name,
         view,
         timestamp,
-        ..
-    } in tool_results
-    {
-        // A pending card takes its result in place; every other result
-        // (a true orphan, or a duplicate settle on a finished card)
-        // keeps its standalone card exactly like the live push path -
-        // the rebuilt transcript never drops it. The LAST pending card
-        // matches first (the live `rposition` semantics: a later
-        // invocation reusing the id settles its own card, never the
-        // first invocation's).
-        let pending_index = card_index.get(&tool_call_id).and_then(|indices| {
-            indices
-                .iter()
-                .rev()
-                .copied()
-                .find(|&index| {
-                    matches!(chat.get(index), Some(ChatEntry::Tool(card)) if card.result.is_none())
-                })
-        });
-        let pending = pending_index.and_then(|index| match chat.get_mut(index) {
-            Some(ChatEntry::Tool(card)) => Some(card),
-            _ => None,
-        });
-        match pending {
-            Some(card) => {
-                card.started = true;
-                // Replayed cards never saw the live execution: the timing
-                // collapses to the rebuild instant, so the bash `Took` row
-                // renders the same `0.0s` the TS component does on replay.
-                let now = std::time::Instant::now();
-                card.started_at = Some(now);
-                card.ended_at = Some(now);
-                card.ended_ms = (timestamp > 0).then_some(timestamp);
-                card.result = Some(view);
-                card.result_partial = false;
-            }
-            None => chat.push(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
-                id: tool_call_id,
-                name: tool_name,
-                args: serde_json::Value::Null,
-                started: true,
-                ended_ms: (timestamp > 0).then_some(timestamp),
-                result: Some(view),
-                unmatched_result: true,
-                ..Default::default()
-            }))),
-        }
-    }
-    chat
+    } = result;
+    ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+        id: tool_call_id,
+        name: tool_name,
+        args: serde_json::Value::Null,
+        started: true,
+        ended_ms: (timestamp > 0).then_some(timestamp),
+        result: Some(view),
+        unmatched_result: true,
+        ..Default::default()
+    }))
 }
 
 /// Reconstruct the view state from slim attach data.
@@ -1770,6 +1843,108 @@ mod tests {
     }
 
     #[test]
+    fn an_interleaved_replay_pairs_results_in_arrival_order() {
+        // Call, result, ANOTHER call reusing the id, result: each
+        // result settles the call it FOLLOWED (the live arrival-order
+        // pairing), never the later invocation's card.
+        let chat = transcript_to_entries(&[
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "first" },
+                    { "type": "toolCall", "id": "dup", "name": "ipython", "arguments": {"code": "1"} },
+                ],
+                "timestamp": 1,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "dup",
+                "toolName": "ipython",
+                "content": [{ "type": "text", "text": "the first run" }],
+                "isError": false,
+                "timestamp": 2,
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "second" },
+                    { "type": "toolCall", "id": "dup", "name": "ipython", "arguments": {"code": "2"} },
+                ],
+                "timestamp": 3,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "dup",
+                "toolName": "ipython",
+                "content": [{ "type": "text", "text": "the second run" }],
+                "isError": false,
+                "timestamp": 4,
+            }),
+        ]);
+        let cards: Vec<&crate::chat::ToolCallCard> = chat
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Tool(card) => Some(card.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2, "two cards: {chat:?}");
+        assert_eq!(
+            cards[0]
+                .result
+                .as_ref()
+                .and_then(|result| result.content.first())
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str),
+            Some("the first run"),
+            "the FIRST call kept its own result"
+        );
+        assert_eq!(
+            cards[1]
+                .result
+                .as_ref()
+                .and_then(|result| result.content.first())
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str),
+            Some("the second run"),
+            "the SECOND call kept its own result"
+        );
+    }
+
+    #[test]
+    fn an_orphan_result_keeps_its_wire_position() {
+        // An orphan result BETWEEN two ordinary messages lands at its
+        // own wire position in the rebuilt transcript - never at the
+        // tail (condensation can never span across it).
+        let chat = transcript_to_entries(&[
+            json!({
+                "role": "user",
+                "content": "before",
+                "timestamp": 1,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "orphan",
+                "toolName": "bash",
+                "content": [{ "type": "text", "text": "orphan output" }],
+                "isError": false,
+                "timestamp": 2,
+            }),
+            json!({
+                "role": "user",
+                "content": "after",
+                "timestamp": 3,
+            }),
+        ]);
+        assert_eq!(chat.len(), 3, "the orphan card sits between: {chat:?}");
+        match &chat[1] {
+            ChatEntry::Tool(card) => assert!(card.unmatched_result),
+            other => panic!("the orphan sits at its wire position: {other:?}"),
+        }
+        assert!(matches!(&chat[2], ChatEntry::User { text } if text == "after"));
+    }
+
+    #[test]
     fn reconstructs_slim_attach() {
         let data = attach_data_from_response(&slim_attach()).unwrap();
         assert_eq!(data.active_session_id, "abc123def456");
@@ -2366,8 +2541,8 @@ mod tests {
         );
         assert_eq!(result.details, json!({ "durationMs": 3, "status": "ok" }));
         assert!(!result.is_error);
-        let Some(ChatEntry::Tool(orphan)) = chat.get(4) else {
-            panic!("orphan card at index 4: {chat:?}");
+        let Some(ChatEntry::Tool(orphan)) = chat.get(3) else {
+            panic!("orphan card at its wire position (index 3): {chat:?}");
         };
         assert_eq!(orphan.id, "orphan");
         assert!(orphan.unmatched_result, "the orphan never joins a run");
