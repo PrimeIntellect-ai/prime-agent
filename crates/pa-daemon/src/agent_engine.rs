@@ -858,11 +858,11 @@ impl AgentSessionEngine {
         // reuses it instead of arming another beside it; a user-cancelled
         // one is honored (the user owns the wake) by leaving the session
         // unparked.
-        let job_id = match persisted.job_id {
-            Some(job_id) if self.quota_wake_job_active(&job_id) => Some(job_id),
+        let job_id = match &persisted.job_id {
+            Some(job_id) if self.quota_wake_job_active(job_id) => persisted.job_id.clone(),
             Some(job_id)
                 if self.cron_wiring().is_some_and(|wiring| {
-                    wiring.store.list().iter().any(|job| job.id == job_id)
+                    wiring.store.list().iter().any(|job| &job.id == job_id)
                 }) =>
             {
                 return;
