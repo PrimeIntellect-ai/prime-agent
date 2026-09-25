@@ -254,7 +254,7 @@ mod tests {
         > {
             let response = self.0.get(&request.url).cloned();
             Box::pin(
-                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
+                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
         }
     }

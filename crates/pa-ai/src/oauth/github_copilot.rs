@@ -175,7 +175,7 @@ pub async fn login_github_copilot(
     let device = start_device_flow(http, &domain).await?;
     ui.on_auth(
         &device.verification_uri,
-        Some(&format!("Enter code: {device.user_code}")),
+        Some(&format!("Enter code: {}", device.user_code)),
     );
     let github_access_token = poll_for_github_access_token(http, &domain, &device, ui).await?;
     let credentials =
@@ -519,6 +519,7 @@ fn status_text(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::ProviderHttpResponse;
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::pin::Pin;
@@ -552,7 +553,7 @@ mod tests {
             }
         }
 
-        fn queue(mut self, url: &str, responses: Vec<ProviderHttpResponse>) -> Self {
+        fn queue(self, url: &str, responses: Vec<ProviderHttpResponse>) -> Self {
             self.queued.lock().unwrap().insert(
                 url.to_string(),
                 responses.into_iter().collect::<VecDeque<_>>(),
@@ -598,7 +599,7 @@ mod tests {
                 .or_else(|| self.fixed.get(&request.url).cloned())
                 .or_else(|| self.catch_all.clone());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
+                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
         }
     }
@@ -867,9 +868,9 @@ mod tests {
             ));
         let ui = Arc::new(ScriptedUi::new(ScriptedAnswer::value("")));
         let flag = Arc::clone(&ui.cancelled);
-        let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http = Arc::new(http);
+            let flow_ui = Arc::clone(&ui);
             tokio::spawn(
                 async move { login_github_copilot(flow_http.as_ref(), flow_ui.as_ref()).await },
             )
@@ -877,7 +878,7 @@ mod tests {
         // Readiness-wait for the URL (bounded: a missing URL fails the
         // test instead of hanging the cancel flip).
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while flow_ui.auth_url.lock().unwrap().is_none() {
+        while ui.auth_url.lock().unwrap().is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the flow never presented its url"

@@ -266,7 +266,7 @@ async fn post_form(
         return Err(LOGIN_CANCELLED.to_string());
     }
     let parsed: serde_json::Value = serde_json::from_str(&response.body)
-        .map_err(|_| format!("xAI OAuth returned invalid JSON (HTTP {response.status})"))?;
+        .map_err(|_| format!("xAI OAuth returned invalid JSON (HTTP {})", response.status))?;
     let body = match parsed {
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
@@ -421,7 +421,7 @@ mod tests {
             }
         }
 
-        fn queue(mut self, url: &str, responses: Vec<ScriptedResponse>) -> Self {
+        fn queue(self, url: &str, responses: Vec<ScriptedResponse>) -> Self {
             self.queued.lock().unwrap().insert(
                 url.to_string(),
                 responses.into_iter().collect::<VecDeque<_>>(),
@@ -454,7 +454,7 @@ mod tests {
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
+                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
         }
     }
@@ -718,23 +718,22 @@ mod tests {
                 )],
             );
         let ui = Arc::new(ScriptedUi::new());
-        let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http = Arc::new(http);
+            let flow_ui = Arc::clone(&ui);
             tokio::spawn(async move { login_xai(flow_http.as_ref(), flow_ui.as_ref()).await })
         };
-        // Wait for the device flow to present its URL, then cancel.
         // Readiness-wait for the URL (bounded: a missing URL fails the
         // test instead of hanging the cancel flip).
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while flow_ui.auth_url.lock().unwrap().is_none() {
+        while ui.auth_url.lock().unwrap().is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the flow never presented its url"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        flow_ui.cancelled.store(true, Ordering::Relaxed);
+        ui.cancelled.store(true, Ordering::Relaxed);
         let error = tokio::time::timeout(Duration::from_secs(10), flow)
             .await
             .expect("the cancelled poll settles promptly")

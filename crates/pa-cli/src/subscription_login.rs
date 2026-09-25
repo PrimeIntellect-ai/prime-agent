@@ -269,15 +269,15 @@ mod tests {
     use pa_ai::oauth::ProviderHttpResponse;
 
     /// A scripted transport: queued responses per url (popped in
-    /// order); unknown urls fail the request.
+    /// order; unknown urls fail the request).
     struct ScriptedHttp {
-        queued: HashMap<String, VecDeque<ProviderHttpResponse>>,
+        queued: std::sync::Mutex<HashMap<String, VecDeque<ProviderHttpResponse>>>,
     }
 
     impl ScriptedHttp {
         fn new() -> Self {
             ScriptedHttp {
-                queued: HashMap::new(),
+                queued: std::sync::Mutex::new(HashMap::new()),
             }
         }
 
@@ -288,8 +288,8 @@ mod tests {
             }
         }
 
-        fn queue(mut self, url: &str, responses: Vec<ProviderHttpResponse>) -> Self {
-            self.queued.insert(
+        fn queue(self, url: &str, responses: Vec<ProviderHttpResponse>) -> Self {
+            self.queued.lock().unwrap().insert(
                 url.to_string(),
                 responses.into_iter().collect::<VecDeque<_>>(),
             );
@@ -311,7 +311,7 @@ mod tests {
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front());
             Box::pin(
-                async move { response.ok_or_else(|| format!("{request.url} was not scripted")) },
+                async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
         }
     }
