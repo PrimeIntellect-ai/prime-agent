@@ -6,11 +6,20 @@ name: release
 on:
   push:
     tags:
+      # A plain tag publishes the stable channel (latest.json); a -beta*
+      # prerelease tag publishes the nightly channel (beta.json) - the two
+      # channels pa-core::update::version::UpdateChannel reads.
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta*"
 
 permissions: {}
 
 concurrency:
+  # Every tag promotes under its own group: a queued promotion is never
+  # canceled by another tag (single-pending groups would drop a queued
+  # run), so every published tag gets its release. The rolling nightly
+  # refresh - the one piece of shared state - serializes in its own
+  # nightly-refresh job group instead.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
@@ -38,7 +47,15 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           cargo_ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
           [[ "${tag_ver}" == "${cargo_ver}" ]]             || { echo "tag v${tag_ver} does not match Cargo.toml ${cargo_ver}"; exit 1; }
-          echo "tag and workspace version agree (${tag_ver})"
+          # The channel the tag publishes (pa-core::update::version
+          # resolve_update_channel parity): plain = stable (latest.json),
+          # -beta* = nightly (beta.json); any other prerelease would be a
+          # stable-channel pre-release the update flow refuses to install.
+          case "${tag_ver}" in
+            *-beta*) echo "nightly channel: the release publishes beta.json" ;;
+            *-*) echo "tag v${tag_ver} carries a prerelease other than -beta*: publish vX.Y.Z (stable) or vX.Y.Z-beta.N (nightly)" >&2; exit 1 ;;
+            *) echo "stable channel: the release publishes latest.json" ;;
+          esac
 
   build:
     needs: tag-check
@@ -127,6 +144,34 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: incoming
+      # actions/download-artifact@v8 places a single artifact's files directly
+      # in `path` and only nests one directory per artifact when the run
+      # uploaded more than one (src/download-artifact.ts: the
+      # `artifacts.length === 1` branch of the download-path ternary). The
+      # gates below iterate one directory per artifact, so a flat
+      # single-artifact layout (a one-target matrix) would silently verify
+      # zero archives - the release-side form of the TS #2265 artifact-layout
+      # bug fixed by TS PR #2319. Hoist the flat layout into the directory
+      # the build job's artifact name defines, and fail loudly when nothing
+      # downloaded at all.
+      - name: Normalize download layout (single-artifact runs land flat)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, shutil, sys
+          incoming = pathlib.Path("incoming")
+          if any(p.is_dir() for p in incoming.iterdir()):
+              sys.exit(0)
+          files = [p for p in incoming.iterdir() if p.is_file()]
+          if not files:
+              sys.exit("promote: no build artifacts downloaded")
+          manifest = json.loads((incoming / "manifest.json").read_text())
+          hoist = incoming / f"artifacts-{manifest['binaries'][0]['target']}"
+          hoist.mkdir()
+          for path in files:
+              shutil.move(str(path), str(hoist / path.name))
+          print(f"normalized the flat single-artifact layout into {hoist.name}/")
+          PY
       - name: Verify hash continuity (artifacts match build-job manifests)
         run: |
           set -euo pipefail
@@ -183,6 +228,73 @@ jobs:
                   tar.extractall(unpacked, filter="data")
           PY
           ls -la release-out release-unpacked
+      - name: Emit the channel manifest (latest.json stable / beta.json nightly)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+
+          # The producer half of the update flow's channel contract (TS
+          # getLatestPiRelease parity; the reader is
+          # pa-core::update::release::latest_release): <download-base>/
+          # latest.json (stable) or beta.json (nightly), carrying the
+          # version plus artifact rows the reader keeps only when the
+          # platform is known, `file` is exactly
+          # prime-agent-<version>-<platform>.tar.gz, and `sha256` is 64
+          # lowercase hex. A row the reader would reject fails the release
+          # here - a lying manifest is worse than none. The v1 `binaries`
+          # list stays limited to the original installer platforms
+          # (manifestV1Platforms, TS parity); `binaries_v2` carries every
+          # row (the reader skips platforms it does not know).
+          tag = os.environ["RELEASE_VERSION"]
+          bare = tag[1:] if tag.startswith("v") else tag
+          prerelease = bare.split("-", 1)[1] if "-" in bare else ""
+          if prerelease:
+              if not prerelease.startswith("beta"):
+                  sys.exit(
+                      f"tag {tag}: only vX.Y.Z (stable) and vX.Y.Z-beta* "
+                      "(nightly) releases publish; the update reader treats "
+                      "any other prerelease as a stable-channel pre-release "
+                      "and refuses to install it"
+                  )
+              manifest_name = "beta.json"
+          else:
+              manifest_name = "latest.json"
+          merged = json.loads(pathlib.Path("release-out/manifest.json").read_text())
+          version = merged["version"]
+          version = version[1:] if version.startswith("v") else version
+          if version != bare:
+              sys.exit(f"merged manifest version {merged['version']} != tag {tag}")
+          known = {
+              "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64",
+          }
+          v1_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
+          rows, seen = [], set()
+          for binary in merged["binaries"]:
+              platform, file_name, sha = binary["platform"], binary["file"], binary["sha256"]
+              if platform in known:
+                  expected = f"prime-agent-{version}-{platform}.tar.gz"
+                  if file_name != expected or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+                      sys.exit(
+                          f"the update reader rejects artifact row {binary}: "
+                          f"file must be {expected} with a 64-hex sha256"
+                      )
+                  if platform in seen:
+                      sys.exit(f"duplicate artifact row for platform {platform}")
+                  seen.add(platform)
+              rows.append(
+                  {"platform": platform, "file": file_name, "sha256": sha}
+              )
+          document = {"version": f"v{version}"}
+          v1_rows = [row for row in rows if row["platform"] in v1_platforms]
+          if v1_rows:
+              document["binaries"] = v1_rows
+          if rows:
+              document["binaries_v2"] = rows
+          out = pathlib.Path("release-out") / manifest_name
+          out.write_text(json.dumps(document, indent=2) + "\n")
+          print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
+          PY
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - name: Generate SPDX SBOM per target (unpacked artifact tree)
@@ -205,9 +317,102 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          # A -beta* tag publishes the nightly channel as a GitHub PRE-RELEASE:
+          # prereleases never take the Latest pointer, so the stable channel's
+          # download base (.../releases/latest/download/) keeps serving the
+          # latest stable release's latest.json (Bugbot: beta tags steal
+          # GitHub Latest).
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
             release-out/prime-agent-*.tar.gz
             release-out/SHA256SUMS
-            release-out/manifest.json
-            release-out/sbom-spdx-*.json
+            release-out/*.json
+      - name: Upload the nightly refresh payload (the rolling release step consumes it)
+        if: contains(github.ref_name, '-')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: nightly-refresh-payload
+          path: |
+            release-out/prime-agent-*.tar.gz
+            release-out/SHA256SUMS
+            release-out/beta.json
+          if-no-files-found: error
+
+  # The rolling `nightly` release is the nightly channel's discoverable base:
+  # GitHub's latest/download/ alias serves only the latest NON-prerelease
+  # release, so beta.json has no address there. Every -beta* tag refreshes
+  # the fixed `nightly` release's assets (.../releases/download/nightly/),
+  # the base a nightly install records (.install-source). This job carries
+  # the workflow's only shared mutable state, so it - and it alone -
+  # serializes: the group lets one refresh run at a time (a queued refresh
+  # superseded by a newer tag is harmless: the newest beta's refresh wins,
+  # and no per-tag promotion is ever canceled), and the newest-wins guard
+  # refuses to clobber a newer rolling beta.json (re-runs of older tags).
+  nightly-refresh:
+    needs: promote
+    if: contains(github.ref_name, '-')
+    name: rolling nightly release refresh (the nightly channel's discoverable base)
+    concurrency:
+      group: rolling-nightly-refresh
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the nightly refresh payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-refresh-payload
+          path: release-out
+      - name: Refresh the rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view nightly >/dev/null 2>&1; then
+            # The newest-wins guard protects the CURRENT beta.json, and it
+            # fails CLOSED: a release that carries a beta.json we cannot read
+            # is never clobbered (Bugbot: a discarded download failure fell
+            # through to --clobber, so a re-run of an older tag could replace
+            # a newer nightly). A release with NO beta.json asset (a partial
+            # earlier refresh) has nothing to protect - the clobber heals it.
+            if gh release view nightly --json assets --jq '.[].name' \
+                 2>/dev/null | grep -qx "beta.json"; then
+              guard="$(mktemp -d)"
+              ok=0
+              for attempt in 1 2 3; do
+                if gh release download nightly --pattern beta.json \
+                     --dir "$guard" >/dev/null 2>&1 \
+                   && [ -s "$guard/beta.json" ]; then
+                  ok=1
+                  break
+                fi
+                echo "guard beta.json download attempt $attempt failed; retrying"
+                sleep 5
+              done
+              if [ "$ok" -ne 1 ]; then
+                echo "could not read the rolling nightly's beta.json; refusing to clobber it (re-run this refresh once the release is readable)" >&2
+                exit 1
+              fi
+              current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$guard/beta.json")"
+              newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"
+              if [ "$newest" != "$RELEASE_VERSION" ]; then
+                echo "the rolling nightly release already serves $current >= $RELEASE_VERSION; skipping the refresh"
+                exit 0
+              fi
+            fi
+            gh release upload nightly \
+              release-out/prime-agent-*.tar.gz \
+              release-out/SHA256SUMS \
+              release-out/beta.json \
+              --clobber
+          else
+            gh release create nightly \
+              --title "nightly" \
+              --notes "The rolling nightly channel (beta builds). Assets are overwritten per -beta* tag; beta.json names the current build." \
+              --prerelease \
+              release-out/prime-agent-*.tar.gz \
+              release-out/SHA256SUMS \
+              release-out/beta.json
+          fi
