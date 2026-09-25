@@ -302,9 +302,11 @@ impl ProviderPicker {
 pub enum OnboardingPanel {
     /// A login flow's inline auth panel (TS the `LoginDialogComponent`
     /// over the splash), with the heading line that replaces the brand
-    /// mark while it owns the block.
+    /// mark while it owns the block. The dialog is boxed: it dwarfs the
+    /// other variants (progress lines, the paste field), and the enum
+    /// rides every mount/unmount by value.
     Auth {
-        panel: crate::auth_panel::AuthPanel,
+        panel: std::boxed::Box<crate::auth_panel::AuthPanel>,
         heading: Option<String>,
     },
     /// The connect-more-providers picker.

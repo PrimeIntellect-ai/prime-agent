@@ -475,8 +475,10 @@ type OnboardingFlowTask = tokio::task::JoinHandle<crate::provider_auth::Provider
 /// The outcome of one onboarding pane drive: a screen decision, the exit
 /// keys, or the background flow settling while the pane waited.
 enum PaneOutcome {
+    /// A screen decision: the answer to the mounted panel's step, or the
+    /// onboarding exit keys (they arrive as a decision, not a drive
+    /// outcome — the pane's key loop reports them like any other key).
     Decision(crate::onboarding::OnboardingDecision),
-    Exit,
     /// The flow settled; `Err` is a crashed task (the flow's outcome
     /// reports the same error surface a failed login does).
     Flow(Result<crate::provider_auth::ProviderAuthOutcome, tokio::task::JoinError>),
@@ -535,11 +537,8 @@ async fn drive_onboarding_pane(
                     if key_id == "ctrl+c" {
                         drive.exit_guard.note_ctrl_c_handled();
                     }
-                    match pane.handle_key(&key_id, &drive.keybindings) {
-                        Some(decision) => {
-                            return Ok((pane, PaneOutcome::Decision(decision)));
-                        }
-                        None => {}
+                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
+                        return Ok((pane, PaneOutcome::Decision(decision)));
                     }
                 } else if let Some(UiInput::Paste(text)) = maybe_input {
                     pane.handle_paste(&text);
@@ -607,7 +606,7 @@ async fn run_onboarding_phase(
         let screen = crate::onboarding::OnboardingScreen::new();
         let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         match outcome {
-            PaneOutcome::Exit => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
                 // `Share` opts in; `Not now` keeps traces off (TS
                 // finish(index === 0)). A cancel writes no answer at all,
@@ -624,8 +623,7 @@ async fn run_onboarding_phase(
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
             // The question binds nothing else; a settled flow never ran.
             PaneOutcome::Decision(
-                crate::onboarding::OnboardingDecision::Exit
-                | crate::onboarding::OnboardingDecision::Begin
+                crate::onboarding::OnboardingDecision::Begin
                 | crate::onboarding::OnboardingDecision::Pick(_),
             )
             | PaneOutcome::Flow(_) => {
@@ -649,11 +647,10 @@ async fn run_onboarding_phase(
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
-        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
         PaneOutcome::Decision(
-            crate::onboarding::OnboardingDecision::Exit
-            | crate::onboarding::OnboardingDecision::Selected(_)
+            crate::onboarding::OnboardingDecision::Selected(_)
             | crate::onboarding::OnboardingDecision::Cancelled
             | crate::onboarding::OnboardingDecision::Pick(_),
         )
@@ -680,7 +677,10 @@ async fn run_onboarding_phase(
         return Ok(false);
     };
     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-        panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", prime_row.name)),
+        panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
+            "Login to {}",
+            prime_row.name
+        ))),
         heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
     });
     let prime_panel = session.auth_panel_handle();
@@ -697,7 +697,7 @@ async fn run_onboarding_phase(
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
-        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Flow(result) => result.unwrap_or_else(|_| {
             crate::provider_auth::ProviderAuthOutcome::Error(
                 "the Prime Inference login task failed".to_string(),
@@ -782,21 +782,18 @@ async fn run_onboarding_phase(
             drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         screen = picked_screen;
         let pick = match outcome {
-            PaneOutcome::Exit => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
             // Continue or Esc ends the step (TS settle(undefined) ->
             // return).
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
-                crate::onboarding_flow::ProviderPick::Continue,
-            ))
-            | PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
-                crate::onboarding_flow::ProviderPick::Cancelled,
+                crate::onboarding_flow::ProviderPick::Continue
+                | crate::onboarding_flow::ProviderPick::Cancelled,
             )) => break,
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
                 crate::onboarding_flow::ProviderPick::Provider(id),
             )) => id,
             PaneOutcome::Decision(
-                crate::onboarding::OnboardingDecision::Exit
-                | crate::onboarding::OnboardingDecision::Selected(_)
+                crate::onboarding::OnboardingDecision::Selected(_)
                 | crate::onboarding::OnboardingDecision::Cancelled
                 | crate::onboarding::OnboardingDecision::Begin,
             )
@@ -811,7 +808,10 @@ async fn run_onboarding_phase(
         match row.flow {
             crate::provider_auth::AuthFlow::ApiKeyPrompt => {
                 screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                    panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", row.name)),
+                    panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
+                        "Login to {}",
+                        row.name
+                    ))),
                     heading: None,
                 });
                 let panel = session.auth_panel_handle();
@@ -836,7 +836,9 @@ async fn run_onboarding_phase(
                     drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
                 screen = prompted_screen;
                 match outcome {
-                    PaneOutcome::Exit => return Ok(true),
+                    PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
+                        return Ok(true)
+                    }
                     PaneOutcome::Flow(result) => {
                         let outcome = result.unwrap_or_else(|_| {
                             crate::provider_auth::ProviderAuthOutcome::Error(
@@ -857,7 +859,10 @@ async fn run_onboarding_phase(
             _ => {
                 if row.id.starts_with("mcp:") {
                     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                        panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", row.name)),
+                        panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
+                            "Login to {}",
+                            row.name
+                        ))),
                         heading: None,
                     });
                     let panel = session.auth_panel_handle();
@@ -872,7 +877,9 @@ async fn run_onboarding_phase(
                             .await?;
                     screen = login_screen;
                     match outcome {
-                        PaneOutcome::Exit => return Ok(true),
+                        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
+                            return Ok(true)
+                        }
                         PaneOutcome::Flow(result) => {
                             let outcome = result.unwrap_or_else(|_| {
                                 crate::provider_auth::ProviderAuthOutcome::Error(
@@ -905,7 +912,7 @@ async fn run_onboarding_phase(
     ));
     let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
     match outcome {
-        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
             // `Share` opts in; `Not now` keeps traces off. A cancel
             // writes no answer, but the flow still completed.
@@ -915,8 +922,7 @@ async fn run_onboarding_phase(
         }
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
         PaneOutcome::Decision(
-            crate::onboarding::OnboardingDecision::Exit
-            | crate::onboarding::OnboardingDecision::Begin
+            crate::onboarding::OnboardingDecision::Begin
             | crate::onboarding::OnboardingDecision::Pick(_),
         )
         | PaneOutcome::Flow(_) => {

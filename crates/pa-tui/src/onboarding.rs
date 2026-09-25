@@ -204,14 +204,14 @@ impl OnboardingScreen {
     /// arrive here: the onboarding flows settle through their own spawned
     /// futures, so past-the-dialog requests are a no-op.
     pub fn apply_auth_request(&mut self, request: crate::auth_panel::AuthPanelRequest) {
+        use crate::auth_panel::AuthPanelRequest;
         let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
             return;
         };
-        use crate::auth_panel::AuthPanelRequest;
         match request {
             AuthPanelRequest::Progress { message } => panel.push_progress(message),
             AuthPanelRequest::AuthUrl { url, instructions } => {
-                panel.show_auth_url(url, instructions)
+                panel.show_auth_url(url, instructions);
             }
             AuthPanelRequest::PastePrompt {
                 prompt,
@@ -527,22 +527,6 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::theme::{ColorMode, Theme, ThemeJson};
-
-    fn option(label: &str, detail: Option<&str>) -> OnboardingChoiceOption {
-        OnboardingChoiceOption {
-            label: label.to_string(),
-            detail: detail.map(str::to_string),
-        }
-    }
-
-    fn choice_config(row_width: Option<usize>) -> OnboardingChoiceOptions {
-        OnboardingChoiceOptions {
-            prompt: Some("Pick one".to_string()),
-            description: None,
-            note: None,
-            row_width,
-        }
-    }
 
     fn custom_theme(json: &str, mode: ColorMode) -> Theme {
         let json: ThemeJson = serde_json::from_str(json).expect("valid theme json");
