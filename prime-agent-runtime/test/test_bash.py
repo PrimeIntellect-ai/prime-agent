@@ -489,8 +489,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, script=None):
+                original_init(handle_self, command, script=script)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -517,8 +517,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, script=None):
+                original_init(handle_self, command, script=script)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -592,8 +592,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         pids: list[int] = []
         original_init = bash_module.BashHandle.__init__
 
-        def capturing_init(handle_self, command):
-            original_init(handle_self, command)
+        def capturing_init(handle_self, command, script=None):
+            original_init(handle_self, command, script=script)
             pids.append(handle_self._pid)
 
         async def run_oneshot():
