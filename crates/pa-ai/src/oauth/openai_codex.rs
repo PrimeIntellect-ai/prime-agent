@@ -21,7 +21,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use super::callback::{CallbackCode, CodexCallbackServer};
+use super::callback::CodexCallbackServer;
 use super::CodexHttp;
 
 /// The app registration the TS flow ships (TS `CLIENT_ID`).
@@ -32,7 +32,7 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// The registered redirect (TS `REDIRECT_URI`): the callback server's
 /// own address.
-const REDIRECT_URI: &str = REDIRECT_URI;
+const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 /// TS `SCOPE`.
 const SCOPE: &str = "openid profile email offline_access";
 /// The TS flow's default originator.
