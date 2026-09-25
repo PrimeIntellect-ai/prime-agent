@@ -927,29 +927,38 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
             crossterm::event::KeyModifiers::NONE,
         ))
     };
-    let settle = || pa_tui::interactive::HeadlessStep::WaitMs(150);
+    // The plan waits on observable readiness, not fixed sleeps: each
+    // barrier holds the queued batch until a frame rendered after arming
+    // contains the condition, so a loaded runner cannot fire keys at a
+    // pane whose field or picker has not mounted yet (the pane drive
+    // implements the same WaitRender contract the run loop's session
+    // steps use).
+    let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 5_000,
+    };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             // The welcome screen's login action starts the flow.
             enter(),
             // The Prime sign-in: the paste prompt mounts with the flow.
-            settle(),
+            wait_render("Paste a Prime API key below:"),
             pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
             enter(),
             // The model applies behind the pane, then the picker mounts.
-            settle(),
+            wait_render("Connect other providers, or continue."),
             // Down to the provider row: Enter runs its key prompt.
             down(),
             enter(),
-            settle(),
+            wait_render("Enter API key"),
             pa_tui::interactive::HeadlessStep::Type("faux-key".to_string()),
             enter(),
             // The picker re-mounts with the connected mark; Enter on the
             // pinned Continue row ends the step.
-            settle(),
+            wait_render("\u{2713}"),
             enter(),
             // The trace question: Enter on the pre-selected Share row.
-            settle(),
+            wait_render("Share agent traces"),
             enter(),
             // The released pane runs the submitted turn.
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),

@@ -425,7 +425,11 @@ pub(crate) fn welcome_action_row(theme: &Theme, width: usize) -> Line {
             .add_modifier(Modifier::BOLD),
     );
     washed.style = washed.style.bg(highlight_wash(theme));
-    pad_to(vec![Span::raw(" "), washed], width)
+    // A pane narrower than the label truncates the row to the pane width
+    // (the picker rows run through the same `truncate_line`), so the
+    // action never spills the frame.
+    let line = crate::width::truncate_line(&vec![Span::raw(" "), washed], width, "");
+    pad_to(line, width)
 }
 
 /// TS `line`: the one-space-indented, width-padded row.

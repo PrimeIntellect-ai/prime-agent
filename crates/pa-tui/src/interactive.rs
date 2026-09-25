@@ -553,6 +553,24 @@ struct PaneDrive<'a> {
     headless_done: &'a mut bool,
 }
 
+/// The pane drive's render barrier (the run loop's `WaitRender`/
+/// `WaitGone` contract, pane-scoped): the headless plan's condition
+/// steps hold the queued input batch behind them until a frame rendered
+/// after arming satisfies the condition, so later keystrokes land on a
+/// pane that is actually ready for them instead of racing the panel
+/// mounts (a fixed wall-clock sleep only wins when the machine is idle).
+enum PaneBarrier {
+    /// `WaitRender`: a frame rendered at or after the baseline contains
+    /// the needle.
+    Render {
+        needle: String,
+        baseline: usize,
+        deadline: Instant,
+    },
+    /// `WaitGone`: the newest frame no longer contains the needle.
+    Gone { needle: String, deadline: Instant },
+}
+
 /// Draw the mounted onboarding screen and drive it until a key decides,
 /// the exit keys quit, or the optional background flow settles (TS the
 /// splash's render/wait loop). Each iteration draws first and waits
@@ -565,7 +583,38 @@ async fn drive_onboarding_pane(
     mut screen: crate::onboarding::OnboardingScreen,
     mut flow: Option<OnboardingFlowTask>,
 ) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
+    // The armed render barrier holds the input batch behind it (the
+    // loop's post-draw check pops it on satisfy or timeout).
+    let mut barrier: Option<PaneBarrier> = None;
     loop {
+        // The barrier check rides the redraw cadence: every iteration
+        // drew a fresh frame first, so the condition scans the frames
+        // that exist now.
+        if let Some(armed) = barrier.take() {
+            let satisfied = drive
+                .renderer
+                .headless_frames()
+                .is_some_and(|frames| match &armed {
+                    PaneBarrier::Render {
+                        needle, baseline, ..
+                    } => frames
+                        .get(*baseline..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|frame| frame.contains(needle.as_str())),
+                    PaneBarrier::Gone { needle, .. } => !frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str())),
+                });
+            let expired = match &armed {
+                PaneBarrier::Render { deadline, .. } | PaneBarrier::Gone { deadline, .. } => {
+                    Instant::now() > *deadline
+                }
+            };
+            if !satisfied && !expired {
+                barrier = Some(armed);
+            }
+        }
         // The pane owns the frame from the mount (TS renders the splash
         // the moment it opens).
         view.onboarding = Some(screen);
@@ -592,7 +641,7 @@ async fn drive_onboarding_pane(
             unreachable!("the pane mounts at the top of every iteration");
         };
         tokio::select! {
-            maybe_input = drive.ui_rx.recv() => {
+            maybe_input = drive.ui_rx.recv(), if barrier.is_none() => {
                 // A closed input channel ends the pane (the headless plan
                 // is done, the terminal reader is gone): without this arm
                 // the always-ready `recv()` spins the redraw loop hot.
@@ -641,6 +690,43 @@ async fn drive_onboarding_pane(
                 // driving until the channel closes or a decision ends
                 // it — the run loop's idle gate ends the run).
                 UiInput::HeadlessDone => *drive.headless_done = true,
+                // The plan's render barriers (the run loop's
+                // `WaitRender`/`WaitGone` contract, pane-scoped): a
+                // condition that already holds pops immediately; a
+                // pending one arms and holds the input batch behind it
+                // until a later frame satisfies it or the deadline pops
+                // (the timeout proceeds silently — the harness's
+                // assertion then reports the actual frame, the honest
+                // failure mode for a stall). The steps only ever come
+                // from the headless harness; a terminal pane consumes
+                // them as no-ops.
+                UiInput::WaitRender { needle, timeout_ms } => {
+                    let holds_now = drive.renderer.headless_frames().is_some_and(|frames| {
+                        frames.last().is_some_and(|frame| frame.contains(needle.as_str()))
+                    });
+                    if !holds_now {
+                        if let Some(frames) = drive.renderer.headless_frames() {
+                            barrier = Some(PaneBarrier::Render {
+                                needle,
+                                baseline: frames.len(),
+                                deadline: Instant::now()
+                                    + Duration::from_millis(timeout_ms),
+                            });
+                        }
+                    }
+                }
+                UiInput::WaitGone { needle, timeout_ms } => {
+                    let holds_now = drive.renderer.headless_frames().is_some_and(|frames| {
+                        !frames.last().is_some_and(|frame| frame.contains(needle.as_str()))
+                    });
+                    if !holds_now {
+                        barrier = Some(PaneBarrier::Gone {
+                            needle,
+                            deadline: Instant::now()
+                                + Duration::from_millis(timeout_ms),
+                        });
+                    }
+                }
                 // The plan's driving steps mean nothing to the pane
                 // (the headless harness replays them against the session
                 // screen once the pane releases).
@@ -648,8 +734,6 @@ async fn drive_onboarding_pane(
                 | UiInput::SettleIdle
                 | UiInput::Mouse(_)
                 | UiInput::WaitIdle { .. }
-                | UiInput::WaitRender { .. }
-                | UiInput::WaitGone { .. }
                 | UiInput::ScrollTop
                 | UiInput::Resize => {}
                 }
