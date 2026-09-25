@@ -410,10 +410,13 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     // on a pty, forking the hosted source by its id. The interactive seam
     // reads PRIME_AGENT_FAUX_SCRIPT as a script FILE path (it rides the
     // create config to the daemon worker).
+    // The scripted engine indexes responses by the session's prompt
+    // ordinal (message_count / 2): the fork's copied exchange occupies
+    // index 0, so the first LIVE turn on the fork runs at index 1.
     let fork_script = dir.path().join("script-fork.json");
     std::fs::write(
         &fork_script,
-        json!({ "responses": ["forkfollowanswer"] }).to_string(),
+        json!({ "responses": ["copied exchange slot", "forkfollowanswer"] }).to_string(),
     )
     .expect("write fork script");
     let outcome = dir.path().join("outcome");
