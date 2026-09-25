@@ -1,0 +1,2 @@
+- Changed the built-in Herdr reporter to identify as `custom:prime-agent` instead of Pi's `herdr:pi` source.
+- Added the versioned Herdr integration contract (`docs/herdr.md`) listing the identity, lifecycle states, session references, and resume command Herdr can rely on.

@@ -155,12 +155,14 @@ describe("herdrAgentStateExtension", () => {
 		expect(requests[0]).toMatchObject({
 			method: "pane.report_agent",
 			params: {
+				source: "custom:prime-agent",
 				agent: "prime-agent",
 				pane_id: "w1:p1",
 				state: "idle",
 				agent_session_path: "/tmp/session.jsonl",
 			},
 		});
+		expect(requests[0]?.params).not.toHaveProperty("agent_session_id");
 
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
 		await waitForRequests(2);
@@ -172,7 +174,10 @@ describe("herdrAgentStateExtension", () => {
 
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, ctx);
 		await waitForRequests(4);
-		expect(requests[3]).toMatchObject({ method: "pane.release_agent", params: { agent: "prime-agent" } });
+		expect(requests[3]).toMatchObject({
+			method: "pane.release_agent",
+			params: { source: "custom:prime-agent", agent: "prime-agent", pane_id: "w1:p1" },
+		});
 	});
 
 	it("reports working when the session starts mid-turn (reload)", async () => {
@@ -183,7 +188,7 @@ describe("herdrAgentStateExtension", () => {
 
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "reload" }, ctx);
 		await waitForRequests(1);
-		expect(requests[0]?.params.state).toBe("working");
+		expect(requests[0]?.params).toMatchObject({ state: "working", agent_session_id: "s" });
 
 		handlers.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
 		await waitForRequests(2);

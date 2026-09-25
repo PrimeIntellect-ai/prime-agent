@@ -56,6 +56,7 @@ Public releases are currently installed from versioned release artifacts. The in
 ## Reference
 
 - [Session format](session-format.md) - JSONL session file format, entry types, and SessionManager API.
+- [Herdr integration contract](herdr.md) - versioned identity, lifecycle, session, and resume values for Herdr.
 - [CLI package reference](../README.md) - complete user and CLI reference.
 
 ## Platform Setup

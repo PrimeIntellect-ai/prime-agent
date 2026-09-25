@@ -92,6 +92,10 @@
         {
           "title": "Session Format",
           "path": "session-format.md"
+        },
+        {
+          "title": "Herdr Integration Contract",
+          "path": "herdr.md"
         }
       ]
     },
