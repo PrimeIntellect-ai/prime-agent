@@ -7,6 +7,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
 	type AgentRosterEntry,
+	classifySessionRosterStatus,
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "../src/modes/daemon/agent-roster.js";
@@ -400,7 +401,7 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.lastComposed.has("session-root-active")).toBe(false);
 	});
 
-	it("republishes a finished row as idle once the settled verdict makes the summary current", async () => {
+	it("publishes a settled resident row as idle before its verdict and republishes when the verdict lands", async () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const state = makeState({
 			activeSessionId: "finished",
@@ -409,7 +410,9 @@ describe("worker roster reporter", () => {
 		});
 		daemon.sessions.set("finished", state);
 		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.entries.map((entry) => entry.summary.activity)).toEqual(["working"]);
+		const published = sentDeltas.at(-1)?.entries[0]?.summary;
+		expect(published?.activity).toBe("idle");
+		expect(classifySessionRosterStatus(published!)).toBe("idle");
 
 		(state as unknown as { summaryState?: unknown }).summaryState = {
 			summary: "Waiting for review",
@@ -419,7 +422,10 @@ describe("worker roster reporter", () => {
 		daemon.observeRosterEvent(state, { type: "session_status", activeSessionId: "finished" });
 		await new Promise((resolve) => setImmediate(resolve));
 
-		expect(sentDeltas.at(-1)?.entries.map((entry) => entry.summary.activity)).toEqual(["idle"]);
+		expect(sentDeltas.at(-1)?.entries[0]?.summary).toMatchObject({
+			activity: "idle",
+			taskState: "needs_input",
+		});
 	});
 
 	it("flushes cron and model changes that have no session-event carrier", async () => {

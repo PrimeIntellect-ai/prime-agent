@@ -67,7 +67,7 @@ describe("formatSessionsTable", () => {
 		["compacting", { activity: "working", isCompacting: true }, row("s", "running", "compacting")],
 		["completed verdict", { taskState: "completed" }, row("s", "idle", "completed")],
 		["saved status", { activeSessionId: undefined, rosterStatus: "inactive" }, row("s", "inactive", "")],
-		["queued label", { activity: "working", statusLabel: "queued" }, row("s", "queued", "classifying")],
+		["queued label", { activity: "working", statusLabel: "queued" }, row("s", "queued", "working")],
 		["recovering label", { statusLabel: "recovering" }, row("s", "recovering", "")],
 		["failed label", { statusLabel: "failed" }, row("s", "failed", "", "", "worker failed")],
 		[
@@ -75,7 +75,7 @@ describe("formatSessionsTable", () => {
 			{ modelFallbackMessage: "boom\u0007\u001B[31m!\u001B[39m" },
 			row("s", "idle", "", "", "boom!"),
 		],
-		["staleness", { activity: "working", lastHeardFromAt: STALE_AT }, row("s", "running", "classifying", "10m")],
+		["staleness", { activity: "working", lastHeardFromAt: STALE_AT }, row("s", "running", "working", "10m")],
 		["usage compact", { usage: SPEND }, row("s", "idle", "", "", "", "1.2k/567 $0.42")],
 		[
 			"sanitizes and truncates the recap appended to the activity detail",
@@ -112,7 +112,7 @@ describe("formatSessionsTable", () => {
 		["starting", { activity: "working", workerState: "starting" }],
 		["archived", { lifecycle: "archived", rosterStatus: "inactive" }],
 		["replied", { runtimeKind: "subagent", repliedSinceTask: true }],
-		["classifying", { activity: "working" }],
+		["working", { activity: "working" }],
 		["error", { taskState: "error" }],
 		["completed", { taskState: "completed" }],
 	])("%s agrees with the table's activity wording", (expected, overrides) => {

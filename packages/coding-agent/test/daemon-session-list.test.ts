@@ -42,6 +42,18 @@ describe("buildSessionList", () => {
 			{ messages: oneMessage, summaryState: currentSummary },
 			{ activity: "idle" },
 		],
+		[
+			"a resident session with a stale verdict is idle, not held at working",
+			{
+				messages: oneMessage,
+				summaryState: {
+					summary: "Old recap",
+					taskState: "completed",
+					basedOnMessageCount: 0,
+				} as ActiveSessionState["summaryState"],
+			},
+			{ activity: "idle", summary: "Old recap" },
+		],
 		["an empty resident session is idle", {}, { activity: "idle" }],
 		[
 			"a finished subagent is idle instead of stuck working",

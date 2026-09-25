@@ -125,8 +125,8 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
 		expect(generate).toHaveBeenCalledOnce();
-		// The activity axis holds an unjudged idle session at "working"; the fallback
-		// settles it to needs_input so it doesn't spin forever.
+		// A failed classification on an idle session settles to needs_input so it
+		// carries a current verdict.
 		expect(state.summaryState).toMatchObject({ taskState: "needs_input", basedOnMessageCount: 2 });
 	});
 

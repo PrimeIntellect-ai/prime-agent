@@ -20,8 +20,7 @@ export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roste
 // reachable only via --resume <selector>.
 export type SessionLifecycle = "draft" | "live" | "archived";
 
-// Heuristic activity of a live session. Classification-in-flight counts as
-// "working" so the view never sees an unlabeled idle session.
+// Activity of a live session: "working" only while the session itself is active.
 export type SessionActivity = "working" | "idle";
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
@@ -695,23 +694,9 @@ export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
 	return session.isSessionActive || session.hasRunningRlmChildren();
 }
 
+// The session's own work only; delegated work and the classification verdict don't count.
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {
-	// The session's own work only, ignoring the classification verdict.
-	if (activeSession.runtime.session.isSessionActive) {
-		return "working";
-	}
-	// A finished subagent is resident but never gets a summarizer verdict, so don't hold
-	// it at "working" waiting for one — a not-busy subagent is simply idle/done.
-	if (activeSession.runtime.metadata?.kind === "subagent") {
-		return "idle";
-	}
-	// An empty session never gets a summarizer verdict; don't hold it at "working" forever.
-	if (activeSession.runtime.session.messages.length === 0) {
-		return "idle";
-	}
-	// Hold at "working" until the idle verdict is current, so the view never
-	// buckets an unlabeled idle session.
-	return isSummaryCurrent(activeSession) ? "idle" : "working";
+	return activeSession.runtime.session.isSessionActive ? "working" : "idle";
 }
 
 /**
