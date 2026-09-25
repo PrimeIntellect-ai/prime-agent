@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
 use nix::pty::{openpty, Winsize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use pa_types::daemon::DaemonCommand;
 
@@ -236,7 +236,7 @@ async fn make_session_active(socket: &Path, session_path: &Path, cwd: &Path) -> 
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
         .await
         .expect("open the source session");
@@ -261,7 +261,7 @@ async fn daemon_roster(socket: &Path) -> Vec<(PathBuf, String)> {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
         .await
         .expect("list sessions");
