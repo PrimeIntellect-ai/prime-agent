@@ -1166,9 +1166,14 @@ impl SessionInfoGeneration {
 const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
 
 /// The cached-state count ceiling: files with no usage records never trip
-/// the usage budget, so the state count needs its own cap. Eviction stays
-/// LRU-first (never the old clear-all, which forced a full rescan).
-const SESSION_SCAN_MAX_CACHED_STATES: usize = 512;
+/// the usage budget, so the state count needs its own cap. The cap must
+/// sit well ABOVE a catalog refresh's working set (every saved session
+/// plus every passive child walks into the cache on one list; TS's design
+/// point is ~2k sessions resident) - a cap inside the working set would
+/// evict mid-walk and thrash every pass into a full rescan. 4096 keeps
+/// the ~2k families plus headroom while bounding unbounded-growth; eviction
+/// stays LRU-first (never the old clear-all).
+const SESSION_SCAN_MAX_CACHED_STATES: usize = 4096;
 
 /// TS `sessionScanStates` + `storeSessionScanState`'s accounting: the
 /// states map with its insertion order (JS Map iteration order — the LRU

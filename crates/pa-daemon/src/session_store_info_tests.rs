@@ -495,24 +495,35 @@ fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
 #[test]
 fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
     let dir = test_dir();
-    // Zero-usage session files (a header only): their accounted usage is 0,
-    // so only the state-count cap can evict them (LRU-first, never clear-all).
+    // Zero-usage sessions: a timestamped user message each (no assistant
+    // usage block, so accounted entries stay 0 - only the count cap can
+    // evict; the message also passes the modified_ms > 0 store guard).
     for index in 0..(SESSION_SCAN_MAX_CACHED_STATES + 8) {
         let path = dir.join(format!("zero-{index}.jsonl"));
         append_rows(
             &path,
             &[
                 json!({"type":"session","id":format!("z{index}"),"timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+                json!({"type":"message","id":format!("zm{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"n","timestamp":1_790_110_000_000_u64}}),
             ],
         );
         let info = read_session_info(&path).unwrap();
-        assert_eq!(info.message_count, 0);
+        assert_eq!(info.message_count, 1);
     }
+    // The cache really populated past the cap and stayed capped: LRU-first
+    // eviction dropped the earliest-written files, the latest stay resident.
     let cache = super::session_info_cache().lock().unwrap();
-    assert!(
-        cache.states.len() <= super::SESSION_SCAN_MAX_CACHED_STATES,
-        "the state count must stay under the cap, got {}",
+    assert_eq!(
+        super::SESSION_SCAN_MAX_CACHED_STATES,
+        cache.states.len(),
+        "the state count must sit exactly at the cap, got {}",
         cache.states.len()
     );
     assert_eq!(cache.order.len(), cache.states.len());
+    assert!(!cache.states.contains_key(&dir.join("zero-0.jsonl")));
+    assert!(!cache.states.contains_key(&dir.join("zero-7.jsonl")));
+    assert!(cache.states.contains_key(&dir.join(format!(
+        "zero-{}.jsonl",
+        super::SESSION_SCAN_MAX_CACHED_STATES + 7
+    ))));
 }
