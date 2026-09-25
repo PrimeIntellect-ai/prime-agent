@@ -43,6 +43,19 @@ pub(crate) struct TranscriptLayout {
 }
 
 impl TranscriptLayout {
+    /// The absolute transcript row one entry starts at (`index` runs over
+    /// the chat entries plus the end sentinel at `chat.len()`, so the
+    /// splash precedes `entry_start(0)` and the tail starts at
+    /// `entry_start(chat.len())`).
+    pub(super) fn entry_start(&self, index: usize) -> usize {
+        self.offsets[index.min(self.offsets.len().saturating_sub(1))]
+    }
+
+    /// The absolute transcript row the tail section starts at.
+    pub(super) fn tail_start(&self) -> usize {
+        self.offsets.last().copied().unwrap_or(self.splash.len())
+    }
+
     pub(super) fn cursor_at(&self, row: usize) -> (usize, usize) {
         if row < self.splash.len() {
             return (0, row);
@@ -134,7 +147,9 @@ impl AgentView {
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. } => !first,
             ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_) => {
-                self.conversation_leading(index, self.detail.tool_output_expanded())
+                // TS `shouldAddLeadingSpace(expanded)` reads the
+                // component's own expansion (#2430), not the global.
+                self.conversation_leading(index, self.entry_tool_expanded(index))
             }
             // The bash card's own mount rule (TS `Spacer(1)` unless the
             // chat's last child is an agent message, captured on the card
@@ -224,7 +239,7 @@ impl AgentView {
             .resize(self.chat.len(), [None, None, None]);
     }
 
-    pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
+    pub(super) fn render_transcript_tail(&mut self, width: usize) -> Vec<Line> {
         let mut tail: Vec<Line> = Vec::new();
         // The `?` quick-shortcut guide renders right below the chat rows
         // (TS mounts `shortcutGuideContainer` between the chat and the
@@ -300,16 +315,22 @@ impl AgentView {
         // a bottom-pinned dock) lands between the pane and the editor like
         // TS, never inside the pane. TS mounts the pane behind a `Spacer(1)`
         // (`sideQuestionContainer.addChild(new Spacer(1))`), so one blank
-        // row precedes the component's own leading blank.
+        // row precedes the component's own leading blank. The pane's bash
+        // header click row lands tail-relative (TS `Clickable`; #2430).
         if let Some(pane) = &self.side_pane {
             tail.push(Vec::new());
-            tail.extend(pane.render(
+            let pane_at = tail.len();
+            let (pane_rows, bash_click_row) = pane.render(
                 &self.theme,
                 self.pulse_frame,
                 self.detail.tool_output_expanded(),
                 &self.editor.keybindings().key_text("tui.select.cancel"),
                 width,
-            ));
+            );
+            self.tail_clicks = bash_click_row
+                .map(|row| vec![pane_at + row])
+                .unwrap_or_default();
+            tail.extend(pane_rows);
         }
         tail
     }

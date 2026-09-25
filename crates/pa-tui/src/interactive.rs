@@ -70,7 +70,8 @@ pub struct ModelSelection {
 }
 
 /// Adoption telemetry for interactive-view interactions (schema v1 events
-/// `tui scroll used`, `tui selection used`, and `tui exit`). pa-tui stays
+/// `tui scroll used`, `tui selection used`, `tui click used`, and
+/// `tui exit`). pa-tui stays
 /// pa-types-only, so the
 /// composition root implements this against the telemetry client.
 /// The seam is object-safe (held as `Arc<dyn InteractionTelemetry>` in the
@@ -87,6 +88,10 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first selection copy (`tui selection used`): `lines` is
     /// the copied text's line count.
     fn selection_used(&self, lines: usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first clean-click dispatch (`tui click used`): `action`
+    /// is the dispatched surface class (`open_link` / `toggle_entry` /
+    /// `toggle_side_bash` / `editor_cursor`).
+    fn click_used(&self, action: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A builtin client command was submitted (`agent command used`):
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.
@@ -594,6 +599,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// URLs opened by clean clicks on OSC 8 links (headless runs spawn no
+    /// opener; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -1062,6 +1070,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -2285,6 +2294,7 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        opened_urls: std::mem::take(&mut session.opened_urls),
         agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now

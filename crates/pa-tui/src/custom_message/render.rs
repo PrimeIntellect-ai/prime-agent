@@ -160,6 +160,18 @@ pub(crate) fn render_agent_message(
     out
 }
 
+/// The header's wrapped row count — the entry's click surface spans the
+/// whole header (TS `AgentMessageComponent` registers it at
+/// `leadingSpace ? 1 : 0`; #2430).
+pub(crate) fn agent_message_header_rows(
+    row: &AgentMessageRow,
+    theme: &Theme,
+    width: usize,
+) -> usize {
+    let header = agent_message_header(row, theme, width);
+    crate::width::wrapped_line_count(&header, width.saturating_sub(2).max(1))
+}
+
 /// The summary header with the preview truncated to fit the line: the
 /// label and participant keep TS geometry, the preview gets the remaining
 /// width with the `…` ellipsis so the header stays one row.

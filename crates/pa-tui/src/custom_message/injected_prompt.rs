@@ -266,6 +266,19 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
     header
 }
 
+/// The header's wrapped row count — the entry's click surface spans the
+/// whole header (TS wraps the `InjectedPromptMessageComponent` header in
+/// `Clickable`; #2430).
+pub(crate) fn injected_prompt_header_rows(
+    row: &InjectedPromptRow,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+) -> usize {
+    let header = prompt_header(row, detail, theme);
+    super::geometry::text_row_count(&header, width)
+}
+
 pub(crate) fn count_injected_prompt(
     row: &InjectedPromptRow,
     detail: Detail,

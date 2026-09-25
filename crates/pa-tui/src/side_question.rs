@@ -102,6 +102,11 @@ pub struct SideQuestionPane {
     /// itself): the raw `!input` and the formatted output.
     pub extra_seeds: Vec<(String, String)>,
     pub expanded: bool,
+    /// The pane's bash block expansion override (TS per-component
+    /// `expanded` for the pane's `BashExecutionComponent`, #2430): its
+    /// header click flips only this block; the Ctrl+O cycle resets it
+    /// (TS `applyChatExpansion`).
+    pub bash_expanded: Option<bool>,
 }
 
 /// The pane's horizontal padding (TS `paddingX = max(2, editorPaddingX)`;
@@ -157,6 +162,21 @@ impl SideQuestionPane {
     /// `BashExecutionCard` rows (TS `addBash` appends the same component
     /// the main thread mounts), so the pane passes the card renderer its
     /// frame, expansion flag, and cancel hint.
+    /// The bash block's effective expansion (TS the component's own
+    /// `expanded`): its click override when set, the global otherwise.
+    pub fn bash_tool_expanded(&self, global: bool) -> bool {
+        self.bash_expanded.unwrap_or(global)
+    }
+
+    /// Flip the pane's bash block expansion (TS `Clickable`'s header
+    /// click) from the current effective state.
+    pub fn toggle_bash_expanded(&mut self, global: bool) {
+        self.bash_expanded = Some(!self.bash_tool_expanded(global));
+    }
+
+    /// Render the pane plus its click row: the bash block's `$ command`
+    /// header row index within the returned rows, when a bash block is
+    /// mounted (TS `Clickable` over the pane's bash header; #2430).
     pub fn render(
         &self,
         theme: &Theme,
@@ -164,7 +184,7 @@ impl SideQuestionPane {
         expanded: bool,
         cancel_hint: &str,
         width: usize,
-    ) -> Vec<crate::Line> {
+    ) -> (Vec<crate::Line>, Option<usize>) {
         let bg = theme.bg_style(ThemeBg::ToolPanelBg);
         let user_text = theme.fg_style(ThemeColor::UserMessageText);
         let accent = theme.fg_style(ThemeColor::Accent);
@@ -249,17 +269,27 @@ impl SideQuestionPane {
         // row): one blank before and after, the card's own leading
         // spacer excluded (the pane adds the blank itself, matching the
         // component's `Spacer(1)` row inside its render).
+        let mut bash_click_row = None;
         if let Some(bash) = &self.bash {
             rows.push(blank());
             let card = bash.execution_card();
-            for row in crate::bash_card::render_bash_execution(
+            for (index, row) in crate::bash_card::render_bash_execution(
                 &card,
                 frame,
-                expanded,
+                self.bash_tool_expanded(expanded),
                 cancel_hint,
                 theme,
                 width,
-            ) {
+            )
+            .into_iter()
+            .enumerate()
+            {
+                // The `$ command` header rows sit right after the card's
+                // border row; the first is the block's click surface (TS
+                // `Clickable` over the bash header).
+                if bash_click_row.is_none() && index == 1 {
+                    bash_click_row = Some(rows.len());
+                }
                 rows.push(surface(row));
             }
             rows.push(blank());
@@ -276,7 +306,7 @@ impl SideQuestionPane {
             crate::Span::styled(hint.to_string(), dim),
         ]));
         rows.push(blank());
-        rows
+        (rows, bash_click_row)
     }
 }
 
@@ -409,7 +439,7 @@ mod tests {
         let mut bash = PaneBash::new_running("echo hi", true);
         bash.output = "hi\n".to_string();
         pane.bash = Some(bash);
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let text =
             |line: &crate::Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
         let joined: Vec<String> = rows.iter().map(&text).collect();
@@ -432,6 +462,7 @@ mod tests {
         pane.bash.as_mut().unwrap().exit_code = Some(3);
         let joined: Vec<String> = pane
             .render(&theme, 0, false, "Esc/Ctrl+C", 80)
+            .0
             .iter()
             .map(&text)
             .collect();
@@ -456,7 +487,7 @@ mod tests {
         let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
         let mut pane = SideQuestionPane::default();
         pane.upsert(turn("a", "complete", "the answer"));
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let text =
             |line: &crate::Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
         let joined: Vec<String> = rows.iter().map(&text).collect();
@@ -471,7 +502,7 @@ mod tests {
             .any(|row| row.contains("reply to follow up · esc to return to session")));
         // A running turn swaps the hint.
         pane.upsert(turn("b", "running", ""));
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let joined: Vec<String> = rows.iter().map(&text).collect();
         assert!(joined
             .iter()
@@ -482,7 +513,7 @@ mod tests {
             answer: String::new(),
             ..turn("b", "cancelled", "")
         });
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let joined: Vec<String> = rows.iter().map(&text).collect();
         assert!(joined.iter().any(|row| row.contains("Cancelled")));
     }

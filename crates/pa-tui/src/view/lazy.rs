@@ -1,6 +1,6 @@
 //! Sparse fullscreen windows. Unknown global row totals are resolved only
 //! for callers that require absolute coordinates (selection and scroll info).
-use super::{layout::EntryLayout, AgentView};
+use super::{layout::EntryLayout, layout::TranscriptLayout, AgentView};
 use crate::chat::Detail;
 use crate::chrome::render_splash;
 use crate::Line;
@@ -230,7 +230,7 @@ impl AgentView {
         &mut self,
         width: usize,
         height: usize,
-    ) -> (Vec<Line>, usize) {
+    ) -> (Vec<Line>, usize, crate::click_regions::WindowClickMap) {
         // A paused width change preserves the reference's absolute row
         // offset; a paused detail change keeps the walked cursor (the
         // window re-renders its entries under the new detail without
@@ -277,7 +277,8 @@ impl AgentView {
             });
             self.sparse_enabled = true;
             // Only visible entries acquired Lines; exact heights remain cached.
-            return (rows, self.scroll_top);
+            let clicks = self.window_click_map_from_layout(&layout, self.scroll_top, height);
+            return (rows, self.scroll_top, clicks);
         }
         let mut window = self.sparse_window.expect("sparse window established above");
         if !self.following && height != self.window_rows {
@@ -348,11 +349,20 @@ impl AgentView {
         window.pending = 0;
         window.cursor = Some((section, row));
         let mut rows = Vec::with_capacity(height);
+        // The window-relative start of each section the walk appends (the
+        // click map's materialization point): entries map to their chat
+        // index, the tail to its bash-block click row. A section clipped at
+        // the window top (its first `from` rows sit above the viewport)
+        // records its TRUE start — the clip offset shifts it — so entry
+        // click rows project to the rows the entry actually occupies.
+        let mut section_starts: Vec<(usize, usize, usize)> = Vec::new();
         while rows.len() < height && section <= last {
+            let start_row = rows.len();
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
             rows.extend_from_slice(&source[from..to]);
+            section_starts.push((section, start_row, from));
             section += 1;
             row = 0;
         }
@@ -402,7 +412,48 @@ impl AgentView {
                 .saturating_sub(rows.len()),
             Anchor::Top(offset) => offset,
         };
-        (rows, start)
+        let mut clicks = crate::click_regions::WindowClickMap::default();
+        for (section, start_row, from) in section_starts {
+            if section == 0 {
+                continue;
+            }
+            // The clipped rows sit above the window's first frame row:
+            // the section's true start is its first visible row minus the
+            // clip offset (never underflowing the walk's origin).
+            let abs_row = (start + start_row).saturating_sub(from);
+            if section == last {
+                clicks.tail_start = Some(abs_row);
+            } else {
+                clicks.entries.push((section - 1, abs_row));
+            }
+        }
+        (rows, start, clicks)
+    }
+
+    /// The exact window's click map from a full layout (TS projects the
+    /// scroll's regions onto the window; the rows here are absolute
+    /// transcript positions the frame compose offsets by the window
+    /// start): every entry intersecting `[start, start + height)`.
+    fn window_click_map_from_layout(
+        &self,
+        layout: &TranscriptLayout,
+        start: usize,
+        height: usize,
+    ) -> crate::click_regions::WindowClickMap {
+        let end = start.saturating_add(height);
+        let mut clicks = crate::click_regions::WindowClickMap::default();
+        for index in 0..self.chat.len() {
+            let entry_start = layout.entry_start(index);
+            let entry_end = layout.entry_start(index + 1);
+            if entry_start < end && entry_end > start {
+                clicks.entries.push((index, entry_start));
+            }
+        }
+        let tail_start = layout.tail_start();
+        if tail_start < end {
+            clicks.tail_start = Some(tail_start);
+        }
+        clicks
     }
 
     pub(super) fn sparse_entry_rows(

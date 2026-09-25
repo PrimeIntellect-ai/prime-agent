@@ -21,6 +21,7 @@ pub(crate) mod branch;
 pub mod chat;
 pub mod chat_slash;
 pub mod chrome;
+pub(crate) mod click_regions;
 pub mod client_auth;
 pub mod client_settings;
 mod clipboard;

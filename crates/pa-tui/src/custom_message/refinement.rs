@@ -372,7 +372,9 @@ fn edit_field_rows(edit: &Value) -> Vec<EditField> {
 }
 
 mod layout;
-pub(crate) use layout::{count_refinement_outcome, render_refinement_outcome};
+pub(crate) use layout::{
+    count_refinement_outcome, refinement_header_rows, render_refinement_outcome,
+};
 
 /// One line-diff op over the field's removed/added values.
 enum DiffOp {

@@ -686,19 +686,20 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     for s in label_spans.iter_mut() {
                         s.style = s.style.add_modifier(m);
                     }
-                    if crate::hyperlinks::hyperlinks_enabled() {
-                        // OSC 8: the label is clickable, the URL never
-                        // printed inline (TS `hyperlink()`).
-                        let open = crate::hyperlinks::osc8_open(&href);
-                        if let Some(first) = label_spans.first_mut() {
-                            first.content.insert_str(0, &open);
-                        }
-                        if let Some(last) = label_spans.last_mut() {
-                            last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                        }
-                        spans.extend(label_spans);
-                    } else {
-                        spans.extend(label_spans);
+                    // The label always carries the OSC 8 hyperlink (TS
+                    // #2430 wraps it in both capability paths — the app's
+                    // own click-open handles it even where the terminal
+                    // ignores the sequence); the capability only decides
+                    // whether the URL prints inline after the text.
+                    let open = crate::hyperlinks::osc8_open(&href);
+                    if let Some(first) = label_spans.first_mut() {
+                        first.content.insert_str(0, &open);
+                    }
+                    if let Some(last) = label_spans.last_mut() {
+                        last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+                    }
+                    spans.extend(label_spans);
+                    if !crate::hyperlinks::hyperlinks_enabled() {
                         // Legacy form: the URL shows after the text unless
                         // the label is the URL (mailto stripped for the
                         // comparison, like autolinked emails).
@@ -802,16 +803,17 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 m |= style.italic;
             }
             let label = Span::styled(token.text.clone(), base.add_modifier(m));
-            if crate::hyperlinks::hyperlinks_enabled() {
-                // OSC 8: the label is clickable, the URL never printed
-                // inline (TS `hyperlink()`).
-                let href = crate::hyperlinks::resolve_link_href(&token.href);
-                let mut content = label.content;
-                content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
-                content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                spans.push(Span::styled(content, label.style));
-            } else {
-                spans.push(label);
+            // The label always carries the OSC 8 hyperlink (TS #2430
+            // wraps it in both capability paths — the app's own
+            // click-open handles it even where the terminal ignores the
+            // sequence); the capability only decides whether the URL
+            // prints inline after the text.
+            let href = crate::hyperlinks::resolve_link_href(&token.href);
+            let mut content = label.content;
+            content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
+            content.push_str(crate::hyperlinks::OSC8_CLOSE);
+            spans.push(Span::styled(content, label.style));
+            if !crate::hyperlinks::hyperlinks_enabled() {
                 // Legacy form: the URL shows after the label unless the
                 // label already is it (mailto stripped), TS token.href.
                 let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
@@ -1021,6 +1023,17 @@ pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Span contents with the OSC 8 wrappers stripped — the visible row.
+    /// TS #2430 wraps every link label in BOTH capability paths (the app's
+    /// own click-open reads it even where the terminal ignores the
+    /// sequence), so the fallback-form tests pin the visible text.
+    fn visible_text(spans: &[Span]) -> Vec<String> {
+        spans
+            .iter()
+            .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
+            .collect()
+    }
 
     #[test]
     fn heading_and_paragraph() {
@@ -1250,8 +1263,18 @@ mod tests {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
         let spans = render_inline("a **b** `c` [d](http://e)", &style);
-        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]);
+        assert_eq!(
+            visible_text(&spans),
+            vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]
+        );
+        // The label keeps its OSC 8 wrapper in the legacy form too (TS
+        // #2430: the app's click-open handles the link) — under the
+        // canonicalized href `url::Url` resolves it to.
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert!(joined.contains(&crate::hyperlinks::osc8_open(
+            &crate::hyperlinks::resolve_link_href("http://e")
+        )));
+        assert!(joined.contains(crate::hyperlinks::OSC8_CLOSE));
         crate::hyperlinks::set_hyperlinks_override(None);
     }
 
@@ -1260,15 +1283,14 @@ mod tests {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
         let spans = render_inline("see [docs](https://x.dev/a)", &style);
-        let texts: Vec<String> = spans.iter().map(|s| s.content.clone()).collect();
         assert_eq!(
-            texts,
-            vec![
-                "see ".to_string(),
-                "docs".to_string(),
-                " (https://x.dev/a)".to_string()
-            ]
+            visible_text(&spans),
+            vec!["see ", "docs", " (https://x.dev/a)"]
         );
+        // The label keeps its OSC 8 wrapper in the legacy form (TS #2430).
+        let raw: String = spans[1].content.clone();
+        assert!(raw.starts_with(&crate::hyperlinks::osc8_open("https://x.dev/a")));
+        assert!(raw.ends_with(crate::hyperlinks::OSC8_CLOSE));
         // The observed TS binary output styles the label with the body
         // color only (the underline wrapper never reaches the wire).
         assert!(!spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
@@ -1277,10 +1299,10 @@ mod tests {
         // The URL is not repeated when the label is the URL, and mailto
         // labels compare with the prefix stripped (autolinked emails).
         let bare = render_inline("[https://x.dev](https://x.dev)", &style);
-        let joined: String = bare.iter().map(|s| s.content.as_str()).collect();
+        let joined = visible_text(&bare).join("");
         assert_eq!(joined, "https://x.dev");
         let mail = render_inline("[a@b.dev](mailto:a@b.dev)", &style);
-        let joined: String = mail.iter().map(|s| s.content.as_str()).collect();
+        let joined = visible_text(&mail).join("");
         assert_eq!(joined, "a@b.dev");
         crate::hyperlinks::set_hyperlinks_override(None);
     }
@@ -1341,17 +1363,21 @@ mod tests {
         // Trailing punctuation is backpedaled out of the link and stays in
         // the text stream.
         let spans = render_inline("go to https://x.dev/pull/182. now", &style);
-        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(texts, vec!["go to ", "https://x.dev/pull/182", ". now"]);
+        assert_eq!(
+            visible_text(&spans),
+            vec!["go to ", "https://x.dev/pull/182", ". now"]
+        );
         // Balanced paren groups survive; the peeled trailing run re-renders
         // so the visible row is unchanged.
         let spans = render_inline("(see https://x.dev/a(b)) ok", &style);
-        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        let joined = visible_text(&spans).join("");
         assert_eq!(joined, "(see https://x.dev/a(b)) ok");
         // A comma separates the link from the sentence tail.
         let spans = render_inline("(visit https://x.dev/page, thanks)", &style);
-        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(texts, vec!["(visit ", "https://x.dev/page", ", thanks)"]);
+        assert_eq!(
+            visible_text(&spans),
+            vec!["(visit ", "https://x.dev/page", ", thanks)"]
+        );
         crate::hyperlinks::set_hyperlinks_override(None);
     }
 
@@ -1359,12 +1385,7 @@ mod tests {
     fn bare_url_autolink_forms() {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
-        let joined = |md: &str| -> String {
-            render_inline(md, &style)
-                .iter()
-                .map(|s| s.content.as_str())
-                .collect()
-        };
+        let joined = |md: &str| -> String { visible_text(&render_inline(md, &style)).join("") };
         // ftp and case-insensitive schemes link; uppercase targets pass
         // through unresolved (target == token href, like TS).
         assert_eq!(joined("ftp://files.x.io/x"), "ftp://files.x.io/x");
@@ -1398,9 +1419,8 @@ mod tests {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
         let spans = render_inline("www.example.com/path", &style);
-        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
         assert_eq!(
-            texts,
+            visible_text(&spans),
             vec!["www.example.com/path", " (http://www.example.com/path)"]
         );
         crate::hyperlinks::set_hyperlinks_override(None);
@@ -1413,7 +1433,7 @@ mod tests {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
         let spans = render_inline("mail foo.bar+baz@example.co.uk ok", &style);
-        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        let joined = visible_text(&spans).join("");
         assert_eq!(joined, "mail foo.bar+baz@example.co.uk ok");
         // OSC 8 form: the href carries mailto:.
         crate::hyperlinks::set_hyperlinks_override(Some(true));
@@ -1466,8 +1486,10 @@ mod tests {
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
         let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
-        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
+        assert_eq!(
+            visible_text(&spans),
+            vec!["see https://in.dev/x", " (https://out.dev/y)"]
+        );
         crate::hyperlinks::set_hyperlinks_override(None);
     }
 

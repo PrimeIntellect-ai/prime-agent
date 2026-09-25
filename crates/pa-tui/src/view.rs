@@ -231,6 +231,24 @@ pub struct AgentView {
     /// frame; the window re-styles only the rows the selection change
     /// touched): walked base rows, their styled copies, and the spans.
     pub(crate) selection_restyle: restyle::SelectionRestyle,
+    /// The click surfaces of the last composed frame (TS
+    /// `FullscreenViewport.frameClickTargets`): transcript toggle rows
+    /// projected through the window, the dock editor's content rows, and
+    /// the frame's OSC 8 links.
+    pub(crate) frame_clicks: crate::click_regions::FrameClicks,
+    /// Per-entry expansion overrides (TS per-component `expanded` state,
+    /// #2430): a header/summary click flips only its entry; the Ctrl+O
+    /// detail cycle clears the map so every entry follows the global
+    /// detail again (TS `applyChatExpansion`).
+    pub(crate) entry_expanded: std::collections::HashMap<usize, bool>,
+    /// The editor's click layout from the last dock render (TS
+    /// `Editor.clickLayout`): the visible layout lines plus where the
+    /// text starts. Dock-relative; the frame compose maps it through the
+    /// dock crop.
+    pub(crate) editor_click: Option<crate::click_regions::EditorClickMap>,
+    /// The tail's click rows (the side-question pane's bash header),
+    /// tail-relative, recorded by the last `render_transcript_tail`.
+    pub(crate) tail_clicks: Vec<usize>,
     /// The ephemeral action toasts (the top-right auto-dismiss overlay;
     /// a sanctioned divergence from TS — see `toast`).
     pub toasts: crate::toast::Toasts,
@@ -329,6 +347,10 @@ impl AgentView {
             dock_cursor: None,
             window_rows: 0,
             osc_last_rows: std::collections::HashMap::new(),
+            frame_clicks: crate::click_regions::FrameClicks::default(),
+            entry_expanded: std::collections::HashMap::new(),
+            editor_click: None,
+            tail_clicks: Vec::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
             entry_heights: Vec::new(),
@@ -417,6 +439,10 @@ impl AgentView {
             let rows = self.count_entry_rows(index, self.layout_width);
             self.sparse_tail_delta(-(rows as isize), index);
         }
+        // The popped entry's expansion override goes with it: a later
+        // replacement appended at the same index inherits the global
+        // detail, never the old card's click state.
+        self.entry_expanded.remove(&index);
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
         self.entry_heights.pop();
@@ -536,6 +562,98 @@ impl AgentView {
         // A rebuilt transcript has no pending hold (TS
         // `resetCurrentSessionRenderState` clears `pendingBashComponents`).
         self.pending_bash.clear();
+        // A rebuilt transcript re-creates every component (TS mounts fresh
+        // components from the replayed messages): the per-entry expansion
+        // overrides and the tail's click rows go with the old rows.
+        self.entry_expanded.clear();
+        self.tail_clicks.clear();
+    }
+
+    /// The effective tool-output expansion of one chat entry (TS
+    /// per-component `expanded` after #2430): its own click override when
+    /// set, the global detail otherwise.
+    pub(crate) fn entry_tool_expanded(&self, index: usize) -> bool {
+        self.entry_expanded
+            .get(&index)
+            .copied()
+            .unwrap_or_else(|| self.detail.tool_output_expanded())
+    }
+
+    /// The detail a toggleable entry renders under: these entry families
+    /// read only `tool_output_expanded()` from the detail (the edit-diff
+    /// and thinking bits never reach their renderers), so the per-entry
+    /// override maps onto the two levels that differ exactly in that bit.
+    fn entry_detail(&self, index: usize) -> Detail {
+        if self.entry_tool_expanded(index) {
+            Detail::All
+        } else {
+            Detail::Overview
+        }
+    }
+
+    /// Flip one entry's own expansion (TS `Clickable`'s header click) and
+    /// retire its cached rows so the next frame re-renders it (TS
+    /// components re-render on `setExpanded`): the standard in-place
+    /// mutation protocol — capture the height, flip, mark stale — so the
+    /// sparse window's tail bookkeeping folds the growth like any other
+    /// entry mutation.
+    pub(crate) fn toggle_entry_expanded(&mut self, index: usize) {
+        self.prepare_entry_mutation(index);
+        let expanded = self.entry_tool_expanded(index);
+        self.entry_expanded.insert(index, !expanded);
+        self.mark_entry_stale(index);
+    }
+
+    /// Reset every per-entry expansion override (TS `applyChatExpansion`
+    /// fans the cycled global state out to all components on Ctrl+O). The
+    /// per-entry row caches go with the overrides: they are keyed by the
+    /// global detail level, so a render stored under an override would
+    /// otherwise replay it after the cycle returns to that level.
+    pub(crate) fn clear_entry_expanded(&mut self) {
+        self.entry_expanded.clear();
+        self.entry_layout.fill([None, None, None]);
+        self.entry_heights.fill([None, None, None]);
+    }
+
+    /// Toggle the side-question pane's bash block expansion (TS
+    /// `Clickable` over the pane's `BashExecutionComponent` header).
+    pub(crate) fn toggle_side_pane_bash(&mut self) {
+        if let Some(pane) = self.side_pane.as_mut() {
+            pane.toggle_bash_expanded(self.detail.tool_output_expanded());
+        }
+    }
+
+    /// The click target covering a frame position (TS
+    /// `FullscreenViewport.clickTargetAt`).
+    pub(crate) fn frame_click_target_at(
+        &self,
+        row: usize,
+        col: usize,
+    ) -> Option<crate::click_regions::FrameClickTarget> {
+        self.frame_clicks.target_at(row, col)
+    }
+
+    /// The OSC 8 hyperlink at a frame position (TS `hyperlinkAt`).
+    pub(crate) fn frame_link_at(&self, row: usize, col: usize) -> Option<String> {
+        self.frame_clicks.link_at(row, col).map(str::to_string)
+    }
+
+    /// Focus the editor and place the caret at a clicked content cell (TS
+    /// `Editor.placeCursorFromClick`): the row is the visible layout line
+    /// index of the last dock render, the column the frame column.
+    pub(crate) fn place_editor_cursor_from_click(&mut self, row: usize, col: usize) {
+        let Some(map) = &self.editor_click else {
+            return;
+        };
+        let Some(line) = map.visible.get(row) else {
+            return;
+        };
+        let source = line.source_line;
+        let from = line.source_start;
+        let to = from + line.text.chars().count();
+        // The column past the prompt prefix and inner pad.
+        let rel = col.saturating_sub(map.text_col);
+        self.editor.place_cursor_in_chunk(source, from, to, rel);
     }
 
     /// Prepare an in-place mutation of one entry: capture its current
@@ -829,8 +947,9 @@ impl AgentView {
                     // out to every `ExpandableEventMessage` in the chat;
                     // `CompactionSummaryMessageComponent` renders the
                     // collapsed `EventSummary` until the Ctrl+O cycle
-                    // reaches detail `all`.
-                    self.detail.tool_output_expanded(),
+                    // reaches detail `all` — or its own header click
+                    // flips just this entry (#2430).
+                    self.entry_tool_expanded(index),
                     &self.theme,
                     width,
                 ));
@@ -858,13 +977,13 @@ impl AgentView {
                 // (the same spacing the assistant and agent-message rows
                 // use; consecutive tool cards stay flush).
                 let mut rows: Vec<Line> = Vec::new();
-                if self.conversation_leading(index, self.detail.tool_output_expanded()) {
+                if self.conversation_leading(index, self.entry_tool_expanded(index)) {
                     rows.push(Vec::new());
                 }
                 rows.extend(crate::tool_card::render_tool_card(
                     card,
                     self.pulse_frame,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                     self.show_images,
@@ -885,7 +1004,7 @@ impl AgentView {
                 rows.extend(crate::bash_card::render_bash_execution(
                     card,
                     self.pulse_frame,
-                    self.detail.tool_output_expanded(),
+                    self.entry_tool_expanded(index),
                     &cancel_hint,
                     &self.theme,
                     width,
@@ -894,10 +1013,10 @@ impl AgentView {
             }
             ChatEntry::AgentMessage(row) => crate::custom_message::render::render_agent_message(
                 row,
-                self.detail,
+                self.entry_detail(index),
                 &self.theme,
                 width,
-                self.conversation_leading(index, self.detail.tool_output_expanded()),
+                self.conversation_leading(index, self.entry_tool_expanded(index)),
             ),
             // TS `addMessageToChat`'s user case: `Spacer(1)` when the chat
             // is non-empty, then the card (the conversation-spacing scan the
@@ -906,7 +1025,7 @@ impl AgentView {
             ChatEntry::SkillInvocation(row) => {
                 crate::custom_message::skill_invocation::render_skill_invocation(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                     !first,
@@ -915,7 +1034,7 @@ impl AgentView {
             ChatEntry::InjectedPrompt(row) => {
                 crate::custom_message::injected_prompt::render_injected_prompt(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                 )
@@ -923,16 +1042,16 @@ impl AgentView {
             ChatEntry::ShellCompletion(row) => {
                 crate::custom_message::render::render_shell_completion(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
-                    self.conversation_leading(index, self.detail.tool_output_expanded()),
+                    self.conversation_leading(index, self.entry_tool_expanded(index)),
                 )
             }
             ChatEntry::RefinementOutcome(row) => {
                 crate::custom_message::refinement::render_refinement_outcome(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                 )
@@ -976,6 +1095,88 @@ impl AgentView {
         }
     }
 
+    /// The entry's click-surface rows within its rendered output (TS
+    /// #2430 wraps each family's header/summary rows in `Clickable`): the
+    /// row indices a clean left press/release pair flips. The geometry
+    /// mirrors `render_entry`'s arms — the leading-spacer decisions and
+    /// each family's header wrap — pinned by the click-region tests.
+    fn entry_click_rows(&self, index: usize, entry: &ChatEntry, width: usize) -> Vec<usize> {
+        match entry {
+            // The tool panel's `label · status` header row (TS
+            // `ToolExecutionComponent`'s panel header line; the ipython
+            // shell's fixed summary row — either way card row 0)
+            // and the shell-completion summary row (TS
+            // `ShellCompletionComponent`: `line: leadingSpace ? 1 : 0`):
+            // one row after the leading spacer, by the same rule.
+            ChatEntry::Tool(_) | ChatEntry::ShellCompletion(_) => {
+                vec![usize::from(self.conversation_leading(
+                    index,
+                    self.entry_tool_expanded(index),
+                ))]
+            }
+            // The border row precedes the `$ command` header, whose wrapped
+            // rows all toggle (TS wraps the command `Text` in `Clickable`).
+            ChatEntry::BashExecution(card) => {
+                let lead = usize::from(!card.suppress_leading_space);
+                let header = crate::width::wrapped_text_count(
+                    &format!("$ {}", card.command),
+                    width.saturating_sub(2).max(1),
+                )
+                .max(1);
+                (lead + 1..lead + 1 + header).collect()
+            }
+            // The agent-message summary header (TS
+            // `AgentMessageComponent`'s header, at `leadingSpace ? 1 : 0`).
+            ChatEntry::AgentMessage(row) => {
+                let lead =
+                    usize::from(self.conversation_leading(index, self.entry_tool_expanded(index)));
+                let header = crate::custom_message::render::agent_message_header_rows(
+                    row,
+                    &self.theme,
+                    width,
+                );
+                (lead..lead + header).collect()
+            }
+            // The `[skill]` label row below the box's opening blank (TS
+            // wraps the label and the name line; the collapsed card folds
+            // both into the one label row). The renderer's `leading` is
+            // the plain `!first` spacer rule.
+            ChatEntry::SkillInvocation(_) => {
+                vec![1 + usize::from(index != 0)]
+            }
+            // The header below the opening spacer (TS wraps the
+            // `InjectedPromptMessageComponent` header in `Clickable`).
+            ChatEntry::InjectedPrompt(row) => {
+                let header = crate::custom_message::injected_prompt::injected_prompt_header_rows(
+                    row,
+                    self.entry_detail(index),
+                    &self.theme,
+                    width,
+                );
+                (1..1 + header).collect()
+            }
+            // The `◆` header below the opening blank (TS wraps the
+            // `RefinementOutcomeMessageComponent` header in `Clickable`).
+            ChatEntry::RefinementOutcome(row) => {
+                let header = crate::custom_message::refinement::refinement_header_rows(row, width);
+                (1..1 + header).collect()
+            }
+            // The `[customType]` label row below the spacer and the box's
+            // opening blank (TS wraps the label in `Clickable`).
+            ChatEntry::CustomPanel(_) => vec![2],
+            // The `◆ Context compacted` header (TS wraps the
+            // `CompactionSummaryMessageComponent` header in `Clickable`).
+            ChatEntry::CompactionSummary { .. } => vec![usize::from(index != 0)],
+            ChatEntry::Status { .. }
+            | ChatEntry::User { .. }
+            | ChatEntry::SlashCommand { .. }
+            | ChatEntry::Assistant(_)
+            | ChatEntry::ClientMarkdown { .. }
+            | ChatEntry::ClientText { .. }
+            | ChatEntry::ChangelogPanel { .. } => Vec::new(),
+        }
+    }
+
     /// Render the scrollable transcript: splash rows, chat component rows,
     /// and the working loader when a turn is active (the full compose —
     /// the inline frame and the headless verifiers; the fullscreen frame
@@ -1008,6 +1209,11 @@ impl AgentView {
         let (editor_rows, cursor) = self.render_editor_surface(width);
         let overlay_count = lines.len() - context_rows;
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
+        // The editor's click rows sit where the surface lands in the dock
+        // (the map recorded surface-relative rows).
+        if let Some(map) = &mut self.editor_click {
+            map.first_dock_row += lines.len();
+        }
         lines.extend(editor_rows);
         lines.push(render_tray(&self.chrome, &self.theme, width));
         if let Some(dock) = &self.chrome.activity {
@@ -1093,6 +1299,22 @@ impl AgentView {
         let layout_width = input_width;
         let (visible, scroll_offset, _hidden_above, hidden_below) =
             self.editor.visible_window(layout_width, self.terminal_rows);
+        // The click layout snapshot (TS `Editor.clickLayout`, #2430): the
+        // visible window is the authority for click mapping. Surface-
+        // relative for now — the dock row shift lands in `render_dock`,
+        // the dock crop in the frame compose (TS `getContentLineOffset`
+        // shifts regions with the editor's own header rows).
+        let queue_header_rows = usize::from(self.queue_selected.is_some()) * 2;
+        self.editor_click = (!visible.is_empty()).then(|| {
+            crate::click_regions::EditorClickMap {
+                visible: visible.clone(),
+                // The row's leading pad, the prompt prefix, the inner pad.
+                text_col: prompt_width + 2,
+                // Content rows sit below the indicator/blank row and the
+                // parked-message header pair.
+                first_dock_row: 1 + queue_header_rows,
+            }
+        });
         let mut rows: Vec<Line> = Vec::new();
         if scroll_offset > 0 {
             let indicator = format!(" \u{2191} {scroll_offset} more");
@@ -1236,6 +1458,11 @@ impl AgentView {
         if let Some(screen) = &self.onboarding {
             let frame = screen.render(&self.theme, width, height);
             self.frame_rows = frame.len();
+            // The onboarding pane replaces the whole frame (TS overlay
+            // focus: no click surfaces, and the previous frame's targets
+            // must not survive it).
+            self.frame_clicks = crate::click_regions::FrameClicks::default();
+            self.editor_click = None;
             return frame;
         }
         // The `/model` and `/effort` pickers mount in the editor dock (TS
@@ -1316,6 +1543,11 @@ impl AgentView {
             .fullscreen
             .then(|| render_top_bar(&self.chrome, &self.theme, width));
         let top_rows = usize::from(top.is_some());
+        // A replacement surface (picker, selector, loader, auth panel)
+        // owns the dock: the editor did not render, so its click layout
+        // from an earlier frame must not survive (TS overlays carry their
+        // own regions; none of these panes register click surfaces).
+        self.editor_click = None;
         let dock = match selector_dock {
             // The replacement surfaces swap only the editor part of the
             // dock; the `/speed` footer stays the dock's last row under
@@ -1352,7 +1584,8 @@ impl AgentView {
         let window_height = height
             .saturating_sub(top_rows + dock.len())
             .max(FULLSCREEN_MIN_TRANSCRIPT_ROWS.min(height.saturating_sub(top_rows + dock.len())));
-        let (window_rows, start) = self.visible_transcript_window(width, window_height);
+        let (window_rows, start, window_clicks) =
+            self.visible_transcript_window(width, window_height);
         self.window_rows = window_height;
         // The selection restyle diff: only the rows the selection change
         // touched re-style; the rest reuse the cached styled rows.
@@ -1370,6 +1603,73 @@ impl AgentView {
         for line in dock {
             frame.push(pad_row(line, width));
         }
+        // The fullscreen click surfaces (TS #2430's frame click targets):
+        // the window's entry toggle rows and the tail's bash header
+        // project onto frame rows through the window start (TS
+        // `projectTranscriptRegion`), the dock editor's content rows
+        // through the dock crop (TS `projectDockRegion` — the dock keeps
+        // its bottom rows when clipped, so cropped-away rows drop).
+        let mut clicks = crate::click_regions::FrameClicks::default();
+        for (index, entry_abs) in &window_clicks.entries {
+            for click_row in self.entry_click_rows(*index, &self.chat[*index], width) {
+                // A click row scrolled above the window clips away (TS
+                // drops rows outside the projected span); one inside the
+                // window projects onto its frame row.
+                let Some(window_row) = entry_abs
+                    .checked_add(click_row)
+                    .and_then(|row| row.checked_sub(start))
+                else {
+                    continue;
+                };
+                if window_row < window_height {
+                    clicks.push_toggle(
+                        crate::click_regions::ClickAction::ToggleEntry { index: *index },
+                        top_rows + window_row,
+                        width,
+                    );
+                }
+            }
+        }
+        if let Some(tail_abs) = window_clicks.tail_start {
+            for click_row in &self.tail_clicks {
+                let Some(window_row) = tail_abs
+                    .checked_add(*click_row)
+                    .and_then(|row| row.checked_sub(start))
+                else {
+                    continue;
+                };
+                if window_row < window_height {
+                    clicks.push_toggle(
+                        crate::click_regions::ClickAction::ToggleSidePaneBash,
+                        top_rows + window_row,
+                        width,
+                    );
+                }
+            }
+        }
+        if let Some(map) = &self.editor_click {
+            // The dock crops from its front: content rows cropped away drop
+            // their targets, the still-visible ones keep theirs (TS clips
+            // regions to the rows actually rendered). The anchor is where
+            // the region's FIRST line would sit, so the dispatched
+            // position stays the full visible-window line index the editor
+            // map resolves even when that line cropped away.
+            for offset in 0..map.visible.len() {
+                let dock_row = map.first_dock_row + offset;
+                if dock_row < cropped {
+                    continue;
+                }
+                let row = top_rows + window_height + dock_row - cropped;
+                // The anchor keeps the region-relative position: only a
+                // frame shorter than the region could place the first
+                // line's row below its own offset, and such rows cannot
+                // carry a meaningful anchor.
+                let Some(anchor) = row.checked_sub(offset) else {
+                    continue;
+                };
+                clicks.push_editor_row(row, anchor, width);
+            }
+        }
         // A paused viewport carries the follow hint over the last transcript
         // window row (TS composites it above the dock, below overlays).
         if !self.following {
@@ -1381,8 +1681,14 @@ impl AgentView {
                     .unwrap_or_else(|| "ctrl+shift+down".to_string());
                 let label = format!(" {key} to follow ");
                 *row = composite_follow_hint(row, &label, width);
+                // Painted pixels swallow clicks aimed at content beneath
+                // (TS `subtractFrameClickCoverage` on the follow hint).
+                let label_width = crate::width::str_width(&label);
+                let col = width.saturating_sub(label_width) / 2;
+                clicks.subtract_coverage(window_height, col, col + label_width);
             }
         }
+        self.frame_clicks = clicks;
         self.frame_rows = frame.len();
         self.apply_frame_selection(&mut frame, width);
         // The action toasts overlay the transcript window's top rows
@@ -1402,7 +1708,7 @@ impl AgentView {
         if !toasts.is_empty() {
             // The action ack renders in the Success color.
             let style = self.theme.fg_style(crate::theme::ThemeColor::Success);
-            crate::toast::overlay_toasts(
+            let painted = crate::toast::overlay_toasts(
                 &mut frame,
                 top_rows,
                 top_rows + window_height,
@@ -1410,7 +1716,14 @@ impl AgentView {
                 width,
                 style,
             );
+            for (row, from, to) in painted {
+                self.frame_clicks.subtract_coverage(row, from, to);
+            }
         }
+        // The frame's OSC 8 links (hit-test truth for click-to-open; the
+        // zero-width sequences survived every restyle above).
+        self.frame_clicks
+            .set_links(crate::hyperlinks::frame_link_ranges(&frame));
         frame
     }
 
@@ -2688,6 +3001,277 @@ mod tests {
             joined[header_row + 2].contains("> "),
             "the content rows shift below the header pair: {:?}",
             joined[header_row + 2]
+        );
+    }
+
+    // ---- fullscreen click regions (TS #2430) ------------------------------
+
+    /// One representative of each toggleable entry family renders its
+    /// click rows on the header/summary rows TS wraps in `Clickable`.
+    #[test]
+    fn entry_click_rows_land_on_each_familys_header() {
+        let entries = vec![
+            settled_tool_card("t1"),
+            ChatEntry::BashExecution(Box::new(crate::bash_card::BashExecutionCard {
+                output_lines: vec!["hi".to_string()],
+                running: false,
+                exit_code: Some(0),
+                ..crate::bash_card::BashExecutionCard::new_running("b1", "echo hi", false)
+            })),
+            ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
+                direction: crate::custom_message::AgentMessageDirection::Received,
+                participant: "parent session".to_string(),
+                message: "the body text".to_string(),
+            })),
+            ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
+                pid: Some(31),
+                exit_code: Some(0),
+                content: "quiet output".to_string(),
+            })),
+            ChatEntry::SkillInvocation(Box::new(crate::custom_message::SkillInvocationRow {
+                name: "demo-skill".to_string(),
+                content: "run the demo".to_string(),
+            })),
+            ChatEntry::InjectedPrompt(Box::new(crate::custom_message::InjectedPromptRow {
+                kind: crate::custom_message::InjectedPromptKind::Heartbeat { schedule: None },
+                body: None,
+            })),
+            ChatEntry::RefinementOutcome(Box::new(crate::custom_message::RefinementOutcomeRow {
+                header: "Harness refined".to_string(),
+                summary: "a change".to_string(),
+                meta: "applied".to_string(),
+                edits: Vec::new(),
+            })),
+            ChatEntry::CustomPanel(Box::new(crate::custom_message::CustomPanelRow {
+                custom_type: "autonomous_status".to_string(),
+                content: "running".to_string(),
+            })),
+            ChatEntry::CompactionSummary {
+                summary: "so far".to_string(),
+                tokens_before: 999,
+                custom_instructions: None,
+            },
+        ];
+        let markers = [
+            "bash",                   // the tool panel header (name + status)
+            "$ echo hi",              // the bash card's command header
+            "Agent message received", // the agent-message summary header
+            "Background shell command finished",
+            "[skill]",
+            "Heartbeat prompt",
+            "◆ Harness refined",
+            "[autonomous_status]",
+            "◆ Context compacted",
+        ];
+        let v = view_with(entries);
+        for (index, entry) in v.chat.iter().enumerate() {
+            let rows = v.render_entry(index, entry, 80, index == 0, false);
+            let clicks = v.entry_click_rows(index, entry, 80);
+            assert!(!clicks.is_empty(), "family {index} registers a click row");
+            for click_row in clicks {
+                assert!(
+                    rows.get(click_row)
+                        .is_some_and(|row| text_of(row).contains(markers[index])),
+                    "family {index} click row {click_row} lands on its header:\n{}",
+                    rows.iter().map(text_of).collect::<Vec<_>>().join("\n")
+                );
+            }
+        }
+    }
+
+    /// A settled card whose output marker never appears in its args
+    /// preview (the collapsed panel still shows the args' first lines).
+    fn card_with_hidden_output(id: &str, marker: &str) -> ChatEntry {
+        ChatEntry::Tool(Box::new(ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({ "command": "setup" }),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(ToolResultView {
+                // Ten output lines with the marker FIRST: the collapsed
+                // bash card previews only the LAST five lines, and the
+                // five-row growth dwarfs the leading spacer the
+                // expansion drops (`shouldAddLeadingSpace(expanded)`).
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": format!(
+                        "{marker}\npreview line two\npreview line three\npreview line four\npreview line five\npreview line six\npreview line seven\npreview line eight\npreview line nine\npreview line ten"
+                    )
+                })],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            aborted: false,
+        }))
+    }
+
+    /// A header click flips only its own entry; the global cycle resets
+    /// every override (TS `Clickable` + `applyChatExpansion`).
+    #[test]
+    fn a_header_click_toggles_only_its_entry() {
+        let mut v = view_with(vec![
+            card_with_hidden_output("t1", "RESULT-ONE"),
+            card_with_hidden_output("t2", "RESULT-TWO"),
+        ]);
+        let before = transcript_text(&mut v, 80);
+        assert!(
+            !before.contains("RESULT-ONE") && !before.contains("RESULT-TWO"),
+            "collapsed cards hide the tool output: {before}"
+        );
+        // The geometry path measures the same expansion the render
+        // shows (a count that keeps the global detail would leave the
+        // sparse bookkeeping short by the growth).
+        let collapsed_rows = v.count_entry_rows(0, 80);
+        v.toggle_entry_expanded(0);
+        let after = transcript_text(&mut v, 80);
+        assert!(
+            after.contains("RESULT-ONE"),
+            "the first card expanded: {after}"
+        );
+        let expanded_rows = v.count_entry_rows(0, 80);
+        assert!(
+            expanded_rows > collapsed_rows,
+            "the expanded card measures taller: {collapsed_rows} vs {expanded_rows}"
+        );
+        assert!(
+            !after.contains("RESULT-TWO"),
+            "the second card stays collapsed: {after}"
+        );
+        // Flipping back collapses just this entry again.
+        v.toggle_entry_expanded(0);
+        let again = transcript_text(&mut v, 80);
+        assert!(
+            !again.contains("RESULT-ONE") && !again.contains("RESULT-TWO"),
+            "the card collapsed again: {again}"
+        );
+        // The global cycle resets the overrides wholesale — and the
+        // per-entry caches with them: cycling back to this detail level
+        // must never replay a click's render (the cache slots are keyed
+        // by the global level, so the override-era rows are stale).
+        v.toggle_entry_expanded(1);
+        v.detail = v.detail.next();
+        v.clear_entry_expanded();
+        let cycled = transcript_text(&mut v, 80);
+        assert!(
+            !cycled.contains("RESULT-TWO"),
+            "the cycle cleared the overrides"
+        );
+        v.detail = v.detail.next();
+        v.detail = v.detail.next();
+        let wrapped = transcript_text(&mut v, 80);
+        assert!(
+            !wrapped.contains("RESULT-ONE") && !wrapped.contains("RESULT-TWO"),
+            "no override-era rows replay after the full cycle: {wrapped}"
+        );
+    }
+
+    /// The frame compose projects the entries' toggle rows and the frame's
+    /// OSC 8 links: `frame_click_target_at` hits the tool header row,
+    /// `frame_link_at` hits a rendered markdown link.
+    #[test]
+    fn frame_clicks_project_toggle_rows_and_links() {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let entries = vec![
+            settled_tool_card("t1"),
+            ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text(
+                    "see [docs](https://example.com/docs)".to_string(),
+                )],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })),
+        ];
+        let mut v = view_with(entries);
+        let frame = v.render_frame(80, 24);
+        let header_row = frame
+            .iter()
+            .position(|line| row_text(line).contains("bash · done"))
+            .expect("the tool header row");
+        let target = v
+            .frame_click_target_at(header_row, 3)
+            .expect("the header row carries a toggle target");
+        assert_eq!(
+            target.action,
+            crate::click_regions::ClickAction::ToggleEntry { index: 0 }
+        );
+        let link_row = frame
+            .iter()
+            .position(|line| row_text(line).contains("docs"))
+            .expect("the link label");
+        // The visible column of the label: the OSC 8 wrapper and the
+        // leading OSC 133 zone markers ride zero-width in the span
+        // content, so the stripped row gives the column the hit test
+        // reasons in.
+        let (_, rest) = crate::osc133::split_leading_markers(&frame[link_row]);
+        let raw: String = rest.iter().map(|s| s.content.as_str()).collect();
+        let stripped = crate::hyperlinks::strip_osc8_content(&raw);
+        let link_col = stripped.find("docs").expect("the label column");
+        assert_eq!(
+            v.frame_link_at(link_row, link_col).as_deref(),
+            Some("https://example.com/docs")
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    /// The dock editor's content rows place the caret through the last
+    /// rendered layout (TS `Editor.placeCursorFromClick`): a click past a
+    /// short line's end leaves the caret at that line's end; a click on an
+    /// earlier line moves it there.
+    #[test]
+    fn editor_clicks_place_the_caret_through_the_dock_layout() {
+        let mut v = view();
+        v.editor.set_text("alpha\nbeta\ngamma");
+        let frame = v.render_frame(80, 24);
+        let (row, col) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let text = row_text(line);
+                let col = text.find("beta")?;
+                Some((row, col))
+            })
+            .expect("the editor renders its second line");
+        let target = v
+            .frame_click_target_at(row, col)
+            .expect("the editor content row carries a target");
+        assert!(
+            matches!(
+                target.action,
+                crate::click_regions::ClickAction::EditorCursor
+            ),
+            "the editor row targets caret placement"
+        );
+        // Click past the line's end: the caret lands at the chunk end.
+        v.place_editor_cursor_from_click(row - target.anchor, col - target.col + 9);
+        assert_eq!(
+            v.editor.get_cursor(),
+            (1, 4),
+            "the caret placed at the clicked line's end"
+        );
+        // A click on the first line's middle places the caret on that
+        // line, before the clicked grapheme's tail.
+        let (first_row, first_col) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let text = row_text(line);
+                let col = text.find("alpha")?;
+                Some((row, col))
+            })
+            .expect("the editor renders its first line");
+        let first = v
+            .frame_click_target_at(first_row, first_col)
+            .expect("the first content row targets the editor");
+        v.place_editor_cursor_from_click(first_row - first.anchor, first_col - first.col + 3);
+        assert_eq!(
+            v.editor.get_cursor(),
+            (0, 3),
+            "the caret placed on the first line"
         );
     }
 }

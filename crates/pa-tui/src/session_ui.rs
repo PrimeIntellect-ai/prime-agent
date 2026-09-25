@@ -572,9 +572,32 @@ pub(crate) struct SessionUi {
     selection_auto_scroll: Option<SelectionAutoScroll>,
     /// Whether this run already reported its first selection copy.
     selection_adoption_emitted: bool,
+    /// Whether this run already reported its first click dispatch.
+    click_adoption_emitted: bool,
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
+    /// URLs opened by clean clicks on OSC 8 links this run (headless runs
+    /// spawn no opener; the verifier reads these).
+    pub(crate) opened_urls: Vec<String>,
+    /// Whether a left press moved since it landed (TS
+    /// `fullscreenLeftMouseDragged`): a release only dispatches a click
+    /// when the press never dragged.
+    fullscreen_left_dragged: bool,
+    /// The hyperlink under the last clean left press (TS
+    /// `fullscreenPressedHyperlink`): hyperlinks win over click regions
+    /// at the press position.
+    fullscreen_pressed_hyperlink: Option<String>,
+    /// The click target under the last modifier-free left press (TS
+    /// `fullscreenPressedClick`): the release fires it when it lands on
+    /// the same row inside the target's columns.
+    fullscreen_pressed_click: Option<crate::click_regions::FrameClickTarget>,
+    /// The last left press carried a modifier (selection-only pairing):
+    /// a modified press never arms a click dispatch, whatever its
+    /// release reports (TS's declared contract - "shift/alt/ctrl clicks
+    /// stay selection-only" - tightened past the TS implementation,
+    /// which re-checks only at the release).
+    fullscreen_press_modified: bool,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
@@ -774,6 +797,12 @@ impl SessionUi {
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
+            click_adoption_emitted: false,
+            opened_urls: Vec::new(),
+            fullscreen_left_dragged: false,
+            fullscreen_pressed_hyperlink: None,
+            fullscreen_pressed_click: None,
+            fullscreen_press_modified: false,
             copies: Vec::new(),
         };
         session
@@ -1275,6 +1304,12 @@ impl SessionUi {
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
         self.last_status_index = None;
+        // A press captured against the old frame never releases into the
+        // rebuilt one (TS clears the pressed pair on fullscreen resets).
+        self.fullscreen_left_dragged = false;
+        self.fullscreen_pressed_hyperlink = None;
+        self.fullscreen_pressed_click = None;
+        self.fullscreen_press_modified = false;
         // The rebuild drops the previous run's pending-tool map (TS
         // `resetPendingToolState` at the rebuild boundary).
         self.pending_tools.clear();
@@ -5921,17 +5956,23 @@ impl SessionUi {
         Ok(())
     }
 
-    /// A mouse report (TS `handleFullscreenInput`'s selection branches):
-    /// wheel turns scroll the transcript window by three lines; a left
-    /// press starts a selection (transcript, or the dock's frame surface
-    /// when the press is outside the window), a drag extends it with
-    /// edge auto-scroll, and a release copies the spanned text out
-    /// through OSC 52. Reports are consumed even while a picker, selector,
-    /// or loader owns the frame (the TS overlay-focus gate) — the wheel
-    /// never scrolls behind one, but its rows select; while tracking is
-    /// inactive every report is consumed without a dispatch. The onboarding
-    /// pane replaces the whole frame, so its runs consume reports without
-    /// a selection surface (a known deviation from the TS inline block).
+    /// A mouse report (TS `handleFullscreenInput`'s selection and click
+    /// branches): wheel turns scroll the transcript window by three
+    /// lines; a left press starts a selection (transcript, or the dock's
+    /// frame surface when the press is outside the window), a drag
+    /// extends it with edge auto-scroll, and a release copies the spanned
+    /// text out through OSC 52. A clean unmodified left press/release
+    /// pair dispatches the fullscreen click surfaces (TS #2430): the
+    /// pressed hyperlink opens, otherwise the pressed region fires — an
+    /// entry's header/summary row toggles only that entry, the editor's
+    /// content rows place the caret. Reports are consumed even while a
+    /// picker, selector, or loader owns the frame (the TS overlay-focus
+    /// gate) — the wheel never scrolls behind one, but its rows select
+    /// and the transcript's click rows still dispatch; while tracking is
+    /// inactive every report is consumed without a dispatch. The
+    /// onboarding pane replaces the whole frame, so its runs consume
+    /// reports without a selection surface (a known deviation from the TS
+    /// inline block).
     pub(crate) fn handle_mouse(&mut self, event: crate::mouse::MouseEvent, view: &mut AgentView) {
         if !crate::mouse_tracking::active() {
             return;
@@ -5965,6 +6006,38 @@ impl SessionUi {
         let row = event.y.saturating_sub(1) as usize;
         let col = event.x.saturating_sub(1) as usize;
         let left_press = event.press && event.button == crate::mouse::BUTTON_LEFT;
+        // TS #2430's click capture rides the same reports the selection
+        // dispatch consumes (touch taps arrive as ordinary press/release
+        // pairs): a clean left press records the hyperlink under it first
+        // — hyperlinks win over click regions — then the click target, and
+        // only when no modifier rides the report (shift/alt/ctrl clicks
+        // stay selection-only). A left release clears the pair; a drag
+        // (motion between press and release) disqualifies the dispatch.
+        let left_release_was_drag = !event.press
+            && event.button == crate::mouse::BUTTON_LEFT
+            && self.fullscreen_left_dragged;
+        if left_press {
+            self.fullscreen_left_dragged = event.motion;
+            if !event.motion {
+                // The pairing is clean only when the PRESS carried no
+                // modifier: a modified press stays selection-only even
+                // when its release reports none (the release-side
+                // re-check alone would let a modifier slip through).
+                self.fullscreen_press_modified = event.shift || event.alt || event.ctrl;
+                self.fullscreen_pressed_hyperlink = if self.fullscreen_press_modified {
+                    None
+                } else {
+                    view.frame_link_at(row, col)
+                };
+                self.fullscreen_pressed_click = if !self.fullscreen_press_modified
+                    && self.fullscreen_pressed_hyperlink.is_none()
+                {
+                    view.frame_click_target_at(row, col)
+                } else {
+                    None
+                };
+            }
+        }
         if overlay_focused {
             // TS tries the frame surface first while an overlay owns the
             // frame (its rows are the selectable spans), then the window.
@@ -5985,7 +6058,9 @@ impl SessionUi {
                 self.dirty = true;
             } else if !event.press {
                 view.clear_selection();
+                self.dispatch_fullscreen_click(&event, row, col, left_release_was_drag, view);
             }
+            self.clear_pressed_click(&event);
             return;
         }
         if left_press && !event.motion {
@@ -6009,7 +6084,156 @@ impl SessionUi {
         } else if !event.press {
             self.stop_selection_auto_scroll();
             view.clear_selection();
+            self.dispatch_fullscreen_click(&event, row, col, left_release_was_drag, view);
         }
+        self.clear_pressed_click(&event);
+    }
+
+    /// Fire the click surfaces on a clean left release (TS
+    /// `dispatchFullscreenClick` inside `handleFullscreenInput`'s final
+    /// release branch): the hyperlink captured at the press position wins
+    /// — re-tested at the release when the press sat on none (the label
+    /// may have moved under a repaint) — otherwise the pressed click
+    /// target fires when the release lands on its row inside its columns.
+    /// Modifier-free and drag-free only: shift/alt/ctrl releases stay
+    /// selection-only, and a release after motion is a drag's end.
+    fn dispatch_fullscreen_click(
+        &mut self,
+        event: &crate::mouse::MouseEvent,
+        row: usize,
+        col: usize,
+        left_release_was_drag: bool,
+        view: &mut AgentView,
+    ) {
+        if event.button != crate::mouse::BUTTON_LEFT
+            || event.motion
+            || left_release_was_drag
+            || event.shift
+            || event.alt
+            || event.ctrl
+            || self.fullscreen_press_modified
+        {
+            return;
+        }
+        // Release containment (the region rule, applied to links): the
+        // hyperlink captured at the press opens only when the release
+        // lands on the SAME link — a press-and-release that moved off the
+        // label never launches it. A clean press that captured no link
+        // still honors the release position's link (TS's
+        // `pressedHyperlink ?? hyperlinkAt(release)` re-check).
+        let url = match (
+            self.fullscreen_pressed_hyperlink.clone(),
+            view.frame_link_at(row, col),
+        ) {
+            (Some(pressed), Some(release)) if pressed == release => Some(pressed),
+            (None, Some(release)) => Some(release),
+            _ => None,
+        };
+        if let Some(url) = url {
+            self.open_link(&url);
+            self.track_click("open_link");
+            self.dirty = true;
+            return;
+        }
+        let Some(pressed) = self.fullscreen_pressed_click else {
+            return;
+        };
+        if row != pressed.row || col < pressed.col || col >= pressed.col + pressed.width {
+            return;
+        }
+        match pressed.action {
+            crate::click_regions::ClickAction::ToggleEntry { index } => {
+                view.toggle_entry_expanded(index);
+            }
+            crate::click_regions::ClickAction::ToggleSidePaneBash => {
+                view.toggle_side_pane_bash();
+            }
+            crate::click_regions::ClickAction::EditorCursor => {
+                view.place_editor_cursor_from_click(row - pressed.anchor, col - pressed.col);
+            }
+        }
+        self.track_click(match pressed.action {
+            crate::click_regions::ClickAction::ToggleEntry { .. } => "toggle_entry",
+            crate::click_regions::ClickAction::ToggleSidePaneBash => "toggle_side_bash",
+            crate::click_regions::ClickAction::EditorCursor => "editor_cursor",
+        });
+        self.dirty = true;
+    }
+
+    /// Clear the press-pair state on a left release (TS resets
+    /// `fullscreenLeftMouseDragged`/`fullscreenPressedHyperlink`/
+    /// `fullscreenPressedClick` together).
+    fn clear_pressed_click(&mut self, event: &crate::mouse::MouseEvent) {
+        if !event.press && event.button == crate::mouse::BUTTON_LEFT {
+            self.fullscreen_left_dragged = false;
+            self.fullscreen_pressed_hyperlink = None;
+            self.fullscreen_pressed_click = None;
+            self.fullscreen_press_modified = false;
+        }
+    }
+
+    /// Open a clicked link (TS `openHyperlink`): terminals gate their
+    /// native link handling while mouse reporting is active, so clicks
+    /// the TUI consumes must open OSC 8 links themselves. A control byte
+    /// in the URL or any scheme outside http/https/file drops the click;
+    /// a canonicalized http(s) URL records for the run (the headless
+    /// verifier's `opened_urls`) and spawns the platform opener on a
+    /// terminal — darwin `open`, Windows `rundll32 url.dll,
+    /// FileProtocolHandler`, otherwise `xdg-open` — fire-and-forget like
+    /// the TS `execFile` call.
+    fn open_link(&mut self, url: &str) {
+        if url.chars().any(char::is_control) {
+            return;
+        }
+        let Ok(parsed) = url::Url::parse(url) else {
+            return;
+        };
+        if !matches!(parsed.scheme(), "http" | "https" | "file") {
+            return;
+        }
+        let href = parsed.to_string();
+        self.opened_urls.push(href.clone());
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            return;
+        }
+        // TS runs the executable path with the handler and URL as its
+        // arguments (`execFile`): the rundll32 path is the PROGRAM, never
+        // a positional argument. The inherited `SystemRoot` names the
+        // executable, so it must be an absolute drive path (no traversal,
+        // no redirection); anything else falls back to the TS default.
+        #[cfg(target_os = "windows")]
+        let (program, mut args) = {
+            let default_root = "C:\\Windows".to_string();
+            let inherited_root = std::env::var("SystemRoot").unwrap_or_default();
+            let bytes = inherited_root.as_bytes();
+            let trusted_root = if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+                && !inherited_root.contains("..")
+            {
+                inherited_root
+            } else {
+                default_root
+            };
+            let rundll32 = std::path::Path::new(&trusted_root)
+                .join("System32")
+                .join("rundll32.exe");
+            (
+                rundll32.to_string_lossy().into_owned(),
+                vec!["url.dll,FileProtocolHandler".to_string(), href],
+            )
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let (program, mut args) = ("xdg-open", vec![href]);
+        #[cfg(target_os = "macos")]
+        let (program, mut args) = ("open", vec![href]);
+        let _ = std::process::Command::new(program)
+            .args(std::mem::take(&mut args))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 
     /// Copy a finished selection out (TS `copySelection` +
@@ -7265,6 +7489,21 @@ impl SessionUi {
         }
     }
 
+    /// Report the run's first clean-click dispatch (`tui click used`),
+    /// fire-and-forget like the selection event: the release never waits
+    /// on the telemetry flush. `action` is the dispatched surface class.
+    fn track_click(&mut self, action: &'static str) {
+        if self.click_adoption_emitted {
+            return;
+        }
+        self.click_adoption_emitted = true;
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.click_used(action).await;
+            });
+        }
+    }
+
     /// Take a pending `app.suspend` request (TS `handleCtrlZ`): the
     /// interactive loop performs the process-group suspend cycle; only
     /// the loop owns the renderer that hands the terminal over.
@@ -7471,6 +7710,16 @@ impl SessionUi {
             }
             if kb.matches(&id, "app.tools.expand") {
                 view.detail = view.detail.next();
+                // The global cycle resets every per-entry expansion
+                // override and re-flags the side-question pane (TS
+                // `applyChatExpansion` fans the new state out to all
+                // components; #2430's clicks only ever flipped their
+                // own).
+                view.clear_entry_expanded();
+                if let Some(pane) = view.side_pane.as_mut() {
+                    pane.expanded = view.detail == crate::chat::Detail::All;
+                    pane.bash_expanded = None;
+                }
                 self.dirty = true;
                 return Ok(());
             }
@@ -7655,11 +7904,14 @@ impl SessionUi {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
             // detail: overview -> details -> all -> overview.
             view.detail = view.detail.next();
-            // TS `applyChatExpansion` also re-flags the side-question pane
-            // (the pane has no bash rows here, so the flag is the only
-            // carried state).
+            // The global cycle resets every per-entry expansion override
+            // and the side-question pane's bash override (TS
+            // `applyChatExpansion` fans the new state out to all
+            // components; #2430's clicks only ever flipped their own).
+            view.clear_entry_expanded();
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
+                pane.bash_expanded = None;
             }
             self.dirty = true;
             return Ok(());
@@ -8613,10 +8865,14 @@ impl SessionUi {
             // The same component as the main thread, mounted inside the
             // pane (TS `sideQuestionComponent.addBash`).
             if let Some(pane) = view.side_pane.as_mut() {
+                // A fresh bash block starts from the global expansion
+                // state: the previous block's click override never
+                // carries over (TS mounts a fresh component).
                 pane.bash = Some(crate::side_question::PaneBash::new_running(
                     &command,
                     exclude_from_context,
                 ));
+                pane.bash_expanded = None;
             }
             self.user_bash_card = None;
             self.user_bash_started_at = None;
