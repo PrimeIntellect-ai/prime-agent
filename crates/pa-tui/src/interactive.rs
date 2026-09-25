@@ -1068,7 +1068,9 @@ async fn run_onboarding_phase(
                             "the provider login task failed".to_string(),
                         )
                     });
-                    session.apply_auth_outcome(outcome, &provider_id, view).await;
+                    session
+                        .apply_auth_outcome(outcome, &provider_id, view)
+                        .await;
                 }
                 PaneOutcome::Decision(_) => {
                     unreachable!("the key prompt dialog yields no decisions")
@@ -1111,7 +1113,9 @@ async fn run_onboarding_phase(
                             "the provider login task failed".to_string(),
                         )
                     });
-                    session.apply_auth_outcome(outcome, &provider_id, view).await;
+                    session
+                        .apply_auth_outcome(outcome, &provider_id, view)
+                        .await;
                 }
                 PaneOutcome::Decision(_) => {
                     unreachable!("the login dialog yields no decisions")
