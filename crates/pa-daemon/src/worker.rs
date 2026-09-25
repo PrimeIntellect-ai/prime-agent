@@ -21,6 +21,10 @@ pub use env::{
 pub(crate) use session_core::SessionCore;
 
 use std::collections::VecDeque;
+// PathBuf is read only by this facade's in-file test modules (via `use super::*`); the
+// lib-target import is flagged unused since the lib users moved out, so allow it deliberately.
+#[allow(unused_imports)]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
