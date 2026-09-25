@@ -204,7 +204,7 @@ pub struct AgentSessionEngine {
     /// turn holds the core session's mutex across its admission, so an
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
-    turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     /// The session's queue delivery modes (TS `agent.steeringMode` /
     /// `agent.followUpMode`): seeded from the start config, applied to the
     /// built session's agent at build time, and switched live by the
@@ -252,7 +252,7 @@ pub struct AgentSessionEngine {
     /// Resolved at create time (before any turn) so summary/state polls
     /// during a live turn stay side-effect-free.
     effective_thinking: std::sync::RwLock<Option<pa_types::ai::ModelThinkingLevel>>,
-    service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
+    pub(crate) service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
     /// Built once on the first prompt, reused across prompts, shared
     /// behind an Arc: a running model turn (the admission in
     /// `run_turn_once`), a compaction summarizer, and a refinement run
@@ -284,7 +284,7 @@ pub struct AgentSessionEngine {
     /// (api key + model), set when the session builds: `set_model` swaps
     /// the slot so the live session follows the new model without a
     /// rebuild.
-    provider_target: std::sync::Arc<
+    pub(crate) provider_target: std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
     /// One shared supervisor-link client for the worker: agent messaging
@@ -385,7 +385,7 @@ pub struct AgentSessionEngine {
     /// at every model-turn attempt so retries and post-compaction
     /// continuations keep serving it; cleared (and the session target
     /// restored) when the episode settles.
-    image_route: std::sync::Mutex<Option<ImageRoute>>,
+    pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
     /// The live automatic-compaction abort slot (TS
     /// `_autoCompactionAbortController`): the threshold and requested
     /// turn-boundary runs each register their controller here for the
@@ -1270,7 +1270,7 @@ impl AgentSessionEngine {
     /// flagged create); a model that cannot be resolved degrades to
     /// "off". Resolved once at the create/restore seam and cached so
     /// summary/state calls stay side-effect-free while turns run.
-    fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
+    pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
             .effective_thinking
             .read()

@@ -118,6 +118,9 @@ impl AgentSessionEngine {
                         thinking_level: map_thinking_level(resolved.thinking_level),
                         model: agent_model,
                     },
+                    // Captured at the first swap in
+                    // [`Self::apply_armed_image_route`].
+                    session_target: None,
                 })
             }
             None => None,
@@ -221,6 +224,7 @@ impl AgentSessionEngine {
 mod tests {
     use super::*;
     use crate::agent_engine::{tests::FAUX_TEST_LOCK, AgentEngineConfig};
+    use crate::engine::SessionEngine as _;
     use crate::engine::{EngineEvent, EngineModelSelection, PromptRequest};
 
     // Image-model routing (TS #2453's `settings.imageModel`): a
