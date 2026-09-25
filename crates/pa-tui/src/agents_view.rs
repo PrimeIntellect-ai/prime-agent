@@ -1987,7 +1987,7 @@ impl AgentsViewMode {
 
     /// One session row (TS `renderRow`): the summary rows render their
     /// `▸/▾ title` cell over the full width; agent rows render icon, title
-    /// (nested rows indented), model, activity, cost/age. The selected row
+    /// (nested rows indented), model, cost/age. The selected row
     /// carries the selection background.
     fn render_row(&self, row: &AgentsViewRow, layout: &RowLayout, width: usize) -> Line {
         let theme = &self.theme;
@@ -2020,7 +2020,7 @@ impl AgentsViewMode {
             .fg_style(icon_color)
             .add_modifier(ratatui::style::Modifier::BOLD);
         // TS `renderRow`: `${"  ".repeat(depth)}${icon} ${title}` padded to
-        // the name column, then the model and activity cells, then the dim
+        // the name column, then the model cell, then the dim
         // cost/age details.
         let indent = "  ".repeat(row.depth);
         let indent_width = str_width(&indent);
@@ -2035,7 +2035,7 @@ impl AgentsViewMode {
         ));
         // TS `formatTableCell(title, nameWidth)`: the name cell (indent +
         // icon + title) clips to the column width, so a long session name
-        // can never push the model, activity, and cost/age columns
+        // can never push the model and cost/age columns
         // off-screen. The icon and its space take the first two cells.
         let title = truncate_text(
             &row.title,
@@ -2061,13 +2061,6 @@ impl AgentsViewMode {
             ratatui::style::Style::default(),
         ));
         line.push(theme.fg(ThemeColor::Muted, cell(&row.model, layout.model_width)));
-        if layout.activity_width > 0 {
-            line.push(crate::Span::styled(
-                "  ".to_string(),
-                ratatui::style::Style::default(),
-            ));
-            line.push(theme.fg(ThemeColor::Dim, cell(&row.activity, layout.activity_width)));
-        }
         line.push(crate::Span::styled(
             "  ".to_string(),
             ratatui::style::Style::default(),
@@ -3049,7 +3042,7 @@ mod tests {
     use super::*;
 
     /// One idle row under test plus a holder row that keeps the selection,
-    /// with the given title and one model id. The activity text and cost/age
+    /// with the given title and one model id. The cost/age
     /// stay fixed so the expected rows are exact.
     fn mode_with_row(title: &str, model: &str) -> (AgentsViewMode, usize) {
         let mut mode = AgentsViewMode::new(AgentsViewOptions {
@@ -3073,9 +3066,7 @@ mod tests {
             identity: title.to_string(),
             summary: serde_json::json!({ "sessionName": title }),
             title: title.to_string(),
-            status_label: String::new(),
             model: model.to_string(),
-            activity: "idle now".to_string(),
             cost: 0.0,
             age: "1s".to_string(),
             depth: 0,
@@ -3094,14 +3085,13 @@ mod tests {
     }
 
     /// The exact expected idle-row text: name cell (icon + title, clipped or
-    /// padded to `name_width`), model and activity cells padded to their
-    /// columns, then the cost/age details.
+    /// padded to `name_width`), the model cell padded to its column, then
+    /// the cost/age details.
     fn expected_row(title_cell: &str, layout: &RowLayout) -> String {
         let bullet = "\u{2022}";
         format!(
-            "{bullet} {title_cell}  {}  {}  $0.00   1s",
+            "{bullet} {title_cell}  {}  $0.00   1s",
             cell("mock-1", layout.model_width),
-            cell("idle now", layout.activity_width),
         )
     }
 
@@ -3112,7 +3102,6 @@ mod tests {
         // TS `buildCompactAgentsViewLayout` at width 120 with these rows.
         assert_eq!(layout.name_width, 28);
         assert_eq!(layout.model_width, 12);
-        assert_eq!(layout.activity_width, 64);
         let line = mode.render_row(&mode.rows[index], &layout, 120);
         let text = flat(&line);
         // TS `formatTableCell` clips with an empty ellipsis marker: the

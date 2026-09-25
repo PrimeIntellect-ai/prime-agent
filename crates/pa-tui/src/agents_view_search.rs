@@ -1,7 +1,7 @@
 //! The agents-view session search: a picker over the session's identity
 //! fields — the display NAME (primary), the durable session ID, and the
 //! CWD. The TS corpus fields — the first message, the transcript text,
-//! the recap summary, file paths — never match (a deliberate divergence
+//! file paths — never match (a deliberate divergence
 //! from TS `session-view-search.ts`, which joined them; the query
 //! language stays TS-shaped).
 //!
@@ -383,8 +383,8 @@ mod tests {
     #[test]
     fn transcript_and_roster_fields_never_match() {
         // The corpus is name + id + cwd only: first messages, transcript
-        // text, the recap summary, and session paths have no tier to hit.
-        for query in ["backoff", "deploy", "recap", "sessions", "jsonl"] {
+        // text, and session paths have no tier to hit.
+        for query in ["backoff", "deploy", "sessions", "jsonl"] {
             assert!(
                 score(query).is_none(),
                 "{query:?} matches nothing in the restricted corpus"
