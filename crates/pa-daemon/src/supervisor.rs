@@ -3863,7 +3863,9 @@ impl Supervisor {
         let scan_active_session_id = active_session_id.as_ref().cloned();
         let scan_cwd = cwd.clone();
         let scan = tokio::task::spawn_blocking(move || {
-            crate::session_scan::list_sessions_with(&dir, |index, total, info| {
+            let mut file_total = 0usize;
+            let infos = crate::session_scan::list_sessions_with(&dir, |index, total, info| {
+                file_total = total;
                 if scope_current && info.cwd != scan_cwd {
                     // The row is out of scope, but the scan itself goes on.
                     return true;
@@ -3893,10 +3895,11 @@ impl Supervisor {
                 // the callback stops the scan (the response travels the
                 // same dead channel and drops with it).
                 stream_rows.send((vec![item, progress], false)).is_ok()
-            })
+            });
+            (infos, file_total)
         });
-        let mut infos = match scan.await {
-            Ok(infos) => infos,
+        let (mut infos, file_total) = match scan.await {
+            Ok(scanned) => scanned,
             Err(error) => {
                 return vec![response_line(&response_failure(
                     Some(command_id),
@@ -3995,6 +3998,26 @@ impl Supervisor {
                     "Could not attach deleted-descendant usage: {error:#}"
                 ));
             }
+        }
+        // The scan's completion marker: the per-file progress counts
+        // DIRECTORY entries, while the rows only stream for valid files,
+        // so the last per-row progress can land short of the total when
+        // an invalid file yields no row (TS's onProgress counts every
+        // file, valid or not, so its stream always reaches its total).
+        // One final frame names the scan's end exactly; a consumer
+        // waiting for `loaded == total` observes completion.
+        if file_total > 0 {
+            let mut completion = json!({
+                "id": command_id,
+                "type": "session_list_progress",
+                "command": "list_saved_sessions",
+                "loaded": file_total,
+                "total": file_total,
+            });
+            if let Some(active_session_id) = active_session_id {
+                completion["activeSessionId"] = json!(active_session_id);
+            }
+            let _ = stream.send((vec![completion], false));
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the

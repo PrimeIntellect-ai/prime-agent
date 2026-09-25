@@ -163,7 +163,9 @@ fn write_fixture(
 fn the_saved_catalog_streams_per_file_during_the_scan() {
     // The scan's head: small newest-first rows (the stream's first
     // frames), one per file, stamped in increasing recency so the mtime
-    // order is deterministic (the newest is first).
+    // order is deterministic (the newest is first). SMALL_FILES, the
+    // grown file, and one INVALID file: the gate skips it without a
+    // row, so the per-row progress never names its slot.
     const SMALL_FILES: usize = 30;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
@@ -183,6 +185,13 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
             base + Duration::from_secs(60 + index as u64),
         );
     }
+    // An invalid .jsonl (a parseable non-session first record): the scan
+    // skips it without a fold, so no row streams for it.
+    std::fs::write(
+        sessions_dir.join("foreign.jsonl"),
+        "{\"type\":\"message\",\"id\":\"x\"}\n",
+    )
+    .expect("write the invalid file");
 
     let socket = dir.path().join("daemon.sock");
     let _daemon = spawn_daemon(&socket, &agent_dir);
@@ -197,6 +206,7 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
     let mut first_item: Option<Duration> = None;
     let mut items = 0usize;
     let mut progress = 0usize;
+    let mut progress_reached: Option<(u64, u64)> = None;
     let mut response_at: Option<Duration> = None;
     let mut sessions: Option<Vec<serde_json::Value>> = None;
     while response_at.is_none() {
@@ -227,6 +237,12 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
             }
             Some("session_list_progress") => {
                 progress += 1;
+                let loaded = line["loaded"].as_u64().unwrap_or_default();
+                let total = line["total"].as_u64().unwrap_or_default();
+                let reached = progress_reached.unwrap_or((0, 0));
+                if loaded >= reached.0 {
+                    progress_reached = Some((loaded, total));
+                }
             }
             Some("response") => {
                 assert_eq!(
@@ -245,9 +261,11 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
     let response_at = response_at.expect("the final response");
     let sessions = sessions.expect("the response carries the sessions");
 
-    // The full catalog arrived: every row as a streamed item and in the
-    // terminal response, with per-file progress frames (the wire TS
-    // serves: one item + one progress per file).
+    // The full catalog arrived: every VALID row as a streamed item and
+    // in the terminal response (the invalid file streams neither), with
+    // per-file progress frames and a completion frame that reaches the
+    // scan's file total (the per-row progress lands short when the
+    // invalid file yields no row).
     assert_eq!(items, SMALL_FILES + 1, "every row streamed as an item");
     assert!(
         progress >= SMALL_FILES,
@@ -256,7 +274,18 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
     assert_eq!(
         sessions.len(),
         SMALL_FILES + 1,
-        "the final response carries the whole catalog"
+        "the final response carries the whole catalog (the invalid file stays out)"
+    );
+    let (reached_loaded, reached_total) =
+        progress_reached.expect("at least one progress frame streamed");
+    assert_eq!(
+        reached_total,
+        (SMALL_FILES + 2) as u64,
+        "the progress totals count the directory's files (valid and invalid)"
+    );
+    assert_eq!(
+        reached_loaded, reached_total,
+        "the completion frame names the scan's end: loaded reaches the total even though the invalid file streams no row"
     );
 
     // The decisive assertion: the first streamed row landed well before

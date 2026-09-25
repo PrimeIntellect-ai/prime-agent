@@ -28,13 +28,23 @@ struct MockSupervisor {
     /// Every recorded `list_saved_sessions` request (the carry test's
     /// no-refetch assertion reads it across BOTH view runs).
     saved_requests: Arc<Mutex<Vec<Value>>>,
+    /// A wire-order edge the late-frame test arms: one extra
+    /// `session_list_item` delivered AFTER the terminal response (a
+    /// frame that raced the reader's event delivery behind the
+    /// response's input).
+    late_frame: bool,
 }
 
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
+        Self::bind_with(socket, false)
+    }
+
+    fn bind_with(socket: &std::path::Path, late_frame: bool) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             saved_requests: Arc::new(Mutex::new(Vec::new())),
+            late_frame,
         }
     }
 
@@ -119,6 +129,23 @@ impl MockSupervisor {
                         "list_saved_sessions",
                         json!({ "sessions": saved_catalog() }),
                     );
+                    if self.late_frame {
+                        // The late frame: the same session's path and id
+                        // under a stale name, delivered after the
+                        // terminal response named the authoritative row.
+                        let mut stale =
+                            saved_catalog_row("/tmp/sessions/s2.jsonl", "s2", "stale clobber");
+                        stale["messageCount"] = json!(9);
+                        write_line(
+                            &mut writer,
+                            &json!({
+                                "id": id,
+                                "type": "session_list_item",
+                                "command": "list_saved_sessions",
+                                "session": stale,
+                            }),
+                        );
+                    }
                 }
                 "roster_unsubscribe" => {
                     respond(&mut writer, id, "roster_unsubscribe", Value::Null);
@@ -456,6 +483,72 @@ async fn a_carried_catalog_settles_the_entry_anchor_at_open() {
             "the carried catalog never re-fetches (run one's only): {requests:?}"
         );
     }
+
+    let _ = server.join();
+}
+
+/// A late `session_list_item` frame delivered after the terminal response
+/// never clobbers the settled catalog: the response is the authoritative
+/// array (the ledger enrichment rides it alone), so the fetch's request
+/// gate closes with the settle - a late frame the wire still delivers
+/// must not upsert its un-enriched row over the catalog the flow carries
+/// into its next view run.
+#[tokio::test]
+async fn a_late_stream_frame_never_clobbers_the_settled_catalog() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("agents-view.sock");
+    let mock = MockSupervisor::bind_with(&socket, true);
+    let _saved_requests = Arc::clone(&mock.saved_requests);
+    let server = std::thread::spawn(move || mock.serve());
+
+    // Run one: the catalog loads, the late frame arrives behind the
+    // response, and the anchor opens - the handoff link carries whatever
+    // the run settled.
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            AgentsStep::WaitSettle { timeout_ms: 2500 },
+            AgentsStep::Key("enter".to_string()),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let run = pa_tui::agents_view::run_agents_view(
+        view_options(&socket, Some("s2")),
+        AgentsViewUiMode::Headless(plan),
+        None,
+    )
+    .await
+    .expect("the first agents view run");
+    assert!(
+        run.outcome.selection.is_some(),
+        "the anchored row opened: {:?}",
+        run.outcome.selection
+    );
+    let link = run.link.expect("the opening run hands its link back");
+
+    // Run two: the carried Inactive section carries the SETTLED row - the
+    // response's name - never the late frame's stale one.
+    let plan = AgentsHeadlessPlan {
+        steps: vec![AgentsStep::WaitSettle { timeout_ms: 600 }],
+        width: 120,
+        height: 36,
+    };
+    let run_two = pa_tui::agents_view::run_agents_view(
+        view_options(&socket, None),
+        AgentsViewUiMode::Headless(plan),
+        Some(link),
+    )
+    .await
+    .expect("the second agents view run");
+    let first = run_two.outcome.frames.first().cloned().unwrap_or_default();
+    assert!(
+        first.contains("carried alpha"),
+        "the settled catalog's row paints (the response is authoritative):\n{first}"
+    );
+    assert!(
+        !first.contains("stale clobber"),
+        "the late un-enriched frame never upserts over the settled row:\n{first}"
+    );
 
     let _ = server.join();
 }

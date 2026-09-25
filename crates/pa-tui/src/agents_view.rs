@@ -2684,9 +2684,15 @@ async fn run_agents_view_surface(
                 UiInput::SavedLoaded { sessions } => {
                     // The final response is the authoritative array: the
                     // stream's unflushed rows are its prefix, and the scan
-                    // never re-orders after streaming them.
+                    // never re-orders after streaming them. The request is
+                    // SETTLED: a late frame the wire still delivers must
+                    // not match the request gate and upsert its
+                    // un-enriched row over the catalog the response just
+                    // settled (the response's rows carry the ledger
+                    // enrichment the streamed rows never see).
                     mode.drop_saved_stream();
                     saved_flush = None;
+                    catalog_request = None;
                     mode.apply_saved_loaded(sessions);
                     // The failure status is the fetch's own honest error;
                     // the catalog's success retires it (the status line
@@ -2717,9 +2723,13 @@ async fn run_agents_view_surface(
                     // can only come from THIS fetch, so keeping the wait
                     // pending would re-arm the loading hint on every open
                     // behind an error the status line already showed (TS
-                    // `resolveMissingSelectionAnchor`'s finally arm).
+                    // `resolveMissingSelectionAnchor`'s finally arm). The
+                    // request is settled too: the failure keeps the last
+                    // good rows, and a late frame must not upsert over
+                    // them.
                     mode.drop_saved_stream();
                     saved_flush = None;
+                    catalog_request = None;
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
                     mode.status = Some(format!("Saved sessions unavailable: {error}"));
