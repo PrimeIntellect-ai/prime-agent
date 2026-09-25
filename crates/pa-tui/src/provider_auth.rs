@@ -168,7 +168,6 @@ pub const SUBSCRIPTION_PROVIDER_IDS: [&str; 4] = [
     OPENAI_CODEX_PROVIDER_ID,
     XAI_PROVIDER_ID,
 ];
-
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
@@ -244,6 +243,20 @@ impl ProviderAuthSelector {
         };
         selector.refilter();
         selector
+    }
+
+    /// Preselect a provider's row (the model-picker sign-in route mounts
+    /// the selector on the row the picked model needs; TS
+    /// `ensureModelProviderConfigured` runs the same provider's flow).
+    /// A provider without a row keeps the top selection.
+    pub fn preselect_provider(&mut self, provider_id: &str) {
+        if let Some(position) = self
+            .filtered
+            .iter()
+            .position(|index| self.providers[*index].id == provider_id)
+        {
+            self.selected = position;
+        }
     }
 
     /// The panel title (TS `OAuthSelectorOptions.title`).

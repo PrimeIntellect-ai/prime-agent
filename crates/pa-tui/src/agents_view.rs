@@ -96,6 +96,11 @@ pub struct OpenedRow {
     pub rlm_depth: Option<u32>,
     pub has_children: bool,
     pub status_message: Option<String>,
+    /// The opened session's own directory (the roster summary's `cwd`):
+    /// the session run rides it as its cwd (the completion base and the
+    /// session chrome browse the attached session's directory, not the
+    /// view's launch directory — TS `getCurrentCwd`).
+    pub cwd: Option<String>,
 }
 
 /// How the view is driven.
@@ -155,6 +160,11 @@ pub struct AgentsViewOutcome {
     /// Whether the opened session has direct children (TS
     /// `sessionHasChildren`).
     pub opened_has_children: bool,
+    /// The opened session's own directory (the roster summary's `cwd`):
+    /// the session run rides it as its cwd so the completion base and the
+    /// chrome browse the attached session's directory, not the launch
+    /// directory (TS `getCurrentCwd`).
+    pub opened_cwd: Option<std::path::PathBuf>,
     /// A status message the session opener left (TS
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
@@ -220,12 +230,27 @@ enum UiInput {
 pub struct AgentsViewLink {
     client: DaemonClient,
     events: mpsc::UnboundedReceiver<DaemonClientEvent>,
+    /// The saved catalog the flow's previous view run loaded (TS
+    /// `AgentsViewPersistentState.savedSessions` + `savedCatalogLoaded`):
+    /// a re-entry paints the Inactive rows it already holds on its FIRST
+    /// frame instead of rebuilding the section from empty behind a fresh
+    /// scan, and a loaded catalog skips the re-fetch entirely (TS
+    /// `armSavedSearchFetch`'s early return). The chat handoff parks this
+    /// link; the next run seeds from it and writes its own final state
+    /// back for the run after that.
+    saved_sessions: Vec<Value>,
+    saved_catalog_loaded: bool,
 }
 
 impl AgentsViewLink {
     async fn connect(socket_path: &std::path::Path) -> Result<Self> {
         let (client, events) = DaemonClient::connect_with_retry(socket_path).await?;
-        Ok(Self { client, events })
+        Ok(Self {
+            client,
+            events,
+            saved_sessions: Vec::new(),
+            saved_catalog_loaded: false,
+        })
     }
 
     /// Release the connection; the supervisor drops the roster subscription
@@ -538,6 +563,11 @@ struct AgentsViewMode {
     /// selectable within the first window instead of the whole scan
     /// (the operator's `Still loading sessions` hold).
     saved_stream: Vec<Value>,
+    /// The catalog settled on a successful load (TS
+    /// `AgentsViewPersistentState.savedCatalogLoaded`): the run arms no
+    /// fetch while it holds, and the exit link carries it so the flow's
+    /// next view run skips its own fetch.
+    saved_catalog_loaded: bool,
 }
 
 impl AgentsViewMode {
@@ -606,6 +636,7 @@ impl AgentsViewMode {
             saved_fetch_failed: false,
             saved_query_rearm: false,
             saved_stream: Vec::new(),
+            saved_catalog_loaded: false,
         }
     }
 
@@ -1146,6 +1177,9 @@ impl AgentsViewMode {
             })
             .collect();
         self.saved_fetch_failed = false;
+        // The catalog settled (TS `persistentState.savedCatalogLoaded =
+        // true`): the flow's next view run reuses it without a fetch.
+        self.saved_catalog_loaded = true;
     }
 
     /// Whether the loop must re-arm the saved-catalog fetch (one retry
@@ -1330,6 +1364,12 @@ impl AgentsViewMode {
                 .map(|depth| depth as u32),
             has_children,
             status_message,
+            cwd: row
+                .summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
         });
         self.running = false;
     }
@@ -1372,6 +1412,11 @@ impl AgentsViewMode {
                 .map(|depth| depth as u32),
             has_children,
             status_message: None,
+            cwd: summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
         });
         self.running = false;
     }
@@ -2341,15 +2386,29 @@ async fn open_roster_link(
     DaemonClient,
     mpsc::UnboundedReceiver<DaemonClientEvent>,
     Vec<Value>,
+    Vec<Value>,
+    bool,
 )> {
-    let (mut client, mut events) = if let Some(AgentsViewLink { client, events }) = link {
-        (client, events)
-    } else {
-        let link = AgentsViewLink::connect(&options.socket_path)
-            .await
-            .with_context(|| "the agents view could not attach to the daemon")?;
-        (link.client, link.events)
-    };
+    let (mut client, mut events, saved_sessions, saved_catalog_loaded) =
+        if let Some(AgentsViewLink {
+            client,
+            events,
+            saved_sessions,
+            saved_catalog_loaded,
+        }) = link
+        {
+            (client, events, saved_sessions, saved_catalog_loaded)
+        } else {
+            let link = AgentsViewLink::connect(&options.socket_path)
+                .await
+                .with_context(|| "the agents view could not attach to the daemon")?;
+            (
+                link.client,
+                link.events,
+                link.saved_sessions,
+                link.saved_catalog_loaded,
+            )
+        };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
         rest: Default::default(),
@@ -2379,7 +2438,7 @@ async fn open_roster_link(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok((client, events, roster))
+    Ok((client, events, roster, saved_sessions, saved_catalog_loaded))
 }
 
 /// The saved-catalog fetch (TS `armSavedSearchFetch`): one request whose
@@ -2507,15 +2566,16 @@ async fn run_agents_view_surface(
     // terminal back before the error escapes (TS `returnToAgentsView`'s
     // `finally` runs the same release on a failed handoff); nothing below
     // runs to do it.
-    let (client, mut events, roster) = match open_roster_link(&options, link).await {
-        Ok(open) => open,
-        Err(error) => {
-            if matches!(ui, AgentsViewUiMode::Terminal) {
-                crate::exit_restore::restore_terminal();
+    let (client, mut events, roster, saved_sessions, saved_catalog_loaded) =
+        match open_roster_link(&options, link).await {
+            Ok(open) => open,
+            Err(error) => {
+                if matches!(ui, AgentsViewUiMode::Terminal) {
+                    crate::exit_restore::restore_terminal();
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
 
     // The double-Ctrl+C force-quit guard: same contract as the session
     // loop (see `interactive::run_interactive`).
@@ -2524,6 +2584,12 @@ async fn run_agents_view_surface(
     mode.exit_guard = exit_guard.clone();
 
     mode.roster = roster;
+    // The flow's carried catalog paints on the FIRST frame (TS
+    // `persistentState.savedSessions` seeding the mode): a re-entry's
+    // Inactive section never rebuilds from empty, and a loaded catalog
+    // means no fetch at all below.
+    mode.saved = saved_sessions;
+    mode.saved_catalog_loaded = saved_catalog_loaded;
     mode.rebuild_rows();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
@@ -2559,8 +2625,23 @@ async fn run_agents_view_surface(
     // the scan's newest-first head, exactly the rows the wait needs
     // soonest).
     while events.try_recv().is_ok() {}
-    let mut catalog_request =
-        spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
+    // TS `armSavedSearchFetch`'s early return: a loaded catalog never
+    // re-fetches (the flow's own runs share one link; the delete flow
+    // removes its row by path). A first run - or one whose previous fetch
+    // failed - arms the one fetch whose stream and result re-enter the
+    // loop below.
+    let mut catalog_request = (!mode.saved_catalog_loaded).then(|| {
+        spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone())
+    });
+    // TS `start()`'s open-time settle (`armSavedSearchFetch` followed by
+    // `resolveMissingSelectionAnchor`): a carried catalog arms no fetch,
+    // so no terminal load ever arrives to settle the entry anchor's wait -
+    // resolve it now. The anchor's row either landed from the carry's
+    // rebuild above or the catalog already settled without it; an armed
+    // fetch keeps the wait (its load settles it).
+    if catalog_request.is_none() {
+        mode.end_anchor_wait();
+    }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
     // The saved-catalog stream's open batch window: the first buffered row
@@ -2586,12 +2667,12 @@ async fn run_agents_view_surface(
                     // a terminal failure instead of staying empty for the
                     // rest of the run.
                     if mode.take_saved_fetch_rearm() {
-                        catalog_request = spawn_saved_catalog_fetch(
+                        catalog_request = Some(spawn_saved_catalog_fetch(
                             &client,
                             ui_tx.clone(),
                             cwd.clone(),
                             session_dir.clone(),
-                        );
+                        ));
                         // A superseded fetch's stream stops applying: the
                         // new fetch owns the catalog (TS's generation gate
                         // drops the old refresh's late `onSession` calls).
@@ -2624,9 +2705,15 @@ async fn run_agents_view_surface(
                 UiInput::SavedLoaded { sessions } => {
                     // The final response is the authoritative array: the
                     // stream's unflushed rows are its prefix, and the scan
-                    // never re-orders after streaming them.
+                    // never re-orders after streaming them. The request is
+                    // SETTLED: a late frame the wire still delivers must
+                    // not match the request gate and upsert its
+                    // un-enriched row over the catalog the response just
+                    // settled (the response's rows carry the ledger
+                    // enrichment the streamed rows never see).
                     mode.drop_saved_stream();
                     saved_flush = None;
+                    catalog_request = None;
                     mode.apply_saved_loaded(sessions);
                     // The failure status is the fetch's own honest error;
                     // the catalog's success retires it (the status line
@@ -2640,6 +2727,14 @@ async fn run_agents_view_surface(
                         mode.status = None;
                     }
                     mode.rebuild_rows();
+                    // TS `resolveMissingSelectionAnchor`'s finally arm: the
+                    // anchor's row can only arrive through THIS fetch, so a
+                    // terminal load that still does not carry it ends the
+                    // wait - the loading hint must never re-arm on every
+                    // open behind a catalog that already settled without
+                    // the row. The landing (or the user's first move) ends
+                    // the wait earlier; this arm settles what remains.
+                    mode.end_anchor_wait();
                 }
                 UiInput::SavedFailed { error } => {
                     // The catalog settled on a terminal failure (TS
@@ -2649,9 +2744,13 @@ async fn run_agents_view_surface(
                     // can only come from THIS fetch, so keeping the wait
                     // pending would re-arm the loading hint on every open
                     // behind an error the status line already showed (TS
-                    // `resolveMissingSelectionAnchor`'s finally arm).
+                    // `resolveMissingSelectionAnchor`'s finally arm). The
+                    // request is settled too: the failure keeps the last
+                    // good rows, and a late frame must not upsert over
+                    // them.
                     mode.drop_saved_stream();
                     saved_flush = None;
+                    catalog_request = None;
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
                     mode.status = Some(format!("Saved sessions unavailable: {error}"));
@@ -2689,7 +2788,7 @@ async fn run_agents_view_surface(
                         // instead of after the whole scan (TS
                         // `refreshSavedSessions`'s `onSession` batching).
                         Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
-                            if request_id == catalog_request {
+                            if catalog_request.as_deref() == Some(request_id.as_str()) {
                                 mode.buffer_saved_stream_item(session);
                                 if saved_flush.is_none() {
                                     saved_flush = Some(
@@ -2784,6 +2883,29 @@ async fn run_agents_view_surface(
     for dispatch in delete_dispatches {
         let _ = tokio::time::timeout_at(deadline, dispatch).await;
     }
+    // An in-flight delete's result (sent before its dispatch resolved, or
+    // still queued behind the exit) applies before the link snapshots the
+    // catalog: the carried rows must not resurrect the deleted path in
+    // the next view run, which skips its own fetch behind a loaded
+    // catalog.
+    while let Ok(input) = ui_rx.try_recv() {
+        if let UiInput::DeleteResult {
+            message,
+            deleted_saved_path,
+        } = input
+        {
+            mode.delete_result(message, deleted_saved_path);
+        }
+    }
+    for input in std::mem::take(&mut pending) {
+        if let UiInput::DeleteResult {
+            message,
+            deleted_saved_path,
+        } = input
+        {
+            mode.delete_result(message, deleted_saved_path);
+        }
+    }
     // The force-quit deadline arms only after the drain: the drain
     // window is bounded, so it never wedges, and the watchdog then
     // covers the teardown's remaining best-effort leaves (the client
@@ -2797,7 +2919,16 @@ async fn run_agents_view_surface(
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
     let link = if opened.is_some() || mode.new_session {
-        Some(AgentsViewLink { client, events })
+        // The handoff link carries the catalog the run loaded (TS
+        // `persistentState.savedSessions`/`savedCatalogLoaded`): the flow's
+        // next view run paints the Inactive rows it already holds on its
+        // first frame and skips the fetch when this one loaded them.
+        Some(AgentsViewLink {
+            client,
+            events,
+            saved_sessions: mode.saved.clone(),
+            saved_catalog_loaded: mode.saved_catalog_loaded,
+        })
     } else {
         client.close();
         None
@@ -2821,6 +2952,10 @@ async fn run_agents_view_surface(
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
             opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
+            opened_cwd: opened
+                .as_ref()
+                .and_then(|row| row.cwd.clone())
+                .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
@@ -4628,5 +4763,42 @@ the holder exits.";
                 assert_eq!((draws, mode.pulse), (expected, expected));
             }
         }
+    }
+
+    /// The carried catalog seeds the mode (TS
+    /// `persistentState.savedSessions`): the surface writes the link's
+    /// rows into `saved` before the first rebuild, so the Inactive
+    /// section paints them immediately, the anchor lands from the carried
+    /// rows, and a terminal load flips the loaded flag for the flow's
+    /// next run.
+    #[test]
+    fn the_carried_catalog_paints_and_the_load_flags_the_carry() {
+        let mut mode = mode_with_anchor(Some("s2"), vec![]);
+        assert!(
+            mode.saved.is_empty() && !mode.saved_catalog_loaded,
+            "a fresh run starts with no catalog"
+        );
+        // The surface's seeding (the link's carried rows).
+        mode.saved = vec![saved_catalog_row("/x/s2.jsonl", "s2", "carried chat")];
+        mode.rebuild_rows();
+        assert!(
+            mode.rows
+                .iter()
+                .any(|row| row.summary.get("sessionId").and_then(Value::as_str) == Some("s2")),
+            "the carried row renders without any fetch"
+        );
+        assert!(
+            !mode.anchor_selection_pending,
+            "the anchor lands from the carried catalog - no loading hold"
+        );
+        assert!(
+            !mode.saved_catalog_loaded,
+            "carried rows alone are not a settled catalog (a run that only carried still fetches)"
+        );
+        mode.apply_saved_loaded(vec![saved_catalog_row("/x/s2.jsonl", "s2", "carried chat")]);
+        assert!(
+            mode.saved_catalog_loaded,
+            "the terminal load flags the carry for the flow's next run"
+        );
     }
 }

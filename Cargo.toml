@@ -12,6 +12,12 @@ members = [
     "crates/pa-cli",
 ]
 
+# Crossterm 0.28.1's kitty support check holds the process-wide event reader
+# for 2s on terminals that do not answer. Keep its parser/queued input intact,
+# but cap the query poll to 250ms (late real-terminal replies still get a chance).
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

@@ -1,11 +1,12 @@
 //! The `/fork` user-message selector (TS `UserMessageSelectorComponent`):
-//! the session's user messages, one fork point per row.
+//! the session's user messages, one fork point per row, rendered through
+//! the shared menu grammar (the `›` marker rows, the `(n/m)` scroll row,
+//! the key-hint status row every picker renders with).
 
 use crate::keybindings::KeybindingsManager;
+use crate::menu_panel::{hint_row, key_hint, menu_row, no_match_row, scroll_row};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::truncate_line;
 use crate::{Line, Span};
-use ratatui::style::Modifier;
 
 /// One forkable user message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +66,9 @@ impl UserMessageSelector {
         }
     }
 
-    /// The full pane (TS `UserMessageSelectorComponent.render`).
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
+    /// The full pane: the title and description rows, then the shared menu
+    /// list (one row per message, the scroll indicator, the key hint).
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         // TS mounts the title and description with a one-space margin
         // (`new Text(..., 1, 0)`): the indent sits outside any escape.
         let mut lines: Vec<Line> = vec![
@@ -82,14 +83,9 @@ impl UserMessageSelector {
                 ),
             ],
             Vec::new(),
-            border(),
-            Vec::new(),
         ];
         if self.messages.is_empty() {
-            lines.push(vec![theme.fg_span(
-                ThemeColor::Muted,
-                "  No user messages found".to_string(),
-            )]);
+            lines.push(no_match_row(theme, width, "No user messages found"));
         } else {
             let start = self
                 .selected
@@ -97,36 +93,160 @@ impl UserMessageSelector {
                 .min(self.messages.len().saturating_sub(MAX_VISIBLE));
             let end = (start + MAX_VISIBLE).min(self.messages.len());
             for position in start..end {
-                let message = &self.messages[position];
-                let is_selected = position == self.selected;
-                let normalized = message.text.replace('\n', " ").trim().to_string();
-                let cursor = if is_selected {
-                    theme.fg_span(ThemeColor::Accent, "› ".to_string())
-                } else {
-                    Span::raw("  ".to_string())
-                };
-                let mut row: Line = vec![cursor, Span::raw(normalized)];
-                if is_selected {
-                    for span in &mut row {
-                        span.style = span.style.add_modifier(Modifier::BOLD);
-                    }
-                }
-                lines.push(truncate_line(&row, width, ""));
-                lines.push(vec![theme.fg_span(
-                    ThemeColor::Muted,
-                    format!("  Message {} of {}", position + 1, self.messages.len()),
-                )]);
-                lines.push(Vec::new());
+                let normalized = self.messages[position]
+                    .text
+                    .replace('\n', " ")
+                    .trim()
+                    .to_string();
+                lines.push(menu_row(
+                    theme,
+                    width,
+                    vec![Span::raw(normalized)],
+                    &[],
+                    position == self.selected,
+                ));
             }
             if start > 0 || end < self.messages.len() {
-                lines.push(vec![theme.fg_span(
-                    ThemeColor::Muted,
-                    format!("  ({}/{})", self.selected + 1, self.messages.len()),
-                )]);
+                lines.push(scroll_row(
+                    theme,
+                    width,
+                    self.selected + 1,
+                    self.messages.len(),
+                ));
             }
         }
         lines.push(Vec::new());
-        lines.push(border());
+        lines.push(hint_row(theme, width, &hint(kb)));
         lines
+    }
+}
+
+/// The selector's key hint: the shared hint-row grammar, this surface's
+/// vocabulary (an unbound action is omitted, never advertised with a
+/// default key).
+fn hint(kb: &KeybindingsManager) -> String {
+    [
+        key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
+        key_hint(kb, &["tui.select.confirm"], "select"),
+        key_hint(kb, &["tui.select.cancel"], "close"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kb() -> KeybindingsManager {
+        KeybindingsManager::new()
+    }
+
+    fn theme() -> Theme {
+        Theme::builtin("prime", crate::theme::ColorMode::TrueColor)
+    }
+
+    fn messages() -> Vec<UserMessageItem> {
+        (0..12)
+            .map(|index| UserMessageItem {
+                id: format!("entry-{index}"),
+                text: format!("message {index}"),
+            })
+            .collect()
+    }
+
+    fn row_text(line: &Line) -> String {
+        line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    #[test]
+    fn escape_cancels_and_enter_selects() {
+        let mut selector = UserMessageSelector::new(messages());
+        assert_eq!(
+            selector.handle_key(&kb(), "escape"),
+            UserMessageSelectorAction::Cancel
+        );
+        // The latest message is preselected; Enter forks from it.
+        assert_eq!(
+            selector.handle_key(&kb(), "enter"),
+            UserMessageSelectorAction::Select("entry-11".to_string())
+        );
+    }
+
+    #[test]
+    fn navigation_wraps_around_the_list() {
+        let mut selector = UserMessageSelector::new(messages());
+        for _ in 0..12 {
+            selector.handle_key(&kb(), "up");
+        }
+        assert_eq!(
+            selector.handle_key(&kb(), "enter"),
+            UserMessageSelectorAction::Select("entry-11".to_string())
+        );
+        selector.handle_key(&kb(), "down");
+        assert_eq!(
+            selector.handle_key(&kb(), "enter"),
+            UserMessageSelectorAction::Select("entry-0".to_string())
+        );
+    }
+
+    /// The selector renders through the shared menu grammar: the `›`
+    /// marker on the selected row, the `(n/m)` scroll row once the window
+    /// cannot hold every message, the hint row — and no per-row metadata
+    /// lines.
+    #[test]
+    fn the_pane_renders_through_the_shared_menu_grammar() {
+        let selector = UserMessageSelector::new(messages());
+        let lines = selector.render(&theme(), 80, &kb());
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|row| row.starts_with("\u{203a} message 11")),
+            "the preselected latest message carries the menu marker:\n{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|row| row.contains("(12/12)")),
+            "the shared scroll row replaces the per-row metadata:\n{rendered:?}"
+        );
+        assert!(!rendered.iter().any(|row| row.contains("Message 1 of")));
+        assert!(rendered
+            .iter()
+            .any(|row| row.contains("\u{2191}/\u{2193} navigate · Enter select · Esc close")));
+    }
+
+    /// The hint never advertises an unbound action: with the cancel
+    /// binding disabled (an empty user binding), the rendered hint drops
+    /// the close segment instead of showing an `Esc close` key the
+    /// selector does not handle.
+    #[test]
+    fn the_hint_omits_unbound_actions() {
+        let mut bindings = crate::keybindings::KeybindingsConfig::new();
+        bindings.insert("tui.select.cancel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(bindings);
+        let selector = UserMessageSelector::new(messages());
+        let lines = selector.render(&theme(), 80, &kb);
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+        let hint = rendered
+            .iter()
+            .find(|row| row.contains("navigate"))
+            .expect("the hint row renders");
+        assert!(
+            hint.contains("Enter select"),
+            "the bound action stays: {hint}"
+        );
+        assert!(!hint.contains("close"), "the unbound action drops: {hint}");
+    }
+
+    #[test]
+    fn an_empty_session_renders_the_shared_no_match_row() {
+        let selector = UserMessageSelector::new(Vec::new());
+        let lines = selector.render(&theme(), 80, &kb());
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+        assert!(rendered
+            .iter()
+            .any(|row| row.contains("No user messages found")));
     }
 }

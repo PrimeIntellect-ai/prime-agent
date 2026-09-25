@@ -32,6 +32,7 @@ pub(crate) mod prime_inference_login;
 pub(crate) mod prompt_command;
 pub(crate) mod provider_login;
 pub(crate) mod public_command;
+pub(crate) mod self_update;
 pub(crate) mod session_export;
 pub(crate) mod subscription_login;
 pub(crate) mod traces_login;

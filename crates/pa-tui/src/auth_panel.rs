@@ -113,8 +113,7 @@ pub enum AuthPanelRequest {
     },
     /// A provider login settled (`/login`'s rows): the outcome row
     /// applies and the panel unmounts. `provider` is the row's provider
-    /// id (the model-picker sign-in route keys its parked retry on it —
-    /// #2786).
+    /// id (the model-picker sign-in route keys its parked retry on it).
     ProviderSettled {
         provider: String,
         outcome: ProviderAuthOutcome,
