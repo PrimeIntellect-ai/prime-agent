@@ -4,7 +4,7 @@
 use pa_types::ai::Message;
 use pa_types::session::{AgentMessage, FileEntry};
 
-use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult};
+use super::compaction::{find_cut_point, CutPointResult};
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
     complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
@@ -135,6 +135,45 @@ pub fn estimate_summary_request_tokens(
     required
 }
 
+/// The auxiliary-model window estimate over the exact summarizer request
+/// bodies the run will issue (the prebuilt requests of
+/// [`execute_compaction`]): the same chars/4 math as
+/// [`estimate_summary_request_tokens`] — the shared system prompt, each
+/// request's user-content chars, and each call's completion budget — with
+/// the largest slice winning. `history_request` is `None` exactly when the
+/// wire call would stand in "No prior history." instead of issuing a
+/// request (the old estimator's `issues_history_call` is false);
+/// `turn_prefix_request` is `None` when no turn prefix is retained.
+/// Sharing the bodies with the wire calls keeps the estimate identical to
+/// what the calls issue, without the old estimator's second full
+/// convert+serialize of the conversation.
+pub fn estimate_prebuilt_summary_request_tokens(
+    history_request: Option<&[AgentMessage]>,
+    turn_prefix_request: Option<&[AgentMessage]>,
+    reserve_tokens: u64,
+) -> u64 {
+    let system_prompt_tokens = (super::compaction_utils::SUMMARIZATION_SYSTEM_PROMPT
+        .chars()
+        .count() as u64)
+        .div_ceil(4);
+    let mut required = 0u64;
+    if let Some(request) = history_request {
+        required = required.max(
+            system_prompt_tokens
+                + summarizer_request_tokens(request)
+                + history_summary_completion_budget(reserve_tokens),
+        );
+    }
+    if let Some(request) = turn_prefix_request {
+        required = required.max(
+            system_prompt_tokens
+                + summarizer_request_tokens(request)
+                + turn_prefix_summary_completion_budget(reserve_tokens),
+        );
+    }
+    required
+}
+
 /// The model-visible message produced by a session entry (summarizer input).
 fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
     match entry {
@@ -177,8 +216,16 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 /// and aborted turns never anchor the estimate: their usage is not a real
 /// measurement, and TS `getLastAssistantUsageInfo` skips them too.
 fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
-    let context = crate::session::build_session_context(entries, leaf_id);
-    estimate_context_tokens(&context.messages).tokens
+    // The estimate-only context walk: the owned build clones every
+    // message just to read usage anchors and sizes; the by-reference
+    // walk yields the same sequence (the TS `tokensBefore` semantics are
+    // untouched — see `session_context_message_refs`).
+    let refs = crate::session::session_context_message_refs(entries, leaf_id);
+    let messages: Vec<&AgentMessage> = refs
+        .iter()
+        .map(crate::session::ContextMessageRef::message)
+        .collect();
+    super::compaction::estimate_context_tokens_refs(&messages).tokens
 }
 
 /// Session `AgentMessage` -> LLM Message (post `convertToLlm`).
@@ -346,8 +393,14 @@ pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
 ) -> anyhow::Result<CompactOutcome> {
-    let entries = session.retained_entries().to_vec();
-    let preparation = match prepare_compaction(&entries, options.settings.keep_recent_tokens) {
+    // Planning over the retained chain, borrowed: every derived value is
+    // owned before the summarizer arms, so the chain — the whole session
+    // on a large one — is never cloned to hold it across the wire calls
+    // (the old flow cloned the full entry chain up front; the borrow ends
+    // with the request build below, and the session's first mutable use
+    // is the post-summarizer commit).
+    let entries = session.retained_entries();
+    let preparation = match prepare_compaction(entries, options.settings.keep_recent_tokens) {
         Ok(preparation) => preparation,
         Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
     };
@@ -396,14 +449,47 @@ pub async fn execute_compaction(
     // Split turns retain their suffix, but their prefix file operations
     // still belong in the summary details (TS prepareCompaction extracts
     // from messagesToSummarize plus turnPrefixMessages).
-    let mut file_op_messages = history.clone();
-    file_op_messages.extend(turn_prefix_messages.iter().cloned());
-    let details: CompactionDetails =
-        details_for(&file_op_messages, &entries, prev_compaction_index);
+    let details: CompactionDetails = details_for(
+        history.iter().chain(turn_prefix_messages.iter()),
+        entries,
+        prev_compaction_index,
+    );
 
     // A run aborted before the summarizer request never starts one (TS
     // `throwIfAborted` at the top of the provider call).
     pa_agent::abort::throw_if_aborted_signal(options.abort)?;
+
+    // The summarizer request bodies, built once: the auxiliary-model
+    // window estimate below reads the exact bodies the wire calls issue
+    // (the old flow built them twice — once inside the estimator, once
+    // inside each call — each build a full convert+serialize of the
+    // conversation). Building them here also ends the entry-chain
+    // borrow and lets the message slices drop before the wire calls:
+    // the requests are the only conversation-sized allocations that
+    // survive to them. The history request exists for every cut except
+    // a split turn whose kept cut leaves no history (TS
+    // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
+    // prior history."`); the turn-prefix request exists only for a
+    // split turn with a retained prefix.
+    let issues_history_call =
+        !(cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty());
+    let history_request = if issues_history_call {
+        Some(build_summarization_request(
+            &history,
+            options.custom_instructions,
+            previous_summary.as_deref(),
+            options.settings.reserve_tokens,
+        ))
+    } else {
+        None
+    };
+    let turn_prefix_request = if cut.is_split_turn && !turn_prefix_messages.is_empty() {
+        Some(build_turn_prefix_request(&turn_prefix_messages))
+    } else {
+        None
+    };
+    drop(history);
+    drop(turn_prefix_messages);
 
     // TS `compact`: a split-turn cut runs TWO summarizer calls — the
     // history summary (the normal summarizer, floor(0.8*reserve) tokens)
@@ -427,12 +513,9 @@ pub async fn execute_compaction(
     // runs on the blocking pool, never the async executor.
     let (model, api_key, summary_headers) = match options.auxiliary {
         Some(context) => {
-            let required = estimate_summary_request_tokens(
-                &history,
-                &turn_prefix_messages,
-                cut.is_split_turn,
-                previous_summary.as_deref(),
-                options.custom_instructions,
+            let required = estimate_prebuilt_summary_request_tokens(
+                history_request.as_deref(),
+                turn_prefix_request.as_deref(),
                 options.settings.reserve_tokens,
             );
             let join = {
@@ -478,7 +561,7 @@ pub async fn execute_compaction(
         // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
         // prior history."` — the arm runs when a turn prefix exists); a
         // cut without a turn prefix makes the history call below.
-        if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+        let Some(request) = history_request else {
             // The literal stand-in is the history slice the live block
             // carries too (the flush below appends the split marker and
             // the prefix behind it, exactly like the committed summary).
@@ -493,13 +576,7 @@ pub async fn execute_compaction(
                 summary: NO_PRIOR_HISTORY.to_string(),
                 usage: None,
             });
-        }
-        let request = build_summarization_request(
-            &history,
-            options.custom_instructions,
-            previous_summary.as_deref(),
-            options.settings.reserve_tokens,
-        );
+        };
         complete_summary_call(
             &model,
             api_key.clone(),
@@ -512,10 +589,9 @@ pub async fn execute_compaction(
         .await
     };
     let turn_prefix_call = async {
-        if !(cut.is_split_turn && !turn_prefix_messages.is_empty()) {
+        let Some(request) = turn_prefix_request else {
             return Ok::<Option<SummarySlice>, anyhow::Error>(None);
-        }
-        let request = build_turn_prefix_request(&turn_prefix_messages);
+        };
         let slice = complete_summary_call(
             &model,
             api_key.clone(),
@@ -657,6 +733,7 @@ pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPoi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::compaction::estimate_context_tokens;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
 
@@ -2575,6 +2652,106 @@ mod tests {
             estimate_summary_request_tokens(&history, &[], false, None, None, 100_000);
         assert!(bigger_reserve > history_only);
     }
+
+    /// The prebuilt-request window estimate (what `execute_compaction`'s
+    /// auxiliary routing reads) matches the rebuilding estimator
+    /// ([`estimate_summary_request_tokens`]) for every realizable cut:
+    /// history and turn-prefix presence, update-mode anchors, custom
+    /// instructions, and the split/no-history stand-in arm. The two
+    /// functions must stay in lockstep — the routing decision they feed
+    /// is identical only when their numbers are. (At the call site a
+    /// non-split cut always carries an empty turn prefix, so the
+    /// realizable matrix is history x {split with prefix, no prefix}.)
+    #[test]
+    fn prebuilt_summary_request_estimate_matches_the_rebuilding_estimator() {
+        let history = vec![user_message("some history to summarize")];
+        let turn_prefix = vec![user_message(&"a very long turn prefix ".repeat(2_000))];
+        let reserve = 10_000u64;
+        for (history, turn_prefix, is_split) in [
+            (history.as_slice(), turn_prefix.as_slice(), true),
+            (history.as_slice(), [].as_slice(), false),
+            ([].as_slice(), turn_prefix.as_slice(), true),
+            ([].as_slice(), [].as_slice(), false),
+        ] {
+            let rebuilding = estimate_summary_request_tokens(
+                history,
+                turn_prefix,
+                is_split,
+                Some("the previous summary text"),
+                Some("focus on the goal"),
+                reserve,
+            );
+            // The requests the run will issue, under the wire arms'
+            // own conditions (the history request exists for every cut
+            // except a split turn with a retained prefix and no
+            // history; the turn-prefix request only for a split turn
+            // with a retained prefix).
+            let history_request = if !(is_split && !turn_prefix.is_empty() && history.is_empty())
+            {
+                Some(build_summarization_request(
+                    history,
+                    Some("focus on the goal"),
+                    Some("the previous summary text"),
+                    reserve,
+                ))
+            } else {
+                None
+            };
+            let turn_prefix_request = if !turn_prefix.is_empty() {
+                Some(build_turn_prefix_request(turn_prefix))
+            } else {
+                None
+            };
+            let prebuilt = estimate_prebuilt_summary_request_tokens(
+                history_request.as_deref(),
+                turn_prefix_request.as_deref(),
+                reserve,
+            );
+            assert_eq!(rebuilding, prebuilt);
+        }
+    }
+
+    /// The borrowed context estimate ([`estimate_context_tokens_refs`])
+    /// is the owned estimate ([`estimate_context_tokens`]) over the same
+    /// messages: the compaction `tokensBefore` read switches to the
+    /// borrowed walk, and the two must agree on anchor and trailing math.
+    #[test]
+    fn borrowed_context_estimate_matches_the_owned_estimate() {
+        let mut messages = vec![user_message("first user turn")];
+        messages.push(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(pa_types::ai::TextContent {
+                text: "answer".to_string(),
+                text_signature: None,
+                rest: Default::default(),
+            })],
+            api: Default::default(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage {
+                input: 100,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 150,
+                cost: Default::default(),
+            },
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 20,
+            rest: Default::default(),
+        }));
+        messages.push(user_message("trailing user turn, estimated by chars"));
+        let borrowed: Vec<&AgentMessage> = messages.iter().collect();
+        assert_eq!(
+            estimate_context_tokens(&messages),
+            super::super::compaction::estimate_context_tokens_refs(&borrowed)
+        );
+    }
+
 
     fn user_message(text: &str) -> AgentMessage {
         AgentMessage::User(pa_types::ai::UserMessage {

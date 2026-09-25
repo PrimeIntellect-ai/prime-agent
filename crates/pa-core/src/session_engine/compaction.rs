@@ -223,20 +223,38 @@ pub struct ContextTokensEstimate {
 /// The `expect` on the usage at the found index cannot fire: the index
 /// comes from an `rposition` over messages whose usage is present.
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextTokensEstimate {
+    estimate_context_tokens_refs(&messages.iter().collect::<Vec<_>>())
+}
+
+/// The estimate over borrowed context messages (the session's by-reference
+/// context walk): the same anchor + trailing math as
+/// [`estimate_context_tokens`], one shared implementation so the owned and
+/// borrowed estimates stay in lockstep.
+///
+/// # Panics
+///
+/// The `expect` on the usage at the found index cannot fire: the index
+/// comes from an `rposition` over messages whose usage is present.
+pub fn estimate_context_tokens_refs(messages: &[&AgentMessage]) -> ContextTokensEstimate {
     match messages
         .iter()
+        .copied()
         .rposition(|message| assistant_usage(message).is_some())
     {
         Some(index) => {
-            let usage = assistant_usage(&messages[index]).expect("index from rposition");
-            let trailing: u64 = messages[index + 1..].iter().map(estimate_tokens).sum();
+            let usage = assistant_usage(messages[index]).expect("index from rposition");
+            let trailing: u64 = messages[index + 1..]
+                .iter()
+                .copied()
+                .map(estimate_tokens)
+                .sum();
             ContextTokensEstimate {
                 tokens: calculate_context_tokens(&usage) + trailing,
                 last_usage_index: Some(index),
             }
         }
         None => ContextTokensEstimate {
-            tokens: messages.iter().map(estimate_tokens).sum(),
+            tokens: messages.iter().copied().map(estimate_tokens).sum(),
             last_usage_index: None,
         },
     }
@@ -394,16 +412,10 @@ pub fn find_cut_point(
     }
     let mut accumulated = 0u64;
     let mut cut_index = cut_points[0];
-    for (i, entry) in entries
-        .iter()
-        .enumerate()
-        .take(end_index.min(entries.len()))
-        .skip(start_index)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let FileEntry::Message { message, .. } = entry else {
+    // The same start..end range the collected iterator walked, reversed
+    // without materializing it.
+    for i in (start_index..end_index.min(entries.len())).rev() {
+        let FileEntry::Message { message, .. } = &entries[i] else {
             continue;
         };
         accumulated = accumulated.saturating_add(estimate_tokens(message));

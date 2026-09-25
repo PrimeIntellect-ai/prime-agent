@@ -505,10 +505,10 @@ impl AgentSession {
         };
         let loop_messages: Vec<AgentMessage> = rebuilt
             .into_iter()
-            .filter_map(|message| {
-                let value = serde_json::to_value(&message).ok()?;
-                serde_json::from_value::<AgentMessage>(value).ok()
-            })
+            // The buffered wire cross (see `cross_wire`): same JSON
+            // contract as the `to_value`/`from_value` crossing, without
+            // the `Value` tree over the whole rebuilt context.
+            .filter_map(|message| super::messages::cross_wire(&message))
             .collect();
         let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
@@ -616,10 +616,10 @@ impl AgentSession {
         };
         let loop_messages: Vec<AgentMessage> = rebuilt
             .into_iter()
-            .filter_map(|message| {
-                let value = serde_json::to_value(&message).ok()?;
-                serde_json::from_value::<AgentMessage>(value).ok()
-            })
+            // The buffered wire cross (see `cross_wire`): same JSON
+            // contract as the `to_value`/`from_value` crossing, without
+            // the `Value` tree over the whole rebuilt context.
+            .filter_map(|message| super::messages::cross_wire(&message))
             .collect();
         self.agent.set_messages(loop_messages).await;
         Ok(())
@@ -671,10 +671,11 @@ impl AgentSession {
         let loop_messages: Vec<AgentMessage> =
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
                 .into_iter()
-                .filter_map(|message| {
-                    let value = serde_json::to_value(&message).ok()?;
-                    serde_json::from_value::<AgentMessage>(value).ok()
-                })
+                // The buffered wire cross (see `cross_wire`): same JSON
+                // contract as the `to_value`/`from_value` crossing,
+                // without the `Value` tree over the whole rebuilt
+                // context.
+                .filter_map(|message| super::messages::cross_wire(&message))
                 .collect();
         drop(session);
         self.agent.set_messages(loop_messages).await;

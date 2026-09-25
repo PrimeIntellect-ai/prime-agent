@@ -403,6 +403,137 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     }
 }
 
+/// One model-visible message of the session context, borrowed from the
+/// entry chain wherever the context is only read (token/usage estimates
+/// never mutate or outlive the walk).
+#[derive(Debug)]
+pub enum ContextMessageRef<'a> {
+    /// A session `Message` entry's message, borrowed.
+    Borrowed(&'a AgentMessage),
+    /// A converted row (custom, branch-summary, compaction-summary) —
+    /// the same conversion the owned context build materializes; never
+    /// a clone of a plain message.
+    Converted(AgentMessage),
+}
+
+impl<'a> ContextMessageRef<'a> {
+    /// The context message (either arm).
+    pub fn message(&self) -> &AgentMessage {
+        match self {
+            Self::Borrowed(message) => message,
+            Self::Converted(message) => message,
+        }
+    }
+}
+
+/// The [`build_session_context`] message sequence by reference: the same
+/// leaf-to-root path walk, the same summary-first assembly around a
+/// compaction, the same conversion rows — every plain message borrowed
+/// from `entries`, only the small converted rows allocated. Estimates
+/// over this sequence are identical to estimates over the owned
+/// [`SessionContext::messages`], so read-only consumers (the compaction
+/// `tokensBefore` estimate) skip the full-context clone. The assembly
+/// stays in lockstep with [`build_session_context`];
+/// `context_refs_match_owned_context` holds the two together.
+pub fn session_context_message_refs(
+    entries: &[FileEntry],
+    leaf_id: Option<&str>,
+) -> Vec<ContextMessageRef<'_>> {
+    let by_id: HashMap<&str, usize> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.id().map(|id| (id, index)))
+        .collect();
+
+    let leaf_index: Option<usize> = match leaf_id {
+        Some("") | None => entries.len().checked_sub(1),
+        Some(id) => by_id.get(id).copied(),
+    };
+    let Some(leaf_index) = leaf_index else {
+        return Vec::new();
+    };
+
+    // Path from root to leaf. A corrupt file can hold a parent cycle;
+    // the walk must terminate anyway.
+    let mut path: Vec<usize> = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut current = Some(leaf_index);
+    while let Some(index) = current {
+        if !visited.insert(index) {
+            break;
+        }
+        path.push(index);
+        current = entries[index]
+            .parent_id()
+            .and_then(|parent_id| by_id.get(parent_id).copied());
+    }
+    path.reverse();
+
+    let mut compaction: Option<usize> = None;
+    for &index in &path {
+        if matches!(entries[index], FileEntry::Compaction { .. }) {
+            compaction = Some(index);
+        }
+    }
+
+    // The owned build's `append_message`, by reference.
+    let mut messages: Vec<ContextMessageRef<'_>> = Vec::new();
+    let append_ref = |entry: &FileEntry, target: &mut Vec<ContextMessageRef<'_>>| match entry {
+        FileEntry::Message { message, .. } => target.push(ContextMessageRef::Borrowed(message)),
+        FileEntry::CustomMessage { payload, .. } => {
+            target.push(ContextMessageRef::Converted(AgentMessage::Custom(
+                create_custom_message(payload, entry),
+            )));
+        }
+        FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
+            target.push(ContextMessageRef::Converted(AgentMessage::BranchSummary(
+                pa_types::session::BranchSummaryMessage {
+                    summary: payload.summary.clone(),
+                    from_id: payload.from_id.clone(),
+                    timestamp: timestamp_to_millis(entry.timestamp()),
+                },
+            )));
+        }
+        _ => {}
+    };
+
+    if let Some(compaction_index) = compaction {
+        let FileEntry::Compaction { payload, .. } = &entries[compaction_index] else {
+            unreachable!("compaction index matched above");
+        };
+        let first_kept_id = payload.first_kept_entry_id.as_str();
+        let mut retained: Vec<ContextMessageRef<'_>> = Vec::new();
+        let mut found_first_kept = false;
+        for &index in &path[..path.partition_point(|&i| i < compaction_index)] {
+            if entries[index].id().unwrap_or_default() == first_kept_id {
+                found_first_kept = true;
+            }
+            if found_first_kept {
+                append_ref(&entries[index], &mut retained);
+            }
+        }
+        messages.push(ContextMessageRef::Converted(AgentMessage::CompactionSummary(
+            CompactionSummaryMessage {
+                summary: payload.summary.clone(),
+                tokens_before: payload.tokens_before,
+                retained_message_count: Some(retained.len() as u64),
+                custom_instructions: payload.custom_instructions.clone(),
+                harness_digest: payload.harness_digest.clone(),
+                timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
+            },
+        )));
+        messages.append(&mut retained);
+        for &index in &path[path.partition_point(|&i| i <= compaction_index)..] {
+            append_ref(&entries[index], &mut messages);
+        }
+    } else {
+        for &index in &path {
+            append_ref(&entries[index], &mut messages);
+        }
+    }
+    messages
+}
+
 fn create_custom_message(payload: &CustomMessageEntry, entry: &FileEntry) -> CustomMessage {
     CustomMessage {
         custom_type: payload.custom_type.clone(),
@@ -536,6 +667,101 @@ mod context_tests {
             assert_eq!(assistant.usage.input, 100);
         } else {
             panic!("assistant entry missing");
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod context_refs_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entries_from_rows(rows: &[serde_json::Value]) -> Vec<FileEntry> {
+        rows.iter()
+            .map(|row| serde_json::from_value::<FileEntry>(row.clone()).expect("entry parses"))
+            .collect()
+    }
+
+    /// A session exercising every message-bearing entry kind on one path:
+    /// plain messages, a custom message, a non-empty and an empty branch
+    /// summary, a compaction with a retained span, a thinking-level row
+    /// (a non-message row the walk must skip), and usage-bearing
+    /// assistants on both sides of the compaction.
+    fn fixture_rows() -> Vec<serde_json::Value> {
+        vec![
+            json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+            json!({"type":"thinking_level_change","id":"tl0","parentId":"s","thinkingLevel":"high"}),
+            json!({"type":"message","id":"u0","parentId":"tl0","message":{"role":"user","content":"first turn","timestamp":10}}),
+            json!({"type":"message","id":"a0","parentId":"u0","message":{"role":"assistant","api":"test","provider":"test","model":"m","content":[{"type":"text","text":"answer"}],"usage":{"input":100,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":150,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":20}}),
+            json!({"type":"message","id":"t0","parentId":"a0","message":{"role":"toolResult","toolCallId":"c0","toolName":"echo","content":[{"type":"text","text":"tool output"}],"isError":false,"timestamp":30}}),
+            json!({"type":"custom_message","id":"cm0","parentId":"t0","customType":"note","content":"a custom note","display":true}),
+            json!({"type":"branch_summary","id":"bs0","parentId":"cm0","fromId":"u0","summary":"branch story"}),
+            json!({"type":"branch_summary","id":"bs1","parentId":"bs0","fromId":"u0","summary":""}),
+            json!({"type":"compaction","id":"cp0","parentId":"bs1","summary":"compacted story","firstKeptEntryId":"t0","tokensBefore":999}),
+            json!({"type":"message","id":"u1","parentId":"cp0","message":{"role":"user","content":"after compact","timestamp":40}}),
+            json!({"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","api":"test","provider":"test","model":"m","content":[{"type":"text","text":"done"}],"usage":{"input":50,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":52,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":50}}),
+        ]
+    }
+
+    /// The by-reference context walk ([`session_context_message_refs`])
+    /// produces exactly the owned context's message sequence
+    /// ([`build_session_context`]) for every leaf of a session with
+    /// compactions, custom rows, branch summaries, and non-message rows
+    /// on the path — the lockstep that lets the estimate-only consumers
+    /// read the context without cloning it.
+    #[test]
+    fn context_refs_match_owned_context() {
+        let rows = fixture_rows();
+        let entries = entries_from_rows(&rows);
+        let leaf_ids = [
+            None,
+            Some(""),
+            Some("u0"),
+            Some("a0"),
+            Some("t0"),
+            Some("cm0"),
+            Some("bs0"),
+            Some("bs1"),
+            Some("cp0"),
+            Some("u1"),
+            Some("a1"),
+            Some("missing"),
+        ];
+        for leaf_id in leaf_ids {
+            let owned = build_session_context(&entries, leaf_id);
+            let borrowed = session_context_message_refs(&entries, leaf_id);
+            assert_eq!(
+                owned.messages.len(),
+                borrowed.len(),
+                "length mismatch at leaf {leaf_id:?}"
+            );
+            for (index, borrowed_message) in borrowed.iter().enumerate() {
+                assert_eq!(
+                    &owned.messages[index],
+                    borrowed_message.message(),
+                    "message {index} mismatch at leaf {leaf_id:?}"
+                );
+            }
+        }
+    }
+
+    /// A corrupt parent cycle terminates both walks with the same
+    /// sequence (the cycle guard's behavior is part of the walk's
+    /// contract).
+    #[test]
+    fn context_refs_terminate_on_a_parent_cycle() {
+        let rows = vec![
+            json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+            json!({"type":"message","id":"x","parentId":"y","message":{"role":"user","content":"x","timestamp":0}}),
+            json!({"type":"message","id":"y","parentId":"x","message":{"role":"user","content":"y","timestamp":0}}),
+        ];
+        let entries = entries_from_rows(&rows);
+        let owned = build_session_context(&entries, Some("y"));
+        let borrowed = session_context_message_refs(&entries, Some("y"));
+        assert_eq!(owned.messages.len(), borrowed.len());
+        for (index, borrowed_message) in borrowed.iter().enumerate() {
+            assert_eq!(&owned.messages[index], borrowed_message.message());
         }
     }
 }

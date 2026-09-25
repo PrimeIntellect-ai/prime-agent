@@ -262,8 +262,8 @@ pub fn summed_usage(slices: &[SummarySlice]) -> Option<pa_types::ai::Usage> {
 }
 
 /// File operations preserved across prior compactions plus current messages.
-fn extract_file_operations(
-    messages: &[AgentMessage],
+fn extract_file_operations<'a>(
+    messages: impl Iterator<Item = &'a AgentMessage>,
     entries: &[FileEntry],
     prev_compaction_index: Option<usize>,
 ) -> FileOperations {
@@ -380,8 +380,10 @@ pub fn compaction_entry_for(
 }
 
 /// Full-file-list details for a compact run (prev compaction ops + messages).
-pub fn details_for(
-    messages: &[AgentMessage],
+/// `messages` walks the summarizer slices (history, then turn prefix) —
+/// the file-operation scan reads the messages; nothing owns a copy.
+pub fn details_for<'a>(
+    messages: impl Iterator<Item = &'a AgentMessage>,
     entries: &[FileEntry],
     prev_compaction_index: Option<usize>,
 ) -> CompactionDetails {
@@ -572,7 +574,7 @@ mod tests {
         assert_eq!(result.first_kept_entry_id, "e1");
         assert_eq!(result.tokens_before, 1_000);
         // The persisted entry carries the summary + details.
-        let details = details_for(&messages, &entries, None);
+        let details = details_for(messages.iter(), &entries, None);
         let entry = compaction_entry_for(&result, &details, Some("focus"), None);
         assert_eq!(entry.summary, "## Goal\nship it");
         assert_eq!(entry.custom_instructions.as_deref(), Some("focus"));

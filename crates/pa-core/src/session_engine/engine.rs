@@ -619,10 +619,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         Some(
             existing_messages
                 .into_iter()
-                .filter_map(|message| {
-                    let value = serde_json::to_value(&message).ok()?;
-                    serde_json::from_value(value).ok()
-                })
+                // The buffered wire cross (see `cross_wire`): same JSON
+                // contract as the `to_value`/`from_value` crossing,
+                // without the `Value` tree over the whole resumed
+                // context (this runs on every session open).
+                .filter_map(|message| super::messages::cross_wire(&message))
                 .collect(),
         )
     };

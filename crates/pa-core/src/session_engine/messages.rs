@@ -416,20 +416,43 @@ pub fn loop_convert_to_llm(
     out
 }
 
+/// Cross the pa-core/pa-agent wire boundary in one buffered pass: the two
+/// crates model the same TS wire shapes as separate Rust types, so the
+/// bridge is the shared camelCase JSON form — serialized to compact
+/// bytes and deserialized straight from the buffer. The JSON is
+/// byte-equivalent to the `to_value`/`from_value` crossing this
+/// replaces (the wire form is the contract; the deserialized result is
+/// identical for these types — see `wire_cross_matches_value_crossing`),
+/// without materializing the intermediate `Value` tree, whose cost is an
+/// allocation per object and a duplicated `String` per key of the whole
+/// context — paid on every context rebuild (compaction, tree
+/// navigation, session resume).
+pub(crate) fn cross_wire<T, U>(value: &T) -> Option<U>
+where
+    T: serde::Serialize,
+    U: serde::de::DeserializeOwned,
+{
+    use serde::Serialize as _;
+    let mut bytes = Vec::new();
+    let mut serializer = serde_json::Serializer::new(&mut bytes);
+    value.serialize(&mut serializer).ok()?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    U::deserialize(&mut deserializer).ok()
+}
+
 /// One loop custom row as its session wire shape, when the row matches a
 /// known session role (`custom`, `bashExecution`, `branchSummary`,
 /// `compactionSummary`). Unknown shapes read as unconvertible (TS drops
 /// them via the exhaustive-switch default).
 fn custom_message_to_session(custom: &pa_agent::types::CustomAgentMessage) -> Option<AgentMessage> {
-    let wire = serde_json::to_value(custom).ok()?;
-    serde_json::from_value(wire).ok()
+    cross_wire(custom)
 }
 
 /// One converted session row back into its loop wire shape (the shared
 /// camelCase wire form crosses the pa-core/pa-agent boundary by JSON
 /// round-trip).
 fn session_llm_row_to_loop(message: &AgentMessage) -> Option<pa_agent::types::Message> {
-    serde_json::from_value(serde_json::to_value(message).ok()?).ok()
+    cross_wire(message)
 }
 
 /// The `ConvertToLlmFn` handed to the pa-agent loop: infallible by contract
@@ -444,6 +467,121 @@ pub fn engine_convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
 mod tests {
     use super::*;
 
+
+    /// The buffered wire cross ([`cross_wire`]) is interchangeable with the
+    /// `to_value`/`from_value` crossing it replaces, message for message,
+    /// over every shape the context rebuilds produce: plain text users,
+    /// block users (image and raw blocks, extra `rest` keys), assistants
+    /// with thinking/tool-call blocks, usage, diagnostics and extra
+    /// `rest` keys, and tool results. The wire JSON is the contract; the
+    /// two crossings must agree on both the result and the failure cases.
+    #[test]
+    fn wire_cross_matches_value_crossing() {
+        use pa_types::ai::{
+            AssistantContentBlock, AssistantMessage, Message, TextContent, ThinkingContent,
+            ToolCall, ToolResultMessage, Usage, UserContent, UserContentBlock, UserMessage,
+        };
+        use pa_types::JsonMap;
+
+        fn rest(pairs: &[(&str, serde_json::Value)]) -> JsonMap {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), value.clone()))
+                .collect()
+        }
+
+        let assistant = AssistantMessage {
+            content: vec![
+                AssistantContentBlock::Text(TextContent {
+                    text: "answer".to_string(),
+                    text_signature: Some("sig-v1".to_string()),
+                    rest: rest(&[("extra", serde_json::json!({"nested": [1, 2, 3]}))]),
+                }),
+                AssistantContentBlock::Thinking(ThinkingContent {
+                    thinking: "thinking hard".to_string(),
+                    thinking_signature: None,
+                    redacted: None,
+                    rest: Default::default(),
+                }),
+                AssistantContentBlock::ToolCall(ToolCall {
+                    id: "call-1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: rest(&[
+                        ("text", serde_json::json!("hi")),
+                        ("flags", serde_json::json!([true, false])),
+                    ]),
+                    thought_signature: None,
+                    rest: Default::default(),
+                }),
+            ],
+            api: Default::default(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage {
+                input: 10,
+                output: 2,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 12,
+                cost: Default::default(),
+            },
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 20,
+            rest: rest(&[("unknownAssistantKey", serde_json::json!("kept on the wire"))]),
+        };
+
+        let messages: Vec<Message> = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("plain".to_string()),
+                timestamp: 1,
+                rest: Default::default(),
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Blocks(vec![
+                    UserContentBlock::Text(TextContent {
+                        text: "block".to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    }),
+                    UserContentBlock::Image(pa_types::ai::ImageContent {
+                        data: "aGk=".to_string(),
+                        mime_type: "image/png".to_string(),
+                        rest: Default::default(),
+                    }),
+                    UserContentBlock::Raw(serde_json::json!({"type": "mystery"})),
+                ]),
+                timestamp: 2,
+                rest: rest(&[("unknownUserKey", serde_json::json!(42))]),
+            }),
+            Message::Assistant(assistant),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "echo".to_string(),
+                content: vec![UserContentBlock::Text(TextContent {
+                    text: "result".to_string(),
+                    text_signature: None,
+                    rest: Default::default(),
+                })],
+                details: None,
+                is_error: false,
+                timestamp: 3,
+                rest: rest(&[("unknownToolKey", serde_json::json!(null))]),
+            }),
+        ];
+
+        for message in &messages {
+            let value_crossing: Option<pa_agent::types::AgentMessage> =
+                serde_json::from_value(serde_json::to_value(message).unwrap()).ok();
+            let wire_crossing: Option<pa_agent::types::AgentMessage> = cross_wire(message);
+            assert_eq!(value_crossing.is_some(), wire_crossing.is_some());
+            assert_eq!(value_crossing, wire_crossing);
+        }
+    }
     /// The retry-outcome row (SANCTIONED DIVERGENCE, operator ruling
     /// 2026-09-23): one durable line per episode — the recovered and
     /// exhausted texts, the structured details — and never model context.
