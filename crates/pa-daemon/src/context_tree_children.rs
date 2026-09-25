@@ -94,7 +94,8 @@ pub fn load_context_tree_child(
     // The per-model own-usage breakdown rides the child node too (a
     // subagent on another model — or a child that itself switched —
     // shows which model billed its spend).
-    let own_usage_by_model = crate::state_getters::compute_own_usage_by_model(&branch, all_entries);
+    let own_usage_by_model =
+        crate::state_getters::compute_own_usage_by_model(&branch, all_entries, &own_usage);
     let label = branch
         .iter()
         .find_map(|entry| branch_user_label(entry))
