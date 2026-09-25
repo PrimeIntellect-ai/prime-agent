@@ -1020,6 +1020,7 @@ async fn run_onboarding_phase(
                 });
                 let panel = session.auth_panel_handle();
                 let prompt_cancel = panel.cancel_signal();
+                let provider_id = row.id.clone();
                 let row = row.clone();
                 let prompt_auth = provider_auth.clone();
                 let prompt_flow = OnboardingFlowTask::spawn(
@@ -1059,7 +1060,7 @@ async fn run_onboarding_phase(
                                 "the provider login task failed".to_string(),
                             )
                         });
-                        session.apply_auth_outcome(outcome, &row.id, view).await;
+                        session.apply_auth_outcome(outcome, &provider_id, view).await;
                     }
                     PaneOutcome::Decision(_) => {
                         unreachable!("the key prompt dialog yields no decisions")
@@ -1081,6 +1082,7 @@ async fn run_onboarding_phase(
                     });
                     let panel = session.auth_panel_handle();
                     let service_cancel = panel.cancel_signal();
+                    let provider_id = row.id.clone();
                     let row = row.clone();
                     let service_auth = provider_auth.clone();
                     let provider_login = OnboardingFlowTask::spawn(
@@ -1102,7 +1104,7 @@ async fn run_onboarding_phase(
                                     "the provider login task failed".to_string(),
                                 )
                             });
-                            session.apply_auth_outcome(outcome, &row.id, view).await;
+                            session.apply_auth_outcome(outcome, &provider_id, view).await;
                         }
                         PaneOutcome::Decision(_) => {
                             unreachable!("the login dialog yields no decisions")
