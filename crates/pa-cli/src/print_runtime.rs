@@ -387,16 +387,8 @@ async fn build_headless_engine_parts_with_lease(
 
 /// The session-manager selection every engine build shares
 /// (`--no-session` keeps the engine in-memory; anything else resolves
-/// through the flag order).
-fn select_session_manager(
-    options: &RunOptions,
-) -> Result<Option<pa_core::session::manager::SessionManager>, String> {
-    let (manager, lease) = select_session_manager_with_lease(options)?;
-    std::mem::forget(lease);
-    Ok(manager)
-}
-
-/// The same selection, returning the opened session's runtime lease.
+/// through the flag order), returning the opened session's runtime
+/// lease.
 fn select_session_manager_with_lease(
     options: &RunOptions,
 ) -> Result<
@@ -657,21 +649,13 @@ fn resolve_thinking_level(
     map_thinking_level(clamped)
 }
 
-/// Build the session manager for a headless run, mirroring the flag order of
+/// The headless session-manager resolution, mirroring the flag order of
 /// TS `createSessionManager` (noSession -> fork -> resume -> continue ->
 /// create). `--no-session` never reaches here: the caller passes `None` to
-/// the engine, which builds the in-memory manager itself.
-fn build_session_manager(
-    options: &RunOptions,
-) -> Result<pa_core::session::manager::SessionManager, String> {
-    let (manager, lease) = build_session_manager_with_lease(options)?;
-    std::mem::forget(lease);
-    Ok(manager)
-}
-
-/// The same resolution, returning the opened session's runtime lease
-/// (a long-lived connection holds it on the engine handle; the one-shot
-/// modes forget it for the process lifetime).
+/// the engine, which builds the in-memory manager itself. The opened
+/// session's runtime lease returns alongside (a long-lived connection
+/// holds it on the engine handle; the one-shot modes forget it for the
+/// process lifetime).
 fn build_session_manager_with_lease(
     options: &RunOptions,
 ) -> Result<
@@ -848,16 +832,6 @@ fn session_open_guard(
             ))
         }
     }
-}
-
-/// The one-shot open paths (`-c`/`-r` resolution) hold the opened
-/// session's runtime lease for the process lifetime.
-fn assert_session_not_active_in_daemon(
-    socket_path: Option<&str>,
-    session_path: &std::path::Path,
-) -> Result<(), String> {
-    std::mem::forget(session_open_guard(socket_path, session_path)?);
-    Ok(())
 }
 
 fn open_session_file(
