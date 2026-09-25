@@ -360,13 +360,7 @@ mod tests {
     /// level clamps through the model's thinking-level map, the effort
     /// rides along as `reasoning_effort` unless clamped to off, and the
     /// explicit on/off toggle rides along as `reasoning_enabled`.
-    fn reasoning_params(
-        provider: &str,
-        model_id: &str,
-        level: ModelThinkingLevel,
-    ) -> Map<String, Value> {
-        let model = models_generated::get_model(provider, model_id)
-            .unwrap_or_else(|| panic!("compiled catalog carries {provider}/{model_id}"));
+    fn reasoning_params_for(model: &Model, level: ModelThinkingLevel) -> Map<String, Value> {
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage {
@@ -397,51 +391,121 @@ mod tests {
         }
     }
 
+    /// A compiled fallback catalog entry, straight from `models_generated`
+    /// (the conservative offline floor).
+    fn compiled_params(
+        provider: &str,
+        model_id: &str,
+        level: ModelThinkingLevel,
+    ) -> Map<String, Value> {
+        let model = models_generated::get_model(provider, model_id)
+            .unwrap_or_else(|| panic!("compiled catalog carries {provider}/{model_id}"));
+        reasoning_params_for(model, level)
+    }
+
     /// Port of the TS regression (#2519, gateway-verified 2026-09-21):
-    /// Prime Inference GLM routes send only the reasoning parameters the
-    /// live catalog declares — glm-5.3 selects `reasoning_effort` values,
-    /// glm-4.7 only the `reasoning` object toggle — and `enable_thinking`
-    /// never reaches a Prime Inference route.
+    /// a Prime Inference route sends only the reasoning parameters its live
+    /// catalog declaration selects — an effort-declared route sends
+    /// `reasoning_effort` values, a toggle-declared route the `reasoning`
+    /// object — and `enable_thinking` never reaches a Prime Inference
+    /// route. The live declarations rebuild each model's compat and
+    /// thinking levels (pa-models `build_prime_inference_models`); these
+    /// fixtures hold the two rebuilt shapes, so the request shaping keeps
+    /// its #2519 coverage independent of the compiled fallback catalog.
     #[test]
-    fn sends_only_the_declared_reasoning_parameters_to_prime_inference_glm_routes() {
-        let mut payloads = std::collections::BTreeMap::new();
+    fn sends_only_the_declared_reasoning_parameters_for_live_rebuilt_routes() {
+        // Effort-declared route (the glm-5.3 shape): reasoning_effort with
+        // the declared levels, no reasoning object, no enable_thinking.
+        let mut effort_model = models_generated::get_model("prime-inference", "z-ai/glm-5.3")
+            .expect("compiled template")
+            .clone();
+        effort_model.compat = Some(crate::types::ModelCompat::from_kind(
+            crate::types::CompatKind::OpenAiCompletions(Box::new(
+                crate::types::OpenAiCompletionsCompat {
+                    supports_reasoning_effort: Some(true),
+                    ..Default::default()
+                },
+            )),
+        ));
+        for level in [ModelThinkingLevel::High, ModelThinkingLevel::Medium] {
+            let params = reasoning_params_for(&effort_model, level);
+            for key in ["enable_thinking", "chat_template_kwargs", "reasoning"] {
+                assert!(
+                    !params.contains_key(key),
+                    "effort route: request must not carry {key}"
+                );
+            }
+            // medium is not declared by the route; the clamp sends the nearest level
+            assert_eq!(params.get("reasoning_effort"), Some(&json!("high")));
+        }
+
+        // Toggle-declared route (the glm-4.7 shape): the reasoning object
+        // only, with the declared on and off arms.
+        let mut toggle_model = effort_model;
+        toggle_model.compat = Some(crate::types::ModelCompat::from_kind(
+            crate::types::CompatKind::OpenAiCompletions(Box::new(
+                crate::types::OpenAiCompletionsCompat {
+                    supports_reasoning_effort: Some(false),
+                    thinking_format: Some(crate::types::ThinkingFormat::Openrouter),
+                    ..Default::default()
+                },
+            )),
+        ));
+        let mut declared_map = crate::types::ThinkingLevelMap::new();
+        declared_map.insert(ModelThinkingLevel::Minimal, None);
+        declared_map.insert(ModelThinkingLevel::Low, None);
+        declared_map.insert(ModelThinkingLevel::Medium, None);
+        declared_map.insert(ModelThinkingLevel::High, Some("high".to_string()));
+        declared_map.insert(ModelThinkingLevel::Xhigh, None);
+        declared_map.insert(ModelThinkingLevel::Max, None);
+        toggle_model.thinking_level_map = Some(declared_map);
+
+        let params = reasoning_params_for(&toggle_model, ModelThinkingLevel::High);
+        assert_eq!(params.get("reasoning"), Some(&json!({ "enabled": true })));
+        assert!(!params.contains_key("reasoning_effort"));
+        for key in ["enable_thinking", "chat_template_kwargs"] {
+            assert!(
+                !params.contains_key(key),
+                "toggle route: request must not carry {key}"
+            );
+        }
+        let params = reasoning_params_for(&toggle_model, ModelThinkingLevel::Off);
+        assert_eq!(params.get("reasoning"), Some(&json!({ "enabled": false })));
+    }
+
+    /// The compiled fallback catalog is conservative (TS #2519: the live
+    /// catalog owns the reasoning declarations): offline, a Prime
+    /// Inference route declares neither the effort selector nor a thinking
+    /// format, so a reasoning request sends no reasoning parameter at all
+    /// — and `enable_thinking` still never reaches the route.
+    #[test]
+    fn compiled_fallback_prime_inference_routes_send_no_reasoning_parameters() {
         for (model_id, level) in [
             ("z-ai/glm-5.3", ModelThinkingLevel::High),
             ("z-ai/glm-5.3", ModelThinkingLevel::Medium),
             ("z-ai/glm-4.7", ModelThinkingLevel::High),
             ("z-ai/glm-4.7", ModelThinkingLevel::Off),
         ] {
-            let params = reasoning_params("prime-inference", model_id, level);
-            for key in ["enable_thinking", "chat_template_kwargs"] {
+            let params = compiled_params("prime-inference", model_id, level);
+            for key in [
+                "enable_thinking",
+                "chat_template_kwargs",
+                "reasoning",
+                "reasoning_effort",
+            ] {
                 assert!(
                     !params.contains_key(key),
-                    "{model_id}: request must not carry {key}"
+                    "compiled fallback {model_id}: request must not carry {key}"
                 );
             }
-            payloads.insert((model_id, level), params);
         }
-        let effort = &payloads[&("z-ai/glm-5.3", ModelThinkingLevel::High)];
-        assert_eq!(effort.get("reasoning_effort"), Some(&json!("high")));
-        assert!(!effort.contains_key("reasoning"));
-        // medium is not declared by the route; the clamp sends the nearest level
-        assert_eq!(
-            payloads[&("z-ai/glm-5.3", ModelThinkingLevel::Medium)].get("reasoning_effort"),
-            Some(&json!("high"))
-        );
-        let toggle = &payloads[&("z-ai/glm-4.7", ModelThinkingLevel::High)];
-        assert_eq!(toggle.get("reasoning"), Some(&json!({ "enabled": true })));
-        assert!(!toggle.contains_key("reasoning_effort"));
-        assert_eq!(
-            payloads[&("z-ai/glm-4.7", ModelThinkingLevel::Off)].get("reasoning"),
-            Some(&json!({ "enabled": false }))
-        );
     }
 
     /// The direct z.ai routes keep the toggle: their compat still selects the
     /// zai thinking format, so reasoning requests send `enable_thinking`.
     #[test]
     fn keeps_the_zai_thinking_toggle_on_direct_zai_routes() {
-        let params = reasoning_params("zai", "glm-5.3", ModelThinkingLevel::High);
+        let params = compiled_params("zai", "glm-4.7", ModelThinkingLevel::High);
         assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
     }
 }

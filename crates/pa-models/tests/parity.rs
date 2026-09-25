@@ -1,8 +1,9 @@
-//! Parity verifier: parse the real catalog payload (the compiled TS catalog
-//! aggregate exported through `createModelCatalog` semantics — headers
-//! stripped, prime-inference excluded, provider/id sorted) against the
-//! strict schema and transport pinning. Real data, real scale: 1,171
-//! entries across 31 providers, 0 skipped.
+//! Parity verifier: parse the real catalog payload (a byte-faithful
+//! snapshot of the `PrimeIntellect-ai/prime-agent-catalog`
+//! `models/catalog.v1.json` aggregate — headers stripped, prime-inference
+//! excluded, provider/id sorted; refresh with `scripts/generate-catalog-fixture.py`)
+//! against the strict schema and transport pinning. Real data, real scale:
+//! 1,197 entries across 31 providers, 0 skipped.
 
 use pa_models::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use pa_models::schema::{parse_model_catalog, InvalidEntries};
@@ -21,7 +22,7 @@ fn parses_the_real_payload_with_zero_failures() {
         parse_model_catalog(&fixture(), InvalidEntries::Reject).expect("real payload parses");
     let providers: std::collections::BTreeSet<&str> =
         parsed.models.iter().map(|m| m.provider.as_str()).collect();
-    assert_eq!(parsed.models.len(), 1171, "the full catalog aggregate");
+    assert_eq!(parsed.models.len(), 1197, "the full catalog aggregate");
     assert_eq!(providers.len(), 31, "31 providers");
     // No entry ever carries headers from catalog data.
     assert!(parsed.models.iter().all(|model| model.headers.is_none()));
@@ -33,7 +34,7 @@ fn every_real_entry_survives_transport_pinning() {
         .expect("pinned");
     assert_eq!(
         pinned.len(),
-        1171,
+        1197,
         "real catalog data selects only compiled transports"
     );
     let headers = pinned
@@ -72,5 +73,5 @@ fn passes_the_packer_gates() {
 #[test]
 fn skip_invalid_keeps_the_real_payload_whole() {
     let parsed = parse_model_catalog(&fixture(), InvalidEntries::SkipInvalid).expect("skip mode");
-    assert_eq!(parsed.models.len(), 1171, "no real entry is skipped");
+    assert_eq!(parsed.models.len(), 1197, "no real entry is skipped");
 }
