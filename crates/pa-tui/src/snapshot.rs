@@ -2293,8 +2293,10 @@ mod tests {
             }),
         ];
         let chat = transcript_to_entries(&transcript);
-        // user row, assistant text, tool card, final assistant text.
-        assert_eq!(chat.len(), 4, "chat: {chat:?}");
+        // user row, assistant text, tool card, final assistant text -
+        // and the orphan result keeps its standalone card (the live
+        // push path's twin; the rebuilt transcript never drops it).
+        assert_eq!(chat.len(), 5, "chat: {chat:?}");
         let Some(ChatEntry::Tool(card)) = chat.get(2) else {
             panic!("tool card at index 2: {chat:?}");
         };
@@ -2307,6 +2309,11 @@ mod tests {
         );
         assert_eq!(result.details, json!({ "durationMs": 3, "status": "ok" }));
         assert!(!result.is_error);
+        let Some(ChatEntry::Tool(orphan)) = chat.get(4) else {
+            panic!("orphan card at index 4: {chat:?}");
+        };
+        assert_eq!(orphan.id, "orphan");
+        assert!(orphan.unmatched_result, "the orphan never joins a run");
     }
 
     /// A pending card (result absent) replays with no result, like a turn
