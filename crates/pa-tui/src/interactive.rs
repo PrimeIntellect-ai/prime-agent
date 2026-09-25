@@ -2698,18 +2698,41 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+            _ = async {
+                // The idle tick runs only while idle work is pending: a
+                // parked autocomplete request (TS resolves suggestions
+                // asynchronously after the keystroke batch) or an armed
+                // selection auto-scroll (TS's 150 ms hold + 50 ms
+                // interval timer) need the 50 ms cadence. With nothing
+                // pending the loop parks on its real event sources and
+                // wakes only at the bash-activity refresh deadline
+                // instead of 20x/s.
+                if view.editor.has_pending_autocomplete()
+                    || session.selection_auto_scroll_active()
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await
+                } else {
+                    // With nothing pending, park until the next due idle
+                    // work: the 2 s bash-activity refresh deadline, or a
+                    // toast's expiry when one dismisses sooner (the
+                    // pre-gate prune below repaints it away).
+                    let deadline = last_bash_refresh + Duration::from_secs(2);
+                    let deadline = view
+                        .toasts
+                        .next_expiry()
+                        .map_or(deadline, |expiry| deadline.min(expiry));
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                }
+            } => {
                 // The input stream went quiet for a tick: parked editor
-                // autocomplete requests materialize now (TS resolves
-                // suggestions asynchronously after the keystroke batch, so
-                // a typed command plus Enter in one burst submits as typed
-                // and the dropdown opens only once typing pauses).
+                // autocomplete requests materialize now, so a typed
+                // command plus Enter in one burst submits as typed and
+                // the dropdown opens only once typing pauses.
                 session.materialize_editor_autocomplete(&mut view);
-                // The same tick drives the selection auto-scroll (TS's
-                // 150 ms hold + 50 ms interval timer): a drag holding the
-                // window edge keeps scrolling while no other input
-                // arrives, which is the only time this arm runs at that
-                // cadence.
+                // The same tick drives the selection auto-scroll: a drag
+                // holding the window edge keeps scrolling while no other
+                // input arrives, which is the only time this arm runs at
+                // that cadence.
                 session.selection_auto_scroll_tick(&mut view);
                 if last_bash_refresh.elapsed() >= Duration::from_secs(2) {
                     last_bash_refresh = Instant::now();

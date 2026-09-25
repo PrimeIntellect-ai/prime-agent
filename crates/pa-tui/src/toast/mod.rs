@@ -98,6 +98,13 @@ impl Toasts {
         }
     }
 
+    /// The earliest expiry still on screen: the run loop parks its idle
+    /// tick at this deadline so a toast's dismissal still repaints at its
+    /// TTL with no periodic wakeup.
+    pub fn next_expiry(&self) -> Option<Instant> {
+        self.entries.iter().map(|toast| toast.expires_at).min()
+    }
+
     /// Drop the toasts whose TTL passed at `now`; `true` when any went.
     pub fn prune_expired(&mut self, now: Instant) -> bool {
         let before = self.entries.len();

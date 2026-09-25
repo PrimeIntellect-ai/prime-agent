@@ -6227,6 +6227,12 @@ impl SessionUi {
 
     /// One idle tick of the selection auto-scroll (the run loop's 50 ms arm
     /// stands in for TS's timer): after the 150 ms hold window, each tick
+    /// Whether the selection auto-scroll driver is armed (the run loop's
+    /// idle tick needs its 50 ms cadence while a drag holds the edge).
+    pub(crate) fn selection_auto_scroll_active(&self) -> bool {
+        self.selection_auto_scroll.is_some()
+    }
+
     /// scrolls one line set and re-aims the head onto the edge row; the
     /// drag ending, the edge direction changing, or the scroll clamping
     /// disarms the driver.
