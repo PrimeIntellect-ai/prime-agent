@@ -3403,6 +3403,7 @@ fn empty_prompt_input() -> pa_types::daemon::PromptInput {
         queue_key: None,
         prefix_messages: None,
         admission_id: None,
+        rlm_notice_nonce: None,
     }
 }
 

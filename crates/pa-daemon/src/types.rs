@@ -144,8 +144,36 @@ pub struct SessionActionSnapshot {
     pub queued_count: u32,
     pub steering: Vec<String>,
     pub follow_ups: Vec<String>,
+    /// Rust-native typed provenance the TS snapshot has no counterpart
+    /// for: which parked lane items are RLM child status notices, by
+    /// index (the condensed queue strip folds exactly these rows). The
+    /// lane strings stay the TS preview projection verbatim.
+    #[serde(default, skip_serializing_if = "RlmChildStatusIndices::is_empty")]
+    pub rlm_child_status: RlmChildStatusIndices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<SessionActionActive>,
+}
+
+/// The parked RLM child status notices (`rlm_child_terminal_notice` /
+/// `rlm_child_failure` injected rows), by lane index: the worker derives
+/// the indices from each parked item's injected custom row, so the
+/// classification rides the wire typed — a user-typed message that
+/// merely looks like a notice preview never carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RlmChildStatusIndices {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steering: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_up: Vec<usize>,
+}
+
+impl RlmChildStatusIndices {
+    /// Whether no lane item is marked (the wire omits the rider then, so
+    /// a notice-free projection serializes byte-identical to TS).
+    pub fn is_empty(&self) -> bool {
+        self.steering.is_empty() && self.follow_up.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

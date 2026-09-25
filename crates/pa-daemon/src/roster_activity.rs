@@ -1,10 +1,10 @@
-//! Worker-side roster activity feed: the live half of the
-//! waiting/executing indicator. Every activity row renders the
-//! supervisor's roster (the TUI agents view's Activity column, the session
+//! Worker-side roster activity feed: keeps the supervisor's roster
+//! fresh mid-turn. Every roster consumer renders from it (the TUI
+//! agents view's rows, the session
 //! view's subagents box, the daemon CLI lists), so the worker must publish
-//! its summary whenever the flags those rows render change mid-turn: busy
-//! flips, tool calls starting and ending, compaction, user bash, queue
-//! changes, and the post-turn status line. TS observes the worker's
+//! its summary whenever the state those consumers render changes mid-turn: busy
+//! flips, tool calls starting and ending, compaction, user bash, and
+//! queue changes. TS observes the worker's
 //! outbound event stream (`observeRosterEvent` over
 //! `ROSTER_SESSION_EVENT_TRIGGERS` + `scheduleRosterFlush`, daemon-mode.ts);
 //! the port watches the worker's event pump — the one stream every
@@ -23,7 +23,7 @@ pub(crate) const ROSTER_PUSH_DISABLE_ENV: &str = "PA_WORKER_DISABLE_ROSTER_PUSH"
 
 /// The session event types that trigger a roster flush (TS
 /// `ROSTER_SESSION_EVENT_TRIGGERS`, daemon-mode.ts): each edge moves a
-/// summary field the activity rows render. `thinking_level_changed` has
+/// summary field the roster consumers render. `thinking_level_changed` has
 /// no Rust frame yet; it stays listed so the feed wires the moment the
 /// frame exists.
 pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
