@@ -314,9 +314,14 @@ fn serve(
     let crossing_index = FATTENING_TURNS + 1;
     let (reply, usage) = match index {
         0 => ("seed reply".to_string(), small_usage()),
-        index if (1..=FATTENING_TURNS).contains(&index) => {
-            ("a".repeat(FATTEN_REPLY_CHARS), small_usage())
-        }
+        // Each fattening reply carries its own marker: the compaction's
+        // cut keeps whole messages (the last fattening reply rides the
+        // kept tail; the earlier ones are the compacted-away bulk the
+        // context assertions read).
+        index if (1..=FATTENING_TURNS).contains(&index) => (
+            format!("fatten-{}-{}", index - 1, "a".repeat(FATTEN_REPLY_CHARS)),
+            small_usage(),
+        ),
         index if index == crossing_index => ("crossing reply".to_string(), crossing_usage()),
         _ => ("post-review reply".to_string(), small_usage()),
     };
@@ -669,10 +674,15 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         "the compacted context did not carry the summary: {}",
         request_text.chars().take(2_000).collect::<String>()
     );
-    assert!(
-        !request_text.contains(&"a".repeat(100_000)),
-        "the compacted-away bulk still rode the turn request"
-    );
+    // The compacted-away bulk is gone: the earlier fattening replies
+    // never ride the request (the cut's kept tail keeps whole messages,
+    // so the LAST fattening reply may legitimately remain).
+    for dropped in 0..FATTENING_TURNS.saturating_sub(1) {
+        assert!(
+            !request_text.contains(&format!("fatten-{dropped}-")),
+            "the compacted-away fattening reply {dropped} still rode the turn request"
+        );
+    }
 
     // The review's delayed reply lands in the background (bounded wait).
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -863,9 +873,12 @@ fn interrupted_threshold_compaction_settles_consistent() {
         .cloned()
         .unwrap_or(Value::Null);
     let request_text = serde_json::to_string(&last_turn_request).unwrap_or_default();
-    assert!(
-        request_text.contains(&"a".repeat(100_000)),
-        "the un-compacted bulk vanished from the turn context after the interrupt: {}",
-        request_text.chars().take(2_000).collect::<String>()
-    );
+    // The un-compacted context keeps the whole seeded bulk: every
+    // fattening reply still rides the request.
+    for kept in 0..FATTENING_TURNS {
+        assert!(
+            request_text.contains(&format!("fatten-{kept}-")),
+            "the un-compacted fattening reply {kept} vanished from the turn context after the interrupt"
+        );
+    }
 }
