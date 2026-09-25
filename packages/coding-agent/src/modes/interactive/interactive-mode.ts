@@ -163,7 +163,7 @@ import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
-import type { McpServerConfig } from "../../core/settings-manager.js";
+import type { ChatDetail, McpServerConfig } from "../../core/settings-manager.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
 import {
 	BUILTIN_SLASH_COMMANDS,
@@ -1337,10 +1337,10 @@ export class InteractiveMode {
 	private rlmNodeId: string | undefined;
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
-	private toolOutputExpanded = false;
-	private editDiffsExpanded = true;
+	private toolOutputExpanded!: boolean;
+	private editDiffsExpanded!: boolean;
 
-	private hideThinkingBlock = false;
+	private hideThinkingBlock!: boolean;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -1477,6 +1477,7 @@ export class InteractiveMode {
 			throw new Error("InteractiveMode requires uiServices when no localSessionHost is supplied");
 		}
 		this.uiServices = uiServices;
+		this.assignChatDetail(this.settingsManager.getChatDetail());
 		this.agentConnection = options.agentConnection;
 		this.promptStashStore = options.promptStashStore;
 		this.promptStashSessionId = options.promptStashSessionId;
@@ -8101,18 +8102,24 @@ export class InteractiveMode {
 	}
 
 	private toggleToolOutputExpansion(): void {
-		this.setChatDetail(this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details");
+		const detail = this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details";
+		this.settingsManager.setChatDetail(detail);
+		this.setChatDetail(detail);
 	}
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.setChatDetail(expanded ? "all" : "overview");
 	}
 
-	/** Presentation only: never rewrite messages, settings, or the session trace. */
-	private setChatDetail(detail: "overview" | "details" | "all"): void {
+	private assignChatDetail(detail: ChatDetail): void {
 		this.toolOutputExpanded = detail === "all";
 		this.editDiffsExpanded = detail !== "overview";
 		this.hideThinkingBlock = detail === "overview";
+	}
+
+	/** Applies a detail level to the rendered chat; never rewrites messages or the session trace. */
+	private setChatDetail(detail: ChatDetail): void {
+		this.assignChatDetail(detail);
 		this.applyChatExpansion();
 	}
 
