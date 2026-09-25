@@ -207,9 +207,10 @@ async fn wait_for_code(
         // prompt fallback; without one the prompt is the only path.
         CallbackOutcome::Code(None) => {
             if manual_available {
-                match manual_answer.await {
-                    None => return Err(LOGIN_CANCELLED.to_string()),
-                    Some(input) => parse_paste(&input, state)?,
+                match answer_or_cancelled(ui, manual_answer).await {
+                    Ok(None) => return Err(LOGIN_CANCELLED.to_string()),
+                    Ok(Some(input)) => parse_paste(&input, state)?,
+                    Err(_) => return Err(LOGIN_CANCELLED.to_string()),
                 }
             } else {
                 None
@@ -223,9 +224,29 @@ async fn wait_for_code(
     }
     // The fallback prompt (TS `onPrompt`): neither the callback nor the
     // paste produced a code.
-    let answer = ui.on_prompt(PROMPT_MESSAGE).await;
+    let answer = answer_or_cancelled(ui, ui.on_prompt(PROMPT_MESSAGE)).await?;
     let input = answer.ok_or_else(|| LOGIN_CANCELLED.to_string())?;
     parse_paste(&input, state)?.ok_or_else(|| "Missing authorization code".to_string())
+}
+
+/// Await one answer while re-checking the cooperative cancel between
+/// poll steps (the surface may exit without ever answering — a pending
+/// paste or prompt must not hold a cancelled flow).
+async fn answer_or_cancelled<T>(
+    ui: &dyn CodexLoginUi,
+    answer: impl Future<Output = T>,
+) -> Result<T, String> {
+    tokio::pin!(answer);
+    let mut tick = tokio::time::interval(CANCEL_POLL_INTERVAL);
+    loop {
+        if ui.is_cancelled() {
+            return Err(LOGIN_CANCELLED.to_string());
+        }
+        tokio::select! {
+            _ = tick.tick() => {}
+            output = &mut answer => return Ok(output),
+        }
+    }
 }
 
 /// Parse one pasted input and check its echoed state (TS
@@ -530,10 +551,13 @@ mod tests {
     }
 
     /// One scripted UI answer: an immediate value (`Some`), an
-    /// immediate cancel (`None`), or a never-resolving surface.
+    /// immediate cancel (`None`), a never-resolving surface, or a
+    /// surface that marks the cancel flag on its first poll and then
+    /// never resolves.
     enum ScriptedAnswer {
         Once(Option<String>),
         Pending,
+        PendingMarksCancel,
     }
 
     impl ScriptedAnswer {
@@ -545,13 +569,25 @@ mod tests {
             ScriptedAnswer::Once(Some(text.to_string()))
         }
 
-        fn future(&self) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
+        /// The answer future; `cancel` is the surface's own shared flag
+        /// (the marks-then-pends mode sets it on the first poll).
+        fn future(
+            &self,
+            cancel: &Arc<AtomicBool>,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
             match self {
                 ScriptedAnswer::Once(value) => {
                     let value = value.clone();
                     Box::pin(std::future::ready(value))
                 }
                 ScriptedAnswer::Pending => Box::pin(std::future::pending()),
+                ScriptedAnswer::PendingMarksCancel => {
+                    let cancel = Arc::clone(cancel);
+                    Box::pin(async move {
+                        cancel.store(true, Ordering::Relaxed);
+                        std::future::pending::<Option<String>>().await
+                    })
+                }
             }
         }
     }
@@ -606,14 +642,16 @@ mod tests {
         fn on_manual_code_input(
             &self,
         ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>> {
-            self.manual.as_ref().map(ScriptedAnswer::future)
+            self.manual
+                .as_ref()
+                .map(|manual| manual.future(&self.cancelled))
         }
 
         fn on_prompt(
             &self,
             _message: &str,
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
-            self.prompt.future()
+            self.prompt.future(&self.cancelled)
         }
 
         fn is_cancelled(&self) -> bool {
@@ -875,6 +913,30 @@ mod tests {
             first_param(&http.seen_bodies(TOKEN_URL)[0], "code"),
             "the-code"
         );
+        drop(held);
+    }
+
+    /// The cancellation-aware-wait regression: a dead callback server
+    /// plus a paste that never resolves — the surface's cancel flag (set
+    /// by the paste's own first poll, standing in for the pane exit)
+    /// must end the flow with the cancel, never hang the wait.
+    #[tokio::test]
+    async fn a_pending_paste_never_holds_a_cancelled_flow() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 1455));
+        let http = token_http(&account_jwt(Some("acct-1")));
+        let ui = ScriptedUi::new(
+            Some(ScriptedAnswer::PendingMarksCancel),
+            ScriptedAnswer::Pending,
+        );
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR),
+        )
+        .await
+        .expect("the cancelled wait returns instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, LOGIN_CANCELLED);
+        assert!(http.seen_bodies(TOKEN_URL).is_empty());
         drop(held);
     }
 

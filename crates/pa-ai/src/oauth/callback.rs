@@ -337,7 +337,7 @@ fn error_page(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt as _;
+    use std::time::Duration;
 
     /// One live server on a free loopback port, with its port.
     async fn live(state: &str) -> (CodexCallbackServer, u16) {
