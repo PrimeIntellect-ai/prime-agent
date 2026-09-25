@@ -2,6 +2,7 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { formatConversationDetailStatus } from "../src/modes/interactive/components/keybinding-hints.js";
 import { PromptContextLine } from "../src/modes/interactive/components/prompt-context-line.js";
 import { SubagentSummaryLine } from "../src/modes/interactive/components/subagent-summary-line.js";
@@ -11,6 +12,7 @@ import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 interface DetailMode {
 	toolOutputExpanded: boolean;
 	editDiffsExpanded: boolean;
+	uiServices: { settingsManager: SettingsManager };
 	getPromptContextLabel(width: number): string | undefined;
 	getTrayContextLabel(): string | undefined;
 	toggleToolOutputExpansion(): void;
@@ -20,6 +22,7 @@ function createMode(): DetailMode {
 	return Object.assign(Object.create(InteractiveMode.prototype), {
 		toolOutputExpanded: false,
 		editDiffsExpanded: false,
+		uiServices: { settingsManager: SettingsManager.inMemory() },
 		applyChatExpansion: vi.fn(),
 		isInlinePickerOpen: () => false,
 		getTrayGoalLabel: () => undefined,
@@ -74,6 +77,7 @@ describe("conversation detail status", () => {
 		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Expanded mode (Ctrl+O to collapse)");
 		mode.setToolsExpanded(false);
 		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Collapsed mode (Ctrl+O to expand)");
+		expect(mode.uiServices.settingsManager.getGlobalSettings().chatDetail).toBeUndefined();
 	});
 
 	it("preserves top-row bounds while the lower tray retains model metadata and navigation overrides", () => {
