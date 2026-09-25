@@ -432,17 +432,6 @@ fn spawn_delete_dispatch(
     })
 }
 
-/// The row's arming key: the live session id when it has one, else the
-/// session file — the identity a roster replacement would change under
-/// the same row identity.
-fn armed_session_key(row: &AgentsViewRow) -> Option<String> {
-    row.summary
-        .get("activeSessionId")
-        .or_else(|| row.summary.get("sessionFile"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 /// The agents view state: roster + catalog data, search, selection, and
 /// the pending exit/open requests.
 struct AgentsViewMode {
@@ -763,7 +752,7 @@ impl AgentsViewMode {
                 .rows
                 .iter()
                 .find(|row| row.identity == pending.identity)
-                .map(armed_session_key)
+                .map(|row| self.armed_session_key(row))
                 .is_some_and(|key| key == pending.session_key);
             if !still_there || !unchanged_key {
                 self.pending_delete = None;
@@ -984,8 +973,47 @@ impl AgentsViewMode {
         Some(PendingDelete {
             identity: row.identity.clone(),
             stop,
-            session_key: armed_session_key(row),
+            session_key: self.armed_session_key(row),
         })
+    }
+
+    /// The session a child dispatch targets: the summary's
+    /// parentActiveSessionId, else the parent row's live session (the
+    /// daemon scopes the child lookup by the parent's session — the
+    /// child's own activeSessionId is never the target).
+    fn child_parent_session_key(&self, row: &AgentsViewRow) -> Option<&str> {
+        if let Some(parent_id) = row
+            .summary
+            .get("parentActiveSessionId")
+            .and_then(Value::as_str)
+        {
+            return Some(parent_id);
+        }
+        row.parent_identity
+            .as_deref()
+            .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
+            .and_then(|parent| {
+                parent
+                    .summary
+                    .get("activeSessionId")
+                    .and_then(Value::as_str)
+            })
+    }
+
+    /// The arm's session key: the session the execution itself targets —
+    /// a child rides its parent's session, a live agent its own, a saved
+    /// row its file. A roster change that swaps the key (a re-parented
+    /// child above all) retires the confirm: the second press acts on
+    /// the session the first press confirmed.
+    fn armed_session_key(&self, row: &AgentsViewRow) -> Option<String> {
+        if row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some() {
+            return self.child_parent_session_key(row).map(str::to_string);
+        }
+        row.summary
+            .get("activeSessionId")
+            .or_else(|| row.summary.get("sessionFile"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 
     /// The row's stop-or-delete word (the hint + the execution gate's
@@ -1034,26 +1062,8 @@ impl AgentsViewMode {
             // The child arms always run through the PARENT's session: a
             // scoped promoted child has no parent row in the list, so the
             // summary's own parentActiveSessionId carries the parent
-            // session; the nested child walks its parent row. The child's
-            // own activeSessionId is never the target (the daemon scopes
-            // the child lookup by the parent's session).
-            let parent = row
-                .parent_identity
-                .as_deref()
-                .and_then(|identity| self.rows.iter().find(|row| row.identity == identity));
-            let active_session_id = row
-                .summary
-                .get("parentActiveSessionId")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    parent.and_then(|parent| {
-                        parent
-                            .summary
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                    })
-                })
-                .map(str::to_string)?;
+            // session; the nested child walks its parent row.
+            let active_session_id = self.child_parent_session_key(row)?.to_string();
             if self.delete_arm_word(row) {
                 return Some(DeleteAction::StopSubagent {
                     active_session_id,
@@ -3322,6 +3332,42 @@ mod tests {
         assert!(
             mode.pending_delete.is_some(),
             "an unchanged roster keeps the arm"
+        );
+    }
+
+    /// A parent-session replacement retires an armed CHILD confirm:
+    /// the child's own session survives the re-parenting, but its
+    /// dispatch keys on the parent's session — a second press must never
+    /// act through a parent the confirmation never saw.
+    #[test]
+    fn a_parent_replacement_retires_the_armed_child_confirm() {
+        let mut mode = mode_with_parent_and_child();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert_eq!(
+            armed.session_key.as_deref(),
+            Some("p-live"),
+            "the child arm keys on the parent's session"
+        );
+        // The parent is replaced and the child re-parents: its own
+        // session is unchanged, the dispatch scoping is not.
+        mode.roster[1]["summary"]["parentActiveSessionId"] = serde_json::json!("p2-live");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_none(),
+            "the re-parented child never inherits the confirm"
         );
     }
 
