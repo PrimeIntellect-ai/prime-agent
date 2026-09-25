@@ -2736,8 +2736,10 @@ async fn run_agents_view_surface(
 
     // The view decided to leave. The force-quit deadline arms below,
     // after the stop-or-delete drain settles: a confirmed request
-    // completes before any deadline can cut it down.
+    // completes before any deadline can cut it down. `renderer.finish`
+    // consumes the renderer, so the terminal check is read first.
     let handing_off = mode.opened.is_some() || mode.new_session;
+    let terminal_exit = matches!(renderer, Renderer::Terminal { .. }) && !handing_off;
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
     // exiting releases the alternate screen.
     let frames = renderer.finish(mode.opened.is_some() || mode.new_session);
@@ -2774,7 +2776,7 @@ async fn run_agents_view_surface(
     // (or a new session) is a view switch, not an exit: the process
     // keeps running and TS has no exit deadline on this path, so the
     // deadline covers only the leaves that end this process.
-    if matches!(renderer, Renderer::Terminal { .. }) && !handing_off {
+    if terminal_exit {
         exit_guard.arm_for_exit();
     }
     // A handoff retires the watchdog: the process keeps going. A
@@ -3310,7 +3312,8 @@ mod tests {
         mode.handle_key("ctrl+x");
         let armed = mode.delete_arm_target().expect("an armed target");
         assert!(armed.stop);
-        // The row settles: the section flips to idle while the arm is up.
+        // The settled child: the section reads idle while the arm
+        // rides the same row.
         mode.roster[1]["status"] = serde_json::json!("idle");
         mode.rebuild_rows();
         mode.selected = mode
@@ -3364,8 +3367,8 @@ mod tests {
             hint.contains("again to stop"),
             "the running row's confirm reads stop: {hint}"
         );
-        // The row settles: the arm survives on its identity and
-        // session key, but the hint reads the settled row.
+        // The settled child keeps the arm on its identity and session
+        // key; the hint reads the settled row's word.
         mode.roster[1]["status"] = serde_json::json!("idle");
         mode.rebuild_rows();
         let hint = mode
