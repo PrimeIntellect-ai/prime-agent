@@ -277,6 +277,17 @@ impl Worker {
         }
     }
 
+    /// Arm the one-shot forced steering batch (TS `abortAndSendQueued`'s
+    /// `_forcedAllSteeringActionIds = new Set(queuedSteering.map(...))`):
+    /// the visible plain-user steering items — queue-visible rows whose
+    /// delivery record is a user message, not an accepted agent message or
+    /// an injected custom row — deliver as ONE batched turn at the next
+    /// boundary, even under queue mode "one-at-a-time". Returns whether
+    /// anything armed; an empty lane (or an all-injected one) arms
+    /// nothing and the caller decides from the surviving queue whether
+    /// the abort keeps the pump flowing.
+    // Called by the `abort_and_send_queued` funnel (the wire command's
+    // body, #2599's handler once rebased).
     pub(crate) fn arm_forced_all_steering(&self) -> bool {
         let mut core = self.core.lock().unwrap();
         let armable = |item: &QueuedItem| {
