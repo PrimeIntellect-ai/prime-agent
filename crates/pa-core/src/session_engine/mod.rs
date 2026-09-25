@@ -412,7 +412,7 @@ impl AgentSession {
                 model,
                 provider_adapter::model_thinking_level(state.thinking_level),
             ),
-            self.compaction_settings(),
+            &self.compaction_settings(),
         )
     }
 

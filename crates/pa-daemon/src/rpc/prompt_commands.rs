@@ -5,9 +5,11 @@
 //! `followUp` over `_pumpSessionInputs`).
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
+use pa_agent::types::AgentMessage;
 use pa_core::session_engine::session_commands::{execute_session_command, SessionCommandParams};
 use pa_core::session_engine::{PromptOptions, PromptOutcome, StreamingBehavior};
 
@@ -75,8 +77,9 @@ async fn run_session_command(
     if is_compact {
         state.compacting.store(true, Ordering::SeqCst);
         state
-            .writer
-            .write(compaction_frame("compaction_start", None, None));
+            .session
+            .write_connection_output(compaction_frame("compaction_start", None, None))
+            .await;
     }
     let execution = {
         let mut autonomous = state.autonomous.lock().await;
@@ -86,9 +89,25 @@ async fn run_session_command(
             global_harness_dir: state.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
-        execute_session_command(&engine, &mut params, command)
-            .await
-            .map_err(|error| format!("{error:#}"))?
+        match execute_session_command(&engine, &mut params, command).await {
+            Ok(execution) => execution,
+            Err(error) => {
+                // The failed compact still settles its in-flight flag and
+                // publishes the end frame (TS writes `compaction_end`
+                // around every completed attempt): a client keyed on the
+                // end frame never observes a stuck `isCompacting`.
+                if is_compact {
+                    state.compacting.store(false, Ordering::SeqCst);
+                    state
+                        .session
+                        .write_connection_output(compaction_frame(
+                            "compaction_end", None, None,
+                        ))
+                        .await;
+                }
+                return Err(format!("{error:#}"));
+            }
+        }
     };
     if is_compact {
         state.compacting.store(false, Ordering::SeqCst);
@@ -96,8 +115,9 @@ async fn run_session_command(
             crate::compaction::compaction_result_value(&compaction.result, &compaction.entry)
         });
         state
-            .writer
-            .write(compaction_frame("compaction_end", None, result.as_ref()));
+            .session
+            .write_connection_output(compaction_frame("compaction_end", None, result.as_ref()))
+            .await;
     }
     state.publish_goal_update().await;
     if let Some(error) = &execution.error {

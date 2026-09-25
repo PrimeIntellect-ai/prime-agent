@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pa_agent::agent::Subscription;
@@ -59,6 +60,10 @@ pub struct RpcSession {
     /// One replacement at a time (TS `acquireReplacementLease`): a fork
     /// racing a `switch_session` must not interleave.
     replacement: tokio::sync::Mutex<()>,
+    /// Bumped on every successful whole-session replacement: pumps spawned
+    /// against the replaced engine retire instead of delivering queued
+    /// input to the disposed session.
+    pump_epoch: Arc<AtomicU64>,
 }
 
 impl RpcSession {
@@ -75,6 +80,7 @@ impl RpcSession {
             subscription: tokio::sync::Mutex::new(None),
             pending_outputs: Arc::new(tokio::sync::Mutex::new(None)),
             replacement: tokio::sync::Mutex::new(()),
+            pump_epoch: Arc::new(AtomicU64::new(0)),
         };
         session.resubscribe().await;
         session
@@ -120,6 +126,26 @@ impl RpcSession {
         }
     }
 
+    /// Publish one connection output (a compaction frame, a goal update)
+    /// through the same buffering seam the subscribed session events use:
+    /// while a prompt response is pending the frame buffers and flushes
+    /// after the response (TS connection outputs never precede the prompt
+    /// response they belong behind).
+    pub async fn write_connection_output(&self, frame: serde_json::Value) {
+        let mut pending_outputs = self.pending_outputs.lock().await;
+        if let Some(buffer) = pending_outputs.as_mut() {
+            buffer.push(frame);
+        } else {
+            self.writer.write(frame);
+        }
+    }
+
+    /// The pump generation: a pump spawned against generation `n` retires
+    /// once the session replaced its engine (`n` no longer current).
+    pub fn pump_generation(&self) -> u64 {
+        self.pump_epoch.load(Ordering::SeqCst)
+    }
+
     /// Subscribe the current engine's loop events as raw session-event
     /// frames (TS forwards `event.event` verbatim); replaces the previous
     /// subscription.
@@ -151,10 +177,10 @@ impl RpcSession {
         *self.subscription.lock().await = Some(subscription);
     }
 
-    /// Whole-session replacement (TS `teardownForReplacement` ->
-    /// `buildAndApplyReplacement`): unsubscribe the old feed, wait the
-    /// running turn out, dispose the old kernel, build the replacement
-    /// through the factory, swap the slot, and resubscribe.
+    /// Whole-session replacement (TS `buildAndApplyReplacement`'s
+    /// build-then-apply flow): build the replacement through the factory
+    /// first, then unsubscribe the old feed, wait the running turn out,
+    /// dispose the old kernel, swap the slot, and resubscribe.
     ///
     /// # Errors
     ///
@@ -166,14 +192,21 @@ impl RpcSession {
             .clone()
             .ok_or_else(|| "Session switching is not wired for this RPC transport".to_string())?;
         let _replacement = self.replacement.lock().await;
+        // Build the replacement BEFORE any teardown: a failed assembly
+        // must leave the live session serving (the old kernel keeps its
+        // subscription and turns; nothing was disposed). The swap below
+        // runs only on a fully assembled replacement.
+        let replacement = factory(request).await?;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
         let old = self.handle.read().await.engine.clone();
         old.session.agent().wait_for_idle().await;
         old.dispose_kernel().await;
-        let replacement = factory(request).await?;
         *self.handle.write().await = replacement;
+        // Retire the pumps spawned against the replaced engine so queued
+        // input never delivers to the disposed session.
+        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         self.resubscribe().await;
         Ok(())
     }

@@ -25,6 +25,7 @@ pub mod protocol;
 pub mod session;
 
 use std::io::Write as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -50,38 +51,56 @@ pub struct RpcOptions {
 }
 
 /// The ordered stdout writer: one queue for responses and events, in
-/// publication order (TS `output` through `writeRawStdout`).
+/// publication order (TS `output` through `writeRawStdout`). The queue
+/// depth is tracked so an exit path can drain every queued frame before
+/// the process exits (TS `process.exit` follows synchronous writes).
 #[derive(Clone)]
 pub struct LineWriter {
     tx: tokio::sync::mpsc::UnboundedSender<Value>,
+    /// Frames queued but not yet written by the writer task (incremented
+    /// on `write`, decremented once the task wrote the frame).
+    pending: Arc<AtomicUsize>,
 }
 
 impl LineWriter {
     /// Spawn the writer task over the process stdout.
     fn spawn() -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let task_pending = Arc::clone(&pending);
         tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
             use tokio::io::AsyncWriteExt;
             while let Some(frame) = rx.recv().await {
-                let Ok(mut line) = serde_json::to_string(&frame) else {
-                    continue;
-                };
-                line.push('\n');
-                if stdout.write_all(line.as_bytes()).await.is_err() {
-                    break;
+                if let Ok(mut line) = serde_json::to_string(&frame) {
+                    line.push('\n');
+                    let _ = stdout.write_all(line.as_bytes()).await;
+                    let _ = stdout.flush().await;
                 }
-                if stdout.flush().await.is_err() {
-                    break;
-                }
+                task_pending.fetch_sub(1, Ordering::SeqCst);
             }
         });
-        Self { tx }
+        Self { tx, pending }
     }
 
     /// Queue one frame (serializeJsonLine: LF-only framing).
     pub fn write(&self, frame: Value) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
         let _ = self.tx.send(frame);
+    }
+
+    /// Wait until the writer task has written every queued frame (the
+    /// exit paths call this before `process::exit`, TS parity for
+    /// synchronous writes). Bounded: a broken pipe retires after the
+    /// deadline instead of hanging the exit.
+    pub async fn drain(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while self.pending.load(Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -113,7 +132,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         Arc::new(RpcSession::adopt(options.engine, options.engine_factory, writer.clone()).await);
     let state = Arc::new(commands::RpcState {
         session: Arc::clone(&session),
-        writer,
+        writer: writer.clone(),
         cwd: options.cwd,
         agent_dir: options.agent_dir,
         compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -127,15 +146,17 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         queue_pump: Arc::new(tokio::sync::Mutex::new(())),
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
-    spawn_signal_handlers(Arc::clone(&session));
+    spawn_signal_handlers(Arc::clone(&session), writer.clone());
     serve_stdin(state).await
 }
 
 /// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this
-/// pair): abort the running turn, settle it, dispose the kernel, exit.
-fn spawn_signal_handlers(session: Arc<RpcSession>) {
+/// pair): abort the running turn, settle it, dispose the kernel, drain
+/// the queued frames, exit.
+fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     use tokio::signal::unix::{signal, SignalKind};
     let terminate_session = Arc::clone(&session);
+    let terminate_writer = writer.clone();
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
             stream.recv().await;
@@ -143,10 +164,12 @@ fn spawn_signal_handlers(session: Arc<RpcSession>) {
             engine.session.agent().abort();
             engine.session.agent().wait_for_idle().await;
             engine.dispose_kernel().await;
+            terminate_writer.drain().await;
             exit_with(SIGTERM_EXIT);
         }
     });
     let hangup_session = Arc::clone(&session);
+    let hangup_writer = writer.clone();
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {
             stream.recv().await;
@@ -154,6 +177,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>) {
             engine.session.agent().abort();
             engine.session.agent().wait_for_idle().await;
             engine.dispose_kernel().await;
+            hangup_writer.drain().await;
             exit_with(SIGHUP_EXIT);
         }
     });
@@ -194,9 +218,10 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
         }
     }
     // stdin closed: settle the in-flight handlers, wait the session
-    // idle, dispose, exit 0 (TS `onInputEnd`).
+    // idle, dispose, drain the queued frames, exit 0 (TS `onInputEnd`).
     while pending.join_next().await.is_some() {}
     state.session.dispose().await;
+    state.writer.drain().await;
     0
 }
 

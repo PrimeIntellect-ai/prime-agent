@@ -102,7 +102,10 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         .get("entryId")
         .and_then(Value::as_str)
         .ok_or_else(|| "fork requires an entryId".to_string())?;
-    let selected_text = {
+    // Position "before" (TS `runtimeHost.fork`'s default): the entry must
+    // be a user message; the branch moves to its PARENT leaf (the user
+    // row is dropped) and the selected text rides the response.
+    let (target_leaf, selected_text) = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
         let manager = persistence.lock().await;
@@ -116,13 +119,49 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         else {
             return Err("Invalid entry ID for forking".to_string());
         };
-        let text = user.content.text();
-        (entry.parent_id().map(str::to_string), text)
+        (entry.parent_id().map(str::to_string), user.content.text())
     };
-    let (target_leaf, selected_text) = selected_text;
-    // In-memory session: TS non-persisted `createBranchedSession` moves
-    // the entries in place; persisted sessions branch into a new file the
-    // connection switches onto.
+    fork_at(state, target_leaf, selected_text).await
+}
+
+/// `clone` (TS `connection.clone` -> `fork(leafId, { position: "at" })`):
+/// the branch moves to the CURRENT leaf (kept inclusive) with no text; a
+/// session without a current entry answers the TS error.
+async fn clone(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+    let leaf = {
+        let handle = state.session.handle().await;
+        let persistence = handle.engine.session.shared_persistence();
+        let manager = persistence.lock().await;
+        manager.get_leaf_id().map(str::to_string)
+    };
+    let Some(leaf_id) = leaf else {
+        return Err("Cannot clone session: no current entry selected".to_string());
+    };
+    let response = fork_at(state, Some(leaf_id), None).await?;
+    // The clone response drops the fork's text (TS `{ cancelled }`).
+    match response {
+        ResponseData::Present(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("text");
+            }
+            Ok(ResponseData::Present(value))
+        }
+        ResponseData::Absent => Ok(ResponseData::Absent),
+    }
+}
+
+/// The shared fork tail (TS `runtimeHost.fork`): persisted sessions
+/// branch into a new file the connection switches onto (a `None` leaf
+/// forks at the root into a fresh session under the source); in-memory
+/// sessions move the branch in place — the entry path down to the leaf
+/// replaces the session and the live agent context follows (TS rebuilds
+/// the runtime over the moved branch, `SessionEngine::rebuild_branch_context`
+/// is that context rebuild).
+async fn fork_at(
+    state: &Arc<RpcState>,
+    target_leaf: Option<String>,
+    selected_text: Option<String>,
+) -> Result<ResponseData, String> {
     let persisted = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
@@ -130,17 +169,22 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         manager.is_persisted() && manager.get_session_file().is_some()
     };
     if !persisted {
-        let handle = state.session.handle().await;
-        let persistence = handle.engine.session.shared_persistence();
-        let mut manager = persistence.lock().await;
-        match target_leaf.as_deref() {
-            Some(leaf) => manager.branch(leaf),
-            None => manager.reset_leaf(),
+        let (branch_entries, engine) = {
+            let handle = state.session.handle().await;
+            let persistence = handle.engine.session.shared_persistence();
+            let manager = persistence.lock().await;
+            let branch_entries = branch_entries_to_leaf(manager, target_leaf.as_deref());
+            (branch_entries, handle.engine.clone())
+        };
+        engine
+            .rebuild_branch_context(branch_entries)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        let mut data = json!({ "cancelled": false });
+        if let Some(text) = selected_text {
+            data["text"] = json!(text);
         }
-        return Ok(ResponseData::Present(json!({
-            "text": selected_text.unwrap_or_default(),
-            "cancelled": false,
-        })));
+        return Ok(ResponseData::Present(data));
     }
     let forked_path = {
         let handle = state.session.handle().await;
@@ -192,30 +236,35 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
     Ok(ResponseData::Present(data))
 }
 
-/// `clone` (TS `connection.clone`): fork at the current leaf, position
-/// "at"; a session without a current entry answers the TS error.
-async fn clone(state: &Arc<RpcState>) -> Result<ResponseData, String> {
-    let leaf = {
-        let handle = state.session.handle().await;
-        let persistence = handle.engine.session.shared_persistence();
-        let manager = persistence.lock().await;
-        manager.get_leaf_id().map(str::to_string)
-    };
+/// The active-branch entries from the root down to `leaf` (a `None` leaf
+/// is the root fork's empty branch): walks the parent chain with cycle
+/// protection, the same shape the session's `active_branch_entries`
+/// holds for the current leaf (TS `buildSessionContext` reads the moved
+/// branch; `rebuild_branch_context` adopts exactly this path).
+fn branch_entries_to_leaf(
+    manager: &pa_core::session::manager::SessionManager,
+    leaf: Option<&str>,
+) -> Vec<FileEntry> {
     let Some(leaf_id) = leaf else {
-        return Err("Cannot clone session: no current entry selected".to_string());
+        return Vec::new();
     };
-    let payload = json!({ "entryId": leaf_id });
-    let response = fork(state, &payload).await?;
-    // The clone response drops the fork's text (TS `{ cancelled }`).
-    match response {
-        ResponseData::Present(mut value) => {
-            if let Some(object) = value.as_object_mut() {
-                object.remove("text");
-            }
-            Ok(ResponseData::Present(value))
+    let entries = manager.get_all_entries();
+    let by_id: std::collections::HashMap<&str, &FileEntry> = entries
+        .iter()
+        .filter_map(|entry| entry.id().map(|id| (id, entry)))
+        .collect();
+    let mut path = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut current = by_id.get(leaf_id).copied();
+    while let Some(entry) = current {
+        if !visited.insert(entry.id().unwrap_or_default()) {
+            break;
         }
-        ResponseData::Absent => Ok(ResponseData::Absent),
+        path.push(entry.clone());
+        current = entry.parent_id().and_then(|parent| by_id.get(parent).copied());
     }
+    path.reverse();
+    path
 }
 
 /// `get_fork_messages` (TS `getUserMessagesForForking`): the user

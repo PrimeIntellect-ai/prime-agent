@@ -777,6 +777,22 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 }
 
 impl SessionEngine {
+    /// Live model-facts bookkeeping for the turn-boundary surface: after
+    /// a model switch the registered `model.info` handler and the context
+    /// window the usage estimate reads follow the model the session now
+    /// runs (the TS runtime reads both live, not at assembly time).
+    pub fn update_model_facts(&self, model: &pa_types::ai::Model) {
+        super::turn_boundary::TurnBoundaryRequests::rebind_model_facts(
+            &self.turn_boundary,
+            super::turn_boundary::ModelInfo {
+                id: model.id.clone(),
+                provider: model.provider.clone(),
+                input: model.input.clone(),
+            },
+            model.context_window,
+        );
+    }
+
     /// Expand a `/skill:<name>` submission into its `<skill>` block for
     /// the accepted-turn row (TS `_expandSkillCommand`; the row the daemon
     /// emits before admission must match the text the model turn

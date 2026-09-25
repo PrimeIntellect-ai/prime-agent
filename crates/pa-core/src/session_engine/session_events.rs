@@ -6,6 +6,7 @@
 //! for the wire shape.
 
 use pa_agent::stream::AssistantMessageEvent;
+use pa_agent::types::AgentEvent;
 
 use super::provider_adapter::json_round_trip;
 

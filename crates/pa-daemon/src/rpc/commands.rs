@@ -59,10 +59,12 @@ impl RpcState {
             }
         };
         if changed {
-            self.writer.write(json!({
-                "type": "goal_update",
-                "goal": serde_json::to_value(&goal).unwrap_or(Value::Null),
-            }));
+            self.session
+                .write_connection_output(json!({
+                    "type": "goal_update",
+                    "goal": serde_json::to_value(&goal).unwrap_or(Value::Null),
+                }))
+                .await;
         }
     }
 }
@@ -85,10 +87,20 @@ pub fn kick_queue_pump(
 ) {
     let state = Arc::clone(state);
     let engine = Arc::clone(engine);
+    // The generation this pump serves: a whole-session replacement
+    // (new_session/switch_session/fork) retires it — the pump must never
+    // deliver queued input to the disposed session it was spawned with.
+    let generation = state.session.pump_generation();
     tokio::spawn(async move {
         let _lane = state.queue_pump.lock().await;
+        if state.session.pump_generation() != generation {
+            return;
+        }
         let agent = engine.session.agent();
         loop {
+            if state.session.pump_generation() != generation {
+                return;
+            }
             if state
                 .pump_suspended
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -276,35 +288,60 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         )
     };
     state.compacting.store(true, Ordering::SeqCst);
-    state.writer.write(compaction_frame(
-        "compaction_start",
-        instructions.as_deref(),
-        None,
-    ));
+    state
+        .session
+        .write_connection_output(compaction_frame(
+            "compaction_start",
+            instructions.as_deref(),
+            None,
+        ))
+        .await;
     let outcome = engine
         .session
         .compact(instructions.as_deref(), &model, api_key, None)
         .await;
     state.compacting.store(false, Ordering::SeqCst);
-    let outcome = outcome.map_err(|error| format!("{error:#}"))?;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // The failed compaction still publishes its end frame (TS
+            // writes `compaction_end` around every completed attempt —
+            // success, skip, and failure alike).
+            state
+                .session
+                .write_connection_output(compaction_frame(
+                    "compaction_end",
+                    instructions.as_deref(),
+                    None,
+                ))
+                .await;
+            return Err(format!("{error:#}"));
+        }
+    };
     let outcome_value = match &outcome {
         pa_core::session_engine::compact_session::CompactOutcome::Ran(run) => {
             let result = crate::compaction::compaction_result_value(&run.result, &run.entry);
-            state.writer.write(compaction_frame(
-                "compaction_end",
-                instructions.as_deref(),
-                Some(&result),
-            ));
+            state
+                .session
+                .write_connection_output(compaction_frame(
+                    "compaction_end",
+                    instructions.as_deref(),
+                    Some(&result),
+                ))
+                .await;
             ResponseData::Present(result)
         }
         pa_core::session_engine::compact_session::CompactOutcome::Skipped(message) => {
             // TS `compaction_end` omits an undefined `result` (the skip
             // is observable, the result is not).
-            state.writer.write(compaction_frame(
-                "compaction_end",
-                instructions.as_deref(),
-                None,
-            ));
+            state
+                .session
+                .write_connection_output(compaction_frame(
+                    "compaction_end",
+                    instructions.as_deref(),
+                    None,
+                ))
+                .await;
             return Err(message.to_string());
         }
     };
@@ -392,12 +429,15 @@ async fn set_auto_compaction(
         .get("enabled")
         .and_then(Value::as_bool)
         .ok_or_else(|| "set_auto_compaction requires enabled".to_string())?;
-    let handle = state.session.handle().await;
-    handle.engine.session.set_auto_compaction_enabled(enabled);
+    // Persist the settings default first: a settings failure must leave
+    // the live toggle untouched (the session keeps its configured
+    // behavior instead of half-applying the request).
     let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
     settings
         .set_compaction_enabled(enabled)
         .map_err(|error| error.to_string())?;
+    let handle = state.session.handle().await;
+    handle.engine.session.set_auto_compaction_enabled(enabled);
     Ok(ResponseData::Absent)
 }
 

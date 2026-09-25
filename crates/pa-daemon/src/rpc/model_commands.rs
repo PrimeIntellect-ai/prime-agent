@@ -60,7 +60,13 @@ async fn apply_model_selection(
 ) -> Result<(), String> {
     let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
     {
-        let mut handle = state.session.handle().await;
+        // The write guard serializes the swap with every reader that
+        // holds the handle (a prompt admission snapshots the engine
+        // while holding the read guard): the provider target, agent
+        // model, thinking clamp, and the handle's model/key facts move
+        // as one step, so a concurrently admitted turn can never see
+        // half of the selection.
+        let mut handle = state.session.handle_mut().await;
         let provider_target = ProviderTarget {
             api_key: resolved.api_key.clone(),
             model: model.clone(),
@@ -86,6 +92,10 @@ async fn apply_model_selection(
             .await;
         handle.model = model.clone();
         handle.api_key = resolved.api_key.clone();
+        // The turn-boundary model facts follow the switch: `model.info`
+        // and the context window the usage estimate reads must report
+        // the model the session NOW runs, not the assembly-time one.
+        handle.engine.update_model_facts(model);
         let persistence = handle.engine.session.shared_persistence();
         let mut manager = persistence.lock().await;
         let _ = manager.append_model_change(&model.provider, &model.id);
@@ -108,11 +118,18 @@ async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let current_provider = current.model.provider.clone();
     let current_id = current.model.id.clone();
     drop(current);
-    let index = available
+    // When the current model is absent from the catalog (an auth filter
+    // removed it), the cycle lands on the FIRST available model — not
+    // the one after it (TS `cycleModel` steps from the current when
+    // present, and from the head otherwise).
+    let index = match available
         .iter()
         .position(|model| model.provider == current_provider && model.id == current_id)
-        .unwrap_or(0);
-    let next = available[(index + 1) % available.len()].clone();
+    {
+        Some(index) => (index + 1) % available.len(),
+        None => 0,
+    };
+    let next = available[index].clone();
     apply_model_selection(state, &mut registry, &next).await?;
     let level = {
         let handle = state.session.handle().await;
