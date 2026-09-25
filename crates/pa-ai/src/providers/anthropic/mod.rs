@@ -587,7 +587,7 @@ mod always_on_adaptive_thinking_tests {
 #[cfg(test)]
 mod subscription_identity_tests {
     use super::build_request_headers;
-    use crate::types::{Model, ModelInput, zero_model_cost};
+    use crate::types::{zero_model_cost, Model, ModelInput};
 
     // TS #2645's wire-contract assertions (anthropic-thinking-disable.test.ts):
     // subscription requests claim the Claude Code client identity, and the
