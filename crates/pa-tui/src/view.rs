@@ -2658,7 +2658,7 @@ mod tests {
     fn agent_message_row() -> ChatEntry {
         ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
             direction: crate::custom_message::AgentMessageDirection::Received,
-            participant: "from child lane".to_string(),
+            counterpart: "lane".to_string(),
             message: "hi".to_string(),
         }))
     }
@@ -2828,7 +2828,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         let agent_row = lines
             .iter()
-            .position(|line| line.contains("Agent message received"))
+            .position(|line| line.contains("Agent message \u{b7} \u{2193} lane"))
             .expect("the agent-message row renders");
         // The card's panel header is its FIRST row; the seam check must
         // look above it, never inside the panel's own padding.
@@ -2844,7 +2844,7 @@ mod tests {
             "the card renders after the agent message:\n{text}"
         );
         assert!(
-            lines[header_row - 1].contains("Agent message received"),
+            lines[header_row - 1].contains("Agent message \u{b7} \u{2193} lane"),
             "the agent message header sits directly above the card header:\n{text}"
         );
     }
@@ -2920,7 +2920,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         let agent_row = lines
             .iter()
-            .position(|line| line.contains("Agent message received"))
+            .position(|line| line.contains("Agent message \u{b7} \u{2193} lane"))
             .expect("the agent-message row renders");
         // In overview the agent message renders its header alone; the
         // visible assistant body then leads with its blank, renders, and
@@ -2939,7 +2939,7 @@ mod tests {
         let mut view = view_with(vec![agent_message_row(), shell_completion_row()]);
         view.detail = Detail::All;
         let text = transcript_text(&mut view, 80);
-        assert!(text.contains("Agent message received \u{b7} \u{2190} child lane"));
+        assert!(text.contains("Agent message \u{b7} \u{2193} lane"));
         assert!(text.contains("\u{2570}\u{2500} hi"));
         assert!(text.contains("Background shell command finished"));
         assert!(text.contains("[bash-done]"));
@@ -3206,7 +3206,7 @@ mod tests {
         entries.push(ChatEntry::AgentMessage(Box::new(
             crate::custom_message::AgentMessageRow {
                 direction: crate::custom_message::AgentMessageDirection::Received,
-                participant: "from parent".to_string(),
+                counterpart: "root".to_string(),
                 message: "course correct".to_string(),
             },
         )));
@@ -3218,17 +3218,27 @@ mod tests {
             "the five-card side condenses: {text}"
         );
         assert!(
-            text.contains("Agent message received"),
+            text.contains("Agent message \u{b7} \u{2193} root"),
             "the received row keeps its place: {text}"
         );
+        // The collapsed row carries no body preview (the operator's
+        // 2026-09-25 directive): the content only opens on expand.
         assert!(
-            text.contains("course correct"),
-            "the received message's content stays visible: {text}"
+            !text.contains("course correct"),
+            "the collapsed row never previews the body: {text}"
         );
         // The three cards before the message render their own rows.
         assert!(
             text.contains("bash \u{b7}"),
             "the below-threshold side stays uncondensed: {text}"
+        );
+        // Expanded, the received row opens its \u{2570}\u{2500}-guttered
+        // body: the content stays stored and reachable.
+        view.detail = Detail::All;
+        let text = transcript_text(&mut view, 80);
+        assert!(
+            text.contains("\u{2570}\u{2500} course correct"),
+            "the received body opens on expand: {text}"
         );
     }
 
