@@ -3,10 +3,10 @@
 //! Ported from `packages/ai/src/model-compat-schema.ts`: the top-level keys
 //! of a `compat` object must match the schema the model's `api` selects
 //! (unknown keys reject the entry), and every value must match its declared
-//! type. Nested objects (OpenRouter routing preferences, Vercel gateway
+//! type. Nested objects (`OpenRouter` routing preferences, Vercel gateway
 //! routing, price caps, percentile thresholds) keep the TS default of
 //! allowing additional properties, so the check here is structural, per the
-//! TypeBox validators — deliberately independent of the permissive
+//! `TypeBox` validators — deliberately independent of the permissive
 //! `pa_types` wire structs.
 
 use serde_json::Value;
@@ -52,6 +52,11 @@ const THINKING_FORMATS: &[&str] = &[
 /// `None` (no compat) is always valid. APIs without a declared compat shape
 /// reject every compat object: catalog data can only select among transports
 /// the client knows, and unknown compat surfaces are exactly that.
+///
+/// # Panics
+///
+/// Never panics: the key-table `expect` is unreachable behind the preceding
+/// `None` early return.
 pub fn is_model_compat(api: &str, compat: Option<&serde_json::Map<String, Value>>) -> bool {
     let Some(compat) = compat else {
         return true;
