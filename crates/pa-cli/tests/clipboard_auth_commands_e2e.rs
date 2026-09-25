@@ -171,7 +171,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 use std::sync::{Arc, Mutex};
 
 use pa_tui::provider_auth::{
-    AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
+    AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
     PRIME_INFERENCE_PROVIDER_ID,
 };
@@ -359,7 +359,6 @@ impl ScriptedProviderAuth {
             id: "openai".to_string(),
             name: name.to_string(),
             auth_type,
-            category: AuthCategory::Provider,
             status: (!configured).then(|| AuthStatusIndicator {
                 style: AuthStatusStyle::Muted,
                 label: "unconfigured".to_string(),
@@ -375,7 +374,6 @@ impl ScriptedProviderAuth {
             id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
             name: "Prime Inference".to_string(),
             auth_type: AuthType::ApiKey,
-            category: AuthCategory::Provider,
             status: Some(AuthStatusIndicator {
                 style: AuthStatusStyle::Success,
                 label: "configured".to_string(),
@@ -405,7 +403,6 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 .map(|id| ProviderRow {
                     name: "OpenAI".to_string(),
                     auth_type: AuthType::ApiKey,
-                    category: AuthCategory::Provider,
                     status: Some(AuthStatusIndicator {
                         style: AuthStatusStyle::Success,
                         label: "configured".to_string(),
