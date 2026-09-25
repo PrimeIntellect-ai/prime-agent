@@ -6839,6 +6839,7 @@ mod update_snapshot_tests {
 
     fn queued_user_item(message: &str) -> QueuedItem {
         QueuedItem {
+            priority: QueuePriority::Human,
             message: message.to_string(),
             preview: None,
             custom_message: None,
@@ -6870,6 +6871,7 @@ mod update_snapshot_tests {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(queued_user_item("turn right"));
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: notice_text.clone(),
                 custom_message: Some(child_status_notice_wire("terminal")),
                 ..queued_user_item(&notice_text)
@@ -6877,6 +6879,7 @@ mod update_snapshot_tests {
             // A user-typed row with the exact notice text: unflagged.
             core.steering.push_back(queued_user_item(&notice_text));
             core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: failure_text.clone(),
                 custom_message: Some(child_status_notice_wire("failure")),
                 ..queued_user_item(&failure_text)
@@ -7116,6 +7119,7 @@ mod update_snapshot_tests {
             "target-session",
             &QueueLanes {
                 steering: vec![crate::journal::WorkerQueueItemRecord {
+                    priority: Some(QueuePriority::Background),
                     message: content,
                     preview: None,
                     custom_message: Some(child_status_notice_wire("terminal")),
