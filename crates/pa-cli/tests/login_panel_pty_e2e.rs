@@ -501,7 +501,10 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     harness.write(b"\r");
     harness.wait_from(mark, "Enter API key:", "the API-key prompt");
     harness.write(b"sk-fake\r");
-    harness.wait_from(mark, "Saved API key for ZAI.", "the settled login status");
+    // Ratatui's diff paints changed cells word by word (the fast scripted
+    // flow settles inside one frame), so the wait pins the login status's
+    // first word — "Saved" appears only in the settled login row.
+    harness.wait_from(mark, "Saved", "the settled login status");
 
     // The sign-in automatically applies the parked model: the switch's
     // `Model:` status row lands after the login's own status row.
