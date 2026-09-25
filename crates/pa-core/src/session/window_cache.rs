@@ -54,7 +54,7 @@ impl Generation {
 /// undercount the discarded prefix's summarizer bill — they must not
 /// serve). 4: the older-path stats fold child usage attributions (v3
 /// sidecars carry pre-fold totals and must not serve).
-pub(super) const SNAPSHOT_VERSION: u32 = 5;
+pub(super) const SNAPSHOT_VERSION: u32 = 6;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Snapshot {
@@ -68,6 +68,7 @@ pub(super) struct Snapshot {
     pub tier: Option<pa_types::ai::ServiceTier>,
     pub tier_present: bool,
     pub model: Option<(String, String)>,
+    pub boundary_model: Option<(String, String)>,
     pub metadata: Vec<String>,
     pub message_count: usize,
     pub compaction_count: usize,

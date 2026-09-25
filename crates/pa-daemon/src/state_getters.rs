@@ -120,7 +120,7 @@ impl Worker {
                         &branch,
                         all_entries,
                         &own_usage,
-                        store.window_model().as_ref(),
+                        store.window_boundary_model().as_ref(),
                     );
                     (own_usage, total_usage, own_usage_by_model)
                 }
@@ -464,10 +464,11 @@ pub(crate) fn compute_own_and_total_usage(
 /// their entry records when the summary call named one (TS #2411 routes
 /// branch summaries to a configured auxiliary model — the timeline names
 /// the session's current model, not the routed one that billed) and
-/// otherwise follow the branch's `model_change` timeline, seeded with
-/// the window-restored model on a windowed load (the retained branch
-/// starts at the compaction boundary, whose rows billed on the restored
-/// model even when the discarded prefix's timeline rows never load).
+/// otherwise follow the branch's `model_change` timeline, seeded on a
+/// windowed load with the retained-window boundary's model (the newest
+/// `model_change` in the discarded prefix — the leaf's model would bill
+/// the boundary's early summarizer rows on the wrong side of a post-
+/// boundary switch).
 /// Child-usage attributions subtract from the target row's model bucket
 /// exactly like [`compute_own_and_total_usage`] subtracts from
 /// `ownUsage`, so the buckets sum to the node's own usage — and the sum
@@ -492,13 +493,13 @@ pub(crate) fn compute_own_usage_by_model(
     let mut position: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
     let mut buckets: Vec<Value> = Vec::new();
-    // The branch's model timeline seeded with the store's window-restored
-    // model when the load kept only a window (a reopened compacted
-    // session's retained branch starts at the boundary — rows before its
-    // first `model_change` billed on the restored model, and a full
-    // history keeps `None` so a foreign file still omits the breakdown)
-    // and the assistant id -> bucket map the attribution subtraction
-    // reads.
+    // The branch's model timeline seeded with the retained-window
+    // boundary's model when the load kept only a window (a reopened
+    // compacted session's retained branch starts at the boundary — its
+    // early rows billed on the boundary's model, not the leaf's, and a
+    // full history keeps `None` so a foreign file still omits the
+    // breakdown) and the assistant id -> bucket map the attribution
+    // subtraction reads.
     let mut current: Option<(String, String)> = initial_model.cloned();
     let mut assistant_buckets: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
@@ -1380,9 +1381,9 @@ mod tests {
     }
 
     /// A windowed load (a reopened compacted session) seeds the timeline
-    /// with the boundary's restored model: retained usage rows before the
-    /// branch's first `model_change` still resolve a bucket and the
-    /// breakdown is served instead of omitted — the target case this
+    /// with the retained-window boundary's model: retained usage rows
+    /// before the branch's first `model_change` still resolve a bucket and
+    /// the breakdown is served instead of omitted — the target case this
     /// change exists for (the Bugbot windowed-omission round). The same
     /// walk without a seed (a full-history foreign file without
     /// `model_change` rows) keeps omitting the breakdown.

@@ -98,7 +98,7 @@ pub fn load_context_tree_child(
         &branch,
         all_entries,
         &own_usage,
-        store.window_model().as_ref(),
+        store.window_boundary_model().as_ref(),
     );
     let label = branch
         .iter()

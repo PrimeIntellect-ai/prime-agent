@@ -111,6 +111,11 @@ pub(crate) struct SessionWindow {
     has_thinking_level: bool,
     has_service_tier: bool,
     model: Option<(String, String)>,
+    /// The model in effect at the retained-window boundary (the newest
+    /// `model_change` in the discarded prefix): the per-model usage fold's
+    /// timeline seed — `model` above is the leaf's model, not the
+    /// boundary's.
+    boundary_model: Option<(String, String)>,
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
     retained_ids: std::collections::HashSet<String>,
@@ -380,6 +385,7 @@ impl SessionFile {
             has_thinking_level: window.has_thinking_level(),
             has_service_tier: window.has_service_tier(),
             model: context.model,
+            boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
             retained_ids: window
@@ -635,13 +641,13 @@ impl SessionFile {
         positions
     }
 
-    /// The model the windowed load restored at the compaction boundary
-    /// (`None` on a full-history load): the per-model cost fold seeds its
-    /// timeline with it, so retained rows before the branch's first
-    /// `model_change` still resolve a bucket instead of dropping the
-    /// breakdown for a reopened compacted session.
-    pub(crate) fn window_model(&self) -> Option<(String, String)> {
-        self.window.as_ref()?.model.clone()
+    /// The model in effect at the retained-window boundary (the newest
+    /// `model_change` in the discarded prefix; `None` on a full-history
+    /// load): the per-model cost fold seeds its timeline with it, so
+    /// retained rows before the branch's first in-window `model_change`
+    /// bill on the boundary's model instead of the leaf's.
+    pub(crate) fn window_boundary_model(&self) -> Option<(String, String)> {
+        self.window.as_ref()?.boundary_model.clone()
     }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {

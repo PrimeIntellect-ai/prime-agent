@@ -76,6 +76,47 @@ fn older_path_stats_fold_child_usage_attributions() {
     assert!((stats.cost - 0.165).abs() < 1e-9);
 }
 
+/// The boundary model the per-model usage fold seeds its timeline with:
+/// the newest `model_change` in the discarded prefix — NOT the leaf's
+/// model. A post-compaction switch inside the retained window must not
+/// re-label the boundary's early summarizer spend (the Bugbot/Macroscope
+/// window-seed round: seeding with the leaf's model billed the boundary
+/// rows on the wrong side of the switch).
+#[test]
+fn boundary_model_is_the_prefixs_newest_model_change_not_the_leafs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("boundary-model.jsonl");
+    let mut rows = vec![
+        json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        json!({"type":"model_change","id":"m-a","parentId":null,"provider":"openai","modelId":"gpt-a"}),
+    ];
+    let mut parent = "m-a".to_owned();
+    for i in 0..220 {
+        let id = format!("u{i}");
+        rows.push(json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+        parent = id;
+    }
+    rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
+    // A switch AFTER the boundary: the retained window runs on gpt-b, the
+    // boundary itself still billed on gpt-a.
+    rows.push(json!({"type":"model_change","id":"m-b","parentId":"compact","provider":"anthropic","modelId":"gpt-b"}));
+    rows.push(json!({"type":"message","id":"leaf","parentId":"m-b","message":{"role":"user","content":"latest","timestamp":0}}));
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert_eq!(
+        store.boundary_model(),
+        Some(&("openai".to_string(), "gpt-a".to_string())),
+        "the seed is the prefix's newest model_change, not the leaf's"
+    );
+    // The leaf model stays what it is (the context's own semantics are
+    // unchanged): the latest model identity on the active path.
+    assert_eq!(
+        store.context().model,
+        Some(("anthropic".to_string(), "gpt-b".to_string()))
+    );
+}
+
 #[test]
 fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     let dir = tempfile::tempdir().unwrap();
