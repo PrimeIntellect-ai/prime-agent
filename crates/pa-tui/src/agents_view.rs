@@ -1197,13 +1197,11 @@ impl AgentsViewMode {
         // `hasLiveWork`), the second press on the same row executes, and
         // any other key clears the arm.
         if !has_query && self.keybindings.matches(key, "app.agents.delete") {
-            if was_delete_armed
-                && was_delete_armed.as_ref().is_some_and(|pending| {
-                    self.rows
-                        .get(self.selected)
-                        .is_some_and(|row| row.identity == pending.identity)
-                })
-            {
+            if was_delete_armed.as_ref().is_some_and(|pending| {
+                self.rows
+                    .get(self.selected)
+                    .is_some_and(|row| row.identity == pending.identity)
+            }) {
                 if let Some(action) = self.delete_action_for_selected() {
                     self.pending_delete_action = Some(action);
                 }
@@ -2302,7 +2300,6 @@ async fn run_agents_view_surface(
                 UiInput::Resize | UiInput::Settled => {}
                 UiInput::DeleteResult { message } => {
                     mode.delete_result(message);
-                    redraw = true;
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
