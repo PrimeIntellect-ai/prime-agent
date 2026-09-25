@@ -421,43 +421,64 @@ export class ReplKernelManager {
 
 	private wireChild(child: ChildProcess): void {
 		const decoder = new StringDecoder("utf8");
-		let buffered = "";
+		// The unterminated line accumulates as chunk segments joined once at its
+		// newline: rescanning one growing buffer per chunk is quadratic in the size
+		// of a multi-MB frame arriving in pipe-sized reads.
+		let pending: string[] = [];
+		let pendingLength = 0;
+		// Text an early exit left unparsed (it may hold complete lines); the next
+		// chunk scans it first.
+		let unparsed = "";
 		// A poisoned child's residue must not grow the buffer again before the
 		// protocol repair kills it.
 		let poisoned = false;
 		child.stdout?.on("data", (buf: Buffer) => {
 			if (this.child !== child || poisoned) return;
-			buffered += decoder.write(buf);
-			if (buffered.length > MAX_PROTOCOL_LINE_CHARS) {
+			const text = unparsed + decoder.write(buf);
+			unparsed = "";
+			if (pendingLength + text.length > MAX_PROTOCOL_LINE_CHARS) {
 				poisoned = true;
-				buffered = "";
+				pending = [];
+				pendingLength = 0;
 				this.failProtocolFrame(child, `oversized protocol line: exceeds ${MAX_PROTOCOL_LINE_CHARS} chars`);
 				return;
 			}
-			let newline = buffered.indexOf("\n");
+			let start = 0;
+			let newline = text.indexOf("\n");
 			while (newline !== -1) {
-				if (this.child !== child) return;
-				const line = buffered.slice(0, newline);
-				buffered = buffered.slice(newline + 1);
-				newline = buffered.indexOf("\n");
+				if (this.child !== child) break;
+				pending.push(text.slice(start, newline));
+				const line = pending.join("");
+				pending = [];
+				pendingLength = 0;
+				start = newline + 1;
+				newline = text.indexOf("\n", start);
 				if (!line.trim()) continue;
 				let event: unknown;
 				try {
 					event = JSON.parse(line);
 				} catch {
 					this.failProtocolFrame(child, `unparseable protocol line: ${line.slice(0, 200)}`);
-					return;
+					break;
 				}
 				if (!isRecord(event)) {
 					this.failProtocolFrame(child, `non-object protocol line: ${line.slice(0, 200)}`);
-					return;
+					break;
 				}
 				const invalidReason = invalidProtocolFrameReason(event);
 				if (invalidReason) {
 					this.failProtocolFrame(child, `${invalidReason}: ${line.slice(0, 200)}`);
-					return;
+					break;
 				}
 				this.handleEvent(event);
+			}
+			// A newline-free tail extends the pending line; a tail that still holds
+			// lines (left by an early exit) waits in `unparsed`.
+			if (newline === -1) {
+				pending.push(text.slice(start));
+				pendingLength += text.length - start;
+			} else {
+				unparsed = text.slice(start);
 			}
 		});
 
