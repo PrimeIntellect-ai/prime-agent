@@ -1683,9 +1683,11 @@ impl SessionScanState {
             .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
             .or(stats_mtime_ms.filter(|ms| *ms > 0))
             .unwrap_or_default();
-        let modified = (modified_ms > 0)
-            .then(|| crate::util::iso_from_unix_ms(modified_ms))
-            .unwrap_or_default();
+        let modified = if modified_ms > 0 {
+            crate::util::iso_from_unix_ms(modified_ms)
+        } else {
+            String::new()
+        };
         Some(SessionInfo {
             path: path.to_path_buf(),
             id: header.id.clone(),
