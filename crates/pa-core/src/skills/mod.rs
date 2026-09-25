@@ -50,11 +50,13 @@ pub enum SourceOrigin {
     TopLevel,
 }
 
-/// Markdown entry test: the file name carries a markdown extension (a bare
-/// `.md` name has no extension and does not count).
+/// Markdown entry test: the file name carries a lowercase `.md` extension
+/// (TS `endsWith('.md')` parity: mixed-case suffixes stay undiscovered, and a
+/// bare `.md` name has no extension and does not count).
 pub fn skill_markdown_name(name: &str) -> bool {
-    name.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md"))
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext == "md")
 }
 
 pub fn create_synthetic_source_info(

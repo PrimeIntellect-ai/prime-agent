@@ -10,7 +10,7 @@ use crate::view::AgentView;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self};
-use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui::Terminal;
 use std::io::stdout;
 use std::time::Duration;
 
@@ -362,5 +362,3 @@ pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<S
         .collect()
 }
 
-#[allow(dead_code)]
-fn unused(_: TerminalOptions, _: Viewport) {}
