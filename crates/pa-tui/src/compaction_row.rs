@@ -171,10 +171,13 @@ pub fn render_compaction_stream(
     };
     let wrapped = crate::width::wrap_text(&text, content_width);
     // The tail follows the generation: render the newest rows, marking
-    // the cut with a dim ellipsis when older rows scroll out of the cap
-    // (a clamped window always wraps past the cap, so both the clipped
-    // and the many-row shapes keep the marker).
-    let truncated = wrapped.len() > STREAM_BLOCK_MAX_ROWS;
+    // every cut with a dim ellipsis. The marker must reflect dropped
+    // CONTENT, not the kept row count: the scalar window bounds
+    // Unicode scalars while rows bound display columns, so a
+    // combining-mark-heavy suffix can clamp yet wrap to fewer rows than
+    // the cap — the ellipsis still shows, because content older than
+    // the window was dropped either way.
+    let truncated = clamped || wrapped.len() > STREAM_BLOCK_MAX_ROWS;
     let rows_to_paint = wrapped.len().saturating_sub(STREAM_BLOCK_MAX_ROWS)..;
     let mut painted: Vec<Line> = Vec::new();
     for (offset, line) in wrapped[rows_to_paint].iter().enumerate() {
@@ -581,6 +584,51 @@ mod tests {
         assert!(
             !text.iter().any(|row| row.contains("generated line 0.")),
             "the oldest rows scrolled out of the cap: {text:?}"
+        );
+    }
+
+    /// The ellipsis marks dropped CONTENT, not the kept row count: a
+    /// combining-mark-heavy summary (zero-width scalars ride every row,
+    /// so the scalar window holds more display rows than usual) can
+    /// clamp yet wrap to fewer rows than the cap — the cut still shows
+    /// its marker (Macroscope round 3).
+    #[test]
+    fn stream_block_marks_the_cut_even_when_the_clamped_suffix_is_few_rows() {
+        // Combining marks: each base char carries a zero-width mark, so
+        // the scalar count doubles while the display columns stay one
+        // per pair.
+        let mut summary = String::new();
+        for _ in 0..400 {
+            summary.push('x');
+            summary.push('\u{0301}'); // combining acute accent
+        }
+        let state = streamed_state(CompactionReason::Threshold, &summary);
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        let text = plain(&rows);
+        // The scalar window (693) clamps the 800-scalar summary, and the
+        // 400-column content wraps past the cap — but the invariant
+        // under test is the marker: the first rendered row carries it.
+        assert!(
+            text.first().is_some_and(|row| row.contains('\u{2026}')),
+            "the clamped cut shows its ellipsis: {text:?}"
+        );
+        assert!(
+            rows.len() <= STREAM_BLOCK_MAX_ROWS,
+            "the cap bounds the block: {text:?}"
+        );
+        // And a SHORT combining-mark summary (inside the window, at most
+        // a few rows) stays unmarked — nothing was dropped.
+        let mut short = String::new();
+        for _ in 0..20 {
+            short.push('x');
+            short.push('\u{0301}');
+        }
+        let state = streamed_state(CompactionReason::Threshold, &short);
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        let text = plain(&rows);
+        assert!(
+            !text.iter().any(|row| row.contains('\u{2026}')),
+            "nothing was dropped, no marker: {text:?}"
         );
     }
 

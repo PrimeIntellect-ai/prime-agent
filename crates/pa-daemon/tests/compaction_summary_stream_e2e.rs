@@ -437,12 +437,18 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
-    // The crossing turn reports 126_010 tokens (over the 500-token
+    // The crossing turn reports `126_010` tokens (over the 500-token
     // headroom): the post-turn threshold check fires a compaction, and
-    // the mock streams the summarizer summary chunk by chunk.
+    // the mock streams the summarizer summary chunk by chunk. The turn's
+    // user message is big on purpose: the 10-token keep-recent budget
+    // then cuts AT the big user message's own boundary — a non-split cut
+    // with the seed turn as the summarizable history (the interactive
+    // e2e's same shape: a mid-turn cut would be a split-turn compaction
+    // whose turn-prefix call does not stream, a different test shape
+    // than this single-history-chunk script).
     client.send_command(
         "p2",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
+        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": format!("crossing turn {}", "x".repeat(4_000))}),
     );
     let crossed = client.read_response("p2");
     assert_eq!(
