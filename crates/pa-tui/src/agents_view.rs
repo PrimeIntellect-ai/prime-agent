@@ -2023,8 +2023,7 @@ impl AgentsViewMode {
                 .rows
                 .iter()
                 .find(|row| row.identity == pending.identity)
-                .map(|row| self.delete_arm_word(row))
-                .unwrap_or(pending.stop);
+                .map_or(pending.stop, |row| self.delete_arm_word(row));
             let word = if stop { "stop" } else { "delete" };
             let hint = match self.keybindings.first_key("app.agents.delete") {
                 Some(key) => format!(
