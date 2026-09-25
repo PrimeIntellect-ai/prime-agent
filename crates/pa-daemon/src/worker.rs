@@ -6525,8 +6525,10 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     };
     matches!(
         row.get("customType").and_then(Value::as_str),
-        Some(pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE)
-            | Some(pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE)
+        Some(
+            pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
+                | pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE
+        )
     )
 }
 
@@ -6848,7 +6850,7 @@ mod update_snapshot_tests {
             "target-session",
             &QueueLanes {
                 steering: vec![crate::journal::WorkerQueueItemRecord {
-                    message: content.clone(),
+                    message: content,
                     preview: None,
                     custom_message: Some(child_status_notice_wire("terminal")),
                     queue_key: None,
