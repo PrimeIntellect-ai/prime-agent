@@ -423,7 +423,7 @@ async fn session_new(
     })
     .await
     .ok()
-    .and_then(|discovery| discovery.ok())
+    .and_then(std::result::Result::ok)
     .unwrap_or_default();
     let published = {
         let current = mode.current_model().await;

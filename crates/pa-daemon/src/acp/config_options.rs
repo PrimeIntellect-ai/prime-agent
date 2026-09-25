@@ -67,17 +67,6 @@ impl PickerModel {
         }
     }
 
-    /// The full registry model's identity when discovery holds it (the
-    /// supported-levels source), else the agent-state view.
-    pub fn from_agent_model(model: &pa_agent::types::Model) -> PickerModel {
-        PickerModel {
-            id: model.id.clone(),
-            name: model.name.clone(),
-            provider: model.provider.clone(),
-            reasoning: model.reasoning,
-        }
-    }
-
     /// Parse the `get_connection_state` `model` metadata (the daemon
     /// engine's `{ id, name, provider, reasoning }`).
     pub fn from_connection_state(value: &Value) -> Option<PickerModel> {
@@ -188,7 +177,7 @@ pub async fn publish_config_options(
         if *published == options {
             false
         } else {
-            *published = options.clone();
+            (*published).clone_from(&options);
             true
         }
     };
@@ -261,7 +250,7 @@ mod tests {
     }
 
     fn levels(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| name.to_string()).collect()
+        names.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]
