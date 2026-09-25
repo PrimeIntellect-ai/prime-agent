@@ -597,12 +597,13 @@ mod tests {
         let corpus = [common0.clone(), common1.clone(), rare.clone()];
         let idf = harness_query_term_idf(&corpus, &terms);
         assert_eq!(idf.len(), 2);
-        assert!((idf["session"] - (1.0 + 3.0 / 2.0).ln()).abs() < 1e-9);
-        assert!((idf["quantum"] - (1.0 + 3.0 / 1.0).ln()).abs() < 1e-9);
+        let documents: f64 = 3.0;
+        assert!((idf["session"] - (1.0 + documents / 2.0).ln()).abs() < 1e-9);
+        assert!((idf["quantum"] - (1.0 + documents / 1.0).ln()).abs() < 1e-9);
         // The discount scales the weighted overlap: "quantum" covers 2
         // fields of 1 entry.
         let rare_score = score_harness_entry_for_query(&rare, &terms, Some(&idf));
-        assert!((rare_score - (1.0 + 3.0 / 1.0).ln() * 1.5).abs() < 1e-9);
+        assert!((rare_score - (1.0 + documents / 1.0).ln() * 1.5).abs() < 1e-9);
         // A term in every entry still weighs ln(2); degenerate corpora stay
         // inert, and empty terms or corpora score nothing.
         let solo_idf = harness_query_term_idf(&[rare.clone()], &terms);

@@ -1167,7 +1167,7 @@ mod tests {
             stream_fn: Some(provider.stream_fn()),
             ..Default::default()
         });
-        let mut manager = SessionManager::in_memory(std::env::temp_dir());
+        let mut manager = SessionManager::in_memory(&std::env::temp_dir());
         manager.adopt_entries(entries);
         AgentSession::from_session_arc(
             Arc::new(agent),
@@ -1248,8 +1248,7 @@ mod tests {
         // persists (unranked: the pre-turn context has no task signal yet).
         let provider = Arc::new(ScriptedProvider::new(test_model()));
         provider.push_text_turn("noted");
-        let (session, _tmp) =
-            digest_session_with_harness(Arc::clone(&provider), harness.clone()).await;
+        let session = digest_session_with_harness(Arc::clone(&provider), harness.clone()).await;
         session
             .prompt("hello alpha", PromptOptions::default())
             .await

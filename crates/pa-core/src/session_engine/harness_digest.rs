@@ -17,7 +17,10 @@ use crate::refinement::ranking::{
 };
 use crate::refinement::{load_harness_state, merge_harness_states, HarnessScope};
 
-use super::messages::{COMPACTION_SUMMARY_PREFIX, HARNESS_DIGEST_PREFIX, HARNESS_DIGEST_SUFFIX};
+use super::messages::{
+    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, HARNESS_DIGEST_PREFIX,
+    HARNESS_DIGEST_SUFFIX,
+};
 
 /// Session-scoped digest inputs: where harness state lives and which
 /// interfaces the digest may reference.
@@ -776,11 +779,9 @@ mod tests {
         // `_latestContextHarnessDigestDetails`).
         let mut context = vec![loop_row.clone()];
         assert_eq!(
-            latest_context_digest_details(&context).map(|details| (
-                details.digest.as_str(),
-                details.state_fingerprint.as_deref()
-            )),
-            Some(("digest body", Some("fingerprint-1")))
+            latest_context_digest_details(&context)
+                .map(|details| (details.digest, details.state_fingerprint)),
+            Some(("digest body".to_string(), Some("fingerprint-1".to_string())))
         );
         context.push(harness_digest_prompt_row(
             "newer digest",
@@ -788,11 +789,12 @@ mod tests {
             "fingerprint-2",
         ));
         assert_eq!(
-            latest_context_digest_details(&context).map(|details| (
-                details.digest.as_str(),
-                details.state_fingerprint.as_deref()
-            )),
-            Some(("newer digest", Some("fingerprint-2")))
+            latest_context_digest_details(&context)
+                .map(|details| (details.digest, details.state_fingerprint)),
+            Some((
+                "newer digest".to_string(),
+                Some("fingerprint-2".to_string())
+            ))
         );
         // A context with no digest rows never suppresses delivery.
         assert_eq!(latest_context_digest_details(&[]), None);
@@ -801,11 +803,8 @@ mod tests {
         // same way).
         let typed = latest_typed_digest_details(&[message]);
         assert_eq!(
-            typed.map(|details| (
-                details.digest.as_str(),
-                details.state_fingerprint.as_deref()
-            )),
-            Some(("digest body", Some("fingerprint-1")))
+            typed.map(|details| (details.digest, details.state_fingerprint)),
+            Some(("digest body".to_string(), Some("fingerprint-1".to_string())))
         );
     }
 
@@ -818,14 +817,12 @@ mod tests {
         let converted = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text(harness_digest_message_text("older digest")),
             timestamp: 1,
-            rest: Default::default(),
         }));
         assert!(is_digest_row(&converted));
         // A plain user row and an unrelated custom row are not.
         let plain = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text("a question".to_string()),
             timestamp: 2,
-            rest: Default::default(),
         }));
         assert!(!is_digest_row(&plain));
         let unrelated = AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
@@ -844,19 +841,17 @@ mod tests {
                 "{HARNESS_DIGEST_PREFIX}stale snapshot{HARNESS_DIGEST_SUFFIX}\n\n{summary_text}"
             )),
             timestamp: 3,
-            rest: Default::default(),
         }));
         let stripped = strip_compaction_digest_block(summary_with_block);
         let AgentMessage::Standard(Message::User(user)) = &stripped else {
             panic!("expected the compaction row to stay");
         };
-        assert_eq!(user.content.text(), summary_text);
+        assert_eq!(loop_user_text(&user.content), summary_text);
         assert!(!is_digest_row(&stripped));
         // The same strip on an already-plain summary row is a no-op.
         let plain_summary = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text(summary_text.clone()),
             timestamp: 4,
-            rest: Default::default(),
         }));
         let untouched = strip_compaction_digest_block(plain_summary.clone());
         assert_eq!(untouched, plain_summary);

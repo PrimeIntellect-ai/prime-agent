@@ -382,8 +382,11 @@ pub async fn execute_compaction(
     let (harness_digest, harness_state_fingerprint) = options
         .harness_digest
         .as_ref()
-        .map(super::harness_digest::HarnessDigestInputs::render_with_fingerprint)
-        .map(|render| (render.digest, render.state_fingerprint))
+        .map(|inputs| {
+            let render =
+                super::harness_digest::HarnessDigestInputs::render_with_fingerprint(inputs);
+            (Some(render.digest), Some(render.state_fingerprint))
+        })
         .unwrap_or_default();
     let entry = compaction_entry_for(
         &result,
