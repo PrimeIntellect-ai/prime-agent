@@ -1129,8 +1129,7 @@ fn scan_flatten_exposed(
     // inert — processing it would mark lines whose content never
     // renders, stranding the subtree. The inactive scan skips those
     // rows entirely.
-    let on_running_path =
-        scan_running_path_rows(base, children_by_parent, expanded_running);
+    let on_running_path = scan_running_path_rows(base, children_by_parent, expanded_running);
     let mut exposed_running: HashSet<String> = HashSet::new();
     let mut exposed_inactive: HashSet<String> = HashSet::new();
     for index in 0..base.len() {
@@ -1188,11 +1187,7 @@ fn scan_running_path_rows(
                 // descendants render on the running path too.
                 let mut stack = vec![*child];
                 while let Some(ancestor) = stack.pop() {
-                    for descendant in children_by_parent
-                        .get(&ancestor)
-                        .into_iter()
-                        .flatten()
-                    {
+                    for descendant in children_by_parent.get(&ancestor).into_iter().flatten() {
                         if base[*descendant].section == Section::Running {
                             if on_running_path.insert(base[*descendant].identity.clone())
                                 && expanded_running.contains(&base[*descendant].identity)
