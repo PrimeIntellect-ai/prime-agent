@@ -182,17 +182,6 @@ impl Inner {
         }
     }
 
-    /// The boot that follows a restore owns the debounced window: the restore
-    /// and its bootstrap settle without a user cell, and the skip arm lands
-    /// only after the bootstrap (production order). Suppress the debounce
-    /// until a third execution settles.
-    fn debounced_snapshot_boot_hold(&self) -> bool {
-        let g = lock(&self.guarded);
-        // The +1 is the bootstrap's own settle; any user cell is the +2.
-        g.restore_boot_hold
-            .is_some_and(|held| g.completed_executions <= held + 1)
-    }
-
     /// Arm the one-shot post-restore snapshot skip: the bootstrap-scheduled
     /// snapshot would rewrite identical content, or after a failed restore
     /// clobber the healthy on-disk copy with a skills-only payload. Call after
@@ -262,7 +251,16 @@ impl Inner {
                 if inner.consume_restored_snapshot_skip() {
                     return;
                 }
-                if inner.debounced_snapshot_boot_hold() {
+                // The boot that followed a restore owns this window: the
+                // restore and its bootstrap settle without a user cell, and
+                // the skip arm lands only after the bootstrap (production
+                // order). The +1 is the bootstrap's own settle; any user cell
+                // is the +2 that ends the hold.
+                let (held, completed) = {
+                    let g = lock(&inner.guarded);
+                    (g.restore_boot_hold, g.completed_executions)
+                };
+                if held.is_some_and(|held| completed <= held + 1) {
                     return;
                 }
                 inner
