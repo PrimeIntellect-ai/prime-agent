@@ -89,6 +89,16 @@ fn deferral_diagnostics(mock: &StallMock, trace_path: &Path) -> String {
         .map(|(phase, at)| format!("{phase}@{at}us"))
         .collect();
     parts.push(format!("trace=[{}]", phases.join(", ")));
+    let stderr = std::fs::read_to_string(daemon_stderr_path(trace_path)).unwrap_or_default();
+    let tail: Vec<&str> = stderr
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<&str>>()
+        .into_iter()
+        .rev()
+        .collect();
+    parts.push(format!("daemon_stderr=[{}]", tail.join(" | ")));
     parts.join(" ")
 }
 
@@ -423,8 +433,17 @@ fn serve(
 // The child is reaped in Supervisor::drop (kill + wait); clippy's
 // zombie_processes cannot see the Drop guard from the spawn site.
 #[allow(clippy::zombie_processes)]
+/// The daemon child's stderr lands beside the trace (its `eprintln`
+/// diagnostics — a failed background round names its error) so the
+/// deferral test can surface them.
+fn daemon_stderr_path(trace_path: &Path) -> std::path::PathBuf {
+    trace_path.with_file_name("daemon-stderr.log")
+}
+
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
+    let stderr_path = daemon_stderr_path(trace_path);
+    let stderr_file = std::fs::File::create(&stderr_path).expect("daemon stderr file");
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("supervisor")
         .arg("--socket")
@@ -433,7 +452,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Super
         .arg(agent_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .env("PA_COMPACTION_TRACE", trace_path)
