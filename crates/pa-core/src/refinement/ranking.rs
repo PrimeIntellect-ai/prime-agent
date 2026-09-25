@@ -506,7 +506,7 @@ pub fn harness_digest_fingerprint(
         serde_json::Value::Array(
             entries
                 .iter()
-                .map(|(kind, entry)| entry_material(kind, *entry))
+                .map(|(kind, entry)| entry_material(kind, entry))
                 .collect(),
         ),
     );
