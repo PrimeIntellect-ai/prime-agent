@@ -112,7 +112,7 @@ mod tests {
             ] {
                 let agent = AgentMessageRow {
                     direction: AgentMessageDirection::Received,
-                    participant: "from child worker".into(),
+                    counterpart: "worker".into(),
                     message: content.into(),
                 };
                 let shell = ShellCompletionRow {
