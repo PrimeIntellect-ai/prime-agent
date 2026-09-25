@@ -95,6 +95,7 @@ fn view_options(socket: &Path, session_dir: &Path, notice: Option<String>) -> Ag
         selected_key: None,
         status_message: notice,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
     }
 }
 

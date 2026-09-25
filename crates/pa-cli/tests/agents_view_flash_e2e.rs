@@ -312,6 +312,7 @@ fn view_options(socket: &Path, session_dir: &Path) -> AgentsViewOptions {
         selected_key: None,
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
     }
 }
 

@@ -1,24 +1,25 @@
-//! Real-signal e2e for the `app.suspend` cycle (TS `handleCtrlZ`): the
-//! product's terminal renderer runs on a pty in a child process group,
-//! and the harness drives the signal path a shell exercises.
+//! Real-pty byte-stream e2e for the TUI's hardware-cursor control (the
+//! operator's "purple cursor teleporting/glitching around the TUI"
+//! report): the product's terminal renderer runs on a pty in a child
+//! process group, and the harness audits the raw escape stream across the
+//! glitch's repro sequences — startup mount, editor typing (IME caret
+//! positioning), picker open/close, and the ctrl+z suspend/SIGCONT resume.
 //!
-//! The TS shield window (SIGINT ignored while suspended) is covered by
-//! the pa-types unit test on the disposition pair; it cannot be e2e'd
-//! here: a SIGINT sent to a *stopped* process queues until SIGCONT and is
-//! delivered while the app already restored the default disposition
-//! mid-resume, which destabilizes the terminal reader in this harness —
-//! and a real shell cannot produce that sequence anyway (Ctrl+C goes to
-//! the shell, the foreground process; the suspended app is background).
+//! The TS contract (tui.ts): the hardware cursor is positioned at the
+//! focused caret for IME on every frame, but only *shown* when
+//! `showHardwareCursor` is on (default off). `TUI.start` hides it, every
+//! fullscreen render ends `showCursor`-only-if-enabled, and the stop
+//! paths show it exactly when the shell gets the terminal back. So with
+//! the default setting, the whole session's stream may carry exactly one
+//! `?25h` — the suspend release tail handing the plain terminal to the
+//! shell — and every `?25l` hide that follows a show must precede the
+//! next repaint. A visible cursor anywhere else is the glitch: frame
+//! paints walk the cursor across changed rows while it is shown.
 //!
-//! Two harness details keep the child deterministic (found the hard way,
-//! see PORTING-NOTES "Suspend-to-background"): the child is in its own
-//! process group inside this runner's session (its terminal is the
-//! harness pty alone), and the SIGINT-while-stopped
-//! test is separate — a SIGINT sent to a *stopped* process queues until
-//! SIGCONT and is delivered when the app already restored the default
-//! disposition mid-resume, which destabilizes the terminal reader; a
-//! real shell cannot produce that (Ctrl+C goes to the shell, the
-//! foreground process), so the byte-level assertions run without it.
+//! The harness reuses the suspend e2e's structure (child in its own
+//! process group inside this runner's session, mock supervisor socket,
+//! non-blocking pty master): the byte-level waits serialize through a
+//! static lock like the other pty harnesses.
 
 #![cfg(unix)]
 
@@ -41,40 +42,29 @@ use pa_tui::interactive::{
 };
 
 /// The SGR tracking sequences the seam writes (the exact byte order of
-/// `mouse_tracking`: enable is `?1002h` then `?1006h`, disable the
-/// reverse).
+/// `mouse_tracking`: enable is `?1002h` then `?1006h`).
 const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1006h";
-const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1002l";
 
-/// The kitty capability query crossterm's support check writes (`\x1b[?u`
-/// then the primary-device-attributes query in one write). The port runs
-/// it once per process (the first mount); a resume that writes it again
-/// re-arms the 2s support check — crossterm's filtered poll holds the
-/// process-global event-reader lock for its whole budget, and the app
-/// reader's input goes blind until it expires (the strace-proven
-/// ~2s-after-every-resume blackout).
-const KITTY_QUERY: &str = "\x1b[?u\x1b[c";
+/// The hardware-cursor visibility bytes (`crossterm::cursor::Show`/`Hide`).
+const CURSOR_SHOW: &str = "\x1b[?25h";
+const CURSOR_HIDE: &str = "\x1b[?25l";
 
 /// The child-mode socket: set (with the socket path) only when this very
 /// binary is re-executed as the product-under-test.
-const CHILD_SOCKET_ENV: &str = "PA_SUSPEND_CHILD_SOCKET";
+const CHILD_SOCKET_ENV: &str = "PA_CURSOR_CHILD_SOCKET";
 
 /// The child half of the e2e: runs the real interactive loop in terminal
 /// mode against the parent's mock supervisor. A plain `cargo test` run
-/// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent test
-/// drives the real path.
+/// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent test drives
+/// the real path.
 #[test]
-fn suspend_child_mode() {
+fn cursor_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
         return;
     };
     let options = child_options(PathBuf::from(socket));
-    // A current-thread runtime keeps the child at two threads (the loop
-    // plus the terminal reader): a multithreaded runtime's parked workers
-    // can lose their futex wakeups across a group stop/continue, which
-    // starves the resume mid-path (observed as the resumed child never
-    // writing its re-apply bytes; the product behavior itself is
-    // correct — verified under strace).
+    // A current-thread runtime keeps the child's thread count down across
+    // the group stop/continue cycle (the suspend e2e's observation).
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -82,25 +72,20 @@ fn suspend_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The two pty harnesses serialize: each drives process-group signals and
-/// a raw pty; running them concurrently made the byte-level waits flake
-/// on the shared 4-CPU sandbox.
+/// The pty harnesses serialize: each drives process-group signals and a
+/// raw pty; concurrent byte-level waits flake on the shared sandbox CPUs.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Whether this runner is attached to a controlling-terminal session.
-/// The real-signal stop/continue cycle runs in that class; without one
-/// the test skips with a loud note instead of running.
+/// Whether this runner is attached to a controlling-terminal session (the
+/// real-signal stop/continue cycle needs one).
 fn sigtstp_session_runner() -> bool {
-    // tcgetpgrp on fd 0 answers "does this runner's stdin sit on a
-    // session's controlling terminal": a pipe or /dev/null stdin and a
-    // tty without a foreground process group both read as errors.
     // SAFETY: tcgetpgrp only queries the fd's foreground process group.
     let foreground = unsafe { libc::tcgetpgrp(0) };
     if foreground < 0 {
         eprintln!(
             "no controlling-terminal session on the runner (tcgetpgrp(fd 0) \
-             failed); skipping the suspend signal e2e — it needs a \
-             controlling-terminal session to drive the stop/continue cycle"
+             failed); skipping the cursor visibility e2e — it needs a \
+             controlling-terminal session to drive the suspend cycle"
         );
         return false;
     }
@@ -108,16 +93,10 @@ fn sigtstp_session_runner() -> bool {
 }
 
 #[test]
-fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
+fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
     if !sigtstp_session_runner() {
         return;
     }
-    // The runner leads a fresh session with no controlling terminal (a
-    // new session gets none until TIOCSCTTY), and spawn_child then
-    // moves the child into its own process group inside it. Both are
-    // the harness contract: the stop/continue cycle needs the child's
-    // group parented inside its session, and the renderer needs the
-    // child's terminal to be the harness pty alone.
     match nix::unistd::setsid() {
         Ok(_) => {}
         Err(error) => panic!("the harness could not start a fresh session: {error}"),
@@ -126,101 +105,167 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let mut harness = SuspendHarness::start();
+    let mut harness = CursorHarness::start();
 
-    // The startup contract: the fullscreen surface enables SGR mouse
-    // tracking (the seam bytes) before any input is handled.
+    // Startup: the fullscreen surface enables SGR mouse tracking before
+    // any input is handled — the deterministic startup marker (the mount
+    // and the attach snapshot's transcript rows settled before the
+    // harness handed control back).
     harness.wait_from_start(MOUSE_ENABLE, "startup mouse enable");
 
-    // The first mount runs the kitty capability query once (the
-    // once-per-process contract's positive side: the probe exists).
-    harness.wait_from_start(KITTY_QUERY, "the first mount's kitty query");
+    // Typing: the editor draws the typed cells and the hidden hardware
+    // cursor parks right after them for IME — row 22 (the prompt dock
+    // line of the fixed 24-row frame), column 7 ("hi" after the "> "
+    // prompt). The position write itself is the proof the caret is still
+    // tracked while the cursor stays invisible.
+    let mark_typed = harness.mark();
+    harness.write(b"hi");
+    harness.wait_from(
+        mark_typed,
+        "\x1b[22;7H",
+        "the editor positions the hidden cursor at the caret",
+    );
 
-    // Ctrl+Z: the app.suspend binding. The renderer releases tracking
-    // before the process group stops, so the disable bytes arrive while
-    // the process is still running.
+    // The picker: clear the editor first (the typed `hi` still sits in
+    // it — submitting `hi/model` would go to the daemon as a prompt, not
+    // the slash command), then `/model` opens the model picker (an empty
+    // catalog renders the empty panel, so the mount is deterministic) and
+    // Escape closes it. Both overlays own the frame without a hardware
+    // cursor.
+    let mark_clear = harness.mark();
+    harness.write(b"\x7f\x7f");
+    harness.wait_from(
+        mark_clear,
+        "\x1b[22;5H",
+        "the editor emptied back to the bare caret",
+    );
+    let mark_picker = harness.mark();
+    harness.write(b"/model\r");
+    harness.wait_from(mark_picker, "Search models", "the model picker mounts");
+    harness.write(&[0x1b]);
+    // The frame-end hide followed by the hidden caret write is the
+    // editor-owns-the-frame marker: picker-open frames end at the bare
+    // hide (no caret position exists to write), so no picker cell paint
+    // can false-match this pair. The zone-marker writes may trail the
+    // caret MoveTo before the sync release, so the needle stops at the
+    // pair.
+    harness.wait_from(
+        mark_picker,
+        "\x1b[?25l\x1b[22;5H",
+        "the closed picker returns the caret to the empty editor",
+    );
+    // Let the escape settle before the next key: a byte written hot on
+    // the escape's heels reads as one alt-modified key (ESC then ctrl+z
+    // would become Alt+ctrl+z), and the suspend cycle would never arm.
+    harness.drain_until_quiet(6);
+
+    // Ctrl+Z: the app.suspend cycle hands the plain terminal to the
+    // shell — the one place the stream shows the cursor (TS `TUI.stop`'s
+    // non-preserved branch: the shell prompt needs a visible cursor).
     let mark_suspend = harness.mark();
     harness.write(&[0x1a]);
-    harness.wait_from(mark_suspend, MOUSE_DISABLE, "suspend mouse release");
-
-    // SIGTSTP (from the app's own kill(0)) stops the process group.
+    harness.wait_from(
+        mark_suspend,
+        CURSOR_SHOW,
+        "the suspend release tail shows the cursor for the shell",
+    );
     wait_for_stopped(
         harness.child_id(),
         "the app.suspend cycle stopped the group",
     );
 
-    // SIGCONT (`fg`): the resume re-applies the terminal modes — raw
-    // mode, the alternate screen, SGR mouse tracking — and repaints; the
-    // mouse-tracking seam bytes come back on the pty.
-    // Drain the suspend's scrollback flush to silence first (see
-    // `drain_until_quiet`): the resume's writes must find room in the pty
-    // buffer instead of being dropped by a full one.
+    // SIGCONT (`fg`): the resume hides the cursor again (TS `ui.start()`
+    // on SIGCONT) BEFORE the repaint — a shown cursor at the release
+    // tail's stale position through the clear + full repaint is the exact
+    // glitch window.
     harness.drain_until_quiet(8);
     let mark_resume = harness.mark();
     kill(Pid::from_raw(harness.child_id() as i32), Signal::SIGCONT).expect("SIGCONT");
-    // The post-continue repaint (the resume's `term.clear` plus the fresh
-    // frame) is the deterministic marker on this harness: the resumed
-    // child writes the alt-screen-enter and mouse-tracking sequences first
-    // (verified under strace, and the seam's release/re-apply order is
-    // unit-locked in pa-tui), but this sandbox's pty drops the first
-    // post-continue writes nondeterministically, so the harness pins the
-    // assertion on the repaint that always arrives.
+    harness.wait_from(
+        mark_resume,
+        CURSOR_HIDE,
+        "the resume hides the cursor before the repaint",
+    );
     harness.wait_from(
         mark_resume,
         "\x1b[1;33Hsuspend",
         "the SIGCONT resume repaints the terminal",
     );
 
-    // The resumed app still runs: typing renders in the editor line.
-    // Ratatui's diff renderer repaints only the changed cells, so the
-    // typed text never appears as a contiguous "> hi" byte string: the
-    // editor draws the typed cells at their positions and parks the
-    // cursor right after them — row 22 (the prompt dock line of the
-    // fixed 24-row frame), column 7 ("hi" after the "> " prompt).
-    //
-    // The wait is bounded tight: a resume that re-queried kitty leaves
-    // the app reader starved behind crossterm's support check for the
-    // check's whole 2s budget, and the typed bytes only render when it
-    // expires — the fixed resume leaves the reader free and renders in
-    // well under a second even on a loaded VM (the pre-fix run took
-    // 2.0s here, 10/10, strace-verified).
-    let mark_typed = harness.mark();
-    harness.write(b"hi");
-    harness.wait_from_bounded(
-        mark_typed,
-        "\x1b[22;7H",
-        "the resumed editor renders the typed text",
-        Duration::from_millis(1500),
+    // Let the resumed app settle, then audit the whole byte stream.
+    harness.drain_until_quiet(8);
+    let collected = harness.output();
+    let stream: &[u8] = &collected;
+
+    // Exactly one cursor-show byte window in the whole session: the
+    // suspend release tail. A mount, a frame, a picker, or a resume that
+    // shows the cursor is the glitch.
+    let shows = count_occurrences(stream, CURSOR_SHOW.as_bytes());
+    assert_eq!(
+        shows, 1,
+        "the default-setting session shows the hardware cursor exactly \
+         once (the suspend release tail for the shell)"
     );
 
-    // The regression lock: the resume never re-queries kitty. Drain the
-    // tail so the assertion sees everything the child wrote since the
-    // SIGCONT — the once-per-process probe's query bytes must be absent
-    // from the whole resume (a re-armed probe re-blindes the reader for
-    // its 2s support check; the byte-level evidence of the fix is that
-    // the query appears exactly once, on the first mount).
-    harness.drain_until_quiet(4);
-    let resume_region = harness.region_since(mark_resume);
+    // The show is followed by a hide on resume before the repaint: the
+    // visibility sequences stay balanced across the handoff.
+    let show_at = find_subsequence(stream, CURSOR_SHOW.as_bytes())
+        .expect("the suspend show is in the stream");
+    let post_show = &stream[show_at..];
+    let hide_at = find_subsequence(post_show, CURSOR_HIDE.as_bytes())
+        .expect("the resume hide follows the suspend show");
+    let repaint_at = find_subsequence(post_show, b"\x1b[1;33Hsuspend")
+        .expect("the resume repaint follows the suspend show");
     assert!(
-        find_subsequence(&resume_region, KITTY_QUERY.as_bytes()).is_none(),
-        "the SIGCONT resume re-queried the kitty protocol; the query is \
-         once-per-process and must not run again"
+        hide_at < repaint_at,
+        "the resume must hide the cursor before the repaint (hide at \
+         {hide_at}, repaint at {repaint_at})"
+    );
+
+    // No show rides the hidden caret positioning: every caret MoveTo in
+    // the stream is a bare position write, never ratatui's unconditional
+    // show+position pair (the shape the port must not emit).
+    for caret in [b"\x1b[22;5H".as_slice(), b"\x1b[22;7H".as_slice()] {
+        let mut offset = 0;
+        while let Some(at) = find_subsequence(&stream[offset..], caret) {
+            let start = offset + at;
+            let prefixed = start >= CURSOR_SHOW.len()
+                && &stream[start - CURSOR_SHOW.len()..start] == CURSOR_SHOW.as_bytes();
+            assert!(
+                !prefixed,
+                "a cursor-show byte directly precedes the caret position \
+                 write at byte {start} — the hidden position write must be bare"
+            );
+            offset = start + caret.len();
+        }
+    }
+
+    // The mount hides the cursor with the surface (TS `TUI.start`): the
+    // startup window carries a hide before the first frame's paint.
+    let mount_hide = find_subsequence(stream, CURSOR_HIDE.as_bytes())
+        .expect("the session hides the hardware cursor");
+    assert!(
+        mount_hide < harness.startup_end,
+        "the mount hide lands inside the startup window"
     );
 
     harness.finish();
 }
 
 /// One pty-backed product child plus the mock supervisor it attaches to.
-struct SuspendHarness {
+struct CursorHarness {
     child: Child,
     /// The mock-supervisor server thread's join handle (it exits with the
     /// child's connection).
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
+    /// The byte index where the startup window (through the attach
+    /// marker) ended.
+    startup_end: usize,
 }
 
-impl SuspendHarness {
-    fn start() -> SuspendHarness {
+impl CursorHarness {
+    fn start() -> CursorHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let supervisor = MockSupervisor::bind(&socket);
@@ -242,11 +287,17 @@ impl SuspendHarness {
         // socket for the lifetime of the test, and the whole tree dies
         // with the child at teardown.
         std::mem::forget(dir);
-        SuspendHarness {
+        let mut harness = CursorHarness {
             child,
             _server: server,
             master: PtyReader::new(pty.master),
-        }
+            startup_end: 0,
+        };
+        // The startup window ends where the attach marker landed: the
+        // waits below measure every later window from it.
+        harness.wait_from_start("row 0", "the attach snapshot rendered");
+        harness.startup_end = harness.mark();
+        harness
     }
 
     fn child_id(&self) -> u32 {
@@ -269,16 +320,12 @@ impl SuspendHarness {
         self.master.wait_from(mark, needle, what);
     }
 
-    fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
-        self.master.wait_from_bounded(mark, needle, what, bound);
-    }
-
-    fn region_since(&self, mark: usize) -> Vec<u8> {
-        self.master.region_since(mark)
-    }
-
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         self.master.drain_until_quiet(quiet_polls);
+    }
+
+    fn output(&self) -> Vec<u8> {
+        self.master.output.clone()
     }
 
     fn finish(mut self) {
@@ -309,22 +356,13 @@ impl PtyReader {
         self.output.len()
     }
 
-    /// The bytes collected since the given mark (the region the
-    /// no-re-query assertion inspects).
-    fn region_since(&self, mark: usize) -> Vec<u8> {
-        self.output[mark..].to_vec()
-    }
-
     fn write(&mut self, payload: &[u8]) {
         self.file.write_all(payload).expect("write to the pty");
     }
 
-    /// Read until the master goes quiet for `quiet_polls` consecutive
-    /// polls: the suspend's scrollback flush fills the pty's kernel-side
-    /// buffer, and a resume write that finds it full is silently dropped
-    /// by the pty driver — draining to silence first keeps every resume
-    /// byte (this is the whole difference between the flaky and the
-    /// deterministic harness).
+    /// Drain the master until it goes quiet for `quiet_polls` consecutive
+    /// polls: a settle window keeps every later byte (the pty driver
+    /// drops writes that find its kernel-side buffer full).
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         let mut quiet = 0;
         while quiet < quiet_polls {
@@ -342,8 +380,7 @@ impl PtyReader {
     }
 
     /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline
-    /// (attach + first renders).
+    /// since the given mark, bounded by a generous harness deadline.
     fn wait_from(&mut self, mark: usize, needle: &str, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -365,50 +402,30 @@ impl PtyReader {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-
-    /// `wait_from` with a caller-chosen bound: the paths this pins (the
-    /// resume's input freedom) must answer well inside the bound, while
-    /// the regression they lock out (the re-armed kitty support check's
-    /// 2s event-reader starvation) exceeds it.
-    fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
-        let deadline = Instant::now() + bound;
-        loop {
-            if find_subsequence(&self.output[mark..], needle.as_bytes()).is_some() {
-                return;
-            }
-            let mut buffer = [0u8; 8192];
-            let result = self.file.read(&mut buffer);
-            match result {
-                Ok(0) | Err(_) => {}
-                Ok(n) => self.output.extend_from_slice(&buffer[..n]),
-            }
-            if Instant::now() > deadline {
-                let text = String::from_utf8_lossy(&self.output[mark..]);
-                panic!(
-                    "{what} missed the {bound:?} bound (needle {needle:?}); \
-                     pty tail since mark:\n{text}"
-                );
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
 }
 
+fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    let mut count = 0;
+    let mut offset = 0;
+    while let Some(found) = find_subsequence(&haystack[offset..], needle) {
+        count += 1;
+        offset += found + needle.len();
+    }
+    count
+}
+
 /// A child process group of this very binary, re-executed in child mode
 /// with the pty slave as its terminal and no tmux (the tmux keyboard
-/// check must stay out of the way). The child lives in its own process
-/// group inside the runner's session: kill(0, SIGTSTP) stops the child
-/// and not this runner, and the stop holds — the child's parent, the
-/// session leader, sits in a different process group of the same
-/// session. The child's terminal is the harness pty, never a
-/// controlling terminal, so no background-group arbitration
-/// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
+/// check must stay out of the way).
 fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
     // Runs between fork and exec in the child: setpgid moves it into its
     // own process group, inside the runner's session.
@@ -419,7 +436,7 @@ fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command
         .arg("--exact")
-        .arg("suspend_child_mode")
+        .arg("cursor_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
         .env_remove("TMUX")
         .stdin(slave_as_stdio(slave))
@@ -489,7 +506,7 @@ fn wait_for_stopped(pid: u32, what: &str) {
 }
 
 /// One attached session behind a mock supervisor socket (the same frame
-/// contract the headless e2e harness serves).
+/// contract the suspend e2e harness serves).
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
