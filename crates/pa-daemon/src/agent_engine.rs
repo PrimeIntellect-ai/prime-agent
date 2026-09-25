@@ -3340,6 +3340,7 @@ impl AgentSessionEngine {
         // The failover-captured primary target state (TS `_backupModel`):
         // the model, its thinking level, and its resolved request auth,
         // restored when the turn settles back onto the primary.
+        #[derive(Clone)]
         struct FailoverPrimary {
             model: pa_types::ai::Model,
             thinking_level: pa_agent::types::ThinkingLevel,
