@@ -7176,9 +7176,11 @@ impl SessionUi {
     /// automatically, a cancelled or failed login leaves it parked off.
     /// A provider without a login row keeps the TS external-config error.
     async fn begin_model_sign_in(&mut self, applied: &ModelSelectionApplied, view: &mut AgentView) {
+        let provider = &applied.provider;
+        let model_id = &applied.model_id;
         let Some(auth) = self.provider_auth.clone() else {
             self.error_row(
-                &format!("Authentication for {applied.provider} must be configured externally."),
+                &format!("Authentication for {provider} must be configured externally."),
                 view,
             );
             return;
@@ -7186,18 +7188,18 @@ impl SessionUi {
         let rows = auth.0.login_options().await;
         if !rows.iter().any(|row| row.id == applied.provider) {
             self.error_row(
-                &format!("Authentication for {applied.provider} must be configured externally."),
+                &format!("Authentication for {provider} must be configured externally."),
                 view,
             );
             return;
         }
         self.pending_model_sign_in = Some(PendingModelSignIn {
-            provider: applied.provider.clone(),
-            model_id: applied.model_id.clone(),
+            provider: provider.clone(),
+            model_id: model_id.clone(),
             effort: applied.effort.clone(),
         });
         self.note(
-            &format!("Sign in to {applied.provider} to use {applied.provider}/{applied.model_id}"),
+            &format!("Sign in to {provider} to use {provider}/{model_id}"),
             view,
         );
         // The picker's Apply arm already settled the editor (the command
@@ -7205,7 +7207,7 @@ impl SessionUi {
         // rewrites it.
         let mut selector =
             crate::provider_auth::ProviderAuthSelector::new(AuthSelectorKind::Login, rows);
-        selector.preselect_provider(&applied.provider);
+        selector.preselect_provider(provider);
         view.provider_auth = Some(selector);
         self.dirty = true;
     }
