@@ -1937,6 +1937,15 @@ fn spawn_saved_catalog_fetch(
     id
 }
 
+/// Run the agents view over the roster link (terminal or headless) and
+/// return its run state.
+///
+/// # Errors
+///
+/// Returns `Err` when the view surface fails (a roster-link failure,
+/// a draw failure, a transport error); a terminal-mode error runs the
+/// exit restore first when this run mounted the surface or adopted a
+/// pane already in TUI state.
 pub async fn run_agents_view(
     options: AgentsViewOptions,
     ui: AgentsViewUiMode,
@@ -3123,7 +3132,7 @@ the holder exits.";
 
     /// Kitty-protocol key releases map to no key id: the reader filters
     /// them the way every session handler does, so a release never runs
-    /// handle_key's "any other key" arm — which would clear the armed
+    /// `handle_key`'s "any other key" arm — which would clear the armed
     /// exit hint between the presses of a double Ctrl+C, and the second
     /// press would re-arm the hint instead of exiting.
     #[test]

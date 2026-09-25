@@ -47,6 +47,12 @@ pub fn detect_supported_image_mime_from_bytes(bytes: &[u8]) -> Option<&'static s
 /// Detect the supported image mime type of a file, reading only the sniff
 /// prefix. `Ok(None)` for a non-image or empty file (TS
 /// `detectSupportedImageMimeTypeFromFile`).
+///
+/// # Errors
+///
+/// Returns `Err` when the file cannot be opened or its sniff prefix
+/// cannot be read (an i/o error, e.g. a missing file or missing
+/// permission).
 pub fn detect_supported_image_mime_from_path(path: &Path) -> std::io::Result<Option<&'static str>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -62,6 +68,11 @@ pub fn detect_supported_image_mime_from_path(path: &Path) -> std::io::Result<Opt
 /// Load an image file as an attachment payload. `Ok(None)` when the file
 /// is empty or not a supported image (TS `processFileArguments`' image
 /// branch treats those as plain text instead; the caller decides).
+///
+/// # Errors
+///
+/// Returns `Err` when the file cannot be opened, its prefix read, or its
+/// full bytes re-read (an i/o error).
 pub fn load_image_from_path(path: &Path) -> std::io::Result<Option<LoadedImage>> {
     let Some(mime_type) = detect_supported_image_mime_from_path(path)? else {
         return Ok(None);

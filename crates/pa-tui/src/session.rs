@@ -81,6 +81,13 @@ pub enum SessionEvent {
 /// Source of session events. Implementations range from a JSONL capture
 /// (replay) to a live daemon connection.
 pub trait SessionStream: Send {
+    /// Pull the next event, `End` once the stream is finished.
+    ///
+    /// # Errors
+    ///
+    /// Implementations report their own transport or decode failures;
+    /// the bundled JSONL replay stream never returns `Err` (its entries
+    /// were validated at load).
     fn poll(&mut self) -> Result<SessionEvent>;
 }
 
@@ -101,6 +108,12 @@ impl JsonlSessionStream {
     }
 
     /// Load all entries from a session JSONL file (skip undecodable lines).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the file cannot be read, or a non-empty line
+    /// fails to decode as an entry (the error carries the line's
+    /// 1-based number).
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading session {}", path.display()))?;
@@ -109,6 +122,12 @@ impl JsonlSessionStream {
     }
 }
 
+/// Parse session JSONL text into file entries, ignoring blank lines.
+///
+/// # Errors
+///
+/// Returns `Err` on the first non-blank line that does not decode as a
+/// `FileEntry` (the error carries the line's 1-based number).
 pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     for (i, line) in raw.lines().enumerate() {

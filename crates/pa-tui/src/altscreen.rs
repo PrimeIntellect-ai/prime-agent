@@ -17,6 +17,11 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Enter the alternate screen unless the previous surface already did and
 /// handed it off (no sequence is written when the screen is already active).
+///
+/// # Errors
+///
+/// Returns `Err` when writing the alternate-screen enter sequence to
+/// stdout fails.
 pub fn enter() -> Result<()> {
     if !ACTIVE.swap(true, Ordering::SeqCst) {
         crossterm::execute!(stdout(), EnterAlternateScreen)?;
@@ -27,6 +32,11 @@ pub fn enter() -> Result<()> {
 /// Leave the alternate screen. A no-op when the screen is not active, so a
 /// teardown that runs after another surface already left it cannot emit a
 /// stray restore.
+///
+/// # Errors
+///
+/// Returns `Err` when writing the alternate-screen leave sequence to
+/// stdout fails.
 pub fn leave() -> Result<()> {
     if ACTIVE.swap(false, Ordering::SeqCst) {
         crossterm::execute!(stdout(), LeaveAlternateScreen)?;

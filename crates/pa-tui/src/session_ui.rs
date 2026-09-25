@@ -374,7 +374,7 @@ pub(crate) struct SessionUi {
     /// monotonically within a run.
     working_tokens: LoaderTokenTracker,
     /// The turn already surfaced its error (a failed assistant message or a
-    /// retry-exhausted banner); the turn_end error stays silent then (TS
+    /// retry-exhausted banner); the `turn_end` error stays silent then (TS
     /// renders the failure once, through the message or the retry banner).
     turn_error_shown: bool,
     /// Tool cards awaiting their final result (TS `pendingTools`): a
@@ -445,7 +445,7 @@ pub(crate) struct SessionUi {
     /// The session's fetched skill commands (the `enableSkillCommands`
     /// toggle re-applies them without a daemon round trip).
     skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
-    /// The current Python bash() registry snapshot from the owning kernel.
+    /// The current Python `bash()` registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
     /// response from an older request must not repaint a newer snapshot.
@@ -4841,7 +4841,7 @@ impl SessionUi {
     /// Updates the footer tok/sec readout from a completed assistant
     /// message (TS `recordSpeedSample`): output tokens over the
     /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this message_end arrival. Timestamps keep the span true
+    /// start) to this `message_end` arrival. Timestamps keep the span true
     /// even when buffered session events replay back-to-back on attach.
     /// Aborted/failed responses and samples without a finite positive
     /// span or token count are skipped: some providers only fill usage at

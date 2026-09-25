@@ -564,6 +564,13 @@ pub const PRIME_JSON: &str = pa_types::themes::PRIME_THEME_JSON;
 pub const DARK_JSON: &str = pa_types::themes::DARK_THEME_JSON;
 pub const LIGHT_JSON: &str = pa_types::themes::LIGHT_THEME_JSON;
 
+/// Resolve a bundled theme JSON by name, falling back to the prime
+/// theme when the name is unknown.
+///
+/// # Panics
+///
+/// Panics only if the bundled `prime` theme JSON fails to parse (a
+/// build-time invariant the shipped constant satisfies).
 pub fn builtin_theme_json(name: &str) -> ThemeJson {
     let raw = pa_types::themes::builtin_theme_json(name).unwrap_or(PRIME_JSON);
     serde_json::from_str(raw)
@@ -571,6 +578,11 @@ pub fn builtin_theme_json(name: &str) -> ThemeJson {
 }
 
 /// Load a theme from a JSON file path.
+///
+/// # Errors
+///
+/// Returns `Err` when the file cannot be read or its JSON cannot be
+/// parsed; both errors carry the theme path.
 pub fn load_theme_from_path(path: &std::path::Path, mode: ColorMode) -> Result<Theme> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading theme {}", path.display()))?;

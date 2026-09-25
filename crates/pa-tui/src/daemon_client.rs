@@ -304,6 +304,12 @@ impl DaemonClient {
     /// Connect to `socket_path`, complete the hello handshake, and return the
     /// client plus the event receiver. The event receiver must be polled or
     /// the reader task stalls once the channel's buffer fills.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the transport connect times out or fails, the
+    /// hello handshake times out or the connection closes first, or the
+    /// daemon speaks an unknown protocol.
     pub async fn connect(
         socket_path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
@@ -478,6 +484,11 @@ impl DaemonClient {
     /// out after 15000ms waiting for the Prime Agent daemon handshake").
     /// The caller's error path (fatal exit or view fallback) only runs
     /// after the last attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last attempt's [`Self::connect`] error once the
+    /// bounded retries are exhausted.
     pub async fn connect_with_retry(
         socket_path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
@@ -523,6 +534,12 @@ impl DaemonClient {
 
     /// Send one command envelope and wait for the matching response, using
     /// the TS default timeout for the command class.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` like [`Self::request_with_timeout`]: the frame
+    /// cannot be sent, the connection dies before the response, or the
+    /// command-class timeout elapses.
     pub async fn request(&self, command: DaemonCommand) -> Result<DaemonResponse> {
         let timeout_ms = match &command {
             DaemonCommand::PromptAndWait { .. } | DaemonCommand::WaitForIdle { .. } => {
@@ -541,6 +558,13 @@ impl DaemonClient {
     /// the supervisor (the request never reached the worker); a request that
     /// was sent and timed out surfaces the error instead of retrying, so a
     /// prompt can never execute twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the frame cannot be written (the connection is
+    /// closed), the reader dies before resolving, or the timeout elapses;
+    /// a direct frame that never reached the worker falls back to the
+    /// supervisor instead of failing.
     pub async fn request_with_timeout(
         &self,
         command: DaemonCommand,
@@ -570,6 +594,12 @@ impl DaemonClient {
     /// (`abort_compaction`) must reach the supervisor even when a direct
     /// link serves the session: the direct link IS the wedged worker in
     /// the case the supervisor arm exists for.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the supervisor request fails or times out, or
+    /// the response carries `success: false` (the daemon error string
+    /// surfaces).
     pub async fn request_ok_via_supervisor(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self
@@ -600,6 +630,17 @@ impl DaemonClient {
     /// stream to the originating `listDaemonSavedSessions` callbacks).
     /// The id must start with `daemon_` - the supervisor reader's
     /// socket-close failure pass filters by that prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the envelope cannot be serialized, the writer
+    /// send fails (the connection is already closed), the reader task
+    /// dies before resolving, or the timeout elapses.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the shared pending-request mutex is poisoned (a
+    /// thread panicked while holding it).
     pub async fn request_supervisor_with_id(
         &self,
         command: DaemonCommand,
@@ -641,6 +682,11 @@ impl DaemonClient {
 
     /// Send a command and require `success: true`, surfacing the daemon error
     /// string otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when [`Self::request`] fails or the response
+    /// carries `success: false` (the daemon error string surfaces).
     pub async fn request_ok(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self.request(command).await?;
@@ -752,6 +798,13 @@ impl DaemonClient {
     /// socket, and authenticate with the single-use grant. Every failure
     /// returns `Ok(false)` and leaves the plain supervisor connection in
     /// place.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`: every failure path (an unsupported
+    /// supervisor, a failed or refused ticket request, an invalid
+    /// ticket, or a failed worker connect) returns `Ok(false)` and keeps
+    /// the plain supervisor connection.
     pub async fn upgrade_direct(&self, active_session_id: &str) -> Result<bool> {
         if !supervisor_supports_direct(&self.hello) {
             return Ok(false);

@@ -609,7 +609,7 @@ fn legacy_migration(id: &str) -> Option<&'static str> {
         .map(|(_, current)| *current)
 }
 
-/// The config object as an ordered entry list (serde_json maps sort keys,
+/// The config object as an ordered entry list (`serde_json` maps sort keys,
 /// so the TS object order — definition ids first, extras sorted after — is
 /// carried by this vector; [`write_json_object`] renders it in order).
 pub type OrderedConfig = Vec<(String, serde_json::Value)>;
@@ -775,6 +775,11 @@ fn stringify_value(value: &serde_json::Value, indent: usize) -> Result<String> {
 /// with migrated names (and the definition-first ordering) when any legacy
 /// id was found; a missing or malformed file is a no-op. Returns whether
 /// the file was rewritten.
+///
+/// # Errors
+///
+/// Returns `Err` when serializing or writing the rewritten
+/// `keybindings.json` fails.
 pub fn migrate_keybindings_file(agent_dir: &Path) -> Result<bool> {
     let config_path = agent_dir.join("keybindings.json");
     let Some(raw) = load_raw_config(&config_path) else {
