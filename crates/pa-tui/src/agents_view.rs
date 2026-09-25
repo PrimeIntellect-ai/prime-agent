@@ -337,6 +337,26 @@ impl DeleteAction {
     }
 }
 
+/// The no-effect status summary: the wire's own explanation (`error`
+/// or `reason`) beats a bare `ok: false`, a string value renders bare,
+/// and a payload with no explanation falls back to its own text.
+fn no_effect_summary(data: Option<&serde_json::Value>) -> String {
+    data.and_then(|data| {
+        data.get("error")
+            .or_else(|| data.get("reason"))
+            .or_else(|| data.get("ok"))
+            .or(Some(data))
+    })
+    .map_or_else(
+        || "nothing changed".to_string(),
+        |value| {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string)
+        },
+    )
+}
+
 /// One stop-or-delete wire dispatch (TS `handleDeleteSelected`'s arms):
 /// the call runs off the key loop with a client clone and its outcome
 /// re-enters the loop as a `DeleteResult` status line — the live roster
@@ -390,20 +410,10 @@ fn spawn_delete_dispatch(
             Ok(response) if response.success && action.effect_happened(&response) => {
                 action.success_message()
             }
-            Ok(response) if response.success && action.effect_happened(&response) => {
-                action.success_message()
-            }
             Ok(response) if response.success => {
                 // The wire ran but changed nothing: the status carries
                 // what the wire said, never the button's hope.
-                let summary = response
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("ok").or(Some(data)))
-                    .map_or_else(
-                        || "nothing changed".to_string(),
-                        serde_json::Value::to_string,
-                    );
+                let summary = no_effect_summary(response.data.as_ref());
                 format!("{} did not change anything: {summary}", action.fail_word())
             }
             Ok(response) => {
@@ -3225,6 +3235,37 @@ mod tests {
             error_info: None,
         };
         assert!(!delete.effect_happened(&response));
+    }
+
+    /// The no-effect summary surfaces the wire's own explanation: the
+    /// daemon's `error`/`reason` beats a bare `ok: false` (which hid
+    /// the actual explanation), a string renders bare, and a payload
+    /// without any explanation still shows its own text.
+    #[test]
+    fn the_no_effect_summary_surfaces_the_wires_explanation() {
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({
+                "ok": false,
+                "error": "session gone"
+            }))),
+            "session gone"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({
+                "deleted": false,
+                "reason": "running"
+            }))),
+            "running"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({"ok": false}))),
+            "false"
+        );
+        assert_eq!(
+            no_effect_summary(Some(&serde_json::json!({"queued": true}))),
+            "{"queued":true}"
+        );
+        assert_eq!(no_effect_summary(None), "nothing changed");
     }
 
     /// A row that settles between the presses re-arms instead of
