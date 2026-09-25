@@ -37,6 +37,7 @@ use crate::engine::{
     SessionEngine, SideQuestionOutcome, SideQuestionRequest,
 };
 use crate::goal_continuation::GoalBoundary;
+use crate::image_route::ImageRoute;
 use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_MAX_DEPTH};
 
 /// Configuration for the real engine.
@@ -597,7 +598,7 @@ impl AgentSessionEngine {
     }
 
     /// The session's live working directory (the engine's cwd slot).
-    fn cwd(&self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 

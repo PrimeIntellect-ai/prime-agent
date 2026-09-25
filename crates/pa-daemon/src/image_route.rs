@@ -13,9 +13,11 @@
 //! episode settles. The helpers live here; the dispatch, preflight, and
 //! failover integration points stay in [`crate::agent_engine`].
 
-use pa_core::session_engine::provider_adapter::json_round_trip;
+use pa_core::session_engine::provider_adapter::{
+    json_round_trip, map_thinking_level, ProviderTarget,
+};
 
-use crate::agent_engine::{map_thinking_level, AgentSessionEngine, ProviderTarget};
+use crate::agent_engine::AgentSessionEngine;
 
 /// The routed image-model serving state for one dispatched episode (TS
 /// `AgentModelOverride` + the provider target the daemon's stream reads per
@@ -23,18 +25,18 @@ use crate::agent_engine::{map_thinking_level, AgentSessionEngine, ProviderTarget
 /// configured `settings.imageModel` while the session model keeps
 /// identifying the session for UI and persistence.
 #[derive(Clone)]
-struct ImageRoute {
+pub(crate) struct ImageRoute {
     /// The stream's provider target for the episode (the image model, its
     /// resolved key, and the session tier clamped for it).
-    target: ProviderTarget,
+    pub(crate) target: ProviderTarget,
     /// The agent's per-run override (the image model + the session thinking
     /// level clamped for it) feeding the loop config.
-    agent_override: pa_agent::agent::AgentModelOverride,
+    pub(crate) agent_override: pa_agent::agent::AgentModelOverride,
     /// The session's serving target captured at the first swap: the
     /// episode-settle restore writes it back when the fresh recompute
     /// cannot run (a resolution failure must not leave the routed target
     /// serving later turns).
-    session_target: Option<ProviderTarget>,
+    pub(crate) session_target: Option<ProviderTarget>,
 }
 
 impl AgentSessionEngine {
