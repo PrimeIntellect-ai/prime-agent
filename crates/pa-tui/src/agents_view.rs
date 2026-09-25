@@ -199,6 +199,9 @@ enum UiInput {
     /// line reports the outcome.
     DeleteResult {
         message: String,
+        /// The deleted saved session's path (the catalog key for the
+        /// immediate row removal); `None` for the other arms.
+        deleted_saved_path: Option<String>,
     },
 }
 
@@ -397,7 +400,18 @@ fn spawn_delete_dispatch(
             }
             Err(error) => format!("{} failed: {error}", action.fail_word()),
         };
-        let _ = ui_tx.send(UiInput::DeleteResult { message: outcome });
+        let deleted_saved_path = match &action {
+            DeleteAction::DeleteSavedSession { session_path, .. }
+                if outcome.starts_with("Deleted session") =>
+            {
+                Some(session_path.clone())
+            }
+            _ => None,
+        };
+        let _ = ui_tx.send(UiInput::DeleteResult {
+            message: outcome,
+            deleted_saved_path,
+        });
     })
 }
 
@@ -706,6 +720,15 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
+        // A roster update that removed or re-created the armed row
+        // retires the stop-or-delete confirm: the hint never rides a
+        // row the list no longer carries (the execution gate would
+        // reject it anyway - the arm and the visible row stay one).
+        if let Some(pending) = &self.pending_delete {
+            if !self.rows.iter().any(|row| row.identity == pending.identity) {
+                self.pending_delete = None;
+            }
+        }
         self.sync_selected_row_state();
     }
 
@@ -905,9 +928,18 @@ impl AgentsViewMode {
     /// the running section (TS `hasLiveWork`), false for a saved-only
     /// row.
     fn delete_arm_word(&self, row: &AgentsViewRow) -> bool {
-        let live_session = row.summary.get("activeSessionId").is_some();
-        let child = row.summary.get("rlmChildId").is_some();
-        row.section == crate::agents_view_state::Section::Running || live_session && child
+        if row.summary.get("rlmChildId").is_some() {
+            // A child rides its own activity (TS `hasLiveWork` over the
+            // child): the running section is its live work, an idle
+            // child deletes — the retained activeSessionId on an idle
+            // child is not live work.
+            row.section == crate::agents_view_state::Section::Running
+        } else {
+            // An agent keys on its session's existence (TS
+            // `stopAgentForDeletion`): an idle-but-live agent still
+            // stops, never deletes its file.
+            row.summary.get("activeSessionId").is_some()
+        }
     }
 
     /// The executed dispatch for the armed row (the second press): the
@@ -934,19 +966,29 @@ impl AgentsViewMode {
             if row.kind == RowKind::SubagentSummary {
                 return None;
             }
+            // The child arms always run through the PARENT's session: a
+            // scoped promoted child has no parent row in the list, so the
+            // summary's own parentActiveSessionId carries the parent
+            // session; the nested child walks its parent row. The child's
+            // own activeSessionId is never the target (the daemon scopes
+            // the child lookup by the parent's session).
             let parent = row
                 .parent_identity
                 .as_deref()
                 .and_then(|identity| self.rows.iter().find(|row| row.identity == identity));
-            let active_session_id = parent
-                .and_then(|parent| {
-                    parent
-                        .summary
-                        .get("activeSessionId")
-                        .and_then(Value::as_str)
+            let active_session_id = row
+                .summary
+                .get("parentActiveSessionId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    parent.and_then(|parent| {
+                        parent
+                            .summary
+                            .get("activeSessionId")
+                            .and_then(Value::as_str)
+                    })
                 })
-                .or(active_session_id.as_deref())?
-                .to_string();
+                .map(str::to_string)?;
             if self.delete_arm_word(row) {
                 return Some(DeleteAction::StopSubagent {
                     active_session_id,
@@ -2400,8 +2442,11 @@ async fn run_agents_view_surface(
                     }
                 }
                 UiInput::Resize | UiInput::Settled => {}
-                UiInput::DeleteResult { message } => {
-                    mode.delete_result(message);
+                UiInput::DeleteResult {
+                    message,
+                    deleted_saved_path,
+                } => {
+                    mode.delete_result(message, deleted_saved_path);
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
