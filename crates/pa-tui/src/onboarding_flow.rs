@@ -277,7 +277,11 @@ impl ProviderPicker {
         label: &str,
         marks: RowMarks,
     ) -> Line {
-        let RowMarks { connected, selected, available } = marks;
+        let RowMarks {
+            connected,
+            selected,
+            available,
+        } = marks;
         let name = format!("{}{}", if selected { "> " } else { "  " }, label);
         let mark = if connected { "  \u{2713}" } else { "" };
         let pad = " ".repeat(
