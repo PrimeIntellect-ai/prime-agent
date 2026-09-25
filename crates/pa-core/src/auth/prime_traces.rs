@@ -3,7 +3,9 @@
 //! `auth_challenge` flow that yields a Prime API key with trace write
 //! access, plus the prime-cli credential reuse the login tries first.
 //! The interactive surface (the URL display, the paste fallback) lives in
-//! the composition root; this module owns the protocol.
+//! the composition root; this module owns the protocol. The browser
+//! challenge core is arm-agnostic (the inference login shares it with no
+//! scope on the URL).
 
 use std::path::Path;
 use std::time::Duration;
@@ -232,13 +234,16 @@ fn decrypt_prime_challenge_result(
         .map_err(|_| "Prime login challenge result is not UTF-8".to_string())
 }
 
-/// TS `runPrimeBrowserLogin` (scope `agent_traces`): the keypair, the
-/// challenge, the auth URL callback, and the status poll.
-async fn run_prime_browser_login(
+/// TS `runPrimeBrowserLogin`: the keypair, the challenge, the auth URL
+/// callback, and the status poll. The scope rides the URL only when the
+/// arm passes one (the traces arm's `agent_traces`; the inference arm
+/// sends none).
+pub(super) async fn run_prime_browser_login(
     http: &dyn PrimeHttp,
     base_url: &str,
     frontend_url: &str,
-    callbacks: &PrimeAgentTracesCallbacks<'_>,
+    scope: Option<&str>,
+    on_auth: &(dyn Fn(&PrimeAuthInfo) + Send + Sync),
     timeout_ms: u64,
     poll_interval_ms: u64,
 ) -> Result<String, String> {
@@ -250,13 +255,15 @@ async fn run_prime_browser_login(
         .map_err(|error| error.to_string())?;
     let challenge = generate_prime_challenge(http, base_url, &public_key, timeout_ms).await?;
     // TS builds the URL with `URLSearchParams` (space encodes as `+`):
-    // the query carries both the code and the traces scope.
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("code", &challenge.challenge)
-        .append_pair("scope", "agent_traces")
-        .finish();
+    // the query carries the code and, when the arm passes one, its scope.
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("code", &challenge.challenge);
+    if let Some(scope) = scope {
+        query.append_pair("scope", scope);
+    }
+    let query = query.finish();
     let auth_url = format!("{frontend_url}/dashboard/tokens/challenge?{query}");
-    (callbacks.on_auth)(&PrimeAuthInfo {
+    on_auth(&PrimeAuthInfo {
         url: auth_url,
         instructions: format!("Code: {}", challenge.challenge),
     });
@@ -322,7 +329,9 @@ pub async fn login_prime_agent_traces(
         http,
         &trace_base_url,
         &frontend_url,
-        callbacks,
+        // TS passes the scope only on the traces arm; the URL keeps it.
+        Some("agent_traces"),
+        callbacks.on_auth,
         request_timeout_ms,
         poll_interval_ms,
     )
