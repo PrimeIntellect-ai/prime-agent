@@ -505,8 +505,7 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
         assert!(
-            expires >= before_ms + 3_600_000 - 300_000
-                && expires <= after_ms + 3_600_000 - 300_000,
+            expires >= before_ms + 3_600_000 - 300_000 && expires <= after_ms + 3_600_000 - 300_000,
             "the expiry lands one hour minus the skew out: {expires} vs {before_ms}..{after_ms}"
         );
         let mut auth = AuthStorage::create(&agent);

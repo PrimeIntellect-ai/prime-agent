@@ -818,7 +818,10 @@ mod tests {
         // path keeps the stored one — TS `credentialsFromResponse`).
         let http = ScriptedHttp::new()
             .queue(DEVICE_CODE_URL, vec![device_response("")])
-            .queue(TOKEN_URL, vec![ScriptedHttp::entry(200, r#"{"access_token":"a"}"#)]);
+            .queue(
+                TOKEN_URL,
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"a"}"#)],
+            );
         let error = login_xai(&http, &ScriptedUi::new()).await.unwrap_err();
         assert_eq!(error, "Invalid xAI OAuth response field: refresh_token");
     }

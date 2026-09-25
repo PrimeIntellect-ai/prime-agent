@@ -442,7 +442,7 @@ mod tests {
     /// The login binds the registered callback port (53_692), so the
     /// tests serialize on this lock: parallel test threads never
     /// collide on the one port (the OS answers the bind with
-    /// "address already in use" otherwise).
+    /// `address already in use` otherwise).
     static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A scripted transport: url -> response, recording every posted
