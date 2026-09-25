@@ -1065,4 +1065,62 @@ mod tests {
         assert!(layout.legend.contains("Cost"));
         assert_eq!(layout.details["session:s1"].trim_end(), "$1.50");
     }
+
+    #[test]
+    fn saved_only_age_reads_modified_first_and_falls_back_to_created() {
+        // TS formatSessionDuration: a row without an activeSessionId is a
+        // saved-only record - the age column reads `modified` first. The
+        // daemon scan's `modified` is the durable fallback (header time,
+        // then mtime), so an old record keeps its real age here; pin the
+        // ordering so a days-old record can never read as minutes-old
+        // through a scan-time value.
+        let now = now_ms();
+        let iso = |ms: i64| {
+            let total = ms.div_euclid(1000);
+            let days = total.div_euclid(86_400);
+            let secs_of_day = total.rem_euclid(86_400);
+            let (year, month, day) = civil_test(days);
+            format!(
+                "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+                secs_of_day / 3600,
+                (secs_of_day % 3600) / 60,
+                secs_of_day % 60
+            )
+        };
+        let created_days_ago = iso(now as i64 - 3 * 86_400_000);
+        let modified_minutes_ago = iso(now as i64 - 5 * 60_000);
+        let saved = vec![
+            json!({
+                "id": "old-with-modified",
+                "path": "/x/old-with-modified.jsonl",
+                "firstMessage": "old task",
+                "messageCount": 2,
+                "created": created_days_ago,
+                "modified": modified_minutes_ago,
+            }),
+            json!({
+                "id": "old-created-only",
+                "path": "/x/old-created-only.jsonl",
+                "firstMessage": "older task",
+                "messageCount": 1,
+                "created": created_days_ago,
+            }),
+        ];
+        let records = reconcile_unified_sessions(&[], &saved);
+        let rows = crate::agents_view_forest::build_rows(
+            &records,
+            None,
+            &Default::default(),
+            &Default::default(),
+            None,
+        );
+        let by_identity: HashMap<&str, &crate::agents_view_forest::AgentsViewRow> = rows
+            .iter()
+            .map(|row| (row.identity.as_str(), row))
+            .collect();
+        // `modified` first: the row keeps the scan's durable value.
+        assert_eq!(by_identity["session:old-with-modified"].age, "5m");
+        // A record the scan could not date falls back to `created`.
+        assert_eq!(by_identity["session:old-created-only"].age, "3d");
+    }
 }
