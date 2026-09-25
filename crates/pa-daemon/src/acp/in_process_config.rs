@@ -275,7 +275,7 @@ async fn apply_in_process_model_switch(
         let mut target = mode.provider_target.write().expect("provider target lock");
         match target.as_mut() {
             Some(target) => {
-                target.api_key = resolved.api_key.clone();
+                target.api_key.clone_from(&resolved.api_key);
                 target.model = model.clone();
             }
             None => {
