@@ -361,6 +361,7 @@ mod tests {
             api_key: None,
             model: model.clone(),
             service_tier: Some(pa_types::ai::ServiceTier::Priority),
+            headers: Default::default(),
         })));
         let stream_fn = switchable_stream_fn(target.clone());
         for tier in [Some(pa_types::ai::ServiceTier::Priority), None] {
@@ -485,6 +486,7 @@ mod tests {
             api_key: None,
             model: model.clone(),
             service_tier: None,
+            headers: Default::default(),
         })));
         let stream_fn = switchable_stream_fn(target);
         let mut stream = stream_fn(
