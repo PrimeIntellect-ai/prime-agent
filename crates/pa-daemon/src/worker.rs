@@ -2559,7 +2559,7 @@ impl Worker {
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header (TS
             // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent
-            // session keeps its persisted depth. The runtime kind stays the
+            // session keeps its persisted depth. The runtime kind keeps the
             // create's runtime identity (TS `metadata.kind`) — a resumed
             // subagent file is a top-level runtime that merely carries its
             // persisted depth, so the roster does not re-nest it under its
