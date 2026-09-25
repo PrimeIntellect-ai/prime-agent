@@ -10,7 +10,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Lane::Steering => "steering",
             Lane::FollowUp => "follow_up",
