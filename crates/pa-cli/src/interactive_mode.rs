@@ -1896,6 +1896,32 @@ mod tests {
     }
 
     #[test]
+    fn fork_startup_selection_rejects_a_fifo_source_without_hanging() {
+        // A FIFO with no writer blocks the copy's read forever; the guard
+        // rejects it before any open, so the launch errors instead.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let project = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let fifo = session_dir.join("pipe.jsonl");
+        nix::sys::stat::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        let error = fork_startup_selection(
+            fifo.to_str().expect("utf8 path"),
+            &project,
+            Some(&session_dir),
+        )
+        .expect_err("a FIFO source cannot fork");
+        assert!(
+            error.to_string().contains(&format!(
+                "Cannot fork: source session file is not a regular file: {}",
+                fifo.display()
+            )),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn build_tui_options_opens_a_fork_as_the_startup_session() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let cwd = dir.path().join("project");
