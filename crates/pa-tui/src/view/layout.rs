@@ -68,7 +68,7 @@ impl AgentView {
     pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
         match entry {
             ChatEntry::Status { .. } | ChatEntry::User { .. } => true,
-            ChatEntry::SlashCommand { .. } | ChatEntry::SlashCommandResult { .. } => true,
+            ChatEntry::SlashCommand { .. } => true,
             ChatEntry::CompactionSummary { .. } => true,
             ChatEntry::SkillInvocation(_) => true,
             // Spacing-driven rows (agent messages, shell completions, tool
@@ -139,7 +139,6 @@ impl AgentView {
             ChatEntry::BashExecution(card) => !card.suppress_leading_space,
             ChatEntry::Assistant(_) => preceded_by_tool_activity,
             ChatEntry::Status { .. }
-            | ChatEntry::SlashCommandResult { .. }
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
             | ChatEntry::CustomPanel(_)
