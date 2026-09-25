@@ -2710,7 +2710,7 @@ async fn run_interactive_surface(
                 if view.editor.has_pending_autocomplete()
                     || session.selection_auto_scroll_active()
                 {
-                    tokio::time::sleep(Duration::from_millis(50)).await
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 } else {
                     // With nothing pending, park until the next due idle
                     // work: the 2 s bash-activity refresh deadline, or a
@@ -2721,7 +2721,7 @@ async fn run_interactive_surface(
                         .toasts
                         .next_expiry()
                         .map_or(deadline, |expiry| deadline.min(expiry));
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                 }
             } => {
                 // The input stream went quiet for a tick: parked editor
