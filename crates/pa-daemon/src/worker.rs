@@ -2541,10 +2541,7 @@ impl Worker {
         snapshot_map.insert("summary".to_string(), summary_value);
         snapshot_map.insert("state".to_string(), state_value);
         snapshot_map.insert("messages".to_string(), Value::Array(messages));
-        snapshot_map.insert(
-            "lastEventSequence".to_string(),
-            json!(last_event_sequence),
-        );
+        snapshot_map.insert("lastEventSequence".to_string(), json!(last_event_sequence));
         snapshot_map.insert("lastEventCursor".to_string(), cursor.clone());
         // RLM child roster; empty for top-level daemon sessions.
         snapshot_map.insert("children".to_string(), Value::Array(Vec::new()));
