@@ -187,6 +187,31 @@ it("toggles model scope instead of typing when Option+S arrives as the composed 
 	await done;
 });
 
+it("refreshes a fresh model catalog when the picker opens without a search", async () => {
+	const f = await fixture();
+	const plain = f.harness.getModel("plain")!;
+	const getModelCatalog = vi.fn(async () => ({ models: [f.model, plain], configuredProviders: [plain.provider] }));
+	const prototype = InteractiveMode.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+	const refresh = vi.fn(prototype.getModelSelectorRefreshPromise);
+	Object.assign(f.mode, {
+		agentConnection: { getModelCatalog },
+		connectionModelCatalog: [f.model],
+		connectionModelsFetchedAt: Date.now(),
+		connectionModelsRefreshVersion: 0,
+		getCurrentModel: () => f.model,
+		getCachedModelCandidates: prototype.getCachedModelCandidates,
+		getModelSelectorRefreshPromise: refresh,
+	});
+	const done = f.mode.showConfigurationMenu("models");
+	const listed = () => stripAnsi(f.menu().render(100).join("\n"));
+	expect(listed()).not.toContain("Plain");
+	expect(getModelCatalog).toHaveBeenCalledOnce();
+	await refresh.mock.results[0]?.value;
+	expect(listed()).toContain("Plain");
+	f.menu().handleInput("\x1b");
+	await done;
+});
+
 it("does not publish the removed configuration tab action", () => {
 	expect(Object.keys(KEYBINDINGS)).not.toContain("app.configuration.previousTab");
 });

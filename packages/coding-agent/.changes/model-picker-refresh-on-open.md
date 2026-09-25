@@ -1,0 +1,1 @@
+- Fixed the model picker showing a stale model list for up to a minute when opened without a search term (Ctrl+L or plain `/model`); it now always refreshes the catalog on open ([#2504](https://github.com/PrimeIntellect-ai/prime-agent/pull/2504) by [@sirouk](https://github.com/sirouk)).
