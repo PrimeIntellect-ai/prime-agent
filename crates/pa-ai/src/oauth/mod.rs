@@ -137,21 +137,21 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn Future<Output = Result<CodexHttpResponse, String>> + Send + 'a>>
         {
             let result = self.0.get(url).cloned();
-            Box::pin(async move {
-                result.ok_or_else(|| format!("{url} was not scripted"))
-            })
+            Box::pin(async move { result.ok_or_else(|| format!("{url} was not scripted")) })
         }
     }
 
     #[tokio::test]
     async fn the_seam_serves_scripted_responses() {
-        let http = ScriptedHttp([ScriptedHttp::entry(
-            "https://fixture.example/token",
-            200,
-            r#"{"ok":true}"#,
-        )]
-        .into_iter()
-        .collect());
+        let http = ScriptedHttp(
+            [ScriptedHttp::entry(
+                "https://fixture.example/token",
+                200,
+                r#"{"ok":true}"#,
+            )]
+            .into_iter()
+            .collect(),
+        );
         let response = http
             .post_form("https://fixture.example/token", "", 1)
             .await
@@ -160,6 +160,9 @@ mod tests {
         assert_eq!(response.body, r#"{"ok":true}"#);
         assert!(response.ok());
         // An unscripted url fails the request.
-        assert!(http.post_form("https://other.example/token", "", 1).await.is_err());
+        assert!(http
+            .post_form("https://other.example/token", "", 1)
+            .await
+            .is_err());
     }
 }

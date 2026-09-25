@@ -20,7 +20,9 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use pa_ai::oauth::{login_openai_codex, CodexHttp, CodexLoginUi, DEFAULT_ORIGINATOR, LOGIN_CANCELLED};
+use pa_ai::oauth::{
+    login_openai_codex, CodexHttp, CodexLoginUi, DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
+};
 use pa_core::auth::{AuthCredential, AuthStorage, OPENAI_CODEX_PROVIDER_ID};
 use pa_tui::auth_panel::{AuthPanelHandle, PasteStyle};
 use pa_tui::provider_auth::ProviderAuthOutcome;
@@ -45,9 +47,7 @@ impl CodexLoginUi for PanelCodexLoginUi {
         pa_core::platform::browser::open_in_browser(url);
     }
 
-    fn on_manual_code_input(
-        &self,
-    ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>> {
+    fn on_manual_code_input(&self) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>> {
         let panel = self.panel.clone();
         Some(Box::pin(async move {
             panel
@@ -61,9 +61,7 @@ impl CodexLoginUi for PanelCodexLoginUi {
 
     fn on_prompt(&self, message: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
         let panel = self.panel.clone();
-        Box::pin(async move {
-            panel.paste_prompt(message, PasteStyle::Visible).await
-        })
+        Box::pin(async move { panel.paste_prompt(message, PasteStyle::Visible).await })
     }
 
     fn is_cancelled(&self) -> bool {
@@ -142,9 +140,7 @@ mod tests {
             _timeout_ms: u64,
         ) -> Pin<Box<dyn Future<Output = Result<CodexHttpResponse, String>> + Send + 'a>> {
             let response = self.0.get(url).cloned();
-            Box::pin(async move {
-                response.ok_or_else(|| format!("{url} was not scripted"))
-            })
+            Box::pin(async move { response.ok_or_else(|| format!("{url} was not scripted")) })
         }
     }
 
@@ -178,7 +174,10 @@ mod tests {
             ))))
         }
 
-        fn on_prompt(&self, _message: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
+        fn on_prompt(
+            &self,
+            _message: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
             Box::pin(std::future::ready(None))
         }
 
@@ -233,8 +232,13 @@ mod tests {
         let before_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
-        match run_codex_subscription_login(&agent, "ChatGPT Plus/Pro (Codex Subscription)", &http, &ui)
-            .await
+        match run_codex_subscription_login(
+            &agent,
+            "ChatGPT Plus/Pro (Codex Subscription)",
+            &http,
+            &ui,
+        )
+        .await
         {
             ProviderAuthOutcome::Status(message) => {
                 assert_eq!(
@@ -386,7 +390,9 @@ mod tests {
         let panel = AuthPanelHandle::new(tx);
         let ui = PanelCodexLoginUi::new(panel);
         ui.on_auth("https://auth.example/authorize", "Open your browser.");
-        let manual = ui.on_manual_code_input().expect("the panel supplies the paste");
+        let manual = ui
+            .on_manual_code_input()
+            .expect("the panel supplies the paste");
         let prompt = ui.on_prompt("Paste the authorization code (or full redirect URL):");
         let mut requests = Vec::new();
         while let Ok(request) = rx.try_recv() {

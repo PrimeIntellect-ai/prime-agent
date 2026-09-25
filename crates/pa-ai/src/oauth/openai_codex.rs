@@ -74,9 +74,7 @@ pub trait CodexLoginUi: Send + Sync {
     /// TS `onManualCodeInput`: the paste racing the browser callback;
     /// `None` when the surface offers none. Resolving `None` cancels
     /// the login.
-    fn on_manual_code_input(
-        &self,
-    ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>>;
+    fn on_manual_code_input(&self) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>>;
     /// TS `onPrompt`: the fallback prompt when neither the callback
     /// nor the paste produced a code. Resolving `None` cancels the
     /// login.
@@ -216,8 +214,7 @@ async fn wait_for_code(
     // paste produced a code.
     let answer = ui.on_prompt(PROMPT_MESSAGE).await;
     let input = answer.ok_or_else(|| LOGIN_CANCELLED.to_string())?;
-    parse_paste(&input, state)?
-        .ok_or_else(|| "Missing authorization code".to_string())
+    parse_paste(&input, state)?.ok_or_else(|| "Missing authorization code".to_string())
 }
 
 /// Parse one pasted input and check its echoed state (TS
@@ -345,7 +342,7 @@ fn account_id_of(access_token: &str) -> Result<String, String> {
 /// fields the flow requires.
 async fn token_post(
     http: &dyn CodexHttp,
-    params: &[( &str, &str )],
+    params: &[(&str, &str)],
     label: &str,
 ) -> Result<TokenSuccess, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -369,12 +366,20 @@ async fn token_post(
     }
     let json: serde_json::Value =
         serde_json::from_str(&response.body).map_err(|_| response.body.clone())?;
-    let Some(access) = json.get("access_token").and_then(serde_json::Value::as_str).filter(|token| !token.is_empty()) else {
+    let Some(access) = json
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| !token.is_empty())
+    else {
         return Err(format!(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
     };
-    let Some(refresh) = json.get("refresh_token").and_then(serde_json::Value::as_str).filter(|token| !token.is_empty()) else {
+    let Some(refresh) = json
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| !token.is_empty())
+    else {
         return Err(format!(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
@@ -490,9 +495,7 @@ mod tests {
                 .unwrap()
                 .push((url.to_string(), body.to_string()));
             let response = self.responses.get(url).cloned();
-            Box::pin(async move {
-                response.ok_or_else(|| format!("{url} was not scripted"))
-            })
+            Box::pin(async move { response.ok_or_else(|| format!("{url} was not scripted")) })
         }
     }
 
@@ -574,7 +577,10 @@ mod tests {
             self.manual.as_ref().map(|manual| manual.future())
         }
 
-        fn on_prompt(&self, _message: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
+        fn on_prompt(
+            &self,
+            _message: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
             self.prompt.future()
         }
 
@@ -593,9 +599,8 @@ mod tests {
             }),
             None => json!({"sub": "someone"}),
         };
-        let segment = |value: serde_json::Value| {
-            base64url(serde_json::to_string(&value).unwrap().as_bytes())
-        };
+        let segment =
+            |value: serde_json::Value| base64url(serde_json::to_string(&value).unwrap().as_bytes());
         format!(
             "{}.{}.not-a-signature",
             segment(json!({"alg": "RS256"})),
@@ -628,7 +633,9 @@ mod tests {
     async fn the_exchange_body_matches_the_ts_grant() {
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback?code=abc")),
+            Some(ScriptedAnswer::value(
+                "http://localhost:1455/auth/callback?code=abc",
+            )),
             ScriptedAnswer::ready(),
         );
         let credentials = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -643,7 +650,11 @@ mod tests {
         assert_eq!(first_param(body, "code"), "abc");
         assert_eq!(first_param(body, "redirect_uri"), REDIRECT_URI);
         let verifier = first_param(body, "code_verifier");
-        assert_eq!(verifier.len(), 43, "the PKCE verifier is 32 base64url bytes");
+        assert_eq!(
+            verifier.len(),
+            43,
+            "the PKCE verifier is 32 base64url bytes"
+        );
         // The manual paste carried no state: TS's falsy state skips the
         // echo check and the code is used as-is.
     }
@@ -664,23 +675,24 @@ mod tests {
     async fn a_failed_exchange_surfaces_the_ts_message() {
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback?code=abc")),
+            Some(ScriptedAnswer::value(
+                "http://localhost:1455/auth/callback?code=abc",
+            )),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
             .await
             .unwrap_err();
-        assert_eq!(
-            error,
-            "OpenAI Codex token exchange failed (400): no grant"
-        );
+        assert_eq!(error, "OpenAI Codex token exchange failed (400): no grant");
     }
 
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback?code=abc")),
+            Some(ScriptedAnswer::value(
+                "http://localhost:1455/auth/callback?code=abc",
+            )),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -698,10 +710,7 @@ mod tests {
         let error = refresh_openai_codex_token(&http, "r-old")
             .await
             .unwrap_err();
-        assert_eq!(
-            error,
-            "OpenAI Codex token refresh failed (401): expired"
-        );
+        assert_eq!(error, "OpenAI Codex token refresh failed (401): expired");
     }
 
     #[tokio::test]
@@ -722,7 +731,9 @@ mod tests {
     async fn a_token_without_the_account_id_fails_the_login() {
         let http = token_http(&account_jwt(None));
         let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("http://localhost:1455/auth/callback?code=abc")),
+            Some(ScriptedAnswer::value(
+                "http://localhost:1455/auth/callback?code=abc",
+            )),
             ScriptedAnswer::ready(),
         );
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
@@ -736,10 +747,7 @@ mod tests {
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http(&account_jwt(Some("acct-1")));
-        let mut ui = ScriptedUi::new(
-            Some(ScriptedAnswer::Pending),
-            ScriptedAnswer::Pending,
-        );
+        let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending);
         ui.cancel_on_auth = true;
         let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
             .await
@@ -788,7 +796,10 @@ mod tests {
         let credentials = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
             .await
             .unwrap();
-        assert_eq!(first_param(&http.seen_bodies(TOKEN_URL)[0], "code"), "prompted-code");
+        assert_eq!(
+            first_param(&http.seen_bodies(TOKEN_URL)[0], "code"),
+            "prompted-code"
+        );
     }
 
     #[tokio::test]
@@ -832,7 +843,10 @@ mod tests {
         .expect("the dead-server flow settles promptly")
         .unwrap();
         assert_eq!(credentials.account_id, "acct-1");
-        assert_eq!(first_param(&http.seen_bodies(TOKEN_URL)[0], "code"), "the-code");
+        assert_eq!(
+            first_param(&http.seen_bodies(TOKEN_URL)[0], "code"),
+            "the-code"
+        );
         drop(held);
     }
 
@@ -852,9 +866,10 @@ mod tests {
             ScriptedAnswer::Pending,
         ));
         let flow_ui = Arc::clone(&ui);
-        let flow = tokio::spawn(async move {
-            login_openai_codex(&http, &flow_ui, DEFAULT_ORIGINATOR).await
-        });
+        let flow =
+            tokio::spawn(
+                async move { login_openai_codex(&http, &flow_ui, DEFAULT_ORIGINATOR).await },
+            );
         let url = ui.captured_url().await;
         let state = url::Url::parse(&url)
             .unwrap()

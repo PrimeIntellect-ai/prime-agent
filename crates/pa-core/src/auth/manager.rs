@@ -233,7 +233,10 @@ impl AuthStorage {
         // refresh): the TS storage delegates to the AI library's oauth
         // registry on every instance, and `api_key_for` matches `NoOAuth`
         // (the access token passthrough), so only token refresh gains.
-        Self::create_with_oauth(agent_dir, Arc::new(super::provider_oauth::ProviderOAuth::new()))
+        Self::create_with_oauth(
+            agent_dir,
+            Arc::new(super::provider_oauth::ProviderOAuth::new()),
+        )
     }
 
     /// File-backed storage with an explicit OAuth integration (the MCP

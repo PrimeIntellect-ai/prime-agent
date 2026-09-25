@@ -70,11 +70,7 @@ pub enum AuthCredential {
         /// The ChatGPT account the Codex Subscription token carries (TS
         /// stores the codex login's `accountId` next to the credentials;
         /// the request path re-extracts it from the token, like TS).
-        #[serde(
-            rename = "accountId",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
         /// Endpoint binding for MCP logins (`mcp:<server>` credentials): the
         /// MCP endpoint the token was issued for; consumers refuse to send

@@ -187,7 +187,12 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
     let query = target.split_once('?').map_or("", |(_, query)| query);
     let code = query_param(query, "code");
     if query_param(query, "state").as_deref() != Some(state) {
-        let _ = write_response(&mut stream, "400 Bad Request", error_page("State mismatch.")).await;
+        let _ = write_response(
+            &mut stream,
+            "400 Bad Request",
+            error_page("State mismatch."),
+        )
+        .await;
         return;
     }
     match code {
@@ -382,7 +387,10 @@ mod tests {
     async fn a_state_mismatch_answers_and_keeps_waiting() {
         let (server, port) = live("the-state").await;
         let response = request(port, "/auth/callback?code=c&state=other").await;
-        assert!(response.starts_with("HTTP/1.1 400 Bad Request"), "{response}");
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
         assert!(response.contains("State mismatch."), "{response}");
         // A mismatch never settles the login; cancellation does.
         server.cancel().await;
@@ -393,8 +401,14 @@ mod tests {
     async fn a_missing_code_answers_and_keeps_waiting() {
         let (server, port) = live("the-state").await;
         let response = request(port, "/auth/callback?state=the-state").await;
-        assert!(response.starts_with("HTTP/1.1 400 Bad Request"), "{response}");
-        assert!(response.contains("Missing authorization code."), "{response}");
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
+        assert!(
+            response.contains("Missing authorization code."),
+            "{response}"
+        );
         server.cancel().await;
         assert_eq!(server.wait_for_code().await, None);
     }
@@ -420,7 +434,9 @@ mod tests {
     async fn an_unbindable_port_yields_the_error() {
         let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a probe port");
         let port = held.local_addr().unwrap().port();
-        assert!(CodexCallbackServer::bind("127.0.0.1", port, "s").await.is_err());
+        assert!(CodexCallbackServer::bind("127.0.0.1", port, "s")
+            .await
+            .is_err());
     }
 
     #[test]

@@ -658,7 +658,10 @@ mod tests {
     #[test]
     fn enter_on_an_unavailable_row_is_inert() {
         let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic()]);
-        assert_eq!(selector.handle_key("enter", &kb()), AuthSelectorAction::None);
+        assert_eq!(
+            selector.handle_key("enter", &kb()),
+            AuthSelectorAction::None
+        );
         assert_eq!(
             selector.handle_key("ctrl+c", &kb()),
             AuthSelectorAction::Cancel,
@@ -678,10 +681,8 @@ mod tests {
             }),
             ..codex()
         };
-        let mut selector = ProviderAuthSelector::new(
-            AuthSelectorKind::Login,
-            vec![codex_signed_in, anthropic()],
-        );
+        let mut selector =
+            ProviderAuthSelector::new(AuthSelectorKind::Login, vec![codex_signed_in, anthropic()]);
         let rows = selector.render(&theme(), 80);
         let plain = |line: &crate::Line| {
             line.iter()

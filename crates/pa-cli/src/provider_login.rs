@@ -564,12 +564,14 @@ fn login_blocking_on_panel(
                     ))
                 },
                 |runtime| {
-                    runtime.block_on(crate::codex_subscription_login::run_codex_subscription_login(
-                        &agent_dir,
-                        &provider_row.name,
-                        &pa_ai::oauth::ReqwestCodexHttp::new(),
-                        &crate::codex_subscription_login::PanelCodexLoginUi::new(panel),
-                    ))
+                    runtime.block_on(
+                        crate::codex_subscription_login::run_codex_subscription_login(
+                            &agent_dir,
+                            &provider_row.name,
+                            &pa_ai::oauth::ReqwestCodexHttp::new(),
+                            &crate::codex_subscription_login::PanelCodexLoginUi::new(panel),
+                        ),
+                    )
                 },
             );
     }

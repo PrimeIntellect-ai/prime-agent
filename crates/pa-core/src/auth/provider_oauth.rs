@@ -127,9 +127,7 @@ mod tests {
             Box<dyn std::future::Future<Output = Result<CodexHttpResponse, String>> + Send + 'a>,
         > {
             let response = self.0.get(url).cloned();
-            Box::pin(async move {
-                response.ok_or_else(|| format!("{url} was not scripted"))
-            })
+            Box::pin(async move { response.ok_or_else(|| format!("{url} was not scripted")) })
         }
     }
 
@@ -192,7 +190,9 @@ mod tests {
     #[test]
     fn an_expired_codex_credential_refreshes_and_resolves() {
         let mut auth = storage_with_credential(expired_codex_credential());
-        let api_key = auth.get_api_key(OPENAI_CODEX_PROVIDER_ID).expect("the refreshed access token resolves");
+        let api_key = auth
+            .get_api_key(OPENAI_CODEX_PROVIDER_ID)
+            .expect("the refreshed access token resolves");
         assert_eq!(api_key, account_jwt("acct-2"));
         // The refreshed credential persisted: the account id rode along
         // (TS stores the fresh login's `accountId`).
