@@ -1272,7 +1272,7 @@ mod tests {
         let sent_bodies_handle = std::sync::Arc::clone(&sent_bodies);
         tokio::spawn(async move {
             let serve = async move {
-                for (connection_number, connection_scripts) in scripts.into_iter().enumerate() {
+                for connection_scripts in scripts {
                     let (mut socket, _) = listener.accept().await.expect("mock accept");
                     let mut head = Vec::new();
                     let mut byte = [0u8; 1];
@@ -1337,7 +1337,6 @@ mod tests {
                             if ends_in_error {
                                 socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
                             }
-                        } else {
                         }
                     }
                 }
