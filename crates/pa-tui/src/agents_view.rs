@@ -2878,10 +2878,11 @@ mod tests {
             hint.contains("again to stop"),
             "the live row reads stop: {hint}"
         );
-        // A moved selection never executes the armed row.
+        // A moved selection never executes the armed row: the arm dies
+        // with the key that moved the selection (the clear-on-any-other-
+        // key), and no dispatch ever rode along.
         mode.handle_key("down");
-        mode.handle_key("ctrl+x");
-        assert!(mode.pending_delete.is_none(), "the arm belongs to its row");
+        assert!(mode.pending_delete.is_none(), "the arm dies with the move");
         assert!(mode.pending_delete_action.is_none());
     }
 
