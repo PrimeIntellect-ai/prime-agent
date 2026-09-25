@@ -471,7 +471,11 @@ impl PathCompletionProvider {
                 // `basename("src/.")` is `.`), unlike `Path::file_name`,
                 // which normalizes the trailing reference away and
                 // mis-splits the dot-name browse prefixes.
-                let file = expanded_prefix.rsplit('/').next().unwrap_or_default();
+                let file = expanded_prefix
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
                 let raw_dir = match expanded_prefix.rfind('/') {
                     Some(index) if index > 0 => std::path::PathBuf::from(&expanded_prefix[..index]),
                     Some(_) => std::path::PathBuf::from("/"),
