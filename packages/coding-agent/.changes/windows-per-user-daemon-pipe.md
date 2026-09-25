@@ -1,0 +1,1 @@
+- Changed the default Windows daemon pipe to a per-user name. Stop any daemon still listening on `\\.\pipe\prime-agent-daemon` once after upgrading.

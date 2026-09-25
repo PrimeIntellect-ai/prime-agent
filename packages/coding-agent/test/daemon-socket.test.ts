@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
@@ -22,12 +23,16 @@ describe("normalizeSocketPath", () => {
 });
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
+	it("uses a per-user Windows named pipe path", () => {
+		// test-policy: allow environment-gated-path -- named pipes are only created on Windows
 		if (process.platform !== "win32") {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		const { username } = userInfo();
+		const domain = process.env.USERDOMAIN ?? process.env.COMPUTERNAME ?? "";
+		const suffix = createHash("sha256").update(`${domain}\0${username}`).digest("hex").slice(0, 12);
+		expect(defaultDaemonSocketPath()).toBe(`\\\\.\\pipe\\prime-agent-daemon-${suffix}`);
 	});
 
 	it("uses a per-user Unix socket directory", () => {

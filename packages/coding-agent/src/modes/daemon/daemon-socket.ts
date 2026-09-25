@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 
@@ -67,9 +68,16 @@ export interface DaemonSocketIdentity {
 	ino: number;
 }
 
+function windowsDaemonSocketSuffix(): string {
+	const { username } = userInfo();
+	const domain = process.env.USERDOMAIN ?? process.env.COMPUTERNAME ?? "";
+	const digest = createHash("sha256").update(`${domain}\0${username}`).digest("hex");
+	return digest.slice(0, 12);
+}
+
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		return `\\\\.\\pipe\\prime-agent-daemon-${windowsDaemonSocketSuffix()}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
