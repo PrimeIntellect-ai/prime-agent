@@ -765,9 +765,10 @@ mod tests {
         assert_eq!(progress, ui.progress_log());
         assert_eq!(
             auth,
-            vec![format!(
+            vec![
                 "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
-            )]
+                    .to_string(),
+            ]
         );
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
         let requests = http.requests();
@@ -891,9 +892,10 @@ mod tests {
         let (_, auth, prompts) = ui.logs();
         assert_eq!(
             auth,
-            vec![format!(
+            vec![
                 "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
-            )]
+                    .to_string(),
+            ]
         );
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
     }
@@ -1138,9 +1140,10 @@ mod tests {
         // code, with the code line next to it.
         assert_eq!(
             auth,
-            vec![format!(
+            vec![
                 "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
-            )]
+                    .to_string(),
+            ]
         );
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
         // The poll resolved (pending once, then the encrypted key) before
