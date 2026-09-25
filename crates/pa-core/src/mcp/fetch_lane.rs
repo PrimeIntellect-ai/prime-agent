@@ -218,7 +218,7 @@ mod tests {
     /// A tiny `wiremock`-style local server without the dev dependency: a
     /// bound `TcpListener` answering one GET with the JSON payload.
     async fn wiremock_server(payload: serde_json::Value) -> TestServer {
-        use std::io::{Read as _, Write as _};
+        use std::io::Write as _;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let body = payload.to_string();
