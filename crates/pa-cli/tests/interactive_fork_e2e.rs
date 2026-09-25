@@ -444,9 +444,9 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
         .env("PRIME_AGENT_FAUX_SCRIPT", fork_script.display().to_string())
         .env_remove("TMUX")
         .env_remove("RLM_DEPTH")
-        .stdin(slave.try_clone().expect("clone pty slave").into())
-        .stdout(slave.try_clone().expect("clone pty slave").into())
-        .stderr(slave.into())
+        .stdin(slave.try_clone().expect("clone pty slave"))
+        .stdout(slave.try_clone().expect("clone pty slave"))
+        .stderr(slave)
         .spawn()
         .expect("spawn the interactive client child");
     let mut pty_reader = PtyReader::new(pty.master);

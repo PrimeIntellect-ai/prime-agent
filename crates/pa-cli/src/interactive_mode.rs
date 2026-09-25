@@ -884,8 +884,9 @@ fn fork_startup_selection(
     let resolved = resolve_session_path(selector, cwd, dir)
         .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
     let source = match resolved {
-        ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
-        ResolvedSession::Global { path, .. } => path,
+        ResolvedSession::Path(path)
+        | ResolvedSession::Local(path)
+        | ResolvedSession::Global { path, .. } => path,
     };
     let forked = pa_core::session::manager::SessionManager::fork_from(&source, cwd, dir)
         .map_err(anyhow::Error::msg)?;
@@ -1824,7 +1825,6 @@ mod tests {
 
     #[test]
     fn build_tui_options_opens_a_fork_as_the_startup_session() {
-        use crate::mode::{AppMode, RuntimeConfig};
         let dir = tempfile::TempDir::new().expect("temp dir");
         let cwd = dir.path().join("project");
         let session_dir = dir.path().join("sessions");
@@ -1833,9 +1833,9 @@ mod tests {
         let (source, id) = seed_session(&session_dir, &cwd, "interactive question");
 
         let mut options = run_options_for_continue(dir.path());
-        options.config.cwd = cwd.clone();
+        options.config.cwd = cwd;
         options.config.agent_dir = dir.path().join("agent");
-        options.session.fork = Some(id.clone());
+        options.session.fork = Some(id);
         options.session.session_dir = Some(session_dir.clone());
         let tui = build_tui_options(&options, dir.path().join("d.sock"), Default::default())
             .expect("the interactive launch forks instead of refusing");
