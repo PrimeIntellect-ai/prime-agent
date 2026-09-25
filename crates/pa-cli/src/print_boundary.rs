@@ -377,7 +377,7 @@ impl TurnBoundary {
             .await
     }
 
-    /// TS `_assistantTurnsSinceAutoRefine` (the message_end increments): the
+    /// TS `_assistantTurnsSinceAutoRefine` (the `message_end` increments): the
     /// settled non-error, non-aborted assistant turns appended since the
     /// last boundary call, added to the counter the review prompt's trigger
     /// line carries.
@@ -976,8 +976,8 @@ mod tests {
     use pa_types::session::FileEntry;
     use serde_json::json;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
