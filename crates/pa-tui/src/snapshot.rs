@@ -266,16 +266,26 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     }
     for ToolResultReplay {
         tool_call_id,
+        tool_name,
         view,
         timestamp,
         ..
     } in tool_results
     {
-        let Some(index) = card_index.get(&tool_call_id).copied() else {
-            continue;
-        };
-        if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
-            if card.result.is_none() {
+        // A pending card takes its result in place; every other result
+        // (a true orphan, or a duplicate settle on a finished card)
+        // keeps its standalone card exactly like the live push path -
+        // the rebuilt transcript never drops it.
+        let pending =
+            card_index
+                .get(&tool_call_id)
+                .copied()
+                .and_then(|index| match chat.get_mut(index) {
+                    Some(ChatEntry::Tool(card)) if card.result.is_none() => Some(card),
+                    _ => None,
+                });
+        match pending {
+            Some(card) => {
                 card.started = true;
                 // Replayed cards never saw the live execution: the timing
                 // collapses to the rebuild instant, so the bash `Took` row
@@ -287,6 +297,16 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
                 card.result = Some(view);
                 card.result_partial = false;
             }
+            None => chat.push(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+                id: tool_call_id,
+                name: tool_name,
+                args: serde_json::Value::Null,
+                started: true,
+                ended_ms: (timestamp > 0).then_some(timestamp),
+                result: Some(view),
+                unmatched_result: true,
+                ..Default::default()
+            }))),
         }
     }
     chat
@@ -1656,6 +1676,37 @@ mod tests {
                     Some(123),
                     "the wire timestamp rides the card"
                 );
+            }
+            other => panic!("the orphan is a card: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bulk_replay_never_drops_an_orphan_result() {
+        // The bulk path (slim attach, the get-messages rebuild) keeps
+        // an unmatched `toolResult` as its standalone orphan card -
+        // the rebuilt transcript matches the live and incremental
+        // paths.
+        let chat = transcript_to_entries(&[
+            json!({
+                "role": "user",
+                "content": "run it",
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "orphan",
+                "toolName": "bash",
+                "content": [{ "type": "text", "text": "orphan output" }],
+                "isError": false,
+                "timestamp": 123,
+            }),
+        ]);
+        assert_eq!(chat.len(), 2, "the orphan card lands in the bulk path");
+        match &chat[1] {
+            ChatEntry::Tool(card) => {
+                assert_eq!(card.id, "orphan");
+                assert_eq!(card.name, "bash");
+                assert!(card.unmatched_result, "the bulk orphan never joins a run");
             }
             other => panic!("the orphan is a card: {other:?}"),
         }
