@@ -606,7 +606,7 @@ impl crate::supervisor::Supervisor {
             active_session_id: terminal.active_session_id.clone(),
             event,
             meta: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
         .unwrap_or_default();
         let _ = self.events.send((

@@ -357,9 +357,10 @@ mod tests {
             "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"t\",\"cwd\":\"/x\"}}\n"
         );
         for i in 0..messages {
-            content.push_str(&format!(
+            use std::fmt::Write;
+            write!(content,
                 "{{\"type\":\"message\",\"id\":\"m{i}\",\"timestamp\":\"t\",\"message\":{{\"role\":\"user\",\"content\":\"msg {i}\",\"timestamp\":{i}}}}}\n"
-            ));
+            ).expect("write to String");
         }
         fs::write(path, content).unwrap();
     }

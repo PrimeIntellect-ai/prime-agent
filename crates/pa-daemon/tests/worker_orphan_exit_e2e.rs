@@ -80,12 +80,11 @@ fn wait_exit(child: &mut Child, budget: Duration) -> bool {
         if let Some(status) = child.try_wait().expect("poll worker") {
             assert!(status.success(), "worker exited with {status}");
             return true;
-        } else {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(50));
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

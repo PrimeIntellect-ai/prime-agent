@@ -97,7 +97,7 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {explicit.display()} not found"
         );
         return Some(explicit);
     }
@@ -108,7 +108,9 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live RLM children replacement e2e");
+    eprintln!(
+        "kernel python {candidate.display()} not found; skipping live RLM children replacement e2e"
+    );
     None
 }
 

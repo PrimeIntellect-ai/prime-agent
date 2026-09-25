@@ -95,7 +95,7 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {explicit.display()} not found"
         );
         return Some(explicit);
     }
@@ -106,7 +106,7 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live RLM parent-death e2e");
+    eprintln!("kernel python {candidate.display()} not found; skipping live RLM parent-death e2e");
     None
 }
 
@@ -370,7 +370,7 @@ fn parent_worker_pid(agent_dir: &Path, socket: &Path, parent_id: &str) -> u32 {
         pa_daemon::descriptor::descriptor_dir(agent_dir, socket).join(format!("{parent_id}.json"));
     let descriptor: Value = serde_json::from_str(
         &std::fs::read_to_string(&descriptor_path)
-            .unwrap_or_else(|_| panic!("read parent descriptor {descriptor_path:?}")),
+            .unwrap_or_else(|_| panic!("read parent descriptor {descriptor_path.display()}")),
     )
     .expect("parent descriptor json");
     let pid = descriptor["pid"].as_u64().expect("descriptor pid") as u32;

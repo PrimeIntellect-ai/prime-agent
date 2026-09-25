@@ -175,7 +175,7 @@ impl Supervisor {
         let registration = DaemonWorkerCommand::WorkerRegisterPeerTransport {
             id: None,
             grant: grant.clone(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_value(&registration)?;
         let response = self
@@ -336,14 +336,14 @@ mod tests {
                     create_command: DurableDaemonCreateCommand {
                         session_path: None,
                         no_session: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     consecutive_failures: 0,
                     stop_requested_at: None,
                     archive_on_stop: None,
                     last_failure_at: None,
                     last_error: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 std::path::PathBuf::from("/d.json"),
             )

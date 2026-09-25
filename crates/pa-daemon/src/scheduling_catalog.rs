@@ -555,7 +555,7 @@ impl Supervisor {
             id: None,
             active_session_id: None,
             include_inactive: Some(true),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         for resident in self.live_workers_in_creation_order().await {
             let listing = self

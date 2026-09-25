@@ -771,14 +771,14 @@ pub(crate) mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -885,7 +885,7 @@ pub(crate) mod tests {
         );
         assert_eq!(row.summary["thinkingLevel"], json!("high"));
         assert_eq!(row.worker_id, None);
-        assert!(row.status == AgentRosterStatus::Inactive);
+        assert_eq!(row.status, AgentRosterStatus::Inactive);
 
         // The seed is once-per-boot: a second run never re-reads the
         // transcripts (the present rows skip first) and never pushes.

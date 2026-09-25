@@ -402,7 +402,7 @@ mod tests {
             token: token.to_string(),
             worker_instance_id: "inst-1".to_string(),
             purpose: "session_client".to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

@@ -178,7 +178,7 @@ impl RegistrationTask {
             worker_instance_id: self.identity.worker_instance_id.clone(),
             token: self.identity.token.clone(),
             pid: std::process::id() as u64,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let envelope = json!({
             "type": "command",

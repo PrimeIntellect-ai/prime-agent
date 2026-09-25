@@ -299,7 +299,7 @@ impl CompactionManager {
             active_session_id: self.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);

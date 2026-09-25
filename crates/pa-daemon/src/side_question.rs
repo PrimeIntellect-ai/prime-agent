@@ -311,7 +311,7 @@ fn emit_side_question_frame(events: &Arc<EventPump>, active_session_id: &str, ev
     let outbound = DaemonOutbound::SideQuestionEvent {
         active_session_id: active_session_id.to_string(),
         event,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
     events.send(OutboundFrame::side_question_event(payload));

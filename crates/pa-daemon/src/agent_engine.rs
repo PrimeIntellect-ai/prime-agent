@@ -3876,7 +3876,7 @@ impl AgentSessionEngine {
                     emit(EngineEvent::Done(Err(error)));
                     return;
                 }
-            };
+            }
             // Turn-boundary consumption (TS `_checkCompaction` requested
             // arm, then `_consumePendingRequestedRefine`): requests the
             // kernel `compact.run`/`refine.run` host handlers scheduled
@@ -4400,7 +4400,7 @@ impl AgentSessionEngine {
                         .map(|_| ()),
                 }
             } else {
-                agent.continue_run().await.map(|_| ())
+                agent.continue_run().await.map(|()| ())
             }
         });
         let mut aborted = false;
@@ -4457,7 +4457,7 @@ impl AgentSessionEngine {
         while let Ok(event) = rx.try_recv() {
             let _ = emit(event);
         }
-        let _ = subscription.unsubscribe().await;
+        let () = subscription.unsubscribe().await;
         if aborted {
             return Ok(TurnOnce::Aborted);
         }
@@ -4983,7 +4983,7 @@ pub(crate) mod tests {
             pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text(text),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             },
         ))
         .expect("user message serializes")
@@ -4997,7 +4997,7 @@ pub(crate) mod tests {
                     pa_types::ai::TextContent {
                         text,
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -5011,7 +5011,7 @@ pub(crate) mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 2,
-                rest: Default::default(),
+                rest: Map::default(),
             },
         ))
         .expect("assistant message serializes")
@@ -6828,7 +6828,7 @@ pub(crate) mod tests {
             "the seed turn stays below the headroom"
         );
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let admission = admit_parked(
             &engine,
@@ -6897,7 +6897,7 @@ pub(crate) mod tests {
                 .block_on(async { core.turn_boundary.schedule_compaction(None).await });
         }
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // A padded second turn keeps the cut's kept tail over the 10-token
         // keep-recent budget, leaving the first turn as summarizable
@@ -8145,7 +8145,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
-    let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+    let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let turn_engine = std::sync::Arc::clone(&engine);
     let turn_events = std::sync::Arc::clone(&events);
     let turn = std::thread::spawn(move || {
@@ -8570,7 +8570,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     // The second turn holds mid-provider-wait; the abort cancels the fetch
     // (the eager funnel) and the turn settles on the aborted row.
     let turn_engine = std::sync::Arc::clone(&engine);
-    let turn_events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+    let turn_events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let row_events = std::sync::Arc::clone(&turn_events);
     let turn = std::thread::spawn(move || {
         turn_engine.run_prompt(
@@ -9077,7 +9077,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
             pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(user)) => {
                 match &user.content {
                     pa_agent::types::UserContent::Text(text) => Some(text.clone()),
-                    _ => None,
+                    pa_agent::types::UserContent::Parts(_) => None,
                 }
             }
             _ => None,
@@ -9273,7 +9273,11 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
     // roughly 0.4s wall time. If the engine buffered events until the turn
     // settled, every update would share one emit timestamp; live
     // forwarding spreads them across the stream.
-    let words = (0..40).map(|i| format!("w{i} ")).collect::<String>();
+    let words = (0..40).fold(String::new(), |mut words, i| {
+        use std::fmt::Write;
+        write!(words, "w{i} ").expect("write to String");
+        words
+    });
     let script = serde_json::json!({
         "engine": "faux",
         "tokensPerSecond": 100.0,
@@ -9336,7 +9340,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
     let first = updates.first().unwrap().0;
     let last = updates.last().unwrap().0;
     assert!(
-        (last - first) >= std::time::Duration::from_millis(200),
+        last.duration_since(first) >= std::time::Duration::from_millis(200),
         "updates must spread across the stream, got {first:?}..{last:?}"
     );
     // Content grows monotonically: every update carries the full partial

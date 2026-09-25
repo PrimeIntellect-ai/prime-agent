@@ -148,7 +148,7 @@ fn session_row(
             prompt_in_flight: false,
         },
         should_resume: busy || compacting || lanes_pending,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -176,7 +176,7 @@ fn worker_row(
                 .unwrap_or_default(),
             &snapshot.descriptor,
         ),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -228,7 +228,7 @@ fn subagent_rows(
                 .join("rlm-subagent.json")
                 .to_string_lossy()
                 .to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         });
     }
     Ok(rows)
@@ -263,7 +263,7 @@ fn heartbeat_rows(agent_dir: &Path) -> Vec<UpdateRosterHeartbeat> {
             },
             status,
             next_run_at: job.next_run_at,
-            rest: Default::default(),
+            rest: Map::default(),
         });
     }
     rows
@@ -394,7 +394,7 @@ pub(crate) fn build_update_roster(
         workers: rows,
         subagents: subagent_rows(agent_dir, ledger, &resident_files)?,
         heartbeats: heartbeat_rows(agent_dir),
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -483,7 +483,7 @@ mod tests {
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

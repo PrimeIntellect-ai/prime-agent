@@ -797,7 +797,7 @@ impl SupervisorChildSessionsInner {
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let summary = self
             .command(&create, CREATE_TIMEOUT_MS)
@@ -892,7 +892,7 @@ impl SupervisorChildSessionsInner {
                 prefix_messages: None,
                 admission_id: None,
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         self.command(&command, PROMPT_TIMEOUT_MS)
             .await
@@ -922,7 +922,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let state = self.command(&command, STATE_TIMEOUT_MS).await?;
         Ok(state
@@ -942,7 +942,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let answer = self.command(&command, STATE_TIMEOUT_MS).await?;
         Ok(answer
@@ -963,7 +963,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let _ = self
             .command(&command, budget.as_millis() as u64 + IDLE_WAIT_GRACE_MS)
@@ -1134,7 +1134,7 @@ impl SupervisorChildSessionsInner {
                 prefix_messages: None,
                 admission_id: None,
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         if let Err(error) = self.command(&command, NOTICE_DELIVERY_TIMEOUT_MS).await {
             eprintln!(
@@ -1437,7 +1437,7 @@ impl SupervisorChildSessionsInner {
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             };
             let _ = self
                 .command(&abort, KILL_TIMEOUT_MS)
@@ -1661,7 +1661,7 @@ fn unknown_session(error: &anyhow::Error) -> Option<()> {
 fn custom_message_text(message: &pa_types::session::CustomMessage) -> Option<String> {
     match &message.content {
         pa_types::ai::UserContent::Text(text) => Some(text.clone()),
-        _ => None,
+        pa_types::ai::UserContent::Blocks(_) => None,
     }
 }
 

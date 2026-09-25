@@ -313,7 +313,7 @@ impl Worker {
         // for its whole duration); it owns no exclusive slot, so a streamed
         // user bash is not blocked by it. The bracket releases the count on
         // drop, so a dropped run future cannot leave the flag stuck on.
-        let _awaited = user_bash.begin_awaited();
+        let awaited = user_bash.begin_awaited();
         let end = run_bash(RunBash {
             command: &command,
             cwd: &cwd,
@@ -324,7 +324,7 @@ impl Worker {
             on_chunk: None,
         })
         .await;
-        drop(_awaited);
+        drop(awaited);
         // The awaited path emits no session events, so the live roster
         // feed has no trigger of its own — TS's `execute_bash_and_wait`
         // flushes in the command's `finally`; the port enqueues the same
@@ -845,7 +845,7 @@ pub(crate) fn emit_session_event_frame(
         active_session_id,
         event,
         meta: Some(meta),
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
     drop(core);

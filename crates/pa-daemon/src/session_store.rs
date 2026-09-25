@@ -447,7 +447,7 @@ impl SessionFile {
             parent_session: parent_session.map(str::to_string),
             rlm_depth: Some(rlm_depth as u64),
             git: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         SessionFile {
             path: PathBuf::new(),
@@ -1569,11 +1569,9 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         && modified_ms > 0
         && file
             .metadata()
-            .ok()
-            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
+            .is_ok_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
         && fs::metadata(path)
-            .ok()
-            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
+            .is_ok_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
     {
         state.generation = generation;
         state.info = Some(info.clone());

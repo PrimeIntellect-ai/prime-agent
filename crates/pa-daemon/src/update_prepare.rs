@@ -889,7 +889,7 @@ mod tests {
                 process_start_id: Some(String::from("42/7")),
                 generation: String::from("gen-1"),
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let roster = UpdateRoster {
             format_version: pa_types::daemon::UPDATE_ROSTER_FORMAT_VERSION,
@@ -905,7 +905,7 @@ mod tests {
             workers: Vec::new(),
             subagents: Vec::new(),
             heartbeats: Vec::new(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_prepared_artifacts(&prepared, &roster, &marker).expect("write artifacts");
         assert!(update_roster_path(&prepared).is_file());

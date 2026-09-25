@@ -187,7 +187,7 @@ impl TurnStreamCoalescer {
             active_session_id: self.session.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound).unwrap_or_default();
         events.send(OutboundFrame::session_event(payload));

@@ -929,7 +929,7 @@ mod tests {
             &mut seed_events,
         );
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let admission = crate::agent_engine::tests::admit_parked(
             &engine,

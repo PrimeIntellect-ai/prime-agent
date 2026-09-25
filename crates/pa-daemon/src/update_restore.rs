@@ -286,8 +286,8 @@ impl RestoreProgress {
                 return;
             }
             tokio::select! {
-                _ = notified => {}
-                _ = tokio::time::sleep_until(deadline) => {}
+                () = notified => {}
+                () = tokio::time::sleep_until(deadline) => {}
             }
         }
     }
@@ -659,7 +659,7 @@ async fn wake_saved_session(
         lifecycle: None,
         env: None,
         launch_env: None,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     supervisor
         .handle_create(&command, SCHEDULED_WAKE_CLIENT_ID.to_string())
@@ -1003,9 +1003,9 @@ mod tests {
                 next_turn: Vec::new(),
                 actions: serde_json::json!({}),
             },
-            in_flight: Default::default(),
+            in_flight: UpdateRosterInFlight::default(),
             should_resume: false,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let owned = [
             row("top", 0, false),

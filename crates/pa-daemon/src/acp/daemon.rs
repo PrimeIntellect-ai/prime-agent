@@ -510,7 +510,7 @@ async fn handle_session_new(
         lifecycle: None,
         env: None,
         launch_env: None,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let create_response = match link.request(create, REQUEST_TIMEOUT_MS).await {
         Ok(response) => response,
@@ -546,7 +546,7 @@ async fn handle_session_new(
         recovery_config: None,
         env: None,
         launch_env: None,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     if let Ok(response) = link.request(attach, REQUEST_TIMEOUT_MS).await {
         if !response.success {
@@ -558,7 +558,7 @@ async fn handle_session_new(
                     DaemonCommand::Kill {
                         id: None,
                         active_session_id: daemon_active_session_id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     REQUEST_TIMEOUT_MS,
                 )
@@ -592,7 +592,7 @@ async fn handle_session_new(
                 DaemonCommand::Kill {
                     id: None,
                     active_session_id: hosted.daemon_active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 REQUEST_TIMEOUT_MS,
             )
@@ -642,7 +642,7 @@ async fn replace_session_servers(
                 active_session_id: hosted.daemon_active_session_id.clone(),
                 owner_id: hosted.mcp_owner_id.clone(),
                 servers: serde_json::to_value(resolved)?,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -733,7 +733,7 @@ async fn handle_session_prompt(
             prefix_messages: None,
             admission_id: None,
         },
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let response = match link.request(prompt, TURN_TIMEOUT_MS).await {
         Ok(response) => response,
@@ -905,7 +905,7 @@ async fn fetch_autonomous_status(
                 id: None,
                 active_session_id: active_session_id.to_string(),
                 wait_for_rlm_quiescence: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             TURN_TIMEOUT_MS,
         )
@@ -940,7 +940,7 @@ async fn session_cancel(
     let abort = DaemonCommand::Abort {
         id: None,
         active_session_id: hosted.daemon_active_session_id.clone(),
-        rest: Default::default(),
+        rest: Map::default(),
     };
     drop(guard);
     let _ = link.request(abort, REQUEST_TIMEOUT_MS).await;
@@ -983,7 +983,7 @@ async fn handle_session_close(
             DaemonCommand::Abort {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -997,7 +997,7 @@ async fn handle_session_close(
             DaemonCommand::Kill {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -1018,7 +1018,7 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
             DaemonCommand::Abort {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -1028,7 +1028,7 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
             DaemonCommand::Kill {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
