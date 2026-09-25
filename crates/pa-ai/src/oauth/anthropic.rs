@@ -439,7 +439,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
-    /// The login binds the registered callback port (53_692), so the
+    /// The login binds the registered callback port (`53_692`), so the
     /// tests serialize on this lock: parallel test threads never
     /// collide on the one port (the OS answers the bind with
     /// `address already in use` otherwise).

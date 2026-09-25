@@ -1201,10 +1201,11 @@ mod tests {
             .expect("the xai model renders");
         assert_eq!(grok.api, "openai-responses");
         assert_eq!(grok.base_url, "https://api.x.ai/v1");
-        // The catalog's xai model is unnamed by the TS flow's table, so
-        // its default map nulls every level: no thinking support.
+        // The catalog's xai model is non-reasoning: "off" is the only
+        // supported level whatever the subscription map nulls (the
+        // helper answers the non-reasoning branch first).
         let supported = pa_types::ai::thinking_levels::get_supported_thinking_levels(grok);
-        assert_eq!(supported, Vec::<ModelThinkingLevel>::new());
+        assert_eq!(supported, vec![ModelThinkingLevel::Off]);
         // The compat is the shared-key-only object (TS
         // `supportsLongCacheRetention: false`); the responses provider
         // decodes it directly (its own test covers the decode).
