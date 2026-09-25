@@ -204,7 +204,7 @@ async fn apply_thinking_level(
         // level, the durable row, and the settings default land in one
         // serial sequence instead of interleaving (the durable row must
         // match the live level on reload).
-        let mut handle = state.session.handle_mut().await;
+        let handle = state.session.handle_mut().await;
         let agent = handle.engine.session.agent();
         let model = handle.model.clone();
         let clamped = pa_ai::models::clamp_thinking_level(&model, level);

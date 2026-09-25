@@ -255,10 +255,12 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     // mutations take the driver first and persistence second, so holding
     // the persistence mutex across the driver wait inverts the lock order.
     drop(manager);
-    let goal = engine.goal_driver.lock().await.state();
+    // The guard binding keeps the driver mutex alive across the read (a
+    // chained temporary would free before the borrow ends).
+    let goal_driver = engine.goal_driver.lock().await;
     object.insert(
         "goal".to_string(),
-        serde_json::to_value(goal).unwrap_or(Value::Null),
+        serde_json::to_value(goal_driver.state()).unwrap_or(Value::Null),
     );
     Ok(ResponseData::Present(Value::Object(object)))
 }
