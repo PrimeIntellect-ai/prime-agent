@@ -1403,6 +1403,29 @@ mod tests {
         }
     }
 
+    /// The follow-up turn's context: the full conversation (the first
+    /// user row, the first assistant row, then the new user row), like
+    /// the TS fixture (`[...firstContext.messages, first, { user }]`).
+    fn codex_followup_context(first: &AssistantMessage, text: &str) -> Context {
+        Context {
+            system_prompt: Some("You are a helpful assistant.".to_string()),
+            messages: vec![
+                crate::types::Message::User(crate::types::UserMessage {
+                    content: crate::types::UserMessageContent::Text("Say hello".to_string()),
+                    timestamp: 1,
+                    rest: Default::default(),
+                }),
+                crate::types::Message::Assistant(first.clone()),
+                crate::types::Message::User(crate::types::UserMessage {
+                    content: crate::types::UserMessageContent::Text(text.to_string()),
+                    timestamp: 2,
+                    rest: Default::default(),
+                }),
+            ],
+            tools: None,
+        }
+    }
+
     /// The first text block of a streamed assistant message.
     fn codex_message_text(message: &AssistantMessage) -> Option<String> {
         message.content.iter().find_map(|content| match content {
@@ -1464,7 +1487,7 @@ mod tests {
 
         let second_stream = stream_openai_codex_responses(
             &model,
-            &codex_test_context("Now finish"),
+            &codex_followup_context(&first, "Now finish"),
             Some(&options),
         );
         eprintln!("[test] turn 2 streaming");
@@ -1545,7 +1568,7 @@ mod tests {
 
         let second = stream_openai_codex_responses(
             &model,
-            &codex_test_context("Now finish"),
+            &codex_followup_context(&first, "Now finish"),
             Some(&options),
         )
         .result()
