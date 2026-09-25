@@ -110,8 +110,17 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
+        self.read_line_with_budget(Duration::from_secs(15))
+    }
+
+    /// `read_line` with a caller-chosen budget: a raw `create` that
+    /// launches a worker answers after the worker's connect budget (TS
+    /// `WORKER_CONNECT_TIMEOUT_MS`: up to 30s), which the shared 15s line
+    /// budget turns into a false timeout under the binary's
+    /// parallel-test load.
+    fn read_line_with_budget(&mut self, budget: Duration) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + budget;
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -137,6 +146,22 @@ impl Client {
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
+            if line.get("id").and_then(|v| v.as_str()) == Some(id) {
+                return line;
+            }
+        }
+    }
+
+    /// `read_response` with a worker-boot budget (the raw-create path's
+    /// reader): every line waits on the remaining wall budget, so a
+    /// worker-launching create answers inside the same window the host's
+    /// `CREATE_TIMEOUT_MS` covers.
+    fn read_response_slow(&mut self, id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "no response for id {id}");
+            let line = self.read_line_with_budget(remaining);
             if line.get("id").and_then(|v| v.as_str()) == Some(id) {
                 return line;
             }
@@ -611,7 +636,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     let mut successes = Vec::new();
     let mut failures = 0;
     for id in ids {
-        let response = client.read_response(id);
+        let response = client.read_response_slow(id);
         if response["success"].as_bool().unwrap_or(false) {
             successes.push(response);
         } else {
@@ -636,7 +661,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         "k1",
         json!({ "type": "kill", "activeSessionId": active_id }),
     );
-    let killed = client.read_response("k1");
+    let killed = client.read_response_slow("k1");
     assert!(
         killed["success"].as_bool().unwrap_or(false),
         "kill winner: {killed}"
@@ -650,7 +675,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
             .map(|_| ())
     });
     client.send_command("c5", subagent_create("sub-c5"));
-    let retry = client.read_response("c5");
+    let retry = client.read_response_slow("c5");
     assert!(
         retry["success"].as_bool().unwrap_or(false),
         "the freed name admits again: {retry}"

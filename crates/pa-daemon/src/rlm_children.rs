@@ -2928,16 +2928,27 @@ mod spawn_name_reservation_tests {
                                 let _ = create_seen_tx.send(command.clone());
                                 let verdict = verdict_rx.lock().await.recv().await;
                                 match verdict {
-                                    Some(true) => response_success(
-                                        Some(&id),
-                                        command_type,
-                                        Some(json!({
-                                            "activeSessionId": "child-live",
-                                            "sessionId": "child-file",
-                                            "sessionFile": "/tmp/child.jsonl",
-                                            "sessionName": "gated-worker",
-                                        })),
-                                    ),
+                                    Some(true) => {
+                                        // The real supervisor echoes the
+                                        // requested name in its create
+                                        // summary; the record takes the
+                                        // supervisor's answer over the
+                                        // request, so the fake must echo
+                                        // too or the registry never sees
+                                        // the spawned name.
+                                        let session_name =
+                                            command["name"].as_str().unwrap_or_default();
+                                        response_success(
+                                            Some(&id),
+                                            command_type,
+                                            Some(json!({
+                                                "activeSessionId": "child-live",
+                                                "sessionId": "child-file",
+                                                "sessionFile": "/tmp/child.jsonl",
+                                                "sessionName": session_name,
+                                            })),
+                                        )
+                                    }
                                     _ => response_failure(
                                         Some(&id),
                                         command_type,
