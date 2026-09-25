@@ -1,0 +1,1 @@
+- Fixed high CPU use while streaming large tool-call arguments and OpenAI-compatible reasoning details. Partial arguments of large tool calls now refresh less often and can lag the latest delta; `toolcall_end` still carries the full parse.

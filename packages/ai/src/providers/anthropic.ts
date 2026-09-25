@@ -34,7 +34,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js";
+import { parseJsonWithRepair, parseStreamingJson, StreamingJsonAccumulator } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	classifyStreamFailure,
@@ -535,7 +535,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const requestId = response.headers.get("request-id") ?? undefined;
 			stream.push({ type: "start", partial: output });
 
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
+			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: StreamingJsonAccumulator })) & {
+				index: number;
+			};
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal, requestId)) {
@@ -597,7 +599,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
-							partialJson: "",
+							partialJson: new StreamingJsonAccumulator(),
 							index: event.index,
 						};
 						output.content.push(block);
@@ -632,8 +634,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
-							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
+							block.arguments = block.partialJson.append(event.delta.partial_json) ?? block.arguments;
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -669,10 +670,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								partial: output,
 							});
 						} else if (block.type === "toolCall") {
-							block.arguments = parseStreamingJson(block.partialJson);
+							block.arguments = parseStreamingJson(block.partialJson.text);
 							// Finalize in-place and strip the scratch buffer so replay only
 							// carries parsed arguments.
-							delete (block as { partialJson?: string }).partialJson;
+							delete (block as { partialJson?: StreamingJsonAccumulator }).partialJson;
 							stream.push({
 								type: "toolcall_end",
 								contentIndex: index,
@@ -734,9 +735,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
+				const { partialJson } = block as { partialJson?: StreamingJsonAccumulator };
+				if (block.type === "toolCall" && partialJson) block.arguments = partialJson.flush() ?? block.arguments;
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				delete (block as { partialJson?: StreamingJsonAccumulator }).partialJson;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);

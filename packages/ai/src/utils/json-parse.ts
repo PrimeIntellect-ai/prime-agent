@@ -122,3 +122,44 @@ export function parseStreamingJson<T = Record<string, unknown>>(partialJson: str
 		}
 	}
 }
+
+const EAGER_PARSE_LENGTH = 8 * 1024;
+
+/**
+ * Streamed tool-call argument JSON with a best-effort parsed preview. Re-parsing the whole buffer on
+ * every delta is quadratic in the argument size, so past EAGER_PARSE_LENGTH the preview is refreshed
+ * only after the buffer grew by 1/16 since the last parse, keeping total parse work linear. Callers
+ * still parse `text` with parseStreamingJson when the block ends.
+ */
+export class StreamingJsonAccumulator {
+	#text: string;
+	#parsedLength = 0;
+
+	constructor(text = "") {
+		this.#text = text;
+	}
+
+	get text(): string {
+		return this.#text;
+	}
+
+	/** Appends a delta and returns a fresh partial parse, or undefined while the refresh is throttled. */
+	append(delta: string): Record<string, unknown> | undefined {
+		this.#text += delta;
+		const length = this.#text.length;
+		if (length > EAGER_PARSE_LENGTH && length - this.#parsedLength < this.#parsedLength / 16) {
+			return undefined;
+		}
+		return this.#parse();
+	}
+
+	/** Parses text not covered by the last returned parse; undefined when the preview is already current. */
+	flush(): Record<string, unknown> | undefined {
+		return this.#parsedLength === this.#text.length ? undefined : this.#parse();
+	}
+
+	#parse(): Record<string, unknown> {
+		this.#parsedLength = this.#text.length;
+		return parseStreamingJson(this.#text);
+	}
+}

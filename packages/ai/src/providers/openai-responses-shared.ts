@@ -29,7 +29,7 @@ import type {
 } from "../types.js";
 import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
+import { parseStreamingJson, StreamingJsonAccumulator } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -274,14 +274,15 @@ export async function processResponsesStream<TApi extends Api>(
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
-	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
+	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: StreamingJsonAccumulator }) | null =
+		null;
 	let currentContentIndex = -1;
 	let sawTerminalResponse = false;
 	const slots = new Map<
 		number,
 		{
 			item: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall;
-			block: ThinkingContent | TextContent | (ToolCall & { partialJson: string });
+			block: ThinkingContent | TextContent | (ToolCall & { partialJson: StreamingJsonAccumulator });
 			contentIndex: number;
 		}
 	>();
@@ -316,7 +317,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: `${item.call_id}|${item.id}`,
 					name: item.name,
 					arguments: {},
-					partialJson: item.arguments || "",
+					partialJson: new StreamingJsonAccumulator(item.arguments || ""),
 				};
 				output.content.push(currentBlock);
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
@@ -416,8 +417,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				currentBlock.partialJson += event.delta;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				currentBlock.arguments = currentBlock.partialJson.append(event.delta) ?? currentBlock.arguments;
 				stream.push({
 					type: "toolcall_delta",
 					contentIndex: blockIndex(),
@@ -427,9 +427,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				const previousPartialJson = currentBlock.partialJson;
-				currentBlock.partialJson = event.arguments;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				const previousPartialJson = currentBlock.partialJson.text;
+				currentBlock.partialJson = new StreamingJsonAccumulator(event.arguments);
+				currentBlock.arguments = parseStreamingJson(event.arguments);
 
 				if (event.arguments.startsWith(previousPartialJson)) {
 					const delta = event.arguments.slice(previousPartialJson.length);
@@ -471,7 +471,7 @@ export async function processResponsesStream<TApi extends Api>(
 				currentBlock = null;
 			} else if (item.type === "function_call") {
 				const args = parseStreamingJson(
-					item.arguments || (currentBlock?.type === "toolCall" ? currentBlock.partialJson : "") || "{}",
+					item.arguments || (currentBlock?.type === "toolCall" ? currentBlock.partialJson.text : "") || "{}",
 				);
 
 				let toolCall: ToolCall;
@@ -479,7 +479,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// Finalize in-place and strip the scratch buffer so replay only
 					// carries parsed arguments.
 					currentBlock.arguments = args;
-					delete (currentBlock as { partialJson?: string }).partialJson;
+					delete (currentBlock as { partialJson?: StreamingJsonAccumulator }).partialJson;
 					toolCall = currentBlock;
 				} else {
 					toolCall = {

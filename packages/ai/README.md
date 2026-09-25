@@ -342,6 +342,7 @@ for await (const event of s) {
 - Arrays may be incomplete
 - Nested objects may be partially populated
 - At minimum, `arguments` will be an empty object `{}`, never `undefined`
+- For large arguments the partial parse is refreshed less often, so it can lag the latest delta; `toolcall_end` always carries the full parse
 - The Google provider does not support function call streaming. Instead, you will receive a single `toolcall_delta` event with the full arguments.
 
 ### Validating Tool Arguments
