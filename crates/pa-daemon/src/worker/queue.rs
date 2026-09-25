@@ -24,7 +24,7 @@ impl Lane {
 /// question runs to queue their terminal cancelled events before the
 /// process exits. The runs observe the abort within their 20ms pump tick
 /// and the stream teardown, so this is generous headroom, not a gate.
-const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
