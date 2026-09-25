@@ -799,15 +799,16 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
         ],
         "every copy ran the OSC 52 chain"
     );
-    // The coalesced toast acknowledges the count, exactly one row per
-    // frame: consecutive identical copies never stack duplicate rows.
-    let coalesced = outcome
-        .frames
-        .iter()
-        .any(|frame| frame.contains(&format!("{label} (x3)")))
-        .then_some(())
-        .expect("the coalesced count-bump toast renders");
-    let _ = coalesced;
+    // The coalesced toast acknowledges the count: three consecutive copies
+    // read as one "(x3)" toast, never stacked duplicate rows.
+    let coalesced_label = format!("{label} (x3)");
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains(&coalesced_label)),
+        "the coalesced count-bump toast renders"
+    );
     for (index, frame) in outcome.frames.iter().enumerate() {
         let rows = frame.lines().filter(|row| row.contains(label)).count();
         assert!(
