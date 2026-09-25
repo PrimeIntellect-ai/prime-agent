@@ -443,6 +443,25 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
+/// One hint segment: the resolved bindings' labels joined with `/` plus the
+/// action (TS `keyHint`). An action whose binding is unconfigured is
+/// omitted — the hint never advertises a key the surface does not handle.
+pub(crate) fn key_hint(
+    kb: &crate::keybindings::KeybindingsManager,
+    bindings: &[&str],
+    action: &str,
+) -> Option<String> {
+    let labels: Vec<String> = bindings
+        .iter()
+        .filter_map(|binding| kb.first_key(binding))
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    Some(format!("{} {action}", labels.join("/")))
+}
+
 /// One detail-block row: the selected item's metadata under the list,
 /// truncated to the frame width (marked) and padded to the full row; the
 /// content's own spans carry the color and leading indent.
@@ -459,6 +478,7 @@ pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::KeybindingsManager;
     use crate::theme::{ColorMode, Theme};
 
     fn theme() -> Theme {
@@ -467,6 +487,26 @@ mod tests {
 
     fn row_text(line: &Line) -> String {
         line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    /// The hint segment resolves the bound keys and omits an unbound
+    /// action entirely — a hint must never advertise a key the surface
+    /// does not handle (an empty user binding disables the action).
+    #[test]
+    fn key_hint_omits_unbound_actions() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            key_hint(&kb, &["tui.select.confirm"], "select").as_deref(),
+            Some("Enter select")
+        );
+        let mut bindings = crate::keybindings::KeybindingsConfig::new();
+        bindings.insert("tui.select.cancel".to_string(), Vec::new());
+        let unbound = KeybindingsManager::with_user_bindings(bindings);
+        assert_eq!(key_hint(&unbound, &["tui.select.cancel"], "close"), None);
+        assert_eq!(
+            key_hint(&unbound, &["tui.select.up", "tui.select.down"], "navigate").as_deref(),
+            Some("\u{2191}/\u{2193} navigate")
+        );
     }
 
     /// The table cell pads by GRAPHEME width: a multi-codepoint cluster
