@@ -638,12 +638,12 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         client.send_command(id, subagent_create(&format!("sub-{id}")));
     }
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut responses: std::collections::HashMap<&str, Value> = std::collections::HashMap::new();
+    let mut responses: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     while responses.len() < ids.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(!remaining.is_zero(), "never answered: {ids:?}");
         let line = client.read_line_with_budget(remaining);
-        if let Some(id) = line.get("id").and_then(Value::as_str) {
+        if let Some(id) = line.get("id").and_then(Value::as_str).map(str::to_string) {
             responses.insert(id, line);
         }
     }
