@@ -151,7 +151,7 @@ impl TurnRunner {
     /// One delivery: a single item, or the batch the pump gathered (TS
     /// `_startPreparedTurnActions`): the first item anchors the turn and
     /// the rest ride as co-delivered user rows of the same run.
-    async fn run_turn(&self, engine: std::sync::Arc<dyn SessionEngine>, items: Vec<QueuedItem>) {
+    pub(super) async fn run_turn(&self, engine: std::sync::Arc<dyn SessionEngine>, items: Vec<QueuedItem>) {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
