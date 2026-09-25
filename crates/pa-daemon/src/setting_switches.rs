@@ -283,6 +283,31 @@ impl Worker {
         }
     }
 
+    /// The replacement sessions (`new_session` / `switch_session` /
+    /// `import_jsonl` / `fork`) re-seed the service tier like a create
+    /// (TS `createAgentSession` over the moved-to file): the file's
+    /// `service_tier_change` row when it has one, else the settings
+    /// default, then the active tier re-clamps against the restored
+    /// model (the clamp's configure + event contract).
+    pub(crate) fn reseed_service_tier_for_replacement(&self) {
+        let (restored, cwd) = {
+            let core = self.core.lock().unwrap();
+            let restored = core.store.as_ref().and_then(|store| {
+                store
+                    .has_service_tier()
+                    .then(|| store.restored_settings().service_tier)
+            });
+            (restored, core.cwd.clone())
+        };
+        let default_tier = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir)
+            .get_default_service_tier();
+        {
+            let mut core = self.core.lock().unwrap();
+            core.service_tier = restored.unwrap_or(Some(default_tier));
+        }
+        self.clamp_service_tier_for_model();
+    }
+
     /// `set_scoped_models { scopedModels }` (TS
     /// `session.setScopedModels`): store the scoped model list the cycler
     /// and the connection state surface.
@@ -902,6 +927,48 @@ mod tests {
             )
             .await;
         assert!(!response.success);
+    }
+
+    /// The replacement re-seed restores the moved-to file's tier
+    /// preference (else the settings default) and re-clamps the active
+    /// tier against the restored model (no model on the scripted engine:
+    /// the active tier degrades to `default`).
+    #[tokio::test]
+    async fn replacement_reseed_restores_the_tier_preference() {
+        let worker = created_worker().await;
+        // No durable row and the settings default "default": the reseed
+        // keeps the default preference.
+        worker.reseed_service_tier_for_replacement();
+        let (preference, active) = {
+            let core = worker.core.lock().unwrap();
+            (core.service_tier, core.active_service_tier)
+        };
+        assert_eq!(preference, Some(ServiceTier::Default));
+        assert_eq!(active, Some(ServiceTier::Default));
+        // A moved-to file carrying its own tier row re-seeds the
+        // preference; the active tier still clamps against the
+        // model-less engine.
+        {
+            let mut core = worker.core.lock().unwrap();
+            if let Some(store) = core.store.as_mut() {
+                let _ = store
+                    .persist_entry("service_tier_change", json!({ "serviceTier": "priority" }));
+            }
+        }
+        worker.reseed_service_tier_for_replacement();
+        let (preference, active) = {
+            let core = worker.core.lock().unwrap();
+            (core.service_tier, core.active_service_tier)
+        };
+        assert_eq!(preference, Some(ServiceTier::Priority));
+        assert_eq!(active, Some(ServiceTier::Default));
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
     }
 
     /// `set_transport` persists the settings value; an unknown transport

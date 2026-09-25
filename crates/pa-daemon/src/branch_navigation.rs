@@ -604,6 +604,7 @@ impl Worker {
                 // session file — future restores target the fork, not the
                 // source branch.
                 self.refresh_replaced_session_state();
+                self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
                 let mut data = json!({ "cancelled": false });

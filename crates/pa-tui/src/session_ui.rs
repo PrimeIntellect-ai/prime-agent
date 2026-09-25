@@ -352,10 +352,10 @@ pub(crate) struct SessionUi {
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     /// Snapshot chat entries to fold into the view on the next rebuild.
     pending_snapshot: Option<Vec<ChatEntry>>,
-    /// Snapshot labels (model) for the next rebuild.
-    pending_model: Option<String>,
-    /// Snapshot service tier for the next rebuild (the tray badge).
-    pending_service_tier: Option<String>,
+    /// Snapshot labels (model) for the next rebuild: `Some(None)` clears
+    /// the label (a session that reports no model), `None` leaves the
+    /// chrome untouched (a rebuild outside the attach flow).
+    pending_model: Option<Option<String>>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -699,7 +699,6 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
-            pending_service_tier: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
@@ -968,7 +967,7 @@ impl SessionUi {
         self.bash_activities = serde_json::json!({"activities": []});
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
         self.spawn_bash_activity_refresh();
-        self.pending_model = reconstructed.model_id;
+        self.pending_model = Some(reconstructed.model_id);
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1251,11 +1250,12 @@ impl SessionUi {
             }
         }
         if let Some(model) = self.pending_model.take() {
-            view.chrome.model_id = Some(model);
+            view.chrome.model_id = model;
         }
-        if let Some(tier) = self.pending_service_tier.take() {
-            view.chrome.service_tier = Some(tier);
-        }
+        // The tray badge mirrors the session-scoped tier on every rebuild:
+        // an attach that reports no tier clears the previous session's
+        // badge instead of leaving it stranded.
+        view.chrome.service_tier.clone_from(&self.service_tier);
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -7165,11 +7165,18 @@ impl SessionUi {
                 .map(str::to_string)
                 .unwrap_or_else(|| picked_model_id.to_string());
             view.chrome.model_id = Some(model_id);
-            self.current_model_provider = data
+            // The provider PATCHES, never resets: a state without the
+            // model's provider keeps the switched-to provider the apply
+            // path already stored (the id keeps the picked model as its
+            // fallback the same way), so the eligibility pair stays
+            // consistent.
+            if let Some(provider) = data
                 .get("model")
                 .and_then(|model| model.get("provider"))
                 .and_then(Value::as_str)
-                .map(str::to_string);
+            {
+                self.current_model_provider = Some(provider.to_string());
+            }
             self.dirty = true;
         }
     }
