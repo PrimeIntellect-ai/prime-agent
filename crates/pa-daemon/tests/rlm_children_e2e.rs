@@ -628,17 +628,31 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     };
 
     // Four parallel same-name creates of the same parent scope: commands
-    // on one connection are dispatched concurrently.
+    // on one connection are dispatched concurrently, so their responses
+    // arrive out of order (the losers fail at the reservation in
+    // milliseconds, the winner answers after its worker launch) - drain
+    // the connection until every id is answered instead of reading ids
+    // in sequence.
     let ids = ["c1", "c2", "c3", "c4"];
     for id in ids {
         client.send_command(id, subagent_create(&format!("sub-{id}")));
     }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut responses: std::collections::HashMap<&str, Value> = std::collections::HashMap::new();
+    while responses.len() < ids.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "never answered: {ids:?}");
+        let line = client.read_line_with_budget(remaining);
+        if let Some(id) = line.get("id").and_then(Value::as_str) {
+            responses.insert(id, line);
+        }
+    }
     let mut successes = Vec::new();
     let mut failures = 0;
     for id in ids {
-        let response = client.read_response_slow(id);
+        let response = &responses[id];
         if response["success"].as_bool().unwrap_or(false) {
-            successes.push(response);
+            successes.push(response.clone());
         } else {
             failures += 1;
             assert_eq!(
