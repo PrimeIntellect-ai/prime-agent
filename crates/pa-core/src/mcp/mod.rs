@@ -24,10 +24,7 @@ mod url_checks;
 pub use catalog_views::{
     mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
 };
-pub use fetch_lane::{
-    install_plugins_catalog_cache, plugins_catalog_cache_for, spawn_hourly_plugins_refresh,
-    startup_plugins_refresh, PluginsCatalog,
-};
+pub use fetch_lane::{spawn_hourly_plugins_refresh, startup_plugins_refresh};
 pub use login::{wire_begin_login, McpLoginContext, McpOAuth};
 pub use manager_catalog::{
     install_static_token, remove_mcp_connection, McpConnectionHandles, PasteInstallInputs,

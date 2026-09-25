@@ -16,7 +16,8 @@
 //! at runtime. The Rust port carries the remote chain (URL + ETag fetch +
 //! validated disk cache) so the catalog stays fresh between releases;
 //! the daemon supervisor keeps the cache warm — a forced startup refresh
-//! plus the hourly loop, both fire-and-forget, one log line per failure.
+//! plus the hourly loop, both fire-and-forget; the settle log is one
+//! debug line, mirroring the models chain.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,15 +25,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use pa_models::cache::{CatalogCache, CatalogParse, RefreshOptions, PUBLIC_SCOPE};
 use pa_models::fetch::{CatalogFetcher, MCP_SERVICE_CATALOG_URL};
-use pa_models::offline::is_catalog_offline;
 use pa_models::CATALOG_REFRESH_INTERVAL_MS;
 
-use super::catalog_schema::parse_plugins_catalog;
+use super::catalog_schema::{parse_plugins_catalog, PluginsCatalog};
 use super::remote_source::PLUGINS_CACHE_FILE;
-
-/// The parsed plugins catalog (the fetch lane's cached value). Re-exported
-/// here so the cache's public signatures name reachable types.
-pub use super::catalog_schema::PluginsCatalog;
 
 /// The plugins-catalog parse seam for the generic cache: the fetched
 /// payload parses through the same fail-closed validator the reader uses
@@ -42,51 +38,59 @@ fn plugins_parse(payload: &serde_json::Value, _scope: &str) -> Result<PluginsCat
     parse_plugins_catalog(&bytes)
 }
 
+/// One plugins-catalog cache: the generic cache plus the per-instance
+/// hourly-loop guard (the models chain guards its loop the same way, so
+/// one loop runs per agent dir, not per process).
+struct PluginsCatalogCache {
+    cache: CatalogCache<PluginsCatalog>,
+    hourly_loop: OnceLock<()>,
+}
+
+impl PluginsCatalogCache {
+    /// A cache writing `cache_path`, fetched from `url`.
+    fn at_url(url: &str, cache_path: PathBuf) -> Self {
+        Self {
+            cache: CatalogCache::new(
+                url,
+                Some(cache_path),
+                Arc::new(CatalogFetcher::new()),
+                Arc::new(plugins_parse) as CatalogParse<PluginsCatalog>,
+            ),
+            hourly_loop: OnceLock::new(),
+        }
+    }
+}
+
 /// The process-shared plugins-catalog caches, keyed by the cache path.
-type SharedCaches = HashMap<Option<PathBuf>, Arc<CatalogCache<PluginsCatalog>>>;
+type SharedCaches = HashMap<PathBuf, Arc<PluginsCatalogCache>>;
 
 fn shared() -> &'static Mutex<SharedCaches> {
     static SHARED: OnceLock<Mutex<SharedCaches>> = OnceLock::new();
     SHARED.get_or_init(Default::default)
 }
 
-/// The process-shared plugins-catalog cache for `agent_dir` (`None` = an
-/// in-memory cache with no disk persistence): one cache per agent dir, so
-/// the supervisor's fetch lane and any test-installed cache share the
-/// same snapshots (the models chain's `catalog_for` shape).
-pub fn plugins_catalog_cache_for(agent_dir: Option<&Path>) -> Arc<CatalogCache<PluginsCatalog>> {
-    let cache_path = agent_dir.map(|dir| dir.join(PLUGINS_CACHE_FILE));
+/// The process-shared plugins-catalog cache for `agent_dir`: one cache per
+/// agent dir, so the supervisor's startup refresh and its hourly loop
+/// share the same snapshots, hourly gating, and in-flight coalescing (the
+/// models chain's `catalog_for` shape).
+fn plugins_catalog_cache_for(agent_dir: &Path) -> Arc<PluginsCatalogCache> {
+    let cache_path = agent_dir.join(PLUGINS_CACHE_FILE);
     let mut shared = shared().lock().unwrap();
-    Arc::clone(shared.entry(cache_path.clone()).or_insert_with(move || {
-        Arc::new(CatalogCache::new(
+    Arc::clone(&shared.entry(cache_path.clone()).or_insert_with(move || {
+        Arc::new(PluginsCatalogCache::at_url(
             MCP_SERVICE_CATALOG_URL,
             cache_path,
-            Arc::new(CatalogFetcher::new()),
-            Arc::new(plugins_parse) as CatalogParse<PluginsCatalog>,
         ))
     }))
 }
 
-/// Install a caller-built cache for `agent_dir` (hermetic tests: a cache
-/// whose URL points at a local server), mirroring the models chain's
-/// `install_catalog`.
-pub fn install_plugins_catalog_cache(agent_dir: &Path, cache: CatalogCache<PluginsCatalog>) {
-    let cache_path = agent_dir.join(PLUGINS_CACHE_FILE);
-    shared()
-        .lock()
-        .unwrap()
-        .insert(Some(cache_path), Arc::new(cache));
-}
-
-/// One fire-and-forget refresh of the plugins service catalog. The
-/// cache's contract keeps the last-good snapshot on every failure path;
-/// `None` (nothing served) logs one line — the packaged bundled snapshot
-/// keeps serving (the reader's fail-closed chain).
-async fn refresh_plugins_catalog(cache: Arc<CatalogCache<PluginsCatalog>>, force: bool) {
-    if is_catalog_offline() {
-        return;
-    }
+/// One fire-and-forget refresh of the plugins service catalog: the
+/// cache's contract keeps the last-good snapshot on every failure path
+/// (including `PI_OFFLINE`, where the cache serves without the network),
+/// and the settle log is one debug line, mirroring the models chain.
+async fn refresh_plugins_catalog(cache: &PluginsCatalogCache, force: bool) {
     let fresh = cache
+        .cache
         .refresh(
             PUBLIC_SCOPE,
             RefreshOptions {
@@ -96,12 +100,11 @@ async fn refresh_plugins_catalog(cache: Arc<CatalogCache<PluginsCatalog>>, force
             },
         )
         .await;
-    if fresh.is_none() {
-        eprintln!(
-            "pa-daemon: plugins service catalog refresh produced nothing; the bundled snapshot keeps serving ({})",
-            cache.url()
-        );
-    }
+    tracing::debug!(
+        forced = force,
+        entries = fresh.as_ref().map(|catalog| catalog.entries.len()),
+        "plugins service catalog refresh settled"
+    );
 }
 
 /// The daemon's plugins-catalog warm-up: a forced fire-and-forget refresh
@@ -109,20 +112,20 @@ async fn refresh_plugins_catalog(cache: Arc<CatalogCache<PluginsCatalog>>, force
 /// the last-good chain immediately). Mirrors the models chain's
 /// `startup_refresh`.
 pub fn startup_plugins_refresh(agent_dir: &Path) {
-    let cache = plugins_catalog_cache_for(Some(agent_dir));
+    let cache = plugins_catalog_cache_for(agent_dir);
     tokio::spawn(async move {
-        refresh_plugins_catalog(cache, true).await;
+        refresh_plugins_catalog(&cache, true).await;
     });
 }
 
-/// The daemon's hourly plugins-catalog refresh loop (one per process: the
-/// shared cache's hourly gating coalesces). Mirrors the models chain's
+/// The daemon's hourly plugins-catalog refresh loop (one loop per agent
+/// dir: the guard rides the shared instance, so a second supervisor in
+/// the same process still gets its own loop). Mirrors the models chain's
 /// `spawn_hourly_refresh`. Errors never surface; the task does not keep
 /// the runtime alive.
 pub fn spawn_hourly_plugins_refresh(agent_dir: &Path) {
-    let cache = plugins_catalog_cache_for(Some(agent_dir));
-    static HOURLY_LOOP: OnceLock<()> = OnceLock::new();
-    if HOURLY_LOOP.set(()).is_err() {
+    let cache = plugins_catalog_cache_for(agent_dir);
+    if cache.hourly_loop.set(()).is_err() {
         return;
     }
     tokio::spawn(async move {
@@ -131,7 +134,7 @@ pub fn spawn_hourly_plugins_refresh(agent_dir: &Path) {
         ));
         loop {
             interval.tick().await;
-            refresh_plugins_catalog(Arc::clone(&cache), false).await;
+            refresh_plugins_catalog(&cache, false).await;
         }
     });
 }
@@ -139,105 +142,100 @@ pub fn spawn_hourly_plugins_refresh(agent_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// The parse seam accepts the catalog schema's own fixture (the same
-    /// validator the reader runs over the disk envelope's payload).
+    /// The real shipped catalog payload (the fixture the schema's parity
+    /// tests parse): what a fetch from the catalog repo returns.
+    const REAL_CATALOG: &str = include_str!("../../tests/fixtures/mcp/plugins-catalog.v2.json");
+
+    /// The production cache pins the reader's contract: the catalog-repo
+    /// URL the reader's url gate requires, the cache file the reader
+    /// reads, and one shared instance per agent dir (the supervisor's
+    /// startup and hourly calls drive the same cache).
     #[test]
-    fn the_parse_seam_takes_the_plugins_schema() {
-        let payload = json!({
-            "version": 2,
-            "counts": { "entries": 1, "services": 1 },
-            "services": [
-                {
-                    "server": "linear",
-                    "label": "Linear",
-                    "url": "https://mcp.linear.app/mcp",
-                    "usesOAuth": true,
-                    "source": "catalog",
-                    "review": { "status": "metadata-reviewed" }
-                }
-            ]
-        });
-        let catalog = plugins_parse(&payload, PUBLIC_SCOPE).expect("parses");
-        assert_eq!(catalog.entries.len(), 1);
-        assert!(plugins_parse(&json!({ "version": 3 }), PUBLIC_SCOPE).is_err());
+    fn the_production_cache_pins_the_readers_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        let cache = plugins_catalog_cache_for(&agent_dir);
+        assert_eq!(cache.cache.url(), MCP_SERVICE_CATALOG_URL);
+        assert_eq!(
+            cache.cache.cache_path(),
+            Some(agent_dir.join(PLUGINS_CACHE_FILE).as_path()),
+        );
+        assert!(Arc::ptr_eq(&cache, &plugins_catalog_cache_for(&agent_dir),));
     }
 
-    /// The cache writes the exact envelope the reader validates: url +
-    /// public scope + fetchedAt + the catalog payload (the `SnapshotFile`
-    /// form `remote_source::snapshot_catalog` accepts at any age).
+    /// A fetched catalog lands as the reader's disk envelope: the
+    /// `SnapshotFile` form (`url` + public scope + `fetchedAt` + the
+    /// payload), with the payload intact, at the reader's cache path.
+    /// (The reader's url/scope/age gates over that envelope are the
+    /// reader's own tests.)
     #[tokio::test]
-    async fn the_cache_writes_the_readers_envelope() {
+    async fn a_fetched_catalog_lands_as_the_readers_envelope() {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
-
-        let catalog = json!({
-            "version": 2,
-            "counts": { "entries": 1, "services": 1 },
-            "services": [
-                {
-                    "server": "linear",
-                    "label": "Linear",
-                    "url": "https://mcp.linear.app/mcp",
-                    "usesOAuth": true,
-                    "source": "catalog",
-                    "review": { "status": "metadata-reviewed" }
-                }
-            ]
-        });
-        // A hermetic local fetch server: one 200 with the catalog payload.
-        let server = wiremock_server(catalog).await;
-        let cache = CatalogCache::new(
-            server.uri(),
-            Some(agent_dir.join(PLUGINS_CACHE_FILE)),
-            Arc::new(CatalogFetcher::new()),
-            Arc::new(plugins_parse) as CatalogParse<PluginsCatalog>,
-        );
-        install_plugins_catalog_cache(&agent_dir, cache);
-
-        let shared = plugins_catalog_cache_for(Some(&agent_dir));
-        let fresh = shared
+        // A hermetic one-shot fetch server over the real payload.
+        let server = one_shot_server(REAL_CATALOG.to_string()).await;
+        let cache = PluginsCatalogCache::at_url(server.uri(), agent_dir.join(PLUGINS_CACHE_FILE));
+        let fresh = cache
+            .cache
             .refresh(
                 PUBLIC_SCOPE,
                 RefreshOptions {
                     force: true,
-                    headers: Vec::new(),
-                    is_current: None,
+                    ..Default::default()
                 },
             )
-            .await;
-        assert!(fresh.is_some(), "the fetch landed");
-        // The reader accepts the written envelope: url + scope + finite
-        // fetchedAt + a payload that parses (any age serves - last good).
-        let snapshot = super::super::remote_source::remote_plugins_snapshot(&agent_dir);
-        assert!(snapshot.is_some(), "the reader validates the written cache");
+            .await
+            .expect("the fixture fetch parses");
+        assert_eq!(fresh.version, 2);
+        assert_eq!(fresh.entries.len(), 68);
+
+        let written: Value = serde_json::from_slice(
+            &std::fs::read(agent_dir.join(PLUGINS_CACHE_FILE)).expect("snapshot written"),
+        )
+        .expect("the written file is the snapshot envelope");
+        assert_eq!(written["url"], server.uri());
+        assert_eq!(written["scope"], PUBLIC_SCOPE);
+        assert!(written["fetchedAt"].as_u64().is_some());
+        assert_eq!(
+            written["payload"],
+            serde_json::from_str::<Value>(REAL_CATALOG).expect("fixture parses"),
+        );
     }
 
-    /// A tiny `wiremock`-style local server without the dev dependency: a
-    /// bound `TcpListener` answering one GET with the JSON payload.
-    async fn wiremock_server(payload: serde_json::Value) -> TestServer {
-        use std::io::Write as _;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    /// A one-request local HTTP server answering the catalog payload: an
+    /// async task (not a blocking accept), so the runtime never hangs on
+    /// shutdown, and exactly the one GET a forced refresh performs.
+    async fn one_shot_server(body: String) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let body = payload.to_string();
-        let handle = tokio::task::spawn_blocking(move || {
-            for _ in 0..4 {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(pair) => pair,
-                    Err(_) => return,
-                };
-                let mut buffer = [0u8; 4096];
-                let _ = std::io::Read::read(&mut stream, &mut buffer);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("the one request arrives");
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read the head");
+                if read == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buffer[..read]);
+                if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
             }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("respond");
         });
         TestServer {
             uri: format!("http://{addr}/catalog.v2.json"),
