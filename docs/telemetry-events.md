@@ -400,13 +400,15 @@ subagent inspection surface; emitted once per open action).
 The user opened an activity view from the dock (the operator's
 direct-navigation redesign): dock Enter or a second Alt+A opens the
 focused group's own view directly — the scoped agents view, the
-heartbeats view, or the bash view (the grouped panel is gone). The goal
-indicator is read-only and does not emit this event. No command, output,
-prompt, or goal content is collected.
+heartbeats view, or the bash view (the grouped panel is gone); the
+condensed tool runs pane opens through its own transcript key
+(`app.transcript.runs`, default Alt+T). The goal indicator is read-only
+and does not emit this event. No command, output, prompt, or goal
+content is collected.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `subagents` / `heartbeats` / `bash` |
+| `kind` | string | `subagents` / `heartbeats` / `bash` / `runs` (the condensed tool runs pane) |
 
 ### `tui menu opened`
 

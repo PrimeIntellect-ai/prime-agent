@@ -61,6 +61,11 @@ pub struct PythonSkillRuntimeInfo {
 /// Port of `buildRlmBootstrapCode` from ipython.ts: imports the rlm runtime,
 /// substitutes a raising stub when it is missing, and wraps each Python skill
 /// module with a callable wrapper that forwards `__call__` to `run`.
+///
+/// # Panics
+///
+/// Panics if the sorted import-name list cannot be serialized as JSON,
+/// which cannot fail for a list of strings.
 pub fn build_rlm_bootstrap_code(python_skills: &[PythonSkillRuntimeInfo]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
 

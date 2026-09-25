@@ -160,6 +160,11 @@ pub struct WrappedTool {
 }
 
 impl WrappedTool {
+    /// Run the wrapped tool once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the wrapped tool's own execution error.
     pub async fn execute(
         &self,
         tool_call_id: &str,

@@ -1,6 +1,6 @@
-//! PostHog batched capture sink (primary product sink).
+//! `PostHog` batched capture sink (primary product sink).
 //!
-//! Wire format is the PostHog capture v2 batch API: `POST {base}/batch/` with
+//! Wire format is the `PostHog` capture v2 batch API: `POST {base}/batch/` with
 //! `{"api_key", "batch": [{event, distinct_id, timestamp, properties}]}`.
 //! Endpoint and project key come from configuration (env override, then
 //! settings, resolved by the composition root); pa-telemetry ships no
@@ -21,7 +21,7 @@ use crate::sink::{SinkOutcome, TelemetrySink};
 /// TS parity: requests time out after 1.5s so telemetry never holds the agent.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// A resolved PostHog endpoint: base URL + project capture key.
+/// A resolved `PostHog` endpoint: base URL + project capture key.
 /// Built from env (`PRIME_AGENT_TELEMETRY_ENDPOINT` / `_API_KEY`) or from
 /// settings `telemetry.posthog.*`; both fields must be non-empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +65,7 @@ fn trimmed_non_empty(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// The primary sink: batches to PostHog. Best-effort — any non-2xx response,
+/// The primary sink: batches to `PostHog`. Best-effort — any non-2xx response,
 /// transport error, or timeout drops the batch (offline-safe, no retries).
 /// A 401 is terminal instead of per-batch: bad or missing-scope credentials
 /// cannot succeed on a later batch, so the sink stops requesting until the
@@ -86,6 +86,10 @@ impl PostHogSink {
     }
 
     /// Sink with an explicit request timeout (tests).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reqwest HTTP client (rustls backend) cannot be built.
     pub fn with_timeout(endpoint: &PostHogEndpoint, timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)

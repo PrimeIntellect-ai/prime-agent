@@ -101,6 +101,11 @@ impl AgentSessionEngine {
 
     /// Register the engine's own arc (the weak the in-run continuation hook
     /// upgrades): the worker calls this once after wrapping the engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the self-weak mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn register_arc(self: &Arc<Self>) {
         *self.self_weak.lock().expect("engine self weak lock") = Some(Arc::downgrade(self));
     }
@@ -321,6 +326,11 @@ impl AgentSessionEngine {
 
     /// Wire the worker's autonomous admission sink: the turn loop hands the
     /// held threshold continuation to it at the settled boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the admission mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_autonomous_admission(&self, sink: crate::agent_engine::AutonomousAdmission) {
         *self
             .autonomous_admission
@@ -330,6 +340,11 @@ impl AgentSessionEngine {
 
     /// Wire the worker's queue purge for held autonomous continuations (the
     /// `/autonomous off` withdrawal).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the queue-purge mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_autonomous_queue_purge(&self, purge: std::sync::Arc<dyn Fn() + Send + Sync>) {
         *self
             .autonomous_queue_purge
@@ -343,6 +358,12 @@ impl AgentSessionEngine {
     /// `_handleAutonomousSlashCommand`'s off branch drops the queued and
     /// owed continuations; the on branch resets the run state the same
     /// way).
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the held-continuation
+    /// or the queue-purge lock, after a holder panicked while holding
+    /// it).
     pub fn clear_autonomous_continuations(&self) {
         *self
             .held_autonomous_continuation

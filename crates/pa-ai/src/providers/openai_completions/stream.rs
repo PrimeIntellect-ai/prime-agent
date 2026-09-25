@@ -1,6 +1,6 @@
-//! OpenAI Completions streaming core.
+//! `OpenAI` Completions streaming core.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
-//! chunk-driven block state (text/thinking/toolcalls/reasoning_details), SSE
+//! chunk-driven block state (`text/thinking/toolcalls/reasoning_details`), SSE
 //! decoding, and the provider stream function.
 
 use std::collections::HashMap;

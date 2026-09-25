@@ -18,7 +18,7 @@ use crate::JsonMap;
 // Git context
 // ---------------------------------------------------------------------------
 
-/// Git repository identity captured alongside session headers and git_state entries.
+/// Git repository identity captured alongside session headers and `git_state` entries.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitContext {

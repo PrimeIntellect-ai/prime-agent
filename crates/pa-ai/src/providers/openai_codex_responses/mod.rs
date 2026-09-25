@@ -1,6 +1,6 @@
-//! OpenAI Codex Responses streaming provider (`openai-codex-responses`).
+//! `OpenAI` Codex Responses streaming provider (`openai-codex-responses`).
 //!
-//! Port of `packages/ai/src/providers/openai-codex-responses.ts`: the ChatGPT
+//! Port of `packages/ai/src/providers/openai-codex-responses.ts`: the `ChatGPT`
 //! backend Codex endpoint over WebSocket (session-cached connections with
 //! connection-anchored continuation deltas, SSE fallback on transport
 //! failures) and plain SSE, JWT `chatgpt-account-id` extraction, usage-limit
@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_abc")));
     }
 
-    /// Degenerate wire shape: function_call items without an `fc_` item id.
+    /// Degenerate wire shape: `function_call` items without an `fc_` item id.
     /// The recorded tool call id carries an empty item segment; the
     /// follow-up request must omit the `id` key (never `id: ""`).
     #[test]

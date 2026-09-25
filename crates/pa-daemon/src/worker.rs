@@ -132,6 +132,17 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Read the worker spawn env pair into a config: the socket path,
+    /// the authentication token, the root active session id, and the
+    /// agent dir; the script, the telemetry-disabled flag, the supervisor
+    /// socket path, and the recovery journal path all default when unset
+    /// or unreadable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required env pair is missing (the socket
+    /// path, the authentication token, or the root active session id),
+    /// or the agent dir cannot be resolved.
     pub fn from_env() -> Result<Self> {
         let socket_path: PathBuf = std::env::var_os(WORKER_SOCKET_ENV)
             .map(PathBuf::from)
@@ -325,7 +336,7 @@ pub(crate) struct QueuedItem {
     /// The original agent-message text when this item came from an
     /// `agent_message` delivery (the marker `agent_messages_clear` /
     /// `agent_messages_pause` remove queued items by); `None` for items a
-    /// client queued directly (steer/follow_up).
+    /// client queued directly (`steer/follow_up`).
     pub(crate) agent_message: Option<String>,
     /// The scheduler's queue key (TS `followUpQueueKey`): a heartbeat's
     /// queued fire carries `heartbeat:<id>`, and a later fire replaces the
@@ -875,6 +886,14 @@ fn sender_parent_edge_is(
 }
 
 impl Worker {
+    /// Build the worker: the session core, the engine, and the sink and
+    /// hook wiring between them.
+    ///
+    /// # Panics
+    ///
+    /// The closures wired here (the queue purge and the session-input
+    /// probe) panic on a poisoned session-core mutex (a holder panicked
+    /// while holding it).
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
         let supervisor_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1298,6 +1317,17 @@ impl Worker {
     }
 
     /// Serve worker connections until the process is asked to shut down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovery journal cannot be opened, the
+    /// socket path cannot be prepared, the worker socket cannot be
+    /// bound, or an accept fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the recovery mutex is poisoned (a holder panicked
+    /// while holding it).
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
             &self.config.recovery_journal_path,
@@ -3456,8 +3486,8 @@ impl Worker {
     /// Bind the live session's schedule catalog (TS `rebindCronJobsToState`):
     /// register the session's artifact partition, rebind the stored jobs onto
     /// the live ids, and start (or wake) the scheduler. Runs at create and
-    /// after every replacement swap (new_session / switch_session /
-    /// import_jsonl / fork) - the jobs follow the live session onto the
+    /// after every replacement swap (`new_session` / `switch_session` /
+    /// `import_jsonl` / fork) - the jobs follow the live session onto the
     /// moved-to file, exactly like the TS rebind on the runtime swap.
     pub(crate) async fn bind_scheduled_jobs(&self) {
         let binding = {
@@ -4364,7 +4394,7 @@ impl Worker {
         self.emit_worker_event(json!({ "type": "message_end", "message": message }));
     }
 
-    /// Sequence and broadcast one session_event for the queue projection.
+    /// Sequence and broadcast one `session_event` for the queue projection.
     pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
         let mut core = self.core.lock().unwrap();
         // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
@@ -5936,6 +5966,12 @@ impl TurnRunner {
 }
 
 /// Entry point for the worker process.
+///
+/// # Errors
+///
+/// Returns an error when the worker role env is missing (it must be
+/// `WORKER_ROLE_ENV=1`), the worker env pair cannot be read, or the
+/// serve loop fails.
 pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
@@ -7486,7 +7522,7 @@ mod tests {
     /// completion surface) settles the goal, and the completion's
     /// boundary mints nothing more. The completing cell needs a
     /// bootable kernel: a sandbox gate run must provide uv and
-    /// PI_PACKAGE_DIR at the checkout (the guard inside names the
+    /// `PI_PACKAGE_DIR` at the checkout (the guard inside names the
     /// recipe when the cell fails instead of letting the loop drain
     /// the faux script into a misleading count mismatch).
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
@@ -7635,7 +7671,7 @@ mod tests {
     /// gap: TS broadcasts AND persists it, the gate used to drop it): a
     /// turn aborted mid-provider-wait settles on its aborted assistant
     /// row, and the gate forwards the row — the attached client sees the
-    /// row's message_start/message_end pair (stopReason "aborted", the
+    /// row's `message_start/message_end` pair (stopReason "aborted", the
     /// abort error, EMPTY usage) and the session file holds the same
     /// row — while the active goal's accounting skips it (the state the
     /// goal-start turn left is unchanged after the abort).
@@ -10329,7 +10365,7 @@ mod turn_stream_tests {
 
     /// An instant burst (the provider outruns the tick entirely) parks one
     /// snapshot at a time; the settle frame flushes the final snapshot
-    /// before message_end, so the client sees the full message without a
+    /// before `message_end`, so the client sees the full message without a
     /// tick waiting period and nothing lands out of order.
     #[tokio::test]
     async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {

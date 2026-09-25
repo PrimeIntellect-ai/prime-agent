@@ -17,6 +17,11 @@ pub struct ShellConfig {
 }
 
 /// Resolve the shell to run commands with, honoring an explicit custom path.
+///
+/// # Errors
+///
+/// Returns an error when the explicit custom shell path does not exist;
+/// built-in resolution never fails (a missing bash falls back to `sh`).
 #[cfg(unix)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {

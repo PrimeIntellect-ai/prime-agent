@@ -64,7 +64,7 @@ pub fn rewrite_drive_path(url: &str) -> String {
 /// the session cwd), so every non-fragment target that parses is emitted
 /// through `new URL(target, baseUrl).href`: absolute urls canonicalize
 /// (a bare host gains its `/`, the scheme and host lower-case), drive
-/// paths re-canonicalize their `file:///` form. WhatWG parsing with no
+/// paths re-canonicalize their `file:///` form. `WhatWG` parsing with no
 /// base only succeeds for absolute urls, so relative targets pass
 /// through raw here - the one documented gap: resolving them against the
 /// session cwd needs cwd plumbing the markdown pipeline does not carry,
@@ -261,6 +261,12 @@ pub fn strip_osc8(line: &mut Line) {
 
 /// Remove OSC 8 open/close sequences from a string, preserving every other
 /// escape sequence (OSC 133 zone markers ride in the same contents).
+///
+/// # Panics
+///
+/// Cannot panic for any valid `str`: the `expect` guards the scanner
+/// invariant that the loop only ever advances by whole escape sequences
+/// and chars, so a char always starts at the visited index.
 pub fn strip_osc8_content(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;

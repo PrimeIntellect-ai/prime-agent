@@ -42,7 +42,7 @@ fn read_entries_sorted(dir: &Path) -> Vec<DirEntry> {
     entries
 }
 
-/// Follow symlinks: classify an entry as (is_dir, is_file); unreadable
+/// Follow symlinks: classify an entry as (`is_dir`, `is_file`); unreadable
 /// symlinks classify as nothing.
 fn classify(path: &Path) -> (bool, bool) {
     match std::fs::metadata(path) {

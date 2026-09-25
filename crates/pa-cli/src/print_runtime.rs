@@ -504,7 +504,7 @@ fn thinking_block_text(
         .unwrap_or_default()
 }
 
-/// Serialize one loop event to the TS session_event wire shape.
+/// Serialize one loop event to the TS `session_event` wire shape.
 fn agent_event_json(event: &pa_agent::types::AgentEvent) -> Option<String> {
     use pa_agent::types::AgentEvent;
     fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {

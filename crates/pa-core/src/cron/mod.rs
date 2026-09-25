@@ -119,6 +119,13 @@ pub struct HeartbeatSessionActivity {
 
 /// Parse a schedule expression into a schedule plus its first run time.
 /// `now_millis` is the epoch time in milliseconds.
+///
+/// # Errors
+///
+/// Returns an error when the trimmed expression is empty, when an
+/// `in`/`every`/`each` delay cannot be parsed, when an `at <ISO date>` one-shot
+/// is invalid or not in the future, or when the expression is not a valid cron
+/// schedule with a next run time within one year.
 pub fn parse_agent_cron_schedule(
     input: &str,
     now_millis: u64,
@@ -259,6 +266,12 @@ pub fn normalize_heartbeat_schedule(input: Option<&str>) -> String {
     text.to_string()
 }
 
+/// Normalize an optional heartbeat delivery mode string.
+///
+/// # Errors
+///
+/// Returns an error when `value` is `Some` but is neither `"steer"` nor
+/// `"follow_up"`.
 pub fn normalize_heartbeat_delivery_mode(
     value: Option<&str>,
 ) -> anyhow::Result<Option<DeliveryMode>> {
@@ -280,6 +293,12 @@ pub fn resolve_heartbeat_streaming_behavior(delivery_mode: Option<DeliveryMode>)
 }
 
 /// Parse a `/heartbeat ...` command body.
+///
+/// # Errors
+///
+/// Returns an error when the command body is malformed: an unknown delivery
+/// mode is given, an `--every` option is used without an interval value, or
+/// the command ends with no instruction to set.
 pub fn parse_heartbeat_command(input: &str) -> anyhow::Result<ParsedHeartbeatCommand> {
     let text = input
         .strip_prefix("/heartbeat")
@@ -550,6 +569,12 @@ pub fn should_defer_heartbeat_cron_job(
 }
 
 /// Next run time for a schedule after `after_millis`.
+///
+/// # Errors
+///
+/// Returns an error when an interval schedule has no interval or a zero
+/// interval, or when a cron expression is invalid or does not match within
+/// one year.
 pub fn next_run_at_for_schedule(
     schedule: &AgentCronSchedule,
     after_millis: u64,

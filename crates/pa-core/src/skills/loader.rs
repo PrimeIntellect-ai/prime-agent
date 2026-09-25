@@ -23,7 +23,7 @@ pub struct LoadSkillsResult {
     pub diagnostics: Vec<ResourceDiagnostic>,
 }
 
-/// Agent-side config dir name (TS CONFIG_DIR_NAME).
+/// Agent-side config dir name (TS `CONFIG_DIR_NAME`).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 fn normalize_path(input: &str) -> PathBuf {

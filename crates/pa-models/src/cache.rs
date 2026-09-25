@@ -136,6 +136,11 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     /// Serve the last-good snapshot for `scope`, loading and re-validating the
     /// disk snapshot on first access. A scope change discards the previous
     /// account's view entirely.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock).
     pub fn get(&self, scope: &str) -> Option<T> {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() == Some(scope) {
@@ -163,6 +168,11 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
 
     /// Drop the snapshot for `scope` (401/403 revocation); other scopes keep
     /// their own snapshots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock).
     pub fn clear(&self, scope: &str) {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() != Some(scope) {
@@ -180,6 +190,12 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     /// Refresh the snapshot for `scope`: coalesces with an in-flight refresh,
     /// skips fetches attempted less than an hour ago unless forced, and
     /// returns the last-good value on every failure path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock). In debug builds, also panics if a refresh
+    /// settles its shared result twice, which the current code never does.
     pub async fn refresh(&self, scope: &str, opts: RefreshOptions) -> Option<T> {
         enum Gate<T> {
             Coalesced(Arc<InFlight<T>>),

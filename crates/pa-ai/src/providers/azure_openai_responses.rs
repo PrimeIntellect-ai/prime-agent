@@ -1,4 +1,4 @@
-//! Azure OpenAI Responses API streaming provider.
+//! Azure `OpenAI` Responses API streaming provider.
 //! Port of `packages/ai/src/providers/azure-openai-responses.ts`: deployment
 //! name resolution (options/env map), base-URL normalization with the
 //! /openai/v1 path, api-version query parameter, and the shared Responses

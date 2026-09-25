@@ -1,4 +1,4 @@
-//! OpenAI Completions request params assembly.
+//! `OpenAI` Completions request params assembly.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`.
 
 use std::collections::HashMap;

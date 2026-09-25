@@ -703,7 +703,7 @@ impl SettingsMenu {
         lines
     }
 
-    /// The search field row (the SearchInput's value + cursor).
+    /// The search field row (the `SearchInput`'s value + cursor).
     fn search_line(&self, theme: &Theme, width: usize) -> crate::Line {
         let value = self.search.value();
         let cursor = self.search.cursor();

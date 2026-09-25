@@ -130,6 +130,11 @@ pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) ->
 }
 
 /// The roster entries that descend from `parent`.
+///
+/// # Panics
+///
+/// Cannot panic: the `expect` re-reads the same `"summary"` key the
+/// filter kept, so it always resolves on the collected entries.
 pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
     let with_summaries: Vec<&'a Value> = roster
         .iter()

@@ -58,6 +58,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let exit = key_display(kb, "app.exit");
     let select_model = key_display(kb, "app.model.select");
     let expand_tools = key_display(kb, "app.tools.expand");
+    let condensed_runs = key_display(kb, "app.transcript.runs");
     let focus_subagents = key_display(kb, "app.subagents.focus");
     let external_editor = key_display(kb, "app.editor.external");
     let prompt_stash = key_display(kb, "app.prompt.stash");
@@ -134,7 +135,18 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
         r#"| `{exit}` | Exit (when editor is empty) |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |
-| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
+"#
+    ));
+    // The condensed runs pane has no fixed affordance when the user
+    // disabled its binding (an empty key renders as a blank column, like
+    // the interrupted row above).
+    if !condensed_runs.is_empty() {
+        hotkeys.push_str(&format!(
+            "| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |\n"
+        ));
+    }
+    hotkeys.push_str(&format!(
+        r#"| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
 | `{follow_up}` | Queue follow-up message |

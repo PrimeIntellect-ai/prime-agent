@@ -1,7 +1,7 @@
 //! Tool-argument validation, the TS `validateToolArguments` contract
 //! (`packages/ai/src/utils/validation.ts`).
 //!
-//! The TS reference validates against TypeBox schemas with `Value.Convert`
+//! The TS reference validates against `TypeBox` schemas with `Value.Convert`
 //! (primitive coercion) plus a compiled validator. This port implements the
 //! JSON Schema subset that the product's tool schemas use: `type` (including
 //! type arrays), `properties`, `required`, `items`, `enum`, `const`,
@@ -18,6 +18,11 @@ use serde_json::Value;
 /// Mirrors TS `validateToolArguments(tool, toolCall)`: on failure it returns
 /// the preformatted error message (TS throws `Error(message)`); the caller
 /// wraps it into an error tool result.
+///
+/// # Errors
+///
+/// Returns the preformatted validation error message when the arguments fail
+/// the tool's schema checks (after coercion).
 pub fn validate_tool_arguments(
     tool_name: &str,
     schema: &Value,
@@ -55,7 +60,7 @@ fn schema_type(schema: &Value) -> Vec<&str> {
     }
 }
 
-/// Primitive coercion mirroring TypeBox `Value.Convert`: string values are
+/// Primitive coercion mirroring `TypeBox` `Value.Convert`: string values are
 /// parsed into number/boolean when the schema requests it, and number/boolean
 /// values are stringified when the schema requests a string.
 fn coerce(schema: &Value, value: &mut Value) {

@@ -6,14 +6,14 @@
 //! snapshot replay copies.
 //!
 //! Method: an in-process mock supervisor speaks the same JSONL wire protocol
-//! (daemon_hello, response envelopes, streamed session events) and serves
+//! (`daemon_hello`, response envelopes, streamed session events) and serves
 //! one long session: many turns, each with streamed assistant deltas, tool
 //! calls with large results, and turn completion. A background sampler
 //! reads `/proc/self/statm` while the interactive loop runs; the assertion
 //! is a plateau: resident memory in the last quarter of the run must sit
 //! within a bounded delta of the warm-up state.
 //!
-//! Linux-only by construction (`/proc/self/statm`, AF_UNIX mock sockets);
+//! Linux-only by construction (`/proc/self/statm`, `AF_UNIX` mock sockets);
 //! the whole file compiles to nothing elsewhere (Windows RSS regression
 //! needs its own counter path; see docs/windows-readiness.md).
 #![cfg(unix)]

@@ -117,6 +117,14 @@ enum ManualOutcome {
 
 /// Run one interactive login for a server; the returned credential is
 /// ready to persist under `mcp:<server>`.
+///
+/// # Errors
+///
+/// Returns an error when the discovery document cannot be fetched, the
+/// server supports neither dynamic client registration nor a configured
+/// client id, client registration fails, the callback server cannot start,
+/// the authorization URL cannot be built, the pasted redirect is invalid or
+/// its state mismatches, or the token exchange fails.
 pub async fn mcp_login(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -282,6 +290,18 @@ pub async fn mcp_login(
 
 /// Refresh stored credentials. Every binding the login established must
 /// still hold; anything drifted requires a fresh login.
+///
+/// # Errors
+///
+/// Returns an error when the stored credential is not OAuth, is no longer
+/// bound to the same endpoint, resource, issuer, or token endpoint, carries
+/// no refresh token, when discovery fails or changed modes, or when the
+/// token exchange fails.
+///
+/// # Panics
+///
+/// The `expect` on the discovery resource is unreachable: the discovery-mode
+/// check above it already rejects a mode mismatch.
 pub async fn mcp_refresh_token(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,

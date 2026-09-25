@@ -121,6 +121,12 @@ pub struct PythonSkillRuntimeInfo {
     pub pyproject_path: PathBuf,
 }
 
+/// The runtime info for every Python skill in the list.
+///
+/// # Panics
+///
+/// The `expect` on the Python metadata cannot fire: the loader marks a
+/// skill `Python` only when its metadata was parsed.
 pub fn get_python_skill_runtime_info(skills: &[Skill]) -> Vec<PythonSkillRuntimeInfo> {
     skills
         .iter()
