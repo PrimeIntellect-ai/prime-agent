@@ -162,6 +162,12 @@ async fn fork_at(
     target_leaf: Option<String>,
     selected_text: Option<String>,
 ) -> Result<ResponseData, String> {
+    // One replacement lease across the whole flow: the fork's reads,
+    // branch, and swap serialize against a concurrent
+    // `new_session`/`switch_session` (TS performs the read/branch
+    // synchronously before its async teardown, so nothing can interleave
+    // between them).
+    let lease = state.session.replacement_lease().await;
     let persisted = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
@@ -195,6 +201,12 @@ async fn fork_at(
             .ok_or_else(|| "Persisted session is missing a session file".to_string())?
             .to_path_buf();
         let session_dir = manager.get_session_dir().to_path_buf();
+        // The source session's own cwd: a session opened from another
+        // project keeps resolving its session-scoped work against that
+        // project's directory (TS's runtime cwd follows a switched
+        // session; the fresh fork records the source's, not the CLI
+        // startup cwd).
+        let source_cwd = manager.get_cwd().display().to_string();
         drop(manager);
         drop(handle);
         let store = crate::session_store::SessionFile::open(&session_file)
@@ -208,7 +220,7 @@ async fn fork_at(
             None => {
                 // Fork at the root: a fresh session under the source.
                 let mut forked = crate::session_store::SessionFile::create(
-                    &state.cwd.display().to_string(),
+                    &source_cwd,
                     session_file.to_str(),
                     0,
                 );
@@ -224,10 +236,11 @@ async fn fork_at(
     };
     state
         .session
-        .replace(RpcEngineRequest::Open {
+        .replace_locked(RpcEngineRequest::Open {
             session_path: forked_path,
         })
         .await?;
+    drop(lease);
     super::commands::resume_pump(state);
     let mut data = json!({ "cancelled": false });
     if let Some(text) = selected_text {

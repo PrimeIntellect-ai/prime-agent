@@ -19,12 +19,18 @@ use pa_types::ai::Model;
 use super::LineWriter;
 
 /// One assembled engine plus the live provider target its stream reads
-/// (`set_model` swaps the target without rebuilding the session).
+/// (`set_model` swaps the target without rebuilding the session), and
+/// the runtime session lease the factory acquired for the opened file
+/// (dropped with the handle on replacement — the old session's lease
+/// releases exactly when the engine that owned it goes away).
 pub struct RpcEngineHandle {
     pub engine: Arc<SessionEngine>,
     pub model: Model,
     pub api_key: Option<String>,
     pub provider_target: Arc<std::sync::RwLock<Option<ProviderTarget>>>,
+    /// The cross-process ownership lease on the opened session file
+    /// (`None` for fresh/in-memory sessions the factory created itself).
+    pub session_lease: Option<crate::lease::SessionLease>,
 }
 
 /// A whole-session replacement request (TS `runtimeHost.newSession` /
@@ -115,12 +121,13 @@ impl RpcSession {
     /// The prompt response settled: disarm the buffer and emit its frames
     /// in order (TS `promptResponsePending = false` +
     /// `flushConnectionEvents`, one step so no event can slip between
-    /// them). Events arriving after this write directly again.
+    /// them). The buffer cell stays locked until the buffered frames are
+    /// enqueued, so a concurrent event can never write itself ahead of
+    /// the older buffered frames. Events arriving after this write
+    /// directly again.
     pub async fn flush_connection_events(&self) {
-        let buffered: Vec<serde_json::Value> = {
-            let mut pending_outputs = self.pending_outputs.lock().await;
-            pending_outputs.take().unwrap_or_default()
-        };
+        let mut pending_outputs = self.pending_outputs.lock().await;
+        let buffered = pending_outputs.take().unwrap_or_default();
         for event in buffered {
             self.writer.write(event);
         }
@@ -177,21 +184,22 @@ impl RpcSession {
         *self.subscription.lock().await = Some(subscription);
     }
 
-    /// Whole-session replacement (TS `buildAndApplyReplacement`'s
-    /// build-then-apply flow): build the replacement through the factory
-    /// first, then unsubscribe the old feed, wait the running turn out,
-    /// dispose the old kernel, swap the slot, and resubscribe.
-    ///
-    /// # Errors
-    ///
-    /// Returns the factory's assembly error when the replacement engine
-    /// cannot be built.
-    pub async fn replace(&self, request: RpcEngineRequest) -> Result<(), String> {
+    /// Acquire the whole-session replacement lease (TS
+    /// `acquireReplacementLease`): one replacement flow at a time. The
+    /// fork path holds it across its read/branch/swap so a concurrent
+    /// `new_session`/`switch_session` cannot interleave between them
+    /// (TS's synchronous pre-teardown section has the same effect).
+    pub async fn replacement_lease(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.replacement.lock().await
+    }
+
+    /// Whole-session replacement with the lease already held by the
+    /// caller (`replacement_lease` / `replace` acquire it).
+    pub async fn replace_locked(&self, request: RpcEngineRequest) -> Result<(), String> {
         let factory = self
             .factory
             .clone()
             .ok_or_else(|| "Session switching is not wired for this RPC transport".to_string())?;
-        let _replacement = self.replacement.lock().await;
         // Build the replacement BEFORE any teardown: a failed assembly
         // must leave the live session serving (the old kernel keeps its
         // subscription and turns; nothing was disposed). The swap below
@@ -203,12 +211,29 @@ impl RpcSession {
         let old = self.handle.read().await.engine.clone();
         old.session.agent().wait_for_idle().await;
         old.dispose_kernel().await;
+        // The write guard waits out every live reader (a prompt/steer
+        // handler holding the handle), so the swap lands only once the
+        // in-flight handle holders finish.
         *self.handle.write().await = replacement;
         // Retire the pumps spawned against the replaced engine so queued
         // input never delivers to the disposed session.
         self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         self.resubscribe().await;
         Ok(())
+    }
+
+    /// Whole-session replacement (TS `buildAndApplyReplacement`'s
+    /// build-then-apply flow): build the replacement through the factory
+    /// first, then unsubscribe the old feed, wait the running turn out,
+    /// dispose the old kernel, swap the slot, and resubscribe.
+    ///
+    /// # Errors
+    ///
+    /// Returns the factory's assembly error when the replacement engine
+    /// cannot be built.
+    pub async fn replace(&self, request: RpcEngineRequest) -> Result<(), String> {
+        let _lease = self.replacement.lock().await;
+        self.replace_locked(request).await
     }
 
     /// The stdin-close settle (TS `onInputEnd` -> `waitForIdle` ->

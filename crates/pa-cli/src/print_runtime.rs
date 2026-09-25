@@ -240,6 +240,10 @@ fn rpc_engine_factory(
         options.session.continue_recent = false;
         options.session.fork = None;
         Box::pin(async move {
+            // The runtime lease an `Open` acquired for the target file: it
+            // rides the handle (dropping with the engine on the next
+            // replacement, exactly when the old session stops writing).
+            let mut opened_lease = None;
             let manager = match &request {
                 pa_daemon::rpc::session::RpcEngineRequest::New { parent_session } => {
                     let session_dir = replacement_session_dir(&options);
@@ -265,17 +269,29 @@ fn rpc_engine_factory(
                 pa_daemon::rpc::session::RpcEngineRequest::Open { session_path } => {
                     let session_dir = replacement_session_dir(&options);
                     let cwd = options.config.cwd.clone();
-                    open_session_file(session_path, &session_dir, &cwd, None)?
+                    // The ownership guard every in-process open applies:
+                    // refuse a file a live daemon worker or another
+                    // process already hosts (a second writer over a
+                    // persisted history), and hold its runtime lease for
+                    // the opened session.
+                    let lease =
+                        session_open_guard(options.daemon_socket.as_deref(), session_path)?;
+                    // A failed open drops the lease (its guard releases
+                    // with the value), so the refusal/parse errors never
+                    // leave an orphaned hold behind.
+                    let manager = open_session_file(session_path, &session_dir, &cwd, None)?;
+                    opened_lease = Some(lease);
+                    manager
                 }
             };
-            if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-                return build_faux_engine_with(&options, &script, Some(manager), "rpc")
-                    .await
-                    .map(pa_daemon::rpc::session::RpcEngineHandle::from);
-            }
-            build_headless_engine_with(&options, Some(manager), "rpc")
-                .await
-                .map(pa_daemon::rpc::session::RpcEngineHandle::from)
+            let engine = if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
+                build_faux_engine_with(&options, &script, Some(manager), "rpc").await?
+            } else {
+                build_headless_engine_with(&options, Some(manager), "rpc").await?
+            };
+            let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
+            handle.session_lease = opened_lease;
+            Ok(handle)
         })
     })
 }
@@ -299,6 +315,7 @@ impl From<HeadlessEngine> for pa_daemon::rpc::session::RpcEngineHandle {
             model: parts.model,
             api_key: parts.api_key,
             provider_target: parts.provider_target,
+            session_lease: None,
         }
     }
 }
@@ -679,15 +696,17 @@ fn build_session_manager(
 /// explicit `--cwd` override wins, else the header's cwd, falling back to the
 /// process cwd for unreadable or new files. Resumed sessions keep the
 /// missing-cwd guard from main.ts.
-/// Guard the TS print path: `-c`/`-r` refuse to open a session file that a
-/// live daemon worker already hosts (`SessionAlreadyActiveError`, raised by
-/// the TS supervisor's create ownership check). The Rust print path runs
-/// in-process, so the guard probes the daemon's live roster first; when no
-/// daemon answers, the open proceeds like a TS run without a daemon.
-fn assert_session_not_active_in_daemon(
+/// Guard an in-process open of a persisted session file: probe the
+/// daemon's live roster (`-c`/`-r` refuse a file a live daemon worker
+/// already hosts, `SessionAlreadyActiveError`), then acquire the runtime
+/// lease. Returns the HELD lease — the caller owns its lifetime (the
+/// one-shot print paths forget it for the process lifetime; a
+/// long-lived connection holds it per session and drops it with the
+/// engine it guards).
+fn session_open_guard(
     socket_path: Option<&str>,
     session_path: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<pa_daemon::lease::SessionLease, String> {
     let socket = crate::interactive_mode::resolve_socket_path(socket_path);
     if let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) {
         let list = client
@@ -752,14 +771,12 @@ fn assert_session_not_active_in_daemon(
     // (or another CLI) acquires the file's runtime lease after the check
     // and before this in-process open - two writers on one file. The
     // acquire is atomic against the shared lease table: a live foreign
-    // holder answers with the session-hold refusal, and a successful
-    // acquire is held for the process lifetime (the one-shot print run
-    // IS the writer; `forget` keeps the lease armed until the process
-    // exits, whose dead pid the liveness probes treat as released).
+    // holder answers with the session-hold refusal, and the returned
+    // lease is the caller's to hold (the one-shot print run IS the
+    // writer and forgets it for the process lifetime, whose dead pid
+    // the liveness probes treat as released).
     match pa_daemon::lease::acquire_runtime_session_lease(session_path, &agent_dir) {
-        Ok(lease) => {
-            std::mem::forget(lease);
-        }
+        Ok(lease) => Ok(lease),
         Err(error) => {
             let Some(active) = error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
             else {
@@ -769,15 +786,24 @@ fn assert_session_not_active_in_daemon(
                     "could not verify the session file is not held: {error:#}"
                 ));
             };
-            return Err(pa_daemon::hold_refusal::refusal_message(
+            Err(pa_daemon::hold_refusal::refusal_message(
                 &pa_daemon::hold_refusal::HoldIdentity {
                     pid: active.holder_pid,
                     active_session_id: active.active_session_id.clone(),
                 },
                 Some(session_path),
-            ));
+            ))
         }
     }
+}
+
+/// The one-shot open paths (`-c`/`-r` resolution) hold the opened
+/// session's runtime lease for the process lifetime.
+fn assert_session_not_active_in_daemon(
+    socket_path: Option<&str>,
+    session_path: &std::path::Path,
+) -> Result<(), String> {
+    std::mem::forget(session_open_guard(socket_path, session_path)?);
     Ok(())
 }
 

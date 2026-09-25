@@ -4,8 +4,8 @@
 //! delivers the agent's queues turn by turn (TS `prompt`/`steer`/
 //! `followUp` over `_pumpSessionInputs`).
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -55,8 +55,13 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     let PromptOutcome::SessionCommand(command) = admission else {
         return Ok(ResponseData::Absent);
     };
-    drop(handle);
+    // The handle guard stays held through the admitted session command's
+    // execution: a concurrent whole-session replacement (whose swap
+    // waits on the write guard) can never dispose the kernel mid-command
+    // (TS runs the admitted command before the next queued line can
+    // start a replacement).
     run_session_command(state.as_ref(), engine, &command).await?;
+    drop(handle);
     Ok(ResponseData::Absent)
 }
 
@@ -100,9 +105,7 @@ async fn run_session_command(
                     state.compacting.store(false, Ordering::SeqCst);
                     state
                         .session
-                        .write_connection_output(compaction_frame(
-                            "compaction_end", None, None,
-                        ))
+                        .write_connection_output(compaction_frame("compaction_end", None, None))
                         .await;
                 }
                 return Err(format!("{error:#}"));

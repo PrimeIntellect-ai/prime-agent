@@ -789,7 +789,7 @@ impl SessionEngine {
                 provider: model.provider.clone(),
                 input: model.input.clone(),
             },
-            model.context_window,
+            (model.context_window > 0).then_some(model.context_window),
         );
     }
 
