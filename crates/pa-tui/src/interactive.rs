@@ -479,6 +479,10 @@ enum PaneOutcome {
     /// onboarding exit keys (they arrive as a decision, not a drive
     /// outcome — the pane's key loop reports them like any other key).
     Decision(crate::onboarding::OnboardingDecision),
+    /// The input channel closed under the pane (the headless plan is done,
+    /// the terminal reader is gone): the flow ends without an answer and
+    /// the marker stays unset — the next launch re-runs it.
+    InputClosed,
     /// The flow settled; `Err` is a crashed task (the flow's outcome
     /// reports the same error surface a failed login does).
     Flow(Result<crate::provider_auth::ProviderAuthOutcome, tokio::task::JoinError>),
@@ -525,7 +529,13 @@ async fn drive_onboarding_pane(
         };
         tokio::select! {
             maybe_input = drive.ui_rx.recv() => {
-                if let Some(UiInput::Key(key)) = maybe_input {
+                // A closed input channel ends the pane (the headless plan
+                // is done, the terminal reader is gone): without this arm
+                // the always-ready `recv()` spins the redraw loop hot.
+                let Some(input) = maybe_input else {
+                    return Ok((pane, PaneOutcome::InputClosed));
+                };
+                if let UiInput::Key(key) = input {
                     let Some(key_id) = crate::keys::key_event_to_id(&key) else {
                         screen = pane;
                         continue;
@@ -538,9 +548,18 @@ async fn drive_onboarding_pane(
                         drive.exit_guard.note_ctrl_c_handled();
                     }
                     if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
+                        // A decision tears the pane down mid-drive: abort
+                        // a still-running login flow with it (TS the
+                        // dialog's abort signal) so a quit never leaves a
+                        // detached task writing credentials in the
+                        // background.
+                        if let Some(task) = flow.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
                         return Ok((pane, PaneOutcome::Decision(decision)));
                     }
-                } else if let Some(UiInput::Paste(text)) = maybe_input {
+                } else if let UiInput::Paste(text) = input {
                     pane.handle_paste(&text);
                 }
             }
@@ -606,6 +625,7 @@ async fn run_onboarding_phase(
         let screen = crate::onboarding::OnboardingScreen::new();
         let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
                 // `Share` opts in; `Not now` keeps traces off (TS
@@ -647,6 +667,7 @@ async fn run_onboarding_phase(
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
+        PaneOutcome::InputClosed => return Ok(false),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
         PaneOutcome::Decision(
@@ -697,6 +718,7 @@ async fn run_onboarding_phase(
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
+        PaneOutcome::InputClosed => return Ok(false),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Flow(result) => result.unwrap_or_else(|_| {
             crate::provider_auth::ProviderAuthOutcome::Error(
@@ -775,6 +797,7 @@ async fn run_onboarding_phase(
             drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         screen = picked_screen;
         let pick = match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
             // Continue or Esc ends the step (TS settle(undefined) ->
             // return).
@@ -817,7 +840,12 @@ async fn run_onboarding_phase(
                     match panel
                         .paste_prompt(
                             crate::onboarding_flow::API_KEY_PROMPT,
-                            crate::auth_panel::PasteStyle::Visible,
+                            // The field renders bullets, not the typed key:
+                            // a first-run screen is exactly the shared and
+                            // recorded surface a secret must never render on
+                            // (the token paste panel's rule; TS renders the
+                            // typed key — the port masks the secret).
+                            crate::auth_panel::PasteStyle::Masked,
                         )
                         .await
                     {
@@ -829,6 +857,7 @@ async fn run_onboarding_phase(
                     drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
                 screen = prompted_screen;
                 match outcome {
+                    PaneOutcome::InputClosed => return Ok(false),
                     PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
                         return Ok(true)
                     }
@@ -870,6 +899,7 @@ async fn run_onboarding_phase(
                             .await?;
                     screen = login_screen;
                     match outcome {
+                        PaneOutcome::InputClosed => return Ok(false),
                         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
                             return Ok(true)
                         }
@@ -910,6 +940,7 @@ async fn run_onboarding_phase(
         ));
         let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
                 // `Share` opts in; `Not now` keeps traces off. A cancel
