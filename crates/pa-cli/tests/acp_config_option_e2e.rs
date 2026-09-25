@@ -84,10 +84,6 @@ impl AcpChild {
         }
     }
 
-    fn spawn(args: &[&str], script: &serde_json::Value) -> AcpChild {
-        Self::spawn_with_models(args, script, None, &[])
-    }
-
     fn send(&mut self, frame: Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
