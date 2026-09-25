@@ -478,7 +478,7 @@ pub fn session_context_message_refs<'a>(
 
     // The owned build's `append_message`, by reference.
     let mut messages: Vec<ContextMessageRef<'_>> = Vec::new();
-    let append_ref = |entry: &FileEntry, target: &mut Vec<ContextMessageRef<'_>>| match entry {
+    let append_ref = |entry: &'a FileEntry, target: &mut Vec<ContextMessageRef<'a>>| match entry {
         FileEntry::Message { message, .. } => target.push(ContextMessageRef::Borrowed(message)),
         FileEntry::CustomMessage { payload, .. } => {
             target.push(ContextMessageRef::Converted(AgentMessage::Custom(
