@@ -42,7 +42,6 @@ pub fn digest_query_terms(
     goal_objective: Option<&str>,
     recent_texts_newest_first: &[String],
 ) -> HarnessQueryTerms {
-    let mut terms: HarnessQueryTerms = std::collections::HashMap::new();
     fn add_text(terms: &mut HarnessQueryTerms, text: &str, weight: f64) {
         for raw in harness_query_terms(text) {
             if terms.len() >= 48 && !terms.contains_key(&raw) {
@@ -51,6 +50,7 @@ pub fn digest_query_terms(
             terms.entry(raw).or_insert(weight);
         }
     }
+    let mut terms: HarnessQueryTerms = std::collections::HashMap::new();
     add_text(&mut terms, goal_objective.unwrap_or_default(), 3.0);
     let mut recency_weight = 2.0;
     for text in recent_texts_newest_first.iter().take(4) {
@@ -167,12 +167,12 @@ fn digest_from_frame(text: &str) -> Option<&str> {
 /// position - retained pre-compaction rows follow the compaction head, and
 /// out-of-context file entries must never suppress a cold-boundary delivery.
 pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
-    let mut latest: Option<(i64, &str)> = None;
     fn consider<'a>(latest: &mut Option<(i64, &'a str)>, timestamp: i64, digest: &'a str) {
         if latest.is_none_or(|(kept, _)| timestamp > kept) {
             *latest = Some((timestamp, digest));
         }
     }
+    let mut latest: Option<(i64, &str)> = None;
     for message in messages {
         match message {
             AgentMessage::Standard(Message::User(user)) => {
@@ -215,7 +215,7 @@ pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
                     digest,
                 );
             }
-            _ => continue,
+            _ => {}
         }
     }
     latest.map(|(_, digest)| digest.to_string())

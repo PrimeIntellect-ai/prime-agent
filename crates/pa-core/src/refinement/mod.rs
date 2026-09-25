@@ -194,7 +194,7 @@ pub fn merge_harness_states(
     let mut merged = empty_harness_state();
     merged.schema = global_state
         .schema
-        .max(local_state.map(|state| state.schema).unwrap_or(1));
+        .max(local_state.map_or(1, |state| state.schema));
     for kind in REFINEMENT_KINDS {
         let kind_key = kind_from_name(kind);
         let global_entries = &global_state.entries[&kind_key];
@@ -352,11 +352,11 @@ pub fn append_global_refinement(
     harness_state_dir: &Path,
     result: &RefinementResult,
 ) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
     std::fs::create_dir_all(harness_state_dir)?;
     let history_path = get_refinement_history_path(harness_state_dir);
     let mut line = serde_json::to_string(result)?;
     line.push('\n');
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -436,9 +436,7 @@ pub fn format_refinement_notice_body(result: &RefinementResult) -> String {
             .and_then(|entry| entry.scope)
             .or(result.scope)
             .unwrap_or(HarnessScope::Local);
-        let title = entry
-            .map(|entry| entry.title.as_str())
-            .unwrap_or(edit.id.as_str());
+        let title = entry.map_or(edit.id.as_str(), |entry| entry.title.as_str());
         let content = entry
             .map(|entry| entry.content.as_str())
             .unwrap_or_default();

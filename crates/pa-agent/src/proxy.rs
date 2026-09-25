@@ -354,7 +354,6 @@ fn process_proxy_event(
     proxy_event: ProxyAssistantMessageEvent,
     state: &mut ProxyReconstruction,
 ) -> Result<Option<AssistantMessageEvent>, String> {
-    let partial = &mut state.partial;
     fn ensure_content(partial: &mut AssistantMessage, index: usize) -> Result<usize, String> {
         if partial.content.len() < index + 1 {
             partial.content.resize(
@@ -367,6 +366,7 @@ fn process_proxy_event(
         }
         Ok(index)
     }
+    let partial = &mut state.partial;
 
     match proxy_event {
         ProxyAssistantMessageEvent::Start => Ok(Some(AssistantMessageEvent::Start {
@@ -577,10 +577,6 @@ pub fn repair_json(json: &str) -> String {
         if ch == '\\' {
             let next_char = chars.get(index + 1);
             match next_char {
-                None => {
-                    repaired.push_str("\\\\");
-                    index += 1;
-                }
                 Some('u') => {
                     let digits: String = chars[index + 2..(index + 6).min(chars.len())]
                         .iter()
@@ -598,7 +594,7 @@ pub fn repair_json(json: &str) -> String {
                     repaired.push(next);
                     index += 2;
                 }
-                Some(_) => {
+                None | Some(_) => {
                     repaired.push_str("\\\\");
                     index += 1;
                 }
@@ -618,10 +614,10 @@ pub fn repair_json(json: &str) -> String {
 fn parse_json_with_repair(json: &str) -> Result<serde_json::Value, ()> {
     serde_json::from_str(json).map_err(|_| ()).or_else(|_| {
         let repaired = repair_json(json);
-        if repaired != json {
-            serde_json::from_str(&repaired).map_err(|_| ())
-        } else {
+        if repaired == json {
             Err(())
+        } else {
+            serde_json::from_str(&repaired).map_err(|_| ())
         }
     })
 }
@@ -788,8 +784,7 @@ fn complete_partial_json(input: &str) -> Option<String> {
                     completed.push_str("null");
                 }
             }
-            (_, Expect::KeyOrValue) => {}
-            (_, Expect::AfterValue) => {}
+            (_, Expect::KeyOrValue | Expect::AfterValue) => {}
         }
         completed.push(match kind {
             ContainerKind::Object => '}',

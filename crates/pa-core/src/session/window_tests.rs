@@ -302,6 +302,7 @@ async fn context_and_hydration_match_full_reader() {
 
 #[tokio::test]
 async fn metadata_and_concurrent_disk_append_survive_hydration() {
+    use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.jsonl");
     let body = fixture();
@@ -314,7 +315,6 @@ async fn metadata_and_concurrent_disk_append_survive_hydration() {
         "x".repeat(CHUNK_BYTES * 3)
     );
     assert!(store.metadata_entries().is_empty());
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)

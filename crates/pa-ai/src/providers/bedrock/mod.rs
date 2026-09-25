@@ -165,9 +165,8 @@ fn bedrock_http_error(
         .as_ref()
         .and_then(|parsed| parsed.get("message").or_else(|| parsed.get("Message")))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
         // `decorateServiceException`: `message || Message || "UnknownError"`
-        .unwrap_or_else(|| "UnknownError".to_string());
+        .map_or_else(|| "UnknownError".to_string(), str::to_string);
     ProviderError::Http(ProviderHttpError {
         message: bedrock_exception_message(&exception_name, &message),
         // AWS SDK exceptions carry no `.status` field for the TS classifier
@@ -245,11 +244,7 @@ fn bedrock_proxy_configured() -> bool {
         "no_proxy",
     ]
     .iter()
-    .any(|key| {
-        std::env::var(key)
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
-    })
+    .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
 }
 
 /// Port of `streamBedrock`.
@@ -331,8 +326,7 @@ fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool 
     if options
         .region
         .as_deref()
-        .map(|region| region.to_lowercase().starts_with("us-gov-"))
-        .unwrap_or(false)
+        .is_some_and(|region| region.to_lowercase().starts_with("us-gov-"))
     {
         return true;
     }
@@ -454,8 +448,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -692,8 +685,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

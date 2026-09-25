@@ -230,9 +230,9 @@ impl TurnBoundaryRequests {
                     let scheduled = requests.compaction_scheduled().await;
                     let (tokens, window, percent) = match usage {
                         Some(usage) => (
-                            usage.tokens.map(Value::from).unwrap_or(Value::Null),
+                            usage.tokens.map_or(Value::Null, Value::from),
                             Value::from(usage.context_window),
-                            usage.percent.map(Value::from).unwrap_or(Value::Null),
+                            usage.percent.map_or(Value::Null, Value::from),
                         ),
                         None => (Value::Null, Value::Null, Value::Null),
                     };
@@ -517,9 +517,8 @@ pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Opti
             .iter()
             .filter_map(message_value)
             .find_map(|message| valid_assistant_usage(&message));
-        let usable = post_compaction_usage
-            .map(|usage| calculate_context_tokens(&usage) > 0)
-            .unwrap_or(false);
+        let usable =
+            post_compaction_usage.is_some_and(|usage| calculate_context_tokens(&usage) > 0);
         if !usable {
             return Some(ContextUsage {
                 tokens: None,

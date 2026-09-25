@@ -49,12 +49,12 @@ pub struct PerModelBlock {
 /// blocks are ignored. Everything outside blocks (the format documentation)
 /// is not prompt content.
 pub fn parse_per_model_blocks(map: &str) -> Vec<PerModelBlock> {
+    const OPEN: &str = "<!-- pa:model:";
+    const CLOSE: &str = "<!-- /pa:model -->";
     // Documentation comments (anything that is not a pa:model block) are
     // not prompt content; drop them before scanning for blocks so prose
     // examples cannot smuggle in markers.
     let map = strip_documentation_comments(map);
-    const OPEN: &str = "<!-- pa:model:";
-    const CLOSE: &str = "<!-- /pa:model -->";
     let mut blocks = Vec::new();
     let mut rest = map.as_str();
     while let Some(start) = rest.find(OPEN) {

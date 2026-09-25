@@ -55,8 +55,7 @@ impl Editor {
         let kind_slash = self
             .autocomplete
             .as_ref()
-            .map(|s| s.kind == Some(crate::autocomplete::SuggestionKind::SlashCommand))
-            .unwrap_or(false);
+            .is_some_and(|s| s.kind == Some(crate::autocomplete::SuggestionKind::SlashCommand));
         let default_slash = self.autocomplete.is_some()
             && self.autocomplete.as_ref().unwrap().prefix.starts_with('/');
         (kind_slash || default_slash)
@@ -235,11 +234,7 @@ impl Editor {
             return;
         }
         if self.autocomplete.is_some() {
-            let force = self
-                .autocomplete
-                .as_ref()
-                .map(|s| s.forced)
-                .unwrap_or(false);
+            let force = self.autocomplete.as_ref().is_some_and(|s| s.forced);
             self.request_autocomplete(force, false);
             return;
         }

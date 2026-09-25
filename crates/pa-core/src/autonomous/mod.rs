@@ -466,8 +466,7 @@ pub fn latest_autonomous_gate_attempt(status: &AgentAutonomousStatus) -> u64 {
     let from_failure = status
         .last_gate_failure
         .as_ref()
-        .map(|failure| failure.attempt)
-        .unwrap_or(0);
+        .map_or(0, |failure| failure.attempt);
     let from_attempts = status.gate_attempts.values().copied().max().unwrap_or(0);
     from_failure.max(from_attempts)
 }
@@ -494,8 +493,7 @@ pub fn describe_autonomous_limit(
         AutonomousLimitReason::TimeoutMs => {
             let elapsed = status
                 .started_at
-                .map(|started_at| now.saturating_sub(started_at))
-                .unwrap_or(0);
+                .map_or(0, |started_at| now.saturating_sub(started_at));
             format!("timeoutMs reached ({elapsed}/{})", status.limits.timeout_ms)
         }
     }

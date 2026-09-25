@@ -335,8 +335,7 @@ fn today() -> String {
     // UTC date in YYYY-MM-DD form; the prompt is date context only.
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() / 86_400)
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs() / 86_400);
     // Civil-from-days algorithm (Howard Hinnant).
     let z = days as i64 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

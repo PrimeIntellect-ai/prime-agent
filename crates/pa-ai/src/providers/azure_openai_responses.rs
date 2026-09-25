@@ -211,10 +211,10 @@ fn build_params(
                     .unwrap_or_else(|| effort.wire_name().to_string()),
                 None => "medium".to_string(),
             };
-            let summary = options
-                .reasoning_summary
-                .map(super::openai_responses_hooks::ReasoningSummary::as_str)
-                .unwrap_or("auto");
+            let summary = options.reasoning_summary.map_or(
+                "auto",
+                super::openai_responses_hooks::ReasoningSummary::as_str,
+            );
             params.insert(
                 "reasoning".into(),
                 json!({ "effort": effort, "summary": summary }),
@@ -223,8 +223,7 @@ fn build_params(
         } else {
             let off_null = model
                 .thinking_level_map_value(ModelThinkingLevel::Off)
-                .map(|value| value.is_none())
-                .unwrap_or(false);
+                .is_some_and(|value| value.is_none());
             if !off_null {
                 let off_value = model
                     .thinking_level_map_value(ModelThinkingLevel::Off)
@@ -419,8 +418,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

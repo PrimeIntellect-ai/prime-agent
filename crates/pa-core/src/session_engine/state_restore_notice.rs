@@ -42,15 +42,15 @@ fn now_millis() -> u64 {
 /// failed-names disclosure.
 pub fn notice_content(result: &RestoreResult) -> String {
     let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
-    if !result.restored.is_empty() {
+    if result.restored.is_empty() {
+        lines.push(
+            "Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.".to_string(),
+        );
+    } else {
         lines.push(format!(
             "Your Python kernel state was revived from your previous session. These names are available again: {}.",
             result.restored.join(", ")
         ));
-    } else {
-        lines.push(
-            "Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.".to_string(),
-        );
     }
     if !result.failed.is_empty() {
         lines.push(format!(

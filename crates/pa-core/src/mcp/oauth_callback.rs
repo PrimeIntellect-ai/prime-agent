@@ -135,17 +135,16 @@ impl CallbackServer {
 
 /// One browser request: read it, answer it, settle the login's waiter.
 async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShared) {
-    let request = match read_request_head(&mut stream).await {
-        Some(request) => request,
-        None => {
-            let _ = write_response(
-                &mut stream,
-                "400 Bad Request",
-                oauth_error_page("Prime Agent", "Callback route not found."),
-            )
-            .await;
-            return;
-        }
+    let request = if let Some(request) = read_request_head(&mut stream).await {
+        request
+    } else {
+        let _ = write_response(
+            &mut stream,
+            "400 Bad Request",
+            oauth_error_page("Prime Agent", "Callback route not found."),
+        )
+        .await;
+        return;
     };
     let target = request
         .lines()
@@ -165,7 +164,7 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
         .await;
         return;
     }
-    let query = target.split_once('?').map(|(_, query)| query).unwrap_or("");
+    let query = target.split_once('?').map_or("", |(_, query)| query);
     let code = query_param(query, "code");
     let state = query_param(query, "state");
     let error = query_param(query, "error");

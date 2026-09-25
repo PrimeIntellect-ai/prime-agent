@@ -165,8 +165,7 @@ fn latin_base(ch: char) -> Option<char> {
     // leaves them untouched.
     let lowercase = ch.to_lowercase().next().unwrap_or(ch);
     let base = match lowercase {
-        '\u{00E0}'..='\u{00E5}' | '\u{0101}' | '\u{0103}' | '\u{0105}' => 'a',
-        '\u{00E6}' => 'a', // NFKD splits ligatures; single letter suffices
+        '\u{00E0}'..='\u{00E5}' | '\u{0101}' | '\u{0103}' | '\u{0105}' | '\u{00E6}' => 'a', // NFKD splits ligatures; single letter suffices
         '\u{00E7}' | '\u{0107}' | '\u{0109}' | '\u{010B}' | '\u{010D}' => 'c',
         '\u{00E8}'..='\u{00EB}'
         | '\u{0113}'

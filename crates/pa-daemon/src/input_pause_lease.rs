@@ -146,23 +146,19 @@ impl Supervisor {
                 &format!("Session is detaching: {active_session_id}"),
             );
         }
-        let resident = match self.registry.resolve(active_session_id).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                // The wake-aware resolution of the generic route: a
-                // restore pass may still be bringing the session up.
-                self.await_restore_target(active_session_id).await;
-                match self.registry.resolve(active_session_id).await {
-                    Ok(resident) => resident,
-                    Err(_) => {
-                        let message =
-                            self.restore_failure_for(active_session_id)
-                                .unwrap_or_else(|| {
-                                    format!("Unknown active session: {active_session_id}")
-                                });
-                        return self.pause_failure(command_id, type_name, &message);
-                    }
-                }
+        let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
+            resident
+        } else {
+            // The wake-aware resolution of the generic route: a
+            // restore pass may still be bringing the session up.
+            self.await_restore_target(active_session_id).await;
+            if let Ok(resident) = self.registry.resolve(active_session_id).await {
+                resident
+            } else {
+                let message = self
+                    .restore_failure_for(active_session_id)
+                    .unwrap_or_else(|| format!("Unknown active session: {active_session_id}"));
+                return self.pause_failure(command_id, type_name, &message);
             }
         };
         let resolved = resident.worker_id.clone();
@@ -390,8 +386,7 @@ impl Supervisor {
                         ROUTE_TIMEOUT_MS,
                     )
                     .await
-                    .map(|response| response.success)
-                    .unwrap_or(false);
+                    .is_ok_and(|response| response.success);
                 if released {
                     self.input_pauses.leases.lock().await.remove(&pause_id);
                     continue;

@@ -181,17 +181,17 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     /// skips fetches attempted less than an hour ago unless forced, and
     /// returns the last-good value on every failure path.
     pub async fn refresh(&self, scope: &str, opts: RefreshOptions) -> Option<T> {
+        enum Gate<T> {
+            Coalesced(Arc<InFlight<T>>),
+            Gated,
+            Start(Arc<InFlight<T>>, Option<Snapshot<T>>, u64),
+        }
         let cached = self.get(scope);
         if is_catalog_offline() {
             return cached;
         }
         // The mutex guard must never live across an await: decide under the
         // lock, then act outside it.
-        enum Gate<T> {
-            Coalesced(Arc<InFlight<T>>),
-            Gated,
-            Start(Arc<InFlight<T>>, Option<Snapshot<T>>, u64),
-        }
         let gate = {
             let mut state = self.state.lock().unwrap();
             let coalesced = state
@@ -438,10 +438,10 @@ async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
 /// TS single-process reference never races here; the multi-process port
 /// must).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp = path.with_extension(format!(
         "{}-{}.tmp",
         std::process::id(),

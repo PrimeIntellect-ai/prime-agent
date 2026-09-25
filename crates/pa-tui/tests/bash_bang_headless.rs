@@ -598,12 +598,14 @@ fn run_plan_with(
     let _ = handle.join();
     RunOutcome {
         frames: outcome.frames,
-        bash_requests: Arc::try_unwrap(bash_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
-        side_question_requests: Arc::try_unwrap(side_question_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        bash_requests: Arc::try_unwrap(bash_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
+        side_question_requests: Arc::try_unwrap(side_question_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
     }
 }
 

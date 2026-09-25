@@ -57,8 +57,7 @@ fn timeparse(timestamp: &str) -> Option<u64> {
     if rest.starts_with('.') {
         let fraction_end = rest[1..]
             .find(|c: char| !c.is_ascii_digit())
-            .map(|idx| idx + 1)
-            .unwrap_or(rest.len());
+            .map_or(rest.len(), |idx| idx + 1);
         let fraction = &rest[1..fraction_end];
         let millis_part: u64 = fraction
             .chars()
@@ -235,7 +234,6 @@ fn migrate_v2_to_v3(entries: &mut [FileEntry]) {
     for entry in entries.iter_mut() {
         if let FileEntry::Header { header } = entry {
             header.version = Some(3);
-            continue;
         }
         // hookMessage -> custom: AgentMessage deserializes unknown roles into
         // Unknown variant, where the rewrite happens through raw JSON. The

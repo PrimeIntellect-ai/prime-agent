@@ -73,7 +73,7 @@ impl AgentView {
                         .zip(cached.spans.iter())
                         .filter(|(span, cached)| span != cached)
                         .count(),
-                )
+                );
             });
             for (index, span) in spans.iter().enumerate() {
                 if *span != cached.spans.get(index).copied().flatten() {
@@ -164,7 +164,7 @@ mod tests {
                 rows.get(),
                 2,
                 "the extension styles the two rows whose span changed"
-            )
+            );
         });
         RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
         assert_eq!(styled_rows.len(), base_len);

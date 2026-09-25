@@ -106,12 +106,9 @@ fn mask_quoted_spans(command: &str) -> Vec<char> {
             let prev = if i > 0 { Some(chars[i - 1]) } else { None };
             if ch == '#'
                 && (i == 0
-                    || prev
-                        .map(|p| {
-                            p.is_whitespace()
-                                || matches!(p, ';' | '&' | '|' | '(' | ')' | '{' | '}')
-                        })
-                        .unwrap_or(true))
+                    || prev.is_none_or(|p| {
+                        p.is_whitespace() || matches!(p, ';' | '&' | '|' | '(' | ')' | '{' | '}')
+                    }))
             {
                 let mut j = i;
                 while j < len && chars[j] != '\n' {
@@ -307,8 +304,7 @@ pub fn resolve_discard_probe_target(
                     let relocates = config
                         .strip_prefix("core.worktree")
                         .or_else(|| config.strip_prefix("core.bare"))
-                        .map(|rest| rest.is_empty() || rest.starts_with('='))
-                        .unwrap_or(false);
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('='));
                     if relocates {
                         return DiscardProbeResolution::Unresolvable;
                     }
