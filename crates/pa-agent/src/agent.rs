@@ -202,14 +202,14 @@ fn batch_preview(batch: &[AgentMessage]) -> String {
     batch
         .iter()
         .filter_map(|message| match message {
-            AgentMessage::Standard(pa_agent::types::Message::User(user)) => {
+            AgentMessage::Standard(crate::types::Message::User(user)) => {
                 let text = match &user.content {
-                    pa_agent::types::UserContent::Text(text) => Some(text.clone()),
-                    pa_agent::types::UserContent::Parts(parts) => {
+                    crate::types::UserContent::Text(text) => Some(text.clone()),
+                    crate::types::UserContent::Parts(parts) => {
                         let text: Vec<&str> = parts
                             .iter()
                             .filter_map(|part| match part {
-                                pa_agent::types::UserPart::Text(text) => Some(text.text.as_str()),
+                                crate::types::UserPart::Text(text) => Some(text.text.as_str()),
                                 _ => None,
                             })
                             .collect();

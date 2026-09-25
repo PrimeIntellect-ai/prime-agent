@@ -153,12 +153,14 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         let session_dir = manager.get_session_dir().to_path_buf();
         drop(manager);
         drop(handle);
-        let mut store = crate::session_store::SessionFile::open(&session_file)
+        let store = crate::session_store::SessionFile::open(&session_file)
             .map_err(|error| format!("{error:#}"))?;
         match target_leaf.as_deref() {
             Some(leaf) => store
                 .create_branched_file(leaf, &session_dir)
-                .map_err(|error| format!("{error:#}"))?,
+                .map_err(|error| format!("{error:#}"))?
+                .path
+                .clone(),
             None => {
                 // Fork at the root: a fresh session under the source.
                 let mut forked = crate::session_store::SessionFile::create(
