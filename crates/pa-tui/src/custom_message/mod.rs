@@ -273,8 +273,19 @@ fn slash_row_entries(
             text: content.to_string(),
         }]
     } else {
-        vec![ChatEntry::SlashCommandResult {
-            content: content.to_string(),
+        // The outcome row is system output, never user text (the
+        // operator's 2026-09-25 bug report: the user-message box read as
+        // the "no active goal" reply being a user prompt): it renders in
+        // the status-row class, the severity driving the tone like the
+        // compaction and retry outcome rows.
+        let kind = match details.get("severity").and_then(Value::as_str) {
+            Some("error") => StatusKind::Error,
+            Some("warning") => StatusKind::Warning,
+            _ => StatusKind::Info,
+        };
+        vec![ChatEntry::Status {
+            text: content.to_string(),
+            kind,
         }]
     }
 }
