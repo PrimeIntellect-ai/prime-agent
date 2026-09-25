@@ -661,7 +661,23 @@ mod tests {
     /// identity — not the empty fallback.
     #[test]
     fn a_newly_live_child_rides_its_cached_persisted_usage() {
-        let cache = cache_with_walk("session-a", &[], &["sub-late"]);
+        // The persisted row carries REAL usage (the seeded tree's spend) —
+        // the live snapshot only supplies identity, so a served
+        // totalUsage matching it proves the persisted body rode the row.
+        let cache = Arc::new(ContextTreeCache::new());
+        *cache.state.lock().unwrap() = Some(CachedWalk {
+            computed_at: Instant::now(),
+            session_id: "session-a".to_string(),
+            live_nodes: HashMap::new(),
+            persisted: vec![json!({
+                "id": "sub-late",
+                "label": "persisted child",
+                "status": "idle",
+                "ownUsage": empty_usage(),
+                "totalUsage": { "input": 77, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 77, "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 } },
+                "children": [],
+            })],
+        });
         let children = cache.serve_children(Some("session-a"), &[snapshot("sub-late", "working")]);
         assert_eq!(children.len(), 1);
         assert_eq!(children[0]["id"], json!("sub-late"));
@@ -670,12 +686,9 @@ mod tests {
             json!("working"),
             "the fresh live identity"
         );
-        // The body came from the persisted row (its label differs from
-        // both the live nodes' "child" label and the empty fallback) —
-        // exactly the overlay this test proves.
         assert_eq!(
-            children[0]["label"],
-            json!("persisted child"),
+            children[0]["totalUsage"]["input"],
+            json!(77),
             "the persisted row's body served the live row: {children:?}"
         );
     }

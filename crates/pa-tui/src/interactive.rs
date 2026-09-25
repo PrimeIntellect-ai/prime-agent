@@ -1514,20 +1514,26 @@ async fn run_interactive_surface(
             } => {
                 reader_loss_handled = true;
                 if reader_death.is_ok() && *reader_dead.borrow_and_update() {
-                    // A supervisor socket loss while a live direct link
-                    // still serves the session is not a pane-level loss
-                    // (session-plane commands ride the link): retain the
-                    // loss instead of recovering, and hand it to the full
-                    // reconnect driver when the direct link later dies.
-                    if session.client.direct_session_id().is_some() {
+                    // An update restart's close frame can race this signal
+                    // (the reader emits the frame, then dies — the unbiased
+                    // select may run this arm first): the update's own
+                    // reconnect driver owns the recovery, and the loss
+                    // driver must not take over from it.
+                    if session.reconnect.is_some() {
+                        session.dirty = true;
+                    } else if session.client.direct_session_id().is_some() {
+                        // A supervisor socket loss while a live direct link
+                        // still serves the session is not a pane-level loss
+                        // (session-plane commands ride the link): retain
+                        // the loss instead of recovering, and hand it to
+                        // the full reconnect driver when the direct link
+                        // later dies.
                         supervisor_lost = true;
                     } else if session_reconnect.is_some() {
                         // The direct link already died and the session-plane
-                        // driver is retrying through the NOW-DEAD supervisor:
-                        // stop it (it would ride a dead client) and hand the
-                        // recovery to the full driver — unless the update
-                        // restart already armed it (its resume semantics own
-                        // the window; the loss joins the running driver).
+                        // driver is retrying through the NOW-DEAD
+                        // supervisor: stop it (it would ride a dead client)
+                        // and hand the recovery to the full driver.
                         session_reconnect = None;
                         if reconnect.is_none() {
                             session.note_as(

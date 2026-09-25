@@ -2410,6 +2410,25 @@ impl SessionUi {
                         );
                         return Ok(());
                     }
+                    // A DIRECT-link transport failure happened after the
+                    // frame was queued (`request_direct` sent it, the link
+                    // died answering): the daemon may have admitted the
+                    // turn — restoring the draft would invite a duplicate
+                    // submission, so the draft stays consumed (the timeout
+                    // arm's contract).
+                    let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                        && rendered
+                            .to_lowercase()
+                            .contains("direct session connection");
+                    if direct_sent {
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request may have been sent; the turn may still start"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
                     if crate::daemon_client::is_daemon_rejection(&error)
                         || crate::daemon_client::is_daemon_unreachable(&error)
                     {
