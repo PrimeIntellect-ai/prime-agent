@@ -164,11 +164,9 @@ impl AgentSessionEngine {
         // replaces (the later builds re-write the slot with the session
         // model, so only the swap preceding them holds it).
         if route.session_target.is_none() {
-            route.session_target = self
-                .provider_target
-                .read()
-                .expect("provider target lock")
-                .clone();
+            route
+                .session_target
+                .clone_from(&self.provider_target.read().expect("provider target lock"));
         }
         let route = route.clone();
         drop(slot);
