@@ -47,9 +47,9 @@ fn release_dir() -> Option<PathBuf> {
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!(
-        "no releases dir at {}; skipping live kernel test",
-        releases.display()
-    );
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
