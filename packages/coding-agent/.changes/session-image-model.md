@@ -1,0 +1,4 @@
+- Added `/image-model`, a per-session pin for the model that reads attached images. With an image model configured or pinned, a text-only session answers image turns with no manual step.
+- An image turn the session model cannot see is now read by one bounded child pinned to the image model; only the child's text result enters the session, so the image payload never reaches the session model or its prefix cache.
+- The pinned model is validated when it is set: an unknown, text-only, or unauthenticated reference is refused with the reason instead of failing the next image turn.
+- Limits: one child per turn, 8 images, 8 MB per image, 24 MB per turn, a 4000-character reading, and a 180-second child timeout that names the setting.

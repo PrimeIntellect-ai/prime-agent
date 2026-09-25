@@ -52,6 +52,7 @@ export function createAgentConnectionState(
 			model: toConnectionModel(scoped.model),
 			thinkingLevel: scoped.thinkingLevel,
 		})),
+		...(session.imageModelOverride ? { imageModel: session.imageModelOverride } : {}),
 		activeToolNames: session.getActiveToolNames(),
 		contextUsage: session.getContextUsage(),
 		// Baseline recap; the daemon overlays the live summary when attaching.

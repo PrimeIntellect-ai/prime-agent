@@ -1357,11 +1357,19 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.requestOk({ type: "steer", activeSessionId: this.activeSessionId, message, images });
+		// Only an image-carrying steer waits on an image read; a plain steer keeps
+		// the default transport timeout, so an unresponsive daemon still fails fast.
+		await this.requestData<unknown>(
+			{ type: "steer", activeSessionId: this.activeSessionId, message, images },
+			images?.length ? DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS : undefined,
+		);
 	}
 
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.requestOk({ type: "follow_up", activeSessionId: this.activeSessionId, message, images });
+		await this.requestData<unknown>(
+			{ type: "follow_up", activeSessionId: this.activeSessionId, message, images },
+			images?.length ? DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS : undefined,
+		);
 	}
 
 	async abort(): Promise<void> {
@@ -1504,6 +1512,15 @@ export class DaemonAgentConnection implements AgentConnection {
 			activeSessionId: this.activeSessionId,
 			scopedModels,
 		});
+	}
+
+	async setImageModel(reference: string | null): Promise<AgentConnectionModel | undefined> {
+		const model = await this.requestData<AgentConnectionModel | null>({
+			type: "set_image_model",
+			activeSessionId: this.activeSessionId,
+			imageModel: reference,
+		});
+		return model ?? undefined;
 	}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {

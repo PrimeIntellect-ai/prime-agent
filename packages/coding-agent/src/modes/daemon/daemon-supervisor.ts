@@ -327,6 +327,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_model",
 	"cycle_model",
 	"set_scoped_models",
+	"set_image_model",
 	"set_thinking_level",
 	"cycle_thinking_level",
 	"set_service_tier",

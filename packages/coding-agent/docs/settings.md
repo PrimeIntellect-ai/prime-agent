@@ -26,18 +26,32 @@ Edit directly or use `/settings` for common options.
 
 When `defaultThinkingLevel` is unset, new sessions start at `"medium"` reasoning, clamped to the levels each model supports.
 
-`imageModel` routes image turns on text-only session or subagent models. When a
-turn attaches images and the selected model has no image input, that turn (and
-its retries and post-compaction continuations) is served by the configured
-image-capable model instead; the session model selection stays unchanged, and
-the routed assistant messages record the model that served them. Later
-image-free turns return to the session model, where images already in the
-transcript appear as "(image omitted: model does not support images)"
-placeholders. With no `imageModel` set (default), image turns on a text-only
-model fail with an actionable error instead of silently dropping the images:
-switch the session model with `/model` or configure `imageModel`. Set
-`images.blockImages: true` to drop images everywhere instead of routing or
-refusing.
+`imageModel` names the model that reads images a text-only session or subagent
+model cannot. A user-attached image (pasted into the prompt, a steer, or a
+follow-up) is handed to one bounded child pinned to that model: the child gets
+the image plus the user's message, and only its text result enters the session,
+so the session model serves the turn and keeps serving it. `/image-model` shows
+or sets that model for the current session: `/image-model <model>` pins it until
+the session ends, and `/image-model off` (or `default`) clears the pin back to
+the `imageModel` setting. The pin is session-scoped and runtime-only, so it never
+rewrites `imageModel` in settings.json.
+
+Limits: one child per turn, at most 8 images, 8 MB per image and 24 MB total per
+turn, and a reading capped at 4000 characters. Images past a cap or in an
+unsupported type are skipped, and the reading says so. A child that does not
+answer within 180 seconds fails the turn with the setting named.
+
+With no `imageModel` set (default) and no pin, an image turn on a text-only model
+fails with an actionable error instead of silently dropping the images: switch
+the session model with `/model`, or configure `imageModel` or `/image-model`.
+Set `images.blockImages: true` to drop images everywhere instead.
+
+Images that reach a text-only session model another way (extension-injected
+input, or input restored from a queue) are still served by an in-place routed
+turn on the image model, which re-sends the transcript and records the model that
+served those messages; later image-free turns return to the session model, where
+images already in the transcript appear as "(image omitted: model does not
+support images)" placeholders.
 
 ### Autonomous Runs
 

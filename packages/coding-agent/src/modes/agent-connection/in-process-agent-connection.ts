@@ -14,6 +14,7 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
+import { IMAGE_MODEL_PIN_READINESS_TIMEOUT_MS } from "../../core/image-model-routing.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
@@ -487,6 +488,20 @@ export class InProcessAgentConnection implements AgentConnection {
 
 	async setScopedModels(scopedModels: AgentConnectionScopedModel[]): Promise<void> {
 		this.session.setScopedModels(scopedModels);
+	}
+
+	async setImageModel(reference: string | null): Promise<AgentConnectionModel | undefined> {
+		// Capture the session before awaiting: a swap during the awaits below must
+		// not pin (or wait on the registry of) a replacement session.
+		const session = this.session;
+		if (reference !== null) {
+			// Refresh first, like setModel: a provider authenticated moments ago is
+			// not in the available list yet, and the pin would be refused as
+			// unusable. Clearing resolves nothing, so it pays no catalog wait.
+			await session.modelRegistry.refreshAvailableModels();
+			await session.modelRegistry.waitForPendingModelRefreshes(IMAGE_MODEL_PIN_READINESS_TIMEOUT_MS);
+		}
+		return session.setImageModelOverride(reference ?? undefined);
 	}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {

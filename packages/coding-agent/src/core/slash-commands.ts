@@ -87,6 +87,12 @@ interface BuiltinSlashCommandAlias {
 const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]" },
+	{
+		name: "image-model",
+		description: "Show or set the model that serves image turns in this session",
+		argumentHint: "[model|off]",
+		takesArgument: true,
+	},
 	{ name: "effort", description: "Select reasoning/thinking level (opens selector UI)", argumentHint: "[level]" },
 	{ name: "fast", description: "Toggle OpenAI Fast mode" },
 	{ name: "tier", description: "Show or set the service tier", argumentHint: "[default|flex|priority|auto]" },

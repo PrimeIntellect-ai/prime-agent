@@ -353,6 +353,11 @@ export interface AgentConnectionState {
 	goal: GoalState;
 	heartbeat?: AgentCronJob | null;
 	scopedModels: AgentConnectionScopedModel[];
+	/**
+	 * Session-scoped image-model reference set by /image-model
+	 * ("provider/model-id" or a bare id). Unset falls back to settings.imageModel.
+	 */
+	imageModel?: string;
 	activeToolNames: string[];
 	contextUsage: SessionStats["contextUsage"];
 	/** One-line recent-work recap for the prompt UI. */
@@ -771,6 +776,8 @@ export interface AgentConnection {
 	setModel(provider: string, modelId: string): Promise<AgentConnectionModel>;
 	cycleModel(direction?: "forward" | "backward"): Promise<AgentConnectionModelCycleResult | undefined>;
 	setScopedModels(scopedModels: AgentConnectionScopedModel[]): Promise<void>;
+	/** Set the session's image-model override, or clear it with null; returns the resolved model. */
+	setImageModel(reference: string | null): Promise<AgentConnectionModel | undefined>;
 	setThinkingLevel(level: ThinkingLevel): Promise<void>;
 	setServiceTier(serviceTier: ServiceTier): Promise<void>;
 	cycleThinkingLevel(): Promise<ThinkingLevel | undefined>;

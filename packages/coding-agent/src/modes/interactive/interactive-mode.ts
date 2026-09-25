@@ -84,7 +84,7 @@ import {
 	uploadAgentTraceFile,
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
-import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
+import { formatImageModelReferenceRejectedMessage, isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
 import type { AuthCredential } from "../../core/auth-storage.js";
 import {
 	type AgentCronJob,
@@ -106,6 +106,7 @@ import type {
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
+import { type ImageModelReferenceResolution, resolveImageModelReference } from "../../core/image-model-routing.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import {
@@ -1321,6 +1322,8 @@ export class InteractiveMode {
 	private initialRenderPromise: Promise<void> | undefined = undefined;
 	private sessionEventGeneration = 0;
 	private serviceTierChangeQueue: Promise<void> = Promise.resolve();
+	/** Serializes /image-model pin changes so rapid commands land in order. */
+	private imageModelChangeQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
@@ -1695,6 +1698,15 @@ export class InteractiveMode {
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				getModelArgumentCompletions(prefix, this.getCachedModelCandidates());
+		}
+
+		const imageModelCommand = slashCommands.find((command) => command.name === "image-model");
+		if (imageModelCommand) {
+			imageModelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				getModelArgumentCompletions(
+					prefix,
+					this.getCachedModelCandidates().filter((model) => model.input.includes("image")),
+				);
 		}
 
 		const effortCommand = slashCommands.find((command) => command.name === "effort");
@@ -4919,14 +4931,10 @@ export class InteractiveMode {
 			this.ui.requestRender();
 
 			const model = this.getCurrentModel();
-			if (
-				model &&
-				!model.input.includes("image") &&
-				!this.settingsManager.getImageModel() &&
-				!this.settingsManager.getBlockImages()
-			) {
+			const hasImageModel = Boolean(this.connectionState?.imageModel || this.settingsManager.getImageModel());
+			if (model && !model.input.includes("image") && !hasImageModel && !this.settingsManager.getBlockImages()) {
 				this.showStatus(
-					"Current model does not support images; set imageModel in settings.json or the turn will fail with setup guidance.",
+					"Current model does not support images; set an image model with /image-model or imageModel in settings.json, or the turn will fail with setup guidance.",
 				);
 			}
 		} catch {
@@ -5241,6 +5249,11 @@ export class InteractiveMode {
 					const searchTerm = commandArgs || undefined;
 					this.editor.setText("");
 					await this.handleModelCommand(searchTerm);
+					return;
+				}
+				if (commandName === "image-model") {
+					this.editor.setText("");
+					await this.handleImageModelCommand(commandArgs);
 					return;
 				}
 				if (commandName === "effort") {
@@ -8505,6 +8518,105 @@ export class InteractiveMode {
 		}
 
 		this.showModelSelector(searchTerm);
+	}
+
+	/**
+	 * `/image-model` shows which model serves image turns in this session, sets
+	 * a session-scoped override, or clears it back to settings.imageModel. The
+	 * override is runtime-only, like /scoped-models: it never writes settings,
+	 * so `off` restores the settings default instead of the value the command
+	 * last set.
+	 */
+	private async handleImageModelCommand(arg: string): Promise<void> {
+		const requested = arg.trim();
+		if (!requested) {
+			this.showStatus(this.describeImageModel());
+			return;
+		}
+		const keyword = requested.toLowerCase();
+		if (keyword === "off" || keyword === "default") {
+			if (!this.connectionState?.imageModel) {
+				this.showStatus(this.describeImageModel());
+				return;
+			}
+			await this.applyImageModelOverride(null);
+			return;
+		}
+		const resolution = await this.resolveImageModelReferenceForCommand(requested);
+		if (!resolution.ok) {
+			this.showError(formatImageModelReferenceRejectedMessage(requested, resolution.problem));
+			return;
+		}
+		await this.applyImageModelOverride(`${resolution.model.provider}/${resolution.model.id}`);
+	}
+
+	/**
+	 * Apply one pin change. Changes are serialized through one queue so two
+	 * rapid commands land in submission order, and each resumed change checks
+	 * that it still belongs to the session it started on, so a session switch
+	 * mid-flight cannot report or clear the replacement session's pin.
+	 */
+	private applyImageModelOverride(reference: string | null): Promise<void> {
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		const applied = this.imageModelChangeQueue.then(async () => {
+			if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) return;
+			try {
+				const model = await connection.setImageModel(reference);
+				if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) return;
+				this.patchConnectionState({ imageModel: reference ?? undefined });
+				this.showStatus(
+					model ? `Image model: ${model.provider}/${model.id} (this session)` : this.describeImageModel(),
+				);
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+		});
+		this.imageModelChangeQueue = applied.catch(() => {});
+		return applied;
+	}
+
+	/** One-line state of the image model that reads this session's image turns. */
+	private describeImageModel(): string {
+		const sessionModel = this.getCurrentModel();
+		const sessionModelDisplay = sessionModel ? ` (${sessionModel.provider}/${sessionModel.id})` : "";
+		// A model that accepts images reads them itself, so the pin and the
+		// setting only matter for a model that cannot.
+		if (!sessionModel || sessionModel.input.includes("image")) {
+			return `Image model: same as the session model${sessionModelDisplay}`;
+		}
+		const override = this.connectionState?.imageModel;
+		if (override) return `Image model: ${override} (this session)`;
+		const configured = this.settingsManager.getImageModel();
+		if (configured) {
+			const resolved = findExactModelReferenceMatch(configured, this.getCachedModelCandidates());
+			const display = resolved ? `${resolved.provider}/${resolved.id}` : configured;
+			return `Image model: ${display} (settings.imageModel)`;
+		}
+		return `Image model: none set, so image turns fail on ${sessionModel.provider}/${sessionModel.id}. Set one with /image-model <model>.`;
+	}
+
+	/**
+	 * Validate a /image-model reference against the local model catalog. A
+	 * reference that matches nothing retries once against a refreshed catalog,
+	 * like /model, so a just-authenticated provider resolves.
+	 */
+	private async resolveImageModelReferenceForCommand(reference: string): Promise<ImageModelReferenceResolution> {
+		const validate = (models: AgentConnectionModel[]): ImageModelReferenceResolution =>
+			resolveImageModelReference({
+				reference,
+				availableModels: models,
+				hasConfiguredAuth: (model) => this.isModelProviderConfigured(model),
+			});
+		const cached = validate(this.getCachedModelCandidates());
+		if (cached.ok || cached.problem !== "unresolved") return cached;
+		const refresh = this.getModelSelectorRefreshPromise({ force: true });
+		if (!refresh) return cached;
+		try {
+			return validate(await refresh);
+		} catch {
+			return cached;
+		}
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<Api> | undefined> {

@@ -77,8 +77,17 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds the capability-gated abort_and_send_queued command.
 // Revision 30 adds structured update_restarting failure info for opens fenced by an update restart.
-export const DAEMON_SCHEMA_REVISION = 30;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-30-f908f493c9e1";
+// Revision 31 adds the session-scoped set_image_model command.
+export const DAEMON_SCHEMA_REVISION = 31;
+/**
+ * Opaque wire-schema identity the handshake compares: a client replaces a
+ * daemon whose id differs, so this moves in lockstep with the revision.
+ * The fingerprint is the first 12 hex of
+ * sha256("protocol-7|<revision>|<sorted `name:` keys after the compatibility
+ * map>"). Regenerate it with this command and paste the output below:
+ * python3 -c "import re,hashlib;p=open('packages/coding-agent/src/modes/daemon/daemon-protocol.ts').read();b=p[p.index('export const DAEMON_COMMAND_COMPATIBILITY'):];c=sorted(set(re.findall(r'^\t([a-z_0-9]+):',b,re.M)));r=str(31);print('protocol-7-schema-'+r+'-'+hashlib.sha256(('protocol-7|'+r+'|'+','.join(c)).encode()).hexdigest()[:12])"
+ */
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-31-1e7fae2a49e5";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -628,6 +637,7 @@ export type DaemonCommand =
 	| { id?: string; type: "set_model"; activeSessionId: string; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model"; activeSessionId: string; direction?: "forward" | "backward" }
 	| { id?: string; type: "set_scoped_models"; activeSessionId: string; scopedModels: AgentConnectionScopedModel[] }
+	| { id?: string; type: "set_image_model"; activeSessionId: string; imageModel: string | null }
 	| { id?: string; type: "set_thinking_level"; activeSessionId: string; level: ThinkingLevel }
 	| { id?: string; type: "set_service_tier"; activeSessionId: string; serviceTier: ServiceTier }
 	| { id?: string; type: "cycle_thinking_level"; activeSessionId: string }
@@ -747,6 +757,8 @@ const SESSION_INPUT_PAUSE_COMMAND = {
 	capability: "session_input_pause",
 } as const;
 const AGENT_PEER_LIST_COMMAND = { minProtocol: 7, minSchemaRevision: 23 } as const;
+/** The per-session image-model pin, introduced with schema revision 31. */
+const SET_IMAGE_MODEL_COMMAND = { minProtocol: 7, minSchemaRevision: 31 } as const;
 const DIRECT_PEER_TRANSPORT_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 25,
@@ -822,6 +834,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_model: LEGACY_DAEMON_COMMAND,
 	cycle_model: LEGACY_DAEMON_COMMAND,
 	set_scoped_models: LEGACY_DAEMON_COMMAND,
+	set_image_model: SET_IMAGE_MODEL_COMMAND,
 	set_thinking_level: LEGACY_DAEMON_COMMAND,
 	set_service_tier: LEGACY_DAEMON_COMMAND,
 	cycle_thinking_level: LEGACY_DAEMON_COMMAND,
@@ -941,6 +954,7 @@ export const DAEMON_COMMAND_PLANE = {
 	set_model: "session",
 	cycle_model: "session",
 	set_scoped_models: "session",
+	set_image_model: "session",
 	set_thinking_level: "session",
 	set_service_tier: "session",
 	cycle_thinking_level: "session",
