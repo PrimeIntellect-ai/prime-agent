@@ -439,6 +439,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
+    /// The login binds the registered callback port (53_692), so the
+    /// tests serialize on this lock: parallel test threads never
+    /// collide on the one port (the OS answers the bind with
+    /// "address already in use" otherwise).
+    static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
     /// unexpected fetches).
@@ -643,6 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let credentials = login_anthropic(&http, &ui).await.unwrap();
@@ -675,6 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_exchange_surfaces_the_ts_message() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -688,6 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -722,6 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(
@@ -736,6 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
@@ -749,6 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_paste_ends_the_login() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::ready()), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -757,6 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_prompt_ends_the_login() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
@@ -768,6 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http();
@@ -781,6 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         // The real registered port: the flow binds its callback server
         // and the browser redirect settles the code. Skip when another
         // process holds the port — the bind-failure path is its own

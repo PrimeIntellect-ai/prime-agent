@@ -814,11 +814,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_token_fails_the_field() {
-        let http = ScriptedHttp::new().queue(
-            TOKEN_URL,
-            vec![ScriptedHttp::entry(200, r#"{"access_token":"a"}"#)],
-        );
-        let error = refresh_xai_token(&http, "grok-old").await.unwrap_err();
+        // The login path carries no prior refresh token (the refresh
+        // path keeps the stored one — TS `credentialsFromResponse`).
+        let http = ScriptedHttp::new()
+            .queue(DEVICE_CODE_URL, vec![device_response("")])
+            .queue(TOKEN_URL, vec![ScriptedHttp::entry(200, r#"{"access_token":"a"}"#)]);
+        let error = login_xai(&http, &ScriptedUi::new()).await.unwrap_err();
         assert_eq!(error, "Invalid xAI OAuth response field: refresh_token");
     }
 

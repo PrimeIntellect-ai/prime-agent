@@ -1194,53 +1194,38 @@ mod tests {
             }
         }));
         let registry = ModelRegistry::in_memory(auth);
-        let grok_46 = registry
+        let grok = registry
             .get_all()
             .iter()
-            .find(|model| model.id == "grok-4.6")
-            .expect("the grok model renders");
-        assert_eq!(grok_46.api, "openai-responses");
-        assert_eq!(grok_46.base_url, "https://api.x.ai/v1");
-        // TS grok-4.6's map: low/medium/high/xhigh supported.
-        let supported = pa_types::ai::thinking_levels::get_supported_thinking_levels(grok_46);
-        assert_eq!(
-            supported,
-            vec![
-                ModelThinkingLevel::Low,
-                ModelThinkingLevel::Medium,
-                ModelThinkingLevel::High,
-                ModelThinkingLevel::Xhigh,
-            ]
-        );
+            .find(|model| model.provider == "xai")
+            .expect("the xai model renders");
+        assert_eq!(grok.api, "openai-responses");
+        assert_eq!(grok.base_url, "https://api.x.ai/v1");
+        // The catalog's xai model is unnamed by the TS flow's table, so
+        // its default map nulls every level: no thinking support.
+        let supported = pa_types::ai::thinking_levels::get_supported_thinking_levels(grok);
+        assert_eq!(supported, Vec::<ModelThinkingLevel>::new());
         // The compat is the shared-key-only object (TS
         // `supportsLongCacheRetention: false`); the responses provider
         // decodes it directly (its own test covers the decode).
-        let compat = grok_46.compat.as_ref().expect("the compat rides the model");
+        let compat = grok.compat.as_ref().expect("the compat rides the model");
         assert_eq!(
             compat.raw.get("supportsLongCacheRetention"),
             Some(&serde_json::json!(false))
         );
-        // The default map: an unnamed model serves no thinking levels.
-        let grok_build = registry
-            .get_all()
-            .iter()
-            .find(|model| model.id == "grok-build-0.1")
-            .expect("the grok build model renders");
+        // The TS flow's explicit maps stay per model id (unit level;
+        // the offline catalog no longer carries those models).
+        let map_46 = xai_subscription_thinking_map("grok-4.6");
+        assert_eq!(map_46.get(&ModelThinkingLevel::Off), Some(&None));
         assert_eq!(
-            pa_types::ai::thinking_levels::get_supported_thinking_levels(grok_build),
-            Vec::<ModelThinkingLevel>::new()
+            map_46.get(&ModelThinkingLevel::Xhigh),
+            Some(&Some("xhigh".to_string()))
         );
-        // grok-4.3's map: the "none" off value + low/medium/high.
-        let grok_43 = registry
-            .get_all()
-            .iter()
-            .find(|model| model.id == "grok-4.3")
-            .expect("the grok 4.3 model renders");
-        assert!(grok_43
-            .thinking_level_map
-            .as_ref()
-            .and_then(|map| map.get(&ModelThinkingLevel::Off))
-            .is_some_and(|value| value.as_deref() == Some("none")));
+        let map_43 = xai_subscription_thinking_map("grok-4.3");
+        assert_eq!(
+            map_43.get(&ModelThinkingLevel::Off),
+            Some(&Some("none".to_string()))
+        );
     }
 
     #[test]
@@ -1249,8 +1234,8 @@ mod tests {
         let grok = registry
             .get_all()
             .iter()
-            .find(|model| model.id == "grok-4.6")
-            .expect("the grok model renders");
+            .find(|model| model.provider == "xai")
+            .expect("the xai model renders");
         assert_eq!(grok.api, "openai-completions");
         assert!(grok.thinking_level_map.is_none());
         assert!(grok.compat.is_none());

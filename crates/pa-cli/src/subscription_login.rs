@@ -310,7 +310,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(&request.url)
-                .and_then(|queue| queue.pop_front());
+                .and_then(std::collections::VecDeque::pop_front);
             Box::pin(
                 async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
@@ -500,10 +500,14 @@ mod tests {
         // The expiry is `now + expires_in * 1000 - 5 minutes` (TS's
         // convention).
         let expires = stored["expires"].as_i64().expect("the expiry is numeric");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
         assert!(
             expires >= before_ms + 3_600_000 - 300_000
-                && expires <= before_ms + 3_600_000 - 300_000 + 5_000,
-            "the expiry lands one hour minus the skew out: {expires} vs {before_ms}"
+                && expires <= after_ms + 3_600_000 - 300_000,
+            "the expiry lands one hour minus the skew out: {expires} vs {before_ms}..{after_ms}"
         );
         let mut auth = AuthStorage::create(&agent);
         assert_eq!(auth.get_api_key("xai"), Some("grok-access".to_string()));

@@ -495,6 +495,8 @@ mod tests {
             query_param("code=a+b&state=2", "code"),
             Some("a b".to_string())
         );
-        assert_eq!(query_param("code&state=2", "code"), None);
+        // TS `URLSearchParams` keeps the bare key with an empty value
+        // (`""` is falsy in the flow's missing-params check).
+        assert_eq!(query_param("code&state=2", "code"), Some("".to_string()));
     }
 }

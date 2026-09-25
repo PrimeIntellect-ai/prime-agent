@@ -117,7 +117,9 @@ pub fn get_base_url_from_token(token: &str) -> Option<String> {
     if proxy_host.is_empty() {
         return None;
     }
-    let api_host = proxy_host.strip_prefix("proxy.").unwrap_or(proxy_host);
+    let api_host = proxy_host
+        .strip_prefix("proxy.")
+        .map_or_else(|| proxy_host.to_string(), |rest| format!("api.{rest}"));
     Some(format!("https://{api_host}"))
 }
 
@@ -948,10 +950,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_refresh_exchanges_the_stored_github_token() {
-        let http = ScriptedHttp::new().fixed(
-            "https://api.github.com/copilot_internal/v2/token",
-            ScriptedHttp::entry(200, r#"{"token":"copilot-fresh","expires_at":4000000000}"#),
-        );
+        let http = ScriptedHttp::new()
+            .fixed(
+                "https://api.github.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(200, r#"{"token":"copilot-fresh","expires_at":4000000000}"#),
+            )
+            .fixed(
+                "https://api.company.ghe.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4000000000}"#),
+            );
         let credentials = refresh_github_copilot_token(&http, "gh-old", None)
             .await
             .unwrap();
