@@ -708,6 +708,7 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
 /// (never a durable transcript row).
 #[tokio::test]
 async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
+    use base64::Engine;
     // No platform clipboard tools in the verifier: the copy chain falls to
     // OSC 52 (the TS fallback when no tool copied).
     for var in [
@@ -791,7 +792,6 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
     // Every copy registered: the headless OSC 52 sink is one buffer for
     // the whole run, so the exact TS sequence appears three times
     // concatenated - one emission per copy.
-    use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
     let emission = format!("\x1b]52;c;{encoded}\x07");
     let joined = outcome.clipboard_emissions.join("");
