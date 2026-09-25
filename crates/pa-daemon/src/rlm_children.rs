@@ -229,6 +229,57 @@ impl ChildRecord {
     }
 }
 
+/// A deleted child's retained identity (TS `_deletedRlmChildRuns`
+/// tombstone, #2388): the delete receipt promised a collectable cancelled
+/// envelope, and only the fields that envelope reads survive the registry
+/// removal, so a long-lived parent's deletions stay bounded (TS keeps the
+/// label and the last progress note for the same reason).
+#[derive(Debug, Clone)]
+struct DeletedChild {
+    rlm_child_id: String,
+    active_session_id: String,
+    session_id: Option<String>,
+    session_name: String,
+    session_dir: String,
+    started_at_ms: u64,
+    answer_preview: Option<String>,
+    /// The envelope's error: the child's own terminal error when one was
+    /// recorded, else the delete reason (TS
+    /// `_rlmDeletedCollectEntryForRun`: `entry.error ?? "Deleted by parent
+    /// orchestrator"`).
+    error: String,
+}
+
+impl DeletedChild {
+    /// The selector set a live record answers to (TS
+    /// `_rlmDeletedRunMatchesTarget`): the tombstoned run has no session
+    /// object left, so the registry identity stands in for the session
+    /// selectors a mid-teardown run still answered to.
+    fn matches(&self, target: &str) -> bool {
+        self.rlm_child_id == target
+            || self.active_session_id == target
+            || self.session_name == target
+            || self.session_id.as_deref() == Some(target)
+    }
+}
+
+/// One spawn-name reservation's RAII release: the pending name must free
+/// when the admission settles, fails, OR the spawn future is cancelled
+/// mid-admission - the boxed [`RlmHostFuture`] is a cancellable future,
+/// and a dropped admission that kept its manual release after the last
+/// await would reject every later same-name spawn for the host's lifetime
+/// (TS releases in every path around `_createRlmSubagentRuntime`).
+struct SpawnNameReservationGuard {
+    inner: std::sync::Arc<SupervisorChildSessionsInner>,
+    name: String,
+}
+
+impl Drop for SpawnNameReservationGuard {
+    fn drop(&mut self) {
+        self.inner.release_spawn_name(&self.name);
+    }
+}
+
 /// RLM children as supervisor-managed daemon sessions. A cheap shared handle:
 /// the daemon hands the same children registry to every kernel handler call.
 pub struct SupervisorChildSessions {
@@ -249,6 +300,23 @@ struct SupervisorChildSessionsInner {
     // paths (the create command) without a runtime `block_on`.
     identity: std::sync::Mutex<ParentIdentity>,
     children: Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
+    /// Spawn-name reservations held until admission is durable (TS
+    /// `_pendingRlmSubagentSessionNames`, #2396): a requested name is
+    /// reserved across the whole admission - from the pre-create
+    /// availability check through the child record's registration - so two
+    /// parallel same-name spawns cannot both admit. A default name embeds
+    /// its fresh child id and never reserves (TS parity).
+    pending_spawn_names: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Delete-receipt tombstones (TS `_deletedRlmChildRuns`, #2388): a
+    /// deleted child leaves its identity behind the registry so `collect`
+    /// can answer a just-deleted selector with the settled cancelled
+    /// envelope the delete receipt promised instead of the
+    /// unknown-selector error. Keyed by child id exactly like TS's Map -
+    /// a second receipt for the same child overwrites the first and can
+    /// never stack a duplicate that would turn the settled answer into
+    /// the ambiguous-selector error. Entries live until this parent
+    /// session's host dies, exactly like TS.
+    deleted_children: std::sync::Mutex<std::collections::HashMap<String, DeletedChild>>,
     /// Bumped once per completed parent turn (the worker's `EngineEvent::Done`
     /// boundary). Prompt tasks spawned mid-turn wait for the next bump so
     /// the parent's continuation request is always in flight (and its
@@ -297,6 +365,8 @@ impl SupervisorChildSessions {
                 parent_active_session_id,
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
+                pending_spawn_names: std::sync::Mutex::new(std::collections::HashSet::new()),
+                deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 turn_done: tokio::sync::watch::Sender::new(0),
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
@@ -354,6 +424,18 @@ impl SupervisorChildSessions {
     /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
+    }
+
+    /// Whether a spawn-name reservation currently holds `name` (the TS
+    /// test peeks `_pendingRlmSubagentSessionNames`; the reservation must
+    /// span the whole admission and release at its settle).
+    #[cfg(test)]
+    pub fn spawn_name_reserved(&self, name: &str) -> bool {
+        self.inner
+            .pending_spawn_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(name)
     }
 
     /// Whether any tracked child run is still unsettled (TS
@@ -646,6 +728,25 @@ impl SupervisorChildSessions {
             replied_since_task: None,
         }
     }
+
+    /// TS `_rlmDeletedCollectEntryForRun`: the envelope for a target whose
+    /// delete receipt already returned. The delete accepted the
+    /// cancellation, so the entry reports it as a settled answer instead
+    /// of a snapshot that invites re-polling.
+    fn deleted_collect_result(deleted: &DeletedChild) -> RlmChildResult {
+        RlmChildResult {
+            rlm_child_id: deleted.rlm_child_id.clone(),
+            session_name: Some(deleted.session_name.clone()),
+            session_dir: Some(deleted.session_dir.clone()),
+            status: "cancelled",
+            settled: true,
+            answer_preview: deleted.answer_preview.clone(),
+            error: Some(deleted.error.clone()),
+            duration_ms: Some(now_ms().saturating_sub(deleted.started_at_ms)),
+            tool_use_count: None,
+            replied_since_task: None,
+        }
+    }
 }
 
 impl SupervisorChildSessionsInner {
@@ -691,12 +792,60 @@ impl SupervisorChildSessionsInner {
         let children = self.children.lock().await;
         for record in children.iter() {
             if record.lock().await.session_name == name {
-                bail!(
-                    "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
-                );
+                return Err(spawn_name_unavailable(name, depth));
             }
         }
         Ok(())
+    }
+
+    /// Reserve a requested spawn name (TS `_startRlmChildRun` holds it
+    /// until admission settles, #2396): `false` when another admission of
+    /// this parent session already holds the name, so the racing spawn
+    /// fails closed before any create reaches the supervisor.
+    fn reserve_spawn_name(&self, name: &str) -> bool {
+        self.pending_spawn_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_string())
+    }
+
+    /// Release one spawn-name reservation: the admission settled (the
+    /// record's registration made the name durable, so it transfers from
+    /// the pending reservation to the live registry) or failed (the name
+    /// is free for the next spawn).
+    fn release_spawn_name(&self, name: &str) {
+        self.pending_spawn_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name);
+    }
+
+    /// Record a delete receipt's tombstone (TS #2388: every accepted-delete
+    /// removal of a record funnels here, the live-delete and the inactive
+    /// delete alike): the cancelled collect envelope reads only these
+    /// fields, so the retained identity stays bounded. The map is keyed by
+    /// child id like TS's `_deletedRlmChildRuns`, so a second receipt for
+    /// the same child (two deletes racing the same selector between the
+    /// kill and the registry removal) overwrites the tombstone instead of
+    /// stacking a duplicate.
+    fn remember_deleted_child(&self, record: &ChildRecord) {
+        let deleted = DeletedChild {
+            rlm_child_id: record.rlm_child_id.clone(),
+            active_session_id: record.active_session_id.clone(),
+            session_id: record.session_id.clone(),
+            session_name: record.session_name.clone(),
+            session_dir: record.session_dir.clone(),
+            started_at_ms: record.started_at_ms,
+            answer_preview: record.answer_preview.clone(),
+            error: record
+                .error
+                .clone()
+                .unwrap_or_else(|| "Deleted by parent orchestrator".to_string()),
+        };
+        self.deleted_children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(deleted.rlm_child_id.clone(), deleted);
     }
 
     /// The per-child session directory under the parent's artifacts tree
@@ -1502,6 +1651,14 @@ impl SupervisorChildSessionsInner {
             // watch must not keep polling the killed worker after the
             // delete (the close path sets the same flag).
             record.lock().await.closed_by_parent = true;
+            // The delete receipt promised a collectable cancelled envelope
+            // (TS #2388): the inactive delete leaves the same tombstone as
+            // the live delete, so `collect` answers a just-deleted selector
+            // with its settled cancellation.
+            {
+                let record = record.lock().await;
+                self.remember_deleted_child(&record);
+            }
             self.children
                 .lock()
                 .await
@@ -1665,6 +1822,15 @@ fn custom_message_text(message: &pa_types::session::CustomMessage) -> Option<Str
     }
 }
 
+/// The spawn-name-unavailability error (TS
+/// `formatAgentSessionNameUnavailable`): one source so the reservation
+/// refusal and the availability check stay byte-identical.
+fn spawn_name_unavailable(name: &str, depth: u32) -> anyhow::Error {
+    anyhow!(
+        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
+    )
+}
+
 /// Resolve the child model with the daemon `allowedModels` allowlist
 /// enforced (the parent's cwd scopes the settings read), refusing a model
 /// outside the allowlist loudly with the typed error and emitting the
@@ -1724,64 +1890,95 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let name = request.name.clone().unwrap_or_else(|| {
                 create_default_rlm_subagent_session_name(&request.prompt, &child_id)
             });
-            this.assert_name_available(&name, identity.rlm_depth + 1)
-                .await?;
-            let model = resolve_child_model_allowlisted(
-                &this,
-                request.model.as_deref(),
-                "spawn",
-                "subagent",
-            )
-            .await?;
-            assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
-            let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
-            let child_dir = this.child_session_dir(&child_id, &identity)?;
-            let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
-            let runtime_metadata = json!({
-                "kind": "subagent",
-                "rlmChildId": child_id,
-                "parentActiveSessionId": this.parent_active_session_id,
-                "rlmDepth": identity.rlm_depth + 1,
-                "createdAt": now_ms(),
-            });
-            let created = this
-                .create_child(
-                    &child_id,
-                    Some(&name),
-                    Some(&request.prompt),
-                    identity.rlm_depth + 1,
-                    &model,
-                    thinking,
-                    &cwd,
-                    &child_dir,
-                    Some(runtime_metadata),
-                    &identity,
+            // TS `_startRlmChildRun` (#2396): a requested name is reserved
+            // before the first await and held until the admission settles,
+            // so two parallel same-name spawns cannot both pass the
+            // availability check and both register durable children. A
+            // default name embeds its fresh child id and never reserves
+            // (TS parity). The RAII guard owns the release: it frees the
+            // name at the admission settle, on every failure path, and on
+            // cancellation (a dropped host future) alike.
+            let _reservation = request
+                .name
+                .is_some()
+                .then(|| {
+                    if !this.reserve_spawn_name(&name) {
+                        return Err(spawn_name_unavailable(&name, identity.rlm_depth + 1));
+                    }
+                    Ok(SpawnNameReservationGuard {
+                        inner: Arc::clone(&this),
+                        name: name.clone(),
+                    })
+                })
+                .transpose()?;
+            let admission = async {
+                this.assert_name_available(&name, identity.rlm_depth + 1)
+                    .await?;
+                let model = resolve_child_model_allowlisted(
+                    &this,
+                    request.model.as_deref(),
+                    "spawn",
+                    "subagent",
                 )
                 .await?;
-            let record = ChildRecord {
-                rlm_child_id: child_id.clone(),
-                session_name: created.session_name.clone().unwrap_or_else(|| name.clone()),
-                active_session_id: created.active_session_id.clone(),
-                session_id: created.session_id,
-                session_dir: created.session_dir.clone(),
-                label: rlm_child_label(&request.prompt),
-                started_at_ms: now_ms(),
-                settled_status: None,
-                answer_preview: None,
-                answer_captured: false,
-                replied_since_task: false,
-                notice_delivered: false,
-                prompt_admitted: false,
-                error: None,
-                closed_by_parent: false,
-                session_file: created.session_file.clone(),
-                attributed_rows: 0,
-                usage_watch_live: false,
-                usage_rearm: false,
-                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            };
-            let record = Arc::new(Mutex::new(record));
-            this.children.lock().await.push(Arc::clone(&record));
+                assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
+                let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
+                let child_dir = this.child_session_dir(&child_id, &identity)?;
+                let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
+                let runtime_metadata = json!({
+                    "kind": "subagent",
+                    "rlmChildId": child_id,
+                    "parentActiveSessionId": this.parent_active_session_id,
+                    "rlmDepth": identity.rlm_depth + 1,
+                    "createdAt": now_ms(),
+                });
+                let created = this
+                    .create_child(
+                        &child_id,
+                        Some(&name),
+                        Some(&request.prompt),
+                        identity.rlm_depth + 1,
+                        &model,
+                        thinking,
+                        &cwd,
+                        &child_dir,
+                        Some(runtime_metadata),
+                        &identity,
+                    )
+                    .await?;
+                let record = ChildRecord {
+                    rlm_child_id: child_id.clone(),
+                    session_name: created.session_name.clone().unwrap_or_else(|| name.clone()),
+                    active_session_id: created.active_session_id.clone(),
+                    session_id: created.session_id.clone(),
+                    session_dir: created.session_dir.clone(),
+                    label: rlm_child_label(&request.prompt),
+                    started_at_ms: now_ms(),
+                    settled_status: None,
+                    answer_preview: None,
+                    answer_captured: false,
+                    replied_since_task: false,
+                    notice_delivered: false,
+                    prompt_admitted: false,
+                    error: None,
+                    closed_by_parent: false,
+                    session_file: created.session_file.clone(),
+                    attributed_rows: 0,
+                    usage_watch_live: false,
+                    usage_rearm: false,
+                    emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                };
+                let record = Arc::new(Mutex::new(record));
+                this.children.lock().await.push(Arc::clone(&record));
+                anyhow::Ok((record, created, model))
+            }
+            .await;
+            let (record, created, model) = admission?;
+            // The reservation's guard is still bound: the release runs at
+            // this scope's end (a successful registration made the name
+            // durable - it transfers from the pending reservation to the
+            // live registry), on every earlier failure path's `?`, and on
+            // cancellation of the host future itself.
             // The task prompt runs detached from the spawn admission (TS
             // `void (async () => ...)`): the handle returns at registration
             // and the child's first turn starts after the parent's own
@@ -1978,6 +2175,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
+            // The delete receipt promised a collectable cancelled envelope
+            // (TS #2388): the tombstone keeps the child's identity behind
+            // the registry so a just-deleted selector still answers
+            // `rlm.collect` with its settled cancellation instead of the
+            // unknown-selector error.
+            {
+                let record = record.lock().await;
+                this.remember_deleted_child(&record);
+            }
             // The deletion commits BEFORE the best-effort terminal
             // notice: the notice's supervisor delivery can ride its full
             // timeout, and a deleted child must leave the registry and the
@@ -2030,15 +2236,49 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             // Resolve targets outside the registry lock: `resolve_record`
             // takes it too, and the tokio mutex is not re-entrant.
-            let records = if targets.is_empty() {
+            let mut records: Vec<Arc<Mutex<ChildRecord>>> = if targets.is_empty() {
                 this.children.lock().await.clone()
             } else {
-                let mut records = Vec::with_capacity(targets.len());
-                for target in &targets {
-                    records.push(this.resolve_record(target, "child").await?);
-                }
-                records
+                Vec::with_capacity(targets.len())
             };
+            // TS #2388: a target whose delete receipt already returned
+            // resolves immediately to its settled cancelled envelope —
+            // the delete accepted the cancellation, so waiting for a
+            // teardown that already finished (or reporting the snapshot it
+            // would produce) would only mislead callers. Unknown selectors
+            // keep erroring, and a live record always owns its selector
+            // again (a respawn under a freed name wins before the
+            // tombstone is consulted), so the deleted generation never
+            // answers for a live replacement.
+            let mut deleted_results: Vec<RlmChildResult> = Vec::new();
+            for target in &targets {
+                let record = match this.resolve_record(target, "child").await {
+                    Ok(record) => record,
+                    Err(miss) => {
+                        let matches = this
+                            .deleted_children
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .values()
+                            .filter(|deleted| deleted.matches(target))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        match matches.len() {
+                            0 => return Err(miss),
+                            1 => deleted_results.push(
+                                SupervisorChildSessions::deleted_collect_result(
+                                    &matches[0],
+                                ),
+                            ),
+                            _ => bail!(
+                                "RLM child selector \"{target}\" is ambiguous in the current parent session"
+                            ),
+                        }
+                        continue;
+                    }
+                };
+                records.push(record);
+            }
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
             let mut results = Vec::with_capacity(records.len());
             for record in &records {
@@ -2068,6 +2308,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 results.push(result);
             }
+            // Live entries first, the deleted generations' envelopes after
+            // (TS `collectRlmChildren` result order).
+            results.extend(deleted_results);
             Ok(results)
         })
     }
@@ -2466,6 +2709,125 @@ mod watch_tests {
             tokio::time::timeout(std::time::Duration::from_secs(2), follow_up_rx.recv()).await;
         assert!(extra.is_err(), "a replied child must not deliver a notice");
     }
+
+    /// TS #2388: a target whose delete receipt already returned resolves
+    /// immediately to the settled cancelled envelope - status `cancelled`,
+    /// `settled: true`, the delete reason - without spending the timeout
+    /// budget; unknown selectors keep erroring, and the delete selector
+    /// itself keeps the TS miss.
+    #[tokio::test]
+    async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
+        let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+        let (sessions, _kill_rx) =
+            sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success).await;
+        let handle = spawn_child(&sessions).await;
+        sessions.notify_turn_done();
+        // The child settles with its final answer before the delete.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let entries = sessions.list_subagents().await.expect("child roster");
+            if entries.iter().any(|entry| entry.status == "completed") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never settled: {entries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        sessions
+            .delete_subagent(handle.rlm_child_id.clone())
+            .await
+            .expect("delete the settled child");
+
+        // By child id: the settled cancelled envelope the receipt promised.
+        let results = sessions
+            .collect(vec![handle.rlm_child_id.clone()], 0)
+            .await
+            .expect("collect the deleted child by id");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rlm_child_id, handle.rlm_child_id);
+        assert_eq!(results[0].session_name.as_deref(), Some("f20-worker"));
+        assert_eq!(results[0].status, "cancelled");
+        assert!(results[0].settled);
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("Deleted by parent orchestrator")
+        );
+        // By session name: the same cancelled envelope.
+        let results = sessions
+            .collect(vec!["f20-worker".to_string()], 0)
+            .await
+            .expect("collect the deleted child by name");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rlm_child_id, handle.rlm_child_id);
+        assert_eq!(results[0].status, "cancelled");
+        assert!(results[0].settled);
+        // An unknown selector keeps the TS miss.
+        let missing = sessions
+            .collect(vec!["ghost".to_string()], 0)
+            .await
+            .expect_err("an unknown selector still errors");
+        assert_eq!(
+            missing.to_string(),
+            "No direct RLM child matches \"ghost\" in the current parent session"
+        );
+        // The delete selector itself keeps its TS miss: the tombstone
+        // answers collect only.
+        let gone = sessions
+            .delete_subagent("f20-worker".to_string())
+            .await
+            .expect_err("the deleted child no longer resolves for a delete");
+        assert_eq!(
+            gone.to_string(),
+            "No direct RLM subagent matches \"f20-worker\" in the current parent session"
+        );
+    }
+
+    /// TS #2388: the inactive delete (a settled retained child) leaves the
+    /// same tombstone as the live delete, so `collect` answers a
+    /// just-deleted selector with the settled cancelled envelope its
+    /// delete receipt promised.
+    #[tokio::test]
+    async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
+        let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+        let (sessions, _kill_rx) =
+            sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success).await;
+        let handle = spawn_child(&sessions).await;
+        sessions.notify_turn_done();
+        // The inactive delete requires a settled child (a running child
+        // answers "running").
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let entries = sessions.list_subagents().await.expect("child roster");
+            if entries.iter().any(|entry| entry.status == "completed") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never settled: {entries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let outcome = sessions
+            .delete_inactive_subagent(&handle.rlm_child_id)
+            .await
+            .expect("inactive delete");
+        assert_eq!(outcome, "deleted");
+
+        let results = sessions
+            .collect(vec![handle.rlm_child_id.clone()], 0)
+            .await
+            .expect("collect the inactive-deleted child");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rlm_child_id, handle.rlm_child_id);
+        assert_eq!(results[0].status, "cancelled");
+        assert!(results[0].settled);
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("Deleted by parent orchestrator")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2618,5 +2980,281 @@ mod usage_emit_tests {
         no_file.lock().await.session_file = None;
         sessions.inner.emit_child_usage(&no_file).await;
         assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+    }
+}
+
+/// TS #2396: the spawn-name reservation spans the whole admission. A
+/// gated fake supervisor parks each `create` until the test answers, so
+/// the reservation's lifecycle is observable: held across the parked
+/// admission, closed to a racing same-name spawn, and freed at the
+/// admission settle - success or failure.
+#[cfg(test)]
+mod spawn_name_reservation_tests {
+    use super::*;
+    use crate::protocol::{response_failure, response_success};
+    use pa_types::platform::transport::bind_transport;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::sync::mpsc;
+
+    /// The gated fake supervisor: every `create` reports itself through
+    /// `create_seen_tx` and then parks until the shared verdict channel
+    /// answers `true` (the admission succeeds) or `false` (the admission
+    /// fails). Everything else answers like the watcher tests' scripted
+    /// supervisor: a prompt is admitted, the child goes idle with a final
+    /// answer, and a kill succeeds.
+    async fn spawn_gated_supervisor(
+        socket: std::path::PathBuf,
+        create_seen_tx: mpsc::UnboundedSender<Value>,
+        verdict_rx: mpsc::UnboundedReceiver<bool>,
+    ) {
+        let verdict_rx = std::sync::Arc::new(tokio::sync::Mutex::new(verdict_rx));
+        let listener = bind_transport(&socket).await.unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok(stream) = listener.accept().await else {
+                    return;
+                };
+                let create_seen_tx = create_seen_tx.clone();
+                let verdict_rx = std::sync::Arc::clone(&verdict_rx);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.split();
+                    let mut reader = BufReader::new(reader);
+                    writer
+                        .write_all(
+                            b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n",
+                        )
+                        .await
+                        .unwrap();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap() == 0 {
+                            return;
+                        }
+                        let value: Value = serde_json::from_str(line.trim()).unwrap();
+                        let id = value["id"].as_str().unwrap_or_default().to_string();
+                        let command = value["command"].clone();
+                        let command_type: &str = command["type"].as_str().unwrap_or_default();
+                        let response = match command_type {
+                            "create" => {
+                                let _ = create_seen_tx.send(command.clone());
+                                let verdict = verdict_rx.lock().await.recv().await;
+                                match verdict {
+                                    Some(true) => {
+                                        // The real supervisor echoes the
+                                        // requested name in its create
+                                        // summary; the record takes the
+                                        // supervisor's answer over the
+                                        // request, so the fake must echo
+                                        // too or the registry never sees
+                                        // the spawned name.
+                                        let session_name =
+                                            command["name"].as_str().unwrap_or_default();
+                                        response_success(
+                                            Some(&id),
+                                            command_type,
+                                            Some(json!({
+                                                "activeSessionId": "child-live",
+                                                "sessionId": "child-file",
+                                                "sessionFile": "/tmp/child.jsonl",
+                                                "sessionName": session_name,
+                                            })),
+                                        )
+                                    }
+                                    _ => response_failure(
+                                        Some(&id),
+                                        command_type,
+                                        "create refused by the gated supervisor",
+                                        None,
+                                    ),
+                                }
+                            }
+                            "prompt" => response_success(Some(&id), command_type, None),
+                            "wait_for_idle" => response_success(Some(&id), command_type, None),
+                            "get_state" => response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({
+                                    "isStreaming": false,
+                                    "sessionActions": { "queuedCount": 0 },
+                                })),
+                            ),
+                            "get_last_assistant_text" => response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({ "text": "the child final answer" })),
+                            ),
+                            "kill" => response_success(Some(&id), command_type, None),
+                            "follow_up" => response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({ "queued": true })),
+                            ),
+                            other => response_failure(Some(&id), other, "unexpected command", None),
+                        };
+                        let mut line = serde_json::to_string(&response).unwrap();
+                        line.push('\n');
+                        if writer.write_all(line.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// Children registry against the gated fake supervisor.
+    async fn sessions_with_gated_supervisor(
+        create_seen_tx: mpsc::UnboundedSender<Value>,
+        verdict_rx: mpsc::UnboundedReceiver<bool>,
+    ) -> SupervisorChildSessions {
+        let socket = std::env::temp_dir().join(format!(
+            "pa-rlm-gate-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        spawn_gated_supervisor(socket.clone(), create_seen_tx, verdict_rx).await;
+        let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
+        let sessions = SupervisorChildSessions::new(
+            link,
+            std::env::temp_dir(),
+            "parent-live".to_string(),
+            std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                std::env::temp_dir(),
+                /*telemetry_disabled*/ true,
+            )),
+        );
+        sessions.set_identity(ParentIdentity {
+            model: Some("mock/mock-1".to_string()),
+            cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            ..ParentIdentity::with_default_depth()
+        });
+        sessions
+    }
+
+    fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
+        RlmSpawnRequest {
+            prompt: prompt.to_string(),
+            name: Some(name.to_string()),
+            model: None,
+            thinking: None,
+            cell_source_code: None,
+        }
+    }
+
+    /// The reservation lifecycle (TS's own test sequence): the name is
+    /// held across the parked admission - a racing same-name spawn fails
+    /// closed with the TS unavailability error - and freed at the
+    /// admission settle, after which the live registry owns the name and
+    /// a respawn fails on the registry check with the same error.
+    #[tokio::test]
+    async fn holds_a_spawn_name_reservation_until_admission_settles_then_frees_it() {
+        let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
+        let (verdict_tx, verdict_rx) = mpsc::unbounded_channel();
+        let sessions = sessions_with_gated_supervisor(create_seen_tx, verdict_rx).await;
+        let unavailable = "Agent name \"slow-worker\" is unavailable: an agent of that name already exists at depth 1 under this parent";
+
+        // The first spawn parks inside its create admission.
+        let spawned =
+            tokio::spawn(sessions.spawn(spawn_request("slow-worker", "a slow admission")));
+        create_seen_rx
+            .recv()
+            .await
+            .expect("the create must reach the gated supervisor");
+        assert!(sessions.spawn_name_reserved("slow-worker"));
+
+        // A racing same-name spawn fails closed - the reservation, not the
+        // registry, rejects it before any create reaches the supervisor.
+        let racing = sessions
+            .spawn(spawn_request("slow-worker", "a racing spawn"))
+            .await
+            .expect_err("the racing same-name spawn must fail closed");
+        assert_eq!(racing.to_string(), unavailable);
+
+        // The parked admission completes: the name transfers from the
+        // pending reservation to the live registry.
+        verdict_tx.send(true).expect("admit the parked create");
+        let handle = spawned.await.expect("spawn task").expect("spawn admission");
+        assert_eq!(handle.name, "slow-worker");
+        assert!(!sessions.spawn_name_reserved("slow-worker"));
+
+        // The admitted child owns the name: a respawn fails on the live
+        // registry check with the same TS error.
+        let respawn = sessions
+            .spawn(spawn_request("slow-worker", "respawn while retained"))
+            .await
+            .expect_err("the admitted child owns the name");
+        assert_eq!(respawn.to_string(), unavailable);
+    }
+
+    /// A cancelled admission frees the reserved name: the boxed
+    /// `RlmHostFuture` is a cancellable future, so the kernel can drop a
+    /// spawn mid-admission - the reservation must release with the future
+    /// or every later same-name spawn is rejected for the host's
+    /// lifetime.
+    #[tokio::test]
+    async fn a_cancelled_spawn_admission_frees_the_reserved_name() {
+        let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
+        let (verdict_tx, verdict_rx) = mpsc::unbounded_channel();
+        let sessions = sessions_with_gated_supervisor(create_seen_tx, verdict_rx).await;
+
+        // The spawn parks inside its create admission.
+        let parked = tokio::spawn(sessions.spawn(spawn_request("abandoned", "a parked admission")));
+        create_seen_rx
+            .recv()
+            .await
+            .expect("the create must reach the gated supervisor");
+        assert!(sessions.spawn_name_reserved("abandoned"));
+
+        // The host future is cancelled mid-admission: the reservation
+        // must release with the future.
+        parked.abort();
+        let _ = parked.await;
+        assert!(!sessions.spawn_name_reserved("abandoned"));
+
+        // The abandoned create's handler still holds the gated
+        // supervisor's verdict gate on its dead connection; hand it a
+        // failure to retire it, then queue the retry's admission.
+        verdict_tx.send(false).expect("retire the abandoned create");
+        verdict_tx.send(true).expect("admit the retry");
+        let handle = sessions
+            .spawn(spawn_request("abandoned", "retry after cancellation"))
+            .await
+            .expect("the freed name admits again");
+        assert_eq!(handle.name, "abandoned");
+        assert!(!sessions.spawn_name_reserved("abandoned"));
+    }
+
+    /// The failure path: a failed admission (the create errors after the
+    /// reservation was held) frees the name, so the same name spawns
+    /// again.
+    #[tokio::test]
+    async fn a_failed_admission_frees_the_reserved_name() {
+        let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
+        let (verdict_tx, verdict_rx) = mpsc::unbounded_channel();
+        let sessions = sessions_with_gated_supervisor(create_seen_tx, verdict_rx).await;
+
+        let spawned =
+            tokio::spawn(sessions.spawn(spawn_request("doomed", "kernel startup failed")));
+        create_seen_rx
+            .recv()
+            .await
+            .expect("the create must reach the gated supervisor");
+        assert!(sessions.spawn_name_reserved("doomed"));
+        verdict_tx.send(false).expect("fail the admission");
+        spawned
+            .await
+            .expect("spawn task")
+            .expect_err("the failed admission surfaces");
+        assert!(!sessions.spawn_name_reserved("doomed"));
+
+        // The failed admission freed the name: the same name spawns again.
+        verdict_tx.send(true).expect("admit the retry");
+        let handle = sessions
+            .spawn(spawn_request("doomed", "retry after the failure"))
+            .await
+            .expect("the freed name spawns again");
+        assert_eq!(handle.name, "doomed");
+        assert!(!sessions.spawn_name_reserved("doomed"));
     }
 }

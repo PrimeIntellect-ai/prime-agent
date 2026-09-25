@@ -110,8 +110,17 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
+        self.read_line_with_budget(Duration::from_secs(15))
+    }
+
+    /// `read_line` with a caller-chosen budget: a raw `create` that
+    /// launches a worker answers after the worker's connect budget (TS
+    /// `WORKER_CONNECT_TIMEOUT_MS`: up to 30s), which the shared 15s line
+    /// budget turns into a false timeout under the binary's
+    /// parallel-test load.
+    fn read_line_with_budget(&mut self, budget: Duration) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + budget;
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -137,6 +146,22 @@ impl Client {
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
+            if line.get("id").and_then(|v| v.as_str()) == Some(id) {
+                return line;
+            }
+        }
+    }
+
+    /// `read_response` with a worker-boot budget (the raw-create path's
+    /// reader): every line waits on the remaining wall budget, so a
+    /// worker-launching create answers inside the same window the host's
+    /// `CREATE_TIMEOUT_MS` covers.
+    fn read_response_slow(&mut self, id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "no response for id {id}");
+            let line = self.read_line_with_budget(remaining);
             if line.get("id").and_then(|v| v.as_str()) == Some(id) {
                 return line;
             }
@@ -379,6 +404,63 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         gone.to_string(),
         "No direct RLM subagent matches \"worker-a\" in the current parent session"
     );
+
+    // TS #2388 F4: a just-deleted target resolves immediately to the
+    // settled cancelled envelope its delete receipt promised - by child id
+    // and by session name - without spending the timeout budget.
+    let cancelled = children
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the deleted child by id");
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0].rlm_child_id, handle.rlm_child_id);
+    assert_eq!(cancelled[0].session_name.as_deref(), Some("worker-a"));
+    assert_eq!(cancelled[0].status, "cancelled");
+    assert!(cancelled[0].settled);
+    assert_eq!(
+        cancelled[0].error.as_deref(),
+        Some("Deleted by parent orchestrator")
+    );
+    let cancelled_by_name = children
+        .collect(vec!["worker-a".to_string()], 0)
+        .await
+        .expect("collect the deleted child by name");
+    assert_eq!(cancelled_by_name.len(), 1);
+    assert_eq!(cancelled_by_name[0].rlm_child_id, handle.rlm_child_id);
+    assert_eq!(cancelled_by_name[0].status, "cancelled");
+    assert!(cancelled_by_name[0].settled);
+    assert_eq!(
+        cancelled_by_name[0].error.as_deref(),
+        Some("Deleted by parent orchestrator")
+    );
+    // An unknown selector keeps the TS miss.
+    let missing = children
+        .collect(vec!["ghost".to_string()], 0)
+        .await
+        .expect_err("unknown selector");
+    assert_eq!(
+        missing.to_string(),
+        "No direct RLM child matches \"ghost\" in the current parent session"
+    );
+
+    // A reused name owns the selector again: the live respawn answers
+    // collect, never the deleted generation's cancelled envelope.
+    let replacement = children
+        .spawn(spawn_request("worker-a", "second shard"))
+        .await
+        .expect("respawn under the freed name");
+    children.notify_turn_done();
+    let live = children
+        .collect(vec!["worker-a".to_string()], 0)
+        .await
+        .expect("collect the live respawn");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].rlm_child_id, replacement.rlm_child_id);
+    assert_ne!(live[0].rlm_child_id, handle.rlm_child_id);
+    // The live respawn answers, never the deleted generation's envelope
+    // (the replacement may settle at any moment, but it is never the
+    // tombstone's cancellation).
+    assert_ne!(live[0].status, "cancelled");
 }
 
 /// `rlm.create_session`: a resident depth-0 daemon session over the link,
@@ -488,5 +570,128 @@ async fn rlm_recursion_bound_is_enforced() {
     assert_eq!(
         error.to_string(),
         "rlm.create_session is available only from a depth-0 session"
+    );
+}
+
+/// TS #2396's daemon-wide half (`createRlmSubagentRuntime`): the
+/// supervisor holds a subagent spawn's name under a reservation for the
+/// whole fresh-launch admission, so parallel same-name same-parent creates
+/// cannot both admit - exactly one create lands and the rest fail closed
+/// with the TS unavailability error before the durable ledger edge is
+/// appended. The reservation releases with the admission: once the winner
+/// is gone, the same name admits again.
+#[tokio::test]
+async fn parallel_same_name_subagent_creates_admit_exactly_one() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _hello) = Client::connect(&socket);
+    let script = write_script(dir.path(), "twin answer");
+    let parent_file = agent_dir.join("parent.jsonl");
+    let parent_file = parent_file.to_string_lossy().to_string();
+
+    // The raw create a worker's `rlm.spawn` routes: a scripted subagent
+    // child of one parent scope, with the name the reservations key on.
+    let subagent_create = |child_id: &str| {
+        let session_dir = agent_dir
+            .join("session-artifacts")
+            .join("parent-session-uuid")
+            .join(child_id);
+        std::fs::create_dir_all(&session_dir).expect("child session dir");
+        json!({
+            "type": "create",
+            "name": "twin-worker",
+            "config": {
+                "cwd": agent_dir.to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "rlmDepth": 1,
+                "rlmMaxDepth": 2,
+                "provider": "scripted",
+                "model": "faux-1",
+                "script": script.to_string_lossy(),
+                "childScript": script.to_string_lossy(),
+                "parentSessionPath": parent_file,
+            },
+            "runtimeMetadata": {
+                "kind": "subagent",
+                "rlmChildId": child_id,
+                "parentActiveSessionId": "parent-active-id",
+                "parentSessionId": "parent-session-uuid",
+                "parentSessionFile": parent_file,
+                "rlmDepth": 1,
+                "createdAt": 0,
+            },
+            "lifecycle": "resident",
+        })
+    };
+
+    // Four parallel same-name creates of the same parent scope: commands
+    // on one connection are dispatched concurrently, so their responses
+    // arrive out of order (the losers fail at the reservation in
+    // milliseconds, the winner answers after its worker launch) - drain
+    // the connection until every id is answered instead of reading ids
+    // in sequence.
+    let ids = ["c1", "c2", "c3", "c4"];
+    for id in ids {
+        client.send_command(id, subagent_create(&format!("sub-{id}")));
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut responses: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    while responses.len() < ids.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "never answered: {ids:?}");
+        let line = client.read_line_with_budget(remaining);
+        if let Some(id) = line.get("id").and_then(Value::as_str).map(str::to_string) {
+            responses.insert(id, line);
+        }
+    }
+    let mut successes = Vec::new();
+    let mut failures = 0;
+    for id in ids {
+        let response = &responses[id];
+        if response["success"].as_bool().unwrap_or(false) {
+            successes.push(response.clone());
+        } else {
+            failures += 1;
+            assert_eq!(
+                response["error"].as_str().expect("failure error"),
+                "Agent name \"twin-worker\" is unavailable: an agent of that name already exists at depth 1 under this parent",
+                "the losing create fails closed with the TS unavailability error"
+            );
+        }
+    }
+    assert_eq!(successes.len(), 1, "exactly one same-name create admits");
+    assert_eq!(failures, 3, "every racing create fails closed");
+
+    // The reservation released with the admission: once the winner is
+    // gone, the same name admits again.
+    let winner = &successes[0];
+    let active_id = winner["data"]["activeSessionId"]
+        .as_str()
+        .expect("winner active id");
+    client.send_command(
+        "k1",
+        json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    let killed = client.read_response_slow("k1");
+    assert!(
+        killed["success"].as_bool().unwrap_or(false),
+        "kill winner: {killed}"
+    );
+    wait_until(Duration::from_secs(10), || {
+        client.send_command("l1", json!({ "type": "list" }));
+        let list = client.read_response("l1");
+        list["data"]["sessions"]
+            .as_array()
+            .filter(|sessions| sessions.is_empty())
+            .map(|_| ())
+    });
+    client.send_command("c5", subagent_create("sub-c5"));
+    let retry = client.read_response_slow("c5");
+    assert!(
+        retry["success"].as_bool().unwrap_or(false),
+        "the freed name admits again: {retry}"
     );
 }
