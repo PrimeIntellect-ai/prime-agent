@@ -26,6 +26,7 @@ import {
 	resolveIncidentWindow,
 	runIncident,
 } from "./incident.js";
+import { parseTailscaleArgs, runTailscaleServe, runTailscaleStatus, tailscaleDoctorFacts } from "./tailscale.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -124,6 +125,8 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runDoctor(args.slice(1));
 		case "incident":
 			return runIncidentCommand(args.slice(1));
+		case "tailscale":
+			return runTailscaleCommand(args.slice(1));
 		case "shutdown":
 			return runShutdown(args.slice(1));
 		case "package":
@@ -266,7 +269,27 @@ async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 		await runReap(options.has("--json"), false);
 	} else {
 		await runPs(options.has("--json"));
+		if (!options.has("--json")) {
+			for (const fact of tailscaleDoctorFacts()) {
+				console.log(fact);
+			}
+		}
 	}
+	return HANDLED;
+}
+
+function runTailscaleCommand(args: string[]): PublicCommandResult {
+	const parsed = parseTailscaleArgs(args);
+	if (parsed.kind === "error") {
+		console.log(chalk.red(parsed.message));
+		process.exitCode = 1;
+		return HANDLED;
+	}
+	if (parsed.kind === "serve") {
+		process.exitCode = runTailscaleServe(parsed.port, parsed.funnel);
+		return HANDLED;
+	}
+	process.exitCode = runTailscaleStatus(parsed.json);
 	return HANDLED;
 }
 
