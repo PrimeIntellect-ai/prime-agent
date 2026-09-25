@@ -421,6 +421,18 @@ export function canPassivateSession(
 	);
 }
 
+/** Pure policy for eagerly passivating a just-settled RLM child: idle passivation without the idle window. */
+export function canPassivateSettledSession(session: SessionPassivationSnapshot): boolean {
+	return (
+		session.hasParent &&
+		!session.hasNonPassiveDescendants &&
+		!session.isHydrating &&
+		!session.isSessionActive &&
+		session.attachedClients === 0 &&
+		!session.hasRegisteredCronJob
+	);
+}
+
 /** Pure whole-tree residency policy. Callers must supply supervisor-owned attachment state. */
 export function canEvictWorker(
 	worker: WorkerEvictionSnapshot,

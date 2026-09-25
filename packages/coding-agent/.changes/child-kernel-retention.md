@@ -1,0 +1,1 @@
+- Settled RLM child sessions now release their kernel at settle (and their resident daemon runtime, with the registry row and lazy rehydration kept) while remaining listable, inspectable, collectable, and deletable, so finished subagents no longer pin one CPython kernel each until explicit deletion or parent shutdown.

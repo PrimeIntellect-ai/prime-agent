@@ -12194,6 +12194,32 @@ export class AgentSession {
 		};
 	}
 
+	/**
+	 * Release a settled child's kernel, best-effort. A residency-owning host
+	 * closes the whole runtime; without one there is no rehydration path, so
+	 * the child session stays live and the next kernel use revives from the
+	 * snapshot.
+	 */
+	private async _passivateSettledRlmChildRuntime(
+		run: RlmChildRun,
+		childRuntime: RlmSubagentRuntime | undefined,
+		child: AgentSession,
+	): Promise<void> {
+		if (childRuntime && this._subagentRuntimeHost?.passivateRlmSubagentRuntime) {
+			try {
+				// try/catch (not .catch): a synchronous host throw must not flip
+				// the settled run to "error" in the spawn lifecycle's catch.
+				await this._subagentRuntimeHost.passivateRlmSubagentRuntime(run.id, childRuntime);
+			} catch {
+				// Failure leaves the child resident; the host's idle sweep owns the fallback.
+			}
+			return;
+		}
+		// Same-class private access; stopKernel (not dispose) so the provisioner
+		// stays undisposed and a follow-up turn revives from the snapshot.
+		await child._ipythonKernelProvisioner?.stopKernel({ snapshot: true }).catch(() => undefined);
+	}
+
 	private _rlmChildStableSnapshotForRun(run: RlmChildRun, child: AgentSession | undefined): RlmChildStableSnapshot {
 		const model = child?.model ?? run.model;
 		return {
@@ -12997,6 +13023,11 @@ export class AgentSession {
 					} else {
 						await child.disposeAsync().catch(() => undefined);
 					}
+				} else if (this._rlmChildSessions.get(run.id)?.session === child) {
+					// Settled with a durable terminal signal (admitted notice, reply,
+					// or suppression), so the kernel can be released now; the retained
+					// entry keeps the child addressable.
+					await this._passivateSettledRlmChildRuntime(run, childRuntime, child);
 				}
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));

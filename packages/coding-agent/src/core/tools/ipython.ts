@@ -366,6 +366,8 @@ export class IpythonKernelProvisioner {
 	private readonly disposeController = new AbortController();
 	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
 	private disposeSnapshot = true;
+	/** In-flight stopKernel() shutdown; the next startKernel waits on it before reading the snapshot back. */
+	private pendingStop?: Promise<void>;
 
 	constructor(
 		private readonly cwd: string,
@@ -407,21 +409,33 @@ export class IpythonKernelProvisioner {
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
 	async dispose(options?: { snapshot?: boolean }): Promise<void> {
-		this.disposeSnapshot = options?.snapshot ?? true;
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
-		// doesn't waste a slot during a fan-out.
+		// doesn't waste a slot during a fan-out. Terminal: a later ensure()
+		// rejects "Kernel provisioner disposed before start".
 		this.disposeController.abort();
+		await this.stopKernel(options);
+	}
+
+	/** Stop the kernel without marking the provisioner disposed; the next ensure() revives it from the snapshot. */
+	async stopKernel(options?: { snapshot?: boolean }): Promise<void> {
+		this.disposeSnapshot = options?.snapshot ?? true;
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
 		if (!pending) return;
-		try {
-			const m = await pending;
-			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
-		} catch {
-			// a failed startup already cleaned up after itself
-		}
+		const stop = pending
+			.then(async (m) => {
+				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
+			})
+			.catch(() => {
+				// a failed startup already cleaned up after itself
+			})
+			.finally(() => {
+				if (this.pendingStop === stop) this.pendingStop = undefined;
+			});
+		this.pendingStop = stop;
+		await stop;
 	}
 
 	async kill(): Promise<void> {
@@ -499,16 +513,15 @@ export class IpythonKernelProvisioner {
 	private async startKernel(signal?: AbortSignal): Promise<KernelClient> {
 		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
 		const startupSignal = startupAbort.signal;
-		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
-		// flushing its final snapshot — before we read that snapshot back, so the two
-		// kernels can't race over the same on-disk file. Guarded so the common
-		// no-gate path stays synchronous (callers rely on prompt startup progress).
+		// Wait for a previous provisioner (e.g. on /reload) or this provisioner's own
+		// stopKernel() to finish flushing its final snapshot before we read that
+		// snapshot back, so the two kernels can't race over the same on-disk file.
+		// Guarded so the common no-gate path stays synchronous (callers rely on
+		// prompt startup progress).
 		try {
-			if (this.options?.readyGate) {
-				await raceWithAbort(
-					this.options.readyGate.catch(() => {}),
-					startupSignal,
-				);
+			const stopGate = this.pendingStop;
+			if (this.options?.readyGate || stopGate) {
+				await raceWithAbort(Promise.all([this.options?.readyGate?.catch(() => {}), stopGate]), startupSignal);
 			}
 			const snapshotDir = this.options?.snapshotDir;
 			// Always inject an absolute trusted shell (undefined only on win32

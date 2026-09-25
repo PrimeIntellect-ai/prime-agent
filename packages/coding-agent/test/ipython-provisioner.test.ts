@@ -11,6 +11,7 @@ import {
 	type KernelClient,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
+import { snapshotPathIn } from "../src/core/kernel/state-snapshot.js";
 import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 let tempDir = "";
@@ -67,11 +68,13 @@ function createBusyKernelContext(
 
 function writeFakeReplRuntime(
 	markerPath: string,
-	options: { gatedExecute?: { startedPath: string; gatePath: string } } = {},
+	options: { gatedExecute?: { startedPath: string; gatePath: string }; okExecute?: boolean; runsFile?: string } = {},
 ): string {
 	const python = join(tempDir, "python-repl");
-	const refuse = `emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
-		emit({ event: "done", id: request.id, status: "error" });`;
+	const refuse = options.okExecute
+		? `emit({ event: "done", id: request.id, status: "ok" });`
+		: `emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
+			emit({ event: "done", id: request.id, status: "error" });`;
 	const executeBranch = options.gatedExecute
 		? `fs.writeFileSync(${JSON.stringify(options.gatedExecute.startedPath)}, "1");
 		const gate = setInterval(() => {
@@ -86,6 +89,7 @@ function writeFakeReplRuntime(
 const fs = require("node:fs");
 const readline = require("node:readline");
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+${options.runsFile ? `fs.appendFileSync(${JSON.stringify(options.runsFile)}, "run\\n");` : ""}
 emit({ event: "ready", protocol: 3, python: process.version });
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
@@ -225,6 +229,47 @@ describe("IpythonKernelProvisioner", () => {
 
 		await provisioner.dispose({ snapshot: false });
 		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
+	});
+
+	it("stopKernel() stays revivable: the next ensure() spawns a fresh kernel and serves it", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const runsFile = join(tempDir, "kernel-runs");
+		const snapshotDir = join(tempDir, "snapshots");
+		mkdirSync(snapshotDir, { recursive: true });
+		const python = writeFakeReplRuntime(marker, { okExecute: true, runsFile });
+		const countRuns = () => readFileSync(runsFile, "utf8").split("\n").filter(Boolean).length;
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
+		try {
+			const first = await provisioner.ensure();
+			expect(countRuns()).toBe(1);
+			await provisioner.stopKernel({ snapshot: true });
+			expect(existsSync(marker)).toBe(true);
+			writeFileSync(snapshotPathIn(snapshotDir), "{}");
+			const revived = await provisioner.ensure();
+			expect(countRuns()).toBe(2);
+			expect(revived).not.toBe(first);
+			expect(provisioner.lastRestore?.restored).toEqual([]);
+			expect(await revived.execute("print(1)")).toMatchObject({ status: "ok" });
+		} finally {
+			await provisioner.dispose();
+		}
+	});
+
+	it("ensure() after an unawaited stopKernel() waits for the shutdown before spawning", async () => {
+		const { python } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+		let release: () => void = () => {};
+		const flushing = new Promise<void>((r) => {
+			release = r;
+		});
+		Reflect.set(provisioner, "managerPromise", Promise.resolve({ shutdown: () => flushing }));
+		const stopping = provisioner.stopKernel({ snapshot: true });
+		const onProgress = vi.fn();
+		const started = provisioner.ensure(onProgress).catch(() => {});
+		expect(onProgress).not.toHaveBeenCalled(); // ungated, startKernel reports the spawn synchronously
+		release();
+		await Promise.all([stopping, started]);
+		expect(onProgress).toHaveBeenCalledWith("Starting Python kernel...");
 	});
 
 	it("dispose() before the boot slot prevents the kernel from spawning", async () => {

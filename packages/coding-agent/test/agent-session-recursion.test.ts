@@ -121,6 +121,11 @@ interface InspectableRlmRun {
 
 interface InspectableRlmSession {
 	_disposing: boolean;
+	_disposed: boolean;
+	_ipythonKernelProvisioner: {
+		stopKernel(options?: { snapshot?: boolean }): Promise<void>;
+		dispose(options?: { snapshot?: boolean }): Promise<void>;
+	};
 	_activeRlmChildRuns: Map<string, InspectableRlmRun>;
 	_unsettledRlmChildRuns: Set<InspectableRlmRun>;
 	_deletingRlmChildren: Map<
@@ -1518,7 +1523,15 @@ describe("AgentSession rlm recursion", () => {
 		const result = await root.runRlmChild("retained worker");
 		if (!result.session_dir) throw new Error("Missing child session directory");
 		daemonChildId = basename(result.session_dir);
+		const child = root.getRlmChildSession(daemonChildId)!;
+		const childProvisioner = (child as unknown as InspectableRlmSession)._ipythonKernelProvisioner;
+		const stopKernel = vi.spyOn(childProvisioner, "stopKernel");
+		const disposed = vi.spyOn(childProvisioner, "dispose");
 		await waitFor(() => root.getRlmChildSession(daemonChildId)?.getLastAssistantText() !== undefined);
+		await waitFor(() => stopKernel.mock.calls.length === 1);
+		expect(stopKernel).toHaveBeenCalledWith({ snapshot: true });
+		expect(disposed).not.toHaveBeenCalled();
+		expect((child as unknown as InspectableRlmSession)._disposed).toBe(false);
 
 		// Only the parent's own daemon child contributes the messaging identity.
 		const expectedSessionName = createDefaultRlmSubagentSessionName("retained worker", daemonChildId);
@@ -1543,9 +1556,15 @@ describe("AgentSession rlm recursion", () => {
 		const listHandler = hostHandler(root, "rlm.list_subagents");
 		const deleteHandler = hostHandler(root, "rlm.delete_subagent");
 		await expect(listHandler({})).resolves.toEqual(expectedRegistry);
+		await child.prompt("follow-up", { expandPromptTemplates: false });
+		expect(child.getLastAssistantText()).toBe("child answer: follow-up");
+		expect((await root.collectRlmChildren([daemonChildId], 0)).results[0]).toMatchObject({
+			status: "done",
+			settled: true,
+		});
 
 		await expect(deleteHandler({ target: expectedSessionName })).resolves.toEqual({
-			subagent: expectedRegistry.subagents[0],
+			subagent: { ...expectedRegistry.subagents[0], answer_preview: "child answer: follow-up" },
 		});
 		expect(root.getRlmChildSession(daemonChildId)).toBeUndefined();
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [] });
