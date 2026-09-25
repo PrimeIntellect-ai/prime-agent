@@ -545,6 +545,12 @@ struct PaneDrive<'a> {
     exit_guard: &'a ExitGuard,
     keybindings: KeybindingsManager,
     auth_panel_rx: &'a mut mpsc::UnboundedReceiver<crate::auth_panel::AuthPanelRequest>,
+    /// The run loop's headless-plan-completed flag: the pane marks it
+    /// when the plan's `HeadlessDone` lands while it owns the input
+    /// channel, so the run loop's idle gate still ends the run (the
+    /// pane keeps driving until the channel closes or a decision ends
+    /// it).
+    headless_done: &'a mut bool,
 }
 
 /// Draw the mounted onboarding screen and drive it until a key decides,
@@ -566,7 +572,18 @@ async fn drive_onboarding_pane(
         match drive.renderer {
             Renderer::Terminal { .. } => {
                 if let Some(renderer) = drive.renderer.is_terminal_mut() {
-                    crate::app::draw(renderer, view)?;
+                    if let Err(error) = crate::app::draw(renderer, view) {
+                        // A failed frame ends the pane: end a
+                        // still-running login flow with it — the
+                        // cooperative cancel reaches the blocking login
+                        // body, so the error path never leaves a
+                        // detached flow writing credentials in the
+                        // background.
+                        if let Some(task) = flow.take() {
+                            task.end().await;
+                        }
+                        return Err(error);
+                    }
                 }
             }
             Renderer::Headless { .. } => drive.renderer.render_headless_pane(view),
@@ -582,7 +599,8 @@ async fn drive_onboarding_pane(
                 let Some(input) = maybe_input else {
                     return Ok((pane, PaneOutcome::InputClosed));
                 };
-                if let UiInput::Key(key) = input {
+                match input {
+                UiInput::Key(key) => {
                     let Some(key_id) = crate::keys::key_event_to_id(&key) else {
                         screen = pane;
                         continue;
@@ -606,8 +624,26 @@ async fn drive_onboarding_pane(
                         }
                         return Ok((pane, PaneOutcome::Decision(decision)));
                     }
-                } else if let UiInput::Paste(text) = input {
+                }
+                UiInput::Paste(text) => {
                     pane.handle_paste(&text);
+                }
+                // The headless plan completed while the pane owned the
+                // channel: mark the run loop's flag (the pane keeps
+                // driving until the channel closes or a decision ends
+                // it — the run loop's idle gate ends the run).
+                UiInput::HeadlessDone => *drive.headless_done = true,
+                // The plan's driving steps mean nothing to the pane
+                // (the headless harness replays them against the session
+                // screen once the pane releases).
+                UiInput::Submit(_)
+                | UiInput::SettleIdle
+                | UiInput::Mouse(_)
+                | UiInput::WaitIdle { .. }
+                | UiInput::WaitRender { .. }
+                | UiInput::WaitGone { .. }
+                | UiInput::ScrollTop
+                | UiInput::Resize => {}
                 }
             }
             // The login flows drive the mounted dialog through the
@@ -1508,6 +1544,11 @@ async fn run_interactive_surface(
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
+    // Whether the headless plan completed (the plan's final
+    // `HeadlessDone`; the run loop's idle gate ends the run on it):
+    // declared above the onboarding phase because the pane's drive marks
+    // it when the plan completes while the pane owns the input channel.
+    let mut headless_done = false;
     // First-run onboarding owns the pane before the session screen (TS
     // `runStartupOnboarding`): a home whose startup model is ready sees
     // the trace question alone, and a not-ready home runs the full
@@ -1522,6 +1563,7 @@ async fn run_interactive_surface(
             exit_guard: &exit_guard,
             keybindings: view.editor.keybindings().clone(),
             auth_panel_rx: &mut auth_panel_rx,
+            headless_done: &mut headless_done,
         };
         let exit_requested =
             run_onboarding_phase(&task, &mut session, &mut view, &mut drive).await?;
@@ -1584,7 +1626,6 @@ async fn run_interactive_surface(
     // expired between iterations).
     let mut hint_painted = false;
     let mut running = true;
-    let mut headless_done = false;
     let mut wait_idle_deadline: Option<Instant> = None;
     // The headless render barrier's armed state: its deadline, and the
     // frames captured at arming (the `WaitRender` condition scans only
