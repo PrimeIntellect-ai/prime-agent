@@ -849,7 +849,7 @@ mod tests {
         assert!(!is_digest_row(&stripped));
         // The same strip on an already-plain summary row is a no-op.
         let plain_summary = AgentMessage::Standard(Message::User(UserMessage {
-            content: UserContent::Text(summary_text.clone()),
+            content: UserContent::Text(summary_text),
             timestamp: 4,
         }));
         let untouched = strip_compaction_digest_block(plain_summary.clone());

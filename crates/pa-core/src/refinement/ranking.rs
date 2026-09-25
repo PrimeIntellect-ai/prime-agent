@@ -606,7 +606,7 @@ mod tests {
         assert!((rare_score - (1.0 + documents / 1.0).ln() * 1.5).abs() < 1e-9);
         // A term in every entry still weighs ln(2); degenerate corpora stay
         // inert, and empty terms or corpora score nothing.
-        let solo_idf = harness_query_term_idf(&[rare.clone()], &terms);
+        let solo_idf = harness_query_term_idf(std::slice::from_ref(&rare), &terms);
         assert!((solo_idf["quantum"] - 2.0_f64.ln()).abs() < 1e-9);
         assert!(harness_query_term_idf(&[], &terms).is_empty());
         assert!(harness_query_term_idf(&corpus, &HarnessQueryTerms::new()).is_empty());
