@@ -42,9 +42,11 @@ fn plugins_parse(payload: &serde_json::Value, _scope: &str) -> Result<PluginsCat
     parse_plugins_catalog(&bytes)
 }
 
-fn shared() -> &'static Mutex<HashMap<Option<PathBuf>, Arc<CatalogCache<PluginsCatalog>>>> {
-    static SHARED: OnceLock<Mutex<HashMap<Option<PathBuf>, Arc<CatalogCache<PluginsCatalog>>>>> =
-        OnceLock::new();
+/// The process-shared plugins-catalog caches, keyed by the cache path.
+type SharedCaches = HashMap<Option<PathBuf>, Arc<CatalogCache<PluginsCatalog>>>;
+
+fn shared() -> &'static Mutex<SharedCaches> {
+    static SHARED: OnceLock<Mutex<SharedCaches>> = OnceLock::new();
     SHARED.get_or_init(Default::default)
 }
 
@@ -188,7 +190,7 @@ mod tests {
         // A hermetic local fetch server: one 200 with the catalog payload.
         let server = wiremock_server(catalog).await;
         let cache = CatalogCache::new(
-            &server.uri(),
+            server.uri(),
             Some(agent_dir.join(PLUGINS_CACHE_FILE)),
             Arc::new(CatalogFetcher::new()),
             Arc::new(plugins_parse) as CatalogParse<PluginsCatalog>,
