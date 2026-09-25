@@ -379,6 +379,10 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
             .map(|a| queue_lane(a, "followUps"))
             .unwrap_or_default(),
         starting: actions.as_ref().and_then(starting_from_actions),
+        rlm_child_status: actions
+            .as_ref()
+            .map(queue_rlm_child_status)
+            .unwrap_or_default(),
     };
 
     let service_tier = state
@@ -414,6 +418,32 @@ fn starting_from_actions(actions: &Value) -> Option<String> {
             .unwrap_or_default()
             .to_string()
     })
+}
+
+/// The RLM child status provenance rider of a `sessionActions` wire value
+/// (`rlmChildStatus`: the parked child-status notices by lane index —
+/// Rust-native typed provenance with no TS counterpart; the strip folds
+/// exactly these rows). A projection without parked notices omits the
+/// rider entirely.
+fn queue_rlm_child_status(actions: &Value) -> crate::queued::RlmChildStatusIndices {
+    let indices = |lane: &str| {
+        actions
+            .get("rlmChildStatus")
+            .and_then(|rider| rider.get(lane))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|index| index as usize)
+                    .collect::<Vec<usize>>()
+            })
+            .unwrap_or_default()
+    };
+    crate::queued::RlmChildStatusIndices {
+        steering: indices("steering"),
+        follow_up: indices("followUp"),
+    }
 }
 
 /// One lane of a `sessionActions` wire value: the preview strings in order.
@@ -550,11 +580,14 @@ pub enum TurnUpdate {
     /// carries the picked-up prompt whose turn is still preparing (TS
     /// #2063 `sessionActions.active` with `kind: "turn"` / `phase:
     /// "preparing"`), so the strip keeps it visible until the turn
-    /// begins.
+    /// begins. `rlm_child_status` carries the parked RLM child status
+    /// notices' lane indices (the Rust-native typed provenance rider) so
+    /// the strip folds exactly those rows, never a user-typed lookalike.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
         starting: Option<String>,
+        rlm_child_status: crate::queued::RlmChildStatusIndices,
     },
     /// `bash_start` (the user-bash slot, TS `!command`): a command run
     /// outside the model loop; `transient` marks a side-conversation run
@@ -781,6 +814,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 steering: queue_lane(&actions, "steering"),
                 follow_ups: queue_lane(&actions, "followUps"),
                 starting: starting_from_actions(&actions),
+                rlm_child_status: queue_rlm_child_status(&actions),
             })
         }
         // `bash_start` (TS `runUserBash` emits before the process runs):
@@ -2042,8 +2076,38 @@ mod tests {
                 steering: vec!["turn right".to_string()],
                 follow_ups: vec!["then summarize".to_string()],
                 starting: None,
+                rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
             },
             "an attach re-syncs the queue strip from the snapshot"
+        );
+    }
+
+    /// The typed child-status provenance rides the attach snapshot too
+    /// (replay parity with the live frames): the parked notices stay
+    /// folded and inspectable across a re-attach, while a notice-free
+    /// projection (the TS wire shape, rider omitted) still decodes.
+    #[test]
+    fn reconstructs_the_child_status_provenance_from_session_actions() {
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["sessionActions"] = json!({
+            "queuedCount": 3,
+            "steering": ["turn right"],
+            "followUps": [
+                "[child-exited: no-reply child:lane]\n\nLast assistant text: done",
+                "then summarize",
+                "[child-failed child:broken]\n\nboom",
+            ],
+            "rlmChildStatus": { "steering": [], "followUp": [0, 2] },
+        });
+        let data = attach_data_from_response(&attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(
+            view.queued.rlm_child_status,
+            crate::queued::RlmChildStatusIndices {
+                steering: Vec::new(),
+                follow_up: vec![0, 2],
+            },
+            "the attach re-sync carries the typed provenance"
         );
     }
 
@@ -2151,6 +2215,37 @@ mod tests {
                 steering: vec![],
                 follow_ups: vec!["queued follow-up".to_string()],
                 starting: None,
+                rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            }
+        );
+    }
+
+    /// The live queue update carries the typed child-status provenance
+    /// (the Rust-native rider): the parked notices fold into the strip
+    /// on the live path exactly like the attach path, and a notice-free
+    /// projection decodes with empty provenance.
+    #[test]
+    fn decodes_the_child_status_provenance_from_the_live_queue_update() {
+        let update = event_to_update(&json!({
+            "type": "session_action_update",
+            "actions": {
+                "queuedCount": 2,
+                "steering": ["[child-exited: no-reply child:lane]"],
+                "followUps": ["then summarize"],
+                "rlmChildStatus": { "steering": [0], "followUp": [] },
+            },
+        }))
+        .expect("a queue update");
+        assert_eq!(
+            update,
+            TurnUpdate::QueueUpdated {
+                steering: vec!["[child-exited: no-reply child:lane]".to_string()],
+                follow_ups: vec!["then summarize".to_string()],
+                starting: None,
+                rlm_child_status: crate::queued::RlmChildStatusIndices {
+                    steering: vec![0],
+                    follow_up: Vec::new(),
+                },
             }
         );
     }
@@ -2180,6 +2275,7 @@ mod tests {
                 steering: vec![],
                 follow_ups: vec![],
                 starting: Some("queued before compaction".to_string()),
+                rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
             })
         );
         let committed = json!({
@@ -2201,6 +2297,7 @@ mod tests {
                 steering: vec![],
                 follow_ups: vec![],
                 starting: None,
+                rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
             })
         );
         // An active action that is not a turn never projects a starting
@@ -2224,6 +2321,7 @@ mod tests {
                 steering: vec![],
                 follow_ups: vec![],
                 starting: None,
+                rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
             })
         );
     }

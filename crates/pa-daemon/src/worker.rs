@@ -6436,23 +6436,55 @@ pub(crate) fn session_summary(
 
 /// The queue snapshot for one core (TS `sessionActions`).
 fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
+    // TS `queuedAgentMessagePreview`: a parked row reads the
+    // delivery's labeled preview when it carries one, else the
+    // message text.
+    let lane = |items: &std::collections::VecDeque<QueuedItem>| {
+        items
+            .iter()
+            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
+            .collect::<Vec<String>>()
+    };
+    // The RLM child status notices fold by TYPED provenance: the indices
+    // derive from the parked rows' injected custom rows, so the
+    // classification rides the wire and a user-typed message that
+    // merely looks like a notice preview never marks.
+    let rlm_child_status = |items: &std::collections::VecDeque<QueuedItem>| {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| is_rlm_child_status_item(item))
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>()
+    };
     SessionActionSnapshot {
         queued_count: (core.steering.len() + core.follow_up.len()) as u32,
-        // TS `queuedAgentMessagePreview`: a parked row reads the
-        // delivery's labeled preview when it carries one, else the
-        // message text.
-        steering: core
-            .steering
-            .iter()
-            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
-            .collect(),
-        follow_ups: core
-            .follow_up
-            .iter()
-            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
-            .collect(),
+        steering: lane(&core.steering),
+        follow_ups: lane(&core.follow_up),
+        rlm_child_status: crate::types::RlmChildStatusIndices {
+            steering: rlm_child_status(&core.steering),
+            follow_up: rlm_child_status(&core.follow_up),
+        },
         active: core.active_action.clone(),
     }
+}
+
+/// Whether one parked queue item is an RLM child status notice: the
+/// injected custom row's kind (the terminal-notice and failure custom
+/// types) proves it — the only producer is the RLM children delivery
+/// (`rlm_children::deliver_terminal_notice`), and a client-steered
+/// message never carries the row. This is the queue strip's typed
+/// provenance: the notice previews stay the raw `[child-exited: ...]`
+/// texts, so nothing about the string decides the classification.
+fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
+    let Some(row) = item.custom_message.as_ref() else {
+        return false;
+    };
+    matches!(
+        row.get("customType").and_then(Value::as_str),
+        Some(pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE)
+            | Some(pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE)
+    )
 }
 
 /// The active action's queue label (TS `compactRlmText(text, 160)`):
@@ -6601,6 +6633,205 @@ mod update_snapshot_tests {
             data["queue"]["actions"]["steering"][0], "finish the build",
             "the lane snapshot and the actions projection agree"
         );
+    }
+    /// The wire text of one RLM child terminal notice (the exact row
+    /// `rlm_children::deliver_terminal_notice` rides): the follow-up
+    /// command's `message` plus the injected custom row.
+    fn child_status_notice_wire(kind: &str) -> Value {
+        let notice = if kind == "failure" {
+            pa_core::session_engine::rlm_notices::create_rlm_child_failure_message(
+                "sub-1", "lane", "boom", 1_000,
+            )
+        } else {
+            pa_core::session_engine::rlm_notices::create_rlm_child_terminal_notice(
+                &pa_core::session_engine::rlm_notices::RlmChildTerminalNotice::CompletedWithoutReply {
+                    child_id: "sub-1".to_string(),
+                    session_name: "lane".to_string(),
+                    last_assistant_text_preview: Some("done".to_string()),
+                },
+                1_000,
+            )
+        };
+        serde_json::to_value(pa_types::session::AgentMessage::Custom(notice)).unwrap()
+    }
+
+    fn queued_user_item(message: &str) -> QueuedItem {
+        QueuedItem {
+            message: message.to_string(),
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        }
+    }
+
+    /// The queue-fold bug (operator 2026-09-25): parked RLM child status
+    /// notices projected as user-like rows — one per exited child behind
+    /// a busy turn. The snapshot now carries TYPED provenance: the lane
+    /// strings stay the raw notice texts (the TS
+    /// `queuedAgentMessagePreview` projection is unchanged), and the
+    /// `rlmChildStatus` rider holds the indices of exactly the injected
+    /// rows — a user-typed row with the same text never flags.
+    #[tokio::test]
+    async fn the_action_snapshot_flags_parked_child_status_notices() {
+        let (worker, _) = snapshot_after_create().await;
+        let notice_text =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        let failure_text = "[child-failed child:lane]\n\nboom".to_string();
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering.push_back(queued_user_item("turn right"));
+            core.steering.push_back(QueuedItem {
+                message: notice_text.clone(),
+                custom_message: Some(child_status_notice_wire("terminal")),
+                ..queued_user_item(&notice_text)
+            });
+            // A user-typed row with the exact notice text: unflagged.
+            core.steering.push_back(queued_user_item(&notice_text));
+            core.follow_up.push_back(QueuedItem {
+                message: failure_text.clone(),
+                custom_message: Some(child_status_notice_wire("failure")),
+                ..queued_user_item(&failure_text)
+            });
+            core.follow_up.push_back(queued_user_item("then summarize"));
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.steering,
+            vec!["turn right", notice_text.as_str(), notice_text.as_str()],
+            "the lane strings stay the raw texts"
+        );
+        assert_eq!(
+            snapshot.follow_ups,
+            vec![failure_text.as_str(), "then summarize"],
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.steering,
+            vec![1],
+            "only the injected terminal-notice row flags"
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.follow_up,
+            vec![0],
+            "the failure row flags on the follow-up lane"
+        );
+        assert_eq!(snapshot.queued_count, 5);
+    }
+
+    /// The real delivery route: the supervisor's follow-up command parks
+    /// the notice with the typed provenance, and a client steering the
+    /// same text without the injected row parks a plain user row — the
+    /// spoof regression through the command surface itself.
+    #[tokio::test]
+    async fn a_follow_up_notice_parks_with_typed_provenance() {
+        let (worker, _) = snapshot_after_create().await;
+        let content =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        let notice = worker
+            .dispatch(
+                "follow_up",
+                &json!({ "message": content, "customMessage": child_status_notice_wire("terminal") }),
+            )
+            .await;
+        assert!(notice.success, "the notice follow-up parks: {notice:?}");
+        let spoof = worker
+            .dispatch("follow_up", &json!({ "message": content }))
+            .await;
+        assert!(spoof.success, "the plain follow-up parks: {spoof:?}");
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.follow_ups,
+            vec![content.as_str(), content.as_str()],
+            "both rows park their raw text"
+        );
+        assert_eq!(
+            snapshot.rlm_child_status.follow_up,
+            vec![0],
+            "only the row carrying the injected custom row flags"
+        );
+    }
+
+    /// The rider serializes only when a notice is parked: a notice-free
+    /// projection keeps the TS wire shape byte-for-byte (the field is
+    /// skipped), and a parked notice rides the camelCase indices.
+    #[test]
+    fn the_rider_serializes_only_when_a_notice_is_parked() {
+        let empty = SessionActionSnapshot::default();
+        let wire = serde_json::to_value(&empty).unwrap();
+        assert!(
+            wire.get("rlmChildStatus").is_none(),
+            "a notice-free projection stays the TS wire shape: {wire}"
+        );
+        let parked = SessionActionSnapshot {
+            queued_count: 1,
+            steering: vec!["[child-exited: no-reply child:lane]".to_string()],
+            follow_ups: Vec::new(),
+            rlm_child_status: crate::types::RlmChildStatusIndices {
+                steering: vec![0],
+                follow_up: Vec::new(),
+            },
+            active: None,
+        };
+        let wire = serde_json::to_value(&parked).unwrap();
+        assert_eq!(
+            wire["rlmChildStatus"],
+            json!({ "steering": [0] }),
+            "the rider carries the lane indices in camelCase, the empty lane omitted"
+        );
+    }
+
+    /// The journal round-trip preserves the typed provenance: the restore
+    /// re-derives the flag from the parked row's injected custom row (the
+    /// record carries it), so a respawned worker's strip still folds the
+    /// notice (operator safeguard: journal restore must preserve that).
+    #[tokio::test]
+    async fn restored_lane_rows_keep_the_child_status_provenance() {
+        let (worker, _) = snapshot_after_create().await;
+        let content =
+            "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        worker.persist_queue_snapshot(
+            "target-session",
+            &QueueLanes {
+                steering: vec![crate::journal::WorkerQueueItemRecord {
+                    message: content.clone(),
+                    preview: None,
+                    custom_message: Some(child_status_notice_wire("terminal")),
+                    queue_key: None,
+                    queue_visible: true,
+                    policy: "queued".to_string(),
+                }],
+                follow_up: Vec::new(),
+            },
+        );
+        let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
+        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        assert_eq!(steering.len(), 1);
+        assert!(follow_up.is_empty());
+        assert!(
+            is_rlm_child_status_item(&steering[0]),
+            "the restored row is still a flagged notice"
+        );
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering = steering;
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(snapshot.rlm_child_status.steering, vec![0]);
     }
 }
 

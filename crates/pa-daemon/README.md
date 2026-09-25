@@ -126,7 +126,15 @@ Queue-lane command surface (`queue_commands.rs`): the full TS
 plan), plus the worker's `mutate_queued_message`/`resume_queue` arms
 (`AgentSession.mutateQueuedMessage`/`resumeQueuedWork`: preview-addressed
 delete/move/replace over the two lanes with the TS status vocabulary, and
-the empty-queue resume refusal).
+the empty-queue resume refusal). The `sessionActions` queue projection
+(`SessionActionSnapshot`) carries one Rust-native typed rider the TS wire
+has no counterpart for: `rlmChildStatus`, the parked RLM child status
+notices' lane indices, derived per item from the injected custom row (the
+`rlm_child_terminal_notice`/`rlm_child_failure` kinds) at projection time —
+so journal recovery re-derives it, the lane strings stay the TS
+`queuedAgentMessagePreview` projection verbatim, and the condensed queue
+strip folds exactly these rows (a user-typed lookalike never flags); the
+rider serializes only when a notice is parked.
 Prompt attachments: the `prompt`/`steer`/`follow_up` wire `images` array
 (base64 payload + mime type) rides the queue item into the session engine
 as multimodal user content (images on a queued prompt do not survive a

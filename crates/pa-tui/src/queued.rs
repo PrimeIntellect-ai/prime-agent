@@ -22,7 +22,14 @@
 //! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
 //! no provenance), so a human-typed prompt that begins with one of the
 //! internal labels condenses too - it still delivers, and the browse
-//! affordance walks and shows it. The
+//! affordance walks and shows it. The parked RLM child status notices
+//! (`[child-exited: ...]` / `[child-failed ...]` lifecycle rows) are the
+//! one origin that NEVER string-classifies: they condense by WIRE-TYPED
+//! provenance (operator directive 2026-09-25 — the queue-fold bug: many
+//! child exits parked behind one busy turn rendered as that many
+//! user-like rows), the daemon marking its own injected rows by index on
+//! the queue projection, so a user-typed prompt that merely looks like a
+//! notice stays the human row it is. The
 //! browse/edit affordances TS gives the strip (TS `QueueSelection`,
 //! alt+up/alt+down to pick a parked message, ctrl+alt+arrows to reorder,
 //! Enter to steer the edit, the follow-up key to park it) still walk every
@@ -43,15 +50,20 @@ pub const FOLLOW_UP_LABEL: &str = "Follow-up";
 /// pump selected while it is still on its way into the conversation.
 pub const STARTING_LABEL: &str = "Starting";
 
-/// The origin of a queued internal prompt, classified by its preview
-/// label (the wire carries no provenance - the label is the classifier):
-/// what the condensed row counts the prompt as.
+/// The origin of a queued internal prompt: what the condensed row counts
+/// the prompt as. The four TS labels classify by preview string (the wire
+/// carries no provenance for them - the label is the classifier); the RLM
+/// child status notices classify only by wire-typed provenance.
 #[derive(Debug, Clone, Copy)]
 enum InternalPromptOrigin {
     /// An `Agent message received: ` preview.
     AgentMessage,
     /// A `Heartbeat prompt: ` preview.
     Heartbeat,
+    /// A parked RLM child status notice (an injected
+    /// `rlm_child_terminal_notice` / `rlm_child_failure` row), classified
+    /// by wire-typed provenance only (see [`RlmChildStatusIndices`]).
+    ChildStatus,
     /// Every other internal prompt: `Goal context: ` and
     /// `Background command finished: ` previews.
     Other,
@@ -85,19 +97,26 @@ fn internal_prompt_origin(message: &str) -> Option<InternalPromptOrigin> {
 struct CondensedCounts {
     agent_messages: usize,
     heartbeats: usize,
+    child_status: usize,
     other: usize,
 }
 
 impl CondensedCounts {
+    /// Every counted origin's total (zero means no condensed row).
+    fn total(&self) -> usize {
+        self.agent_messages + self.heartbeats + self.child_status + self.other
+    }
+
     /// The counted row's text: each origin with queued prompts and its
     /// count, plural-correct (only a count of one reads singular - a
     /// listed `0` would read plural too), in the fixed agent-message,
-    /// heartbeat, other order, joined into one concise line. A
-    /// zero-count origin never lists.
+    /// heartbeat, child-status, other order, joined into one concise
+    /// line. A zero-count origin never lists.
     fn row_text(&self) -> String {
         let mut parts = [
             (self.agent_messages, InternalPromptOrigin::AgentMessage),
             (self.heartbeats, InternalPromptOrigin::Heartbeat),
+            (self.child_status, InternalPromptOrigin::ChildStatus),
             (self.other, InternalPromptOrigin::Other),
         ]
         .into_iter()
@@ -106,6 +125,7 @@ impl CondensedCounts {
             let name = match origin {
                 InternalPromptOrigin::AgentMessage => "agent message",
                 InternalPromptOrigin::Heartbeat => "heartbeat",
+                InternalPromptOrigin::ChildStatus => "child status notice",
                 InternalPromptOrigin::Other => "other internal prompt",
             };
             let plural = if count == 1 { "" } else { "s" };
@@ -127,19 +147,51 @@ impl CondensedCounts {
 /// `None` when every queued message is human-typed.
 fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
     let mut counts = CondensedCounts::default();
-    for origin in queue
-        .steering
-        .iter()
-        .chain(queue.follow_ups.iter())
-        .filter_map(|message| internal_prompt_origin(message))
-    {
-        match origin {
-            InternalPromptOrigin::AgentMessage => counts.agent_messages += 1,
-            InternalPromptOrigin::Heartbeat => counts.heartbeats += 1,
-            InternalPromptOrigin::Other => counts.other += 1,
+    for (lane, index, message) in queued_items(queue) {
+        if let Some(origin) = queued_item_origin(message, &queue.rlm_child_status, lane, index) {
+            match origin {
+                InternalPromptOrigin::AgentMessage => counts.agent_messages += 1,
+                InternalPromptOrigin::Heartbeat => counts.heartbeats += 1,
+                InternalPromptOrigin::ChildStatus => counts.child_status += 1,
+                InternalPromptOrigin::Other => counts.other += 1,
+            }
         }
     }
-    (counts.agent_messages + counts.heartbeats + counts.other > 0).then_some(counts)
+    (counts.total() > 0).then_some(counts)
+}
+
+/// Walk the parked queue items lane-by-lane, oldest-first, with each
+/// item's lane and index (its provenance address).
+fn queued_items(queue: &QueuedMessages) -> impl Iterator<Item = (QueueLane, usize, &str)> {
+    queue
+        .steering
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (QueueLane::Steering, index, message.as_str()))
+        .chain(
+            queue
+                .follow_ups
+                .iter()
+                .enumerate()
+                .map(|(index, message)| (QueueLane::FollowUp, index, message.as_str())),
+        )
+}
+
+/// One queued item's origin for the strip: the wire-typed child-status
+/// provenance decides FIRST (the daemon marks its own injected lifecycle
+/// rows; the preview text never classifies them), then the TS internal
+/// labels classify by preview string exactly like `isLabeledQueuedPreview`.
+/// `None` is a human-typed row.
+fn queued_item_origin(
+    message: &str,
+    rlm_child_status: &RlmChildStatusIndices,
+    lane: QueueLane,
+    index: usize,
+) -> Option<InternalPromptOrigin> {
+    if rlm_child_status.is_marked(lane, index) {
+        return Some(InternalPromptOrigin::ChildStatus);
+    }
+    internal_prompt_origin(message)
 }
 
 /// TS `formatQueuedMessagePreview`: the lane label plus the message, or
@@ -168,11 +220,39 @@ pub struct QueuedMessages {
     /// until the turn renders it. Not browsable: the browse affordances
     /// walk the parked lanes only (the prompt is already delivered).
     pub starting: Option<String>,
+    /// Which parked items are RLM child status notices, by lane index
+    /// (the wire-typed provenance; see [`RlmChildStatusIndices`]). The
+    /// strip folds exactly these rows into the condensed count — they
+    /// stay browseable with their full notice text.
+    pub rlm_child_status: RlmChildStatusIndices,
 }
 
 impl QueuedMessages {
     pub fn is_empty(&self) -> bool {
         self.steering.is_empty() && self.follow_ups.is_empty()
+    }
+}
+
+/// The parked RLM child status notices, by lane index (the wire-typed
+/// provenance rider on `sessionActions.rlmChildStatus`): the daemon
+/// derives the indices from the parked rows' injected custom rows (the
+/// `rlm_child_terminal_notice` / `rlm_child_failure` kinds), so the strip
+/// never classifies by preview text — a user-typed message that merely
+/// looks like a notice (or starts with any internal-looking prefix)
+/// stays a human row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RlmChildStatusIndices {
+    pub steering: Vec<usize>,
+    pub follow_up: Vec<usize>,
+}
+
+impl RlmChildStatusIndices {
+    /// Whether the lane item at `index` is a child status notice.
+    pub fn is_marked(&self, lane: QueueLane, index: usize) -> bool {
+        match lane {
+            QueueLane::Steering => self.steering.contains(&index),
+            QueueLane::FollowUp => self.follow_up.contains(&index),
+        }
     }
 }
 
@@ -237,20 +317,17 @@ pub fn render_queue(
     }
     // The human-typed previews (the non-labeled messages) render
     // individually, so what the user parked stays explicit and
-    // prioritized above the condensed row.
-    for message in queue
-        .steering
-        .iter()
-        .filter(|message| internal_prompt_origin(message).is_none())
-    {
-        rows.push(preview_row(theme, STEERING_LABEL, message, width));
-    }
-    for message in queue
-        .follow_ups
-        .iter()
-        .filter(|message| internal_prompt_origin(message).is_none())
-    {
-        rows.push(preview_row(theme, FOLLOW_UP_LABEL, message, width));
+    // prioritized above the condensed row. The child status notices
+    // classify by typed provenance here (never by their text), so a
+    // user-typed row that merely looks like a notice renders too.
+    for (lane, index, message) in queued_items(queue) {
+        if queued_item_origin(message, &queue.rlm_child_status, lane, index).is_none() {
+            let label = match lane {
+                QueueLane::Steering => STEERING_LABEL,
+                QueueLane::FollowUp => FOLLOW_UP_LABEL,
+            };
+            rows.push(preview_row(theme, label, message, width));
+        }
     }
     if let Some(counts) = condensed_counts(queue) {
         rows.push(condensed_row(theme, &counts, width));
@@ -467,6 +544,21 @@ pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usiz
     };
     if index < lane_items.len() && target < lane_items.len() && index != target {
         lane_items.swap(index, target);
+        // The typed provenance mirrors the same swap (a marked index
+        // rides its item through the move), so the strip classification
+        // stays correct in the window before the daemon's action update
+        // lands with the fresh indices.
+        let indices = match lane {
+            QueueLane::Steering => &mut queue.rlm_child_status.steering,
+            QueueLane::FollowUp => &mut queue.rlm_child_status.follow_up,
+        };
+        for marked in indices.iter_mut() {
+            if *marked == index {
+                *marked = target;
+            } else if *marked == target {
+                *marked = index;
+            }
+        }
     }
 }
 
@@ -509,6 +601,7 @@ mod tests {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         }
     }
 
@@ -528,6 +621,7 @@ mod tests {
             steering: Vec::new(),
             follow_ups: Vec::new(),
             starting: Some("queued before compaction".to_string()),
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 2, "spacer + the starting row, no hint");
@@ -543,6 +637,7 @@ mod tests {
             steering: Vec::new(),
             follow_ups: vec!["then summarize".to_string()],
             starting: Some("queued before compaction".to_string()),
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 4, "spacer + starting + follow-up + hint");
@@ -563,6 +658,7 @@ mod tests {
                 steering: Vec::new(),
                 follow_ups: Vec::new(),
                 starting: None,
+                rlm_child_status: RlmChildStatusIndices::default(),
             },
             "alt+up",
             80,
@@ -608,6 +704,7 @@ mod tests {
             steering: vec!["/hotkeys".to_string()],
             follow_ups: vec!["fix @Cargo.toml --quiet".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let theme = theme();
         let rows = render_queue(&theme, &queue, "alt+up", 80);
@@ -646,6 +743,7 @@ mod tests {
             steering: vec!["x".repeat(100)],
             follow_ups: Vec::new(),
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -668,6 +766,7 @@ mod tests {
             steering: vec!["first line\nsecond line".to_string()],
             follow_ups: Vec::new(),
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
@@ -698,6 +797,7 @@ mod tests {
             ],
             follow_ups: vec!["Goal context: milestone".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -740,6 +840,7 @@ mod tests {
                 "Background command finished: sleep done".to_string(),
             ],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -783,6 +884,7 @@ mod tests {
             ],
             follow_ups: vec!["Heartbeat prompt: again".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 3);
@@ -800,6 +902,7 @@ mod tests {
             steering: vec!["Agent message received: hi".to_string()],
             follow_ups: Vec::new(),
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 3);
@@ -816,6 +919,7 @@ mod tests {
             ],
             follow_ups: vec![],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -839,6 +943,7 @@ mod tests {
             ],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         let mut selection = QueueSelection::default();
         // Browsing still walks every queued item newest-first, the
@@ -919,6 +1024,7 @@ mod tests {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["edited".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         assert_eq!(
             selection.refresh_at(&changed, QueueLane::FollowUp, 0, "then summarize"),
@@ -933,6 +1039,7 @@ mod tests {
             steering: vec!["one".to_string(), "two".to_string()],
             follow_ups: vec!["later".to_string()],
             starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
         };
         mirror_lane_move(&mut queue, QueueLane::Steering, 0, 1);
         assert_eq!(queue.steering, vec!["two", "one"]);
@@ -955,6 +1062,47 @@ mod tests {
         );
     }
 
+    /// A reorder through the local mirror keeps the typed provenance on
+    /// the item it marks (the swap rides the index), so the folded row
+    /// never misclassifies in the window before the daemon's action
+    /// update lands.
+    #[test]
+    fn mirror_lane_move_rides_the_marked_indices() {
+        let mut queue = QueuedMessages {
+            steering: vec![
+                "notice parked first".to_string(),
+                "turn right".to_string(),
+                "notice parked last".to_string(),
+            ],
+            follow_ups: Vec::new(),
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices {
+                steering: vec![0, 2],
+                follow_up: Vec::new(),
+            },
+        };
+        mirror_lane_move(&mut queue, QueueLane::Steering, 1, 0);
+        assert_eq!(
+            queue.steering,
+            vec!["turn right", "notice parked first", "notice parked last"]
+        );
+        assert_eq!(
+            queue.rlm_child_status.steering,
+            vec![1, 2],
+            "the marked index rides its item through the swap"
+        );
+        mirror_lane_move(&mut queue, QueueLane::Steering, 2, 1);
+        assert_eq!(
+            queue.steering,
+            vec!["turn right", "notice parked last", "notice parked first"]
+        );
+        assert_eq!(
+            queue.rlm_child_status.steering,
+            vec![2, 1],
+            "the second swap rides the other marked item too"
+        );
+    }
+
     #[test]
     fn browse_header_quotes_lane_index_and_keys() {
         let selected = QueueSelectionItem {
@@ -972,6 +1120,217 @@ mod tests {
         assert_eq!(
             browse_header_text(&selected, &keys),
             "steering 1 \u{00b7} alt+up/alt+down browse \u{00b7} ctrl+alt+up/ctrl+alt+down reorder \u{00b7} enter steers \u{00b7} alt+enter queues \u{00b7} empty deletes"
+        );
+    }
+    /// The queue-fold bug (operator 2026-09-25): many child exits parked
+    /// behind one busy turn rendered as that many user-like rows. The
+    /// wire-typed provenance marks them, so they fold into the counted
+    /// row instead — one row however many notices queue, with the
+    /// human-typed previews untouched.
+    #[test]
+    fn child_status_notices_condense_by_wire_provenance() {
+        let queue = QueuedMessages {
+            steering: vec!["turn right".to_string()],
+            follow_ups: vec![
+                "[child-exited: no-reply child:lane-one]".to_string(),
+                "[child-exited: no-reply child:lane-two]\n\nLast assistant text: done".to_string(),
+                "then summarize".to_string(),
+            ],
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices {
+                steering: Vec::new(),
+                follow_up: vec![0, 1],
+            },
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(
+            rows.len(),
+            5,
+            "spacer + steering preview + follow-up preview + condensed row + hint"
+        );
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(texts[1].trim(), "Steering: turn right");
+        assert_eq!(texts[2].trim(), "Follow-up: then summarize");
+        assert_eq!(
+            texts[3].trim(),
+            "2 child status notices queued",
+            "both lanes' notices fold into one counted row"
+        );
+    }
+
+    /// A marked steering-lane notice folds too (the daemon may park the
+    /// notice behind the steering lane's delivery window).
+    #[test]
+    fn a_steering_lane_notice_condenses_too() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "[child-exited: cancelled child:quiet]".to_string(),
+                "turn right".to_string(),
+            ],
+            follow_ups: Vec::new(),
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices {
+                steering: vec![0],
+                follow_up: Vec::new(),
+            },
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(
+            rows.len(),
+            4,
+            "spacer + human preview + condensed row + hint"
+        );
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(texts[1].trim(), "Steering: turn right");
+        assert_eq!(texts[2].trim(), "1 child status notice queued");
+    }
+
+    /// The spoof regression the operator's plan demands: provenance is
+    /// the ONLY classifier for child status. A user-typed message that
+    /// merely looks like a notice — the raw notice text, a string
+    /// starting with the notice family's own header, or any internal-
+    /// looking label — stays a human preview row and never counts.
+    #[test]
+    fn user_typed_rows_that_look_like_notices_stay_human() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "[child-exited: no-reply child:not-a-notice]".to_string(),
+                "[child-failed child:also-not-a-notice]".to_string(),
+            ],
+            follow_ups: vec!["RLM child status: typed by hand".to_string()],
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices::default(),
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(
+            rows.len(),
+            5,
+            "spacer + three previews + hint — no condensed row"
+        );
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(
+            texts[1].trim(),
+            "Steering: [child-exited: no-reply child:not-a-notice]"
+        );
+        assert_eq!(
+            texts[2].trim(),
+            "Steering: [child-failed child:also-not-a-notice]"
+        );
+        assert_eq!(
+            texts[3].trim(),
+            "Follow-up: RLM child status: typed by hand",
+            "the lane label prepends — no label suppression without the four TS prefixes"
+        );
+    }
+
+    /// The counted row names each origin in the fixed agent-message,
+    /// heartbeat, child-status, other order with plural-correct counts.
+    #[test]
+    fn mixed_origins_count_child_status_in_the_fixed_order() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Agent message received: hi".to_string(),
+                "Heartbeat prompt: nudge".to_string(),
+                "[child-exited: no-reply child:worker]".to_string(),
+                "[child-failed child:broken]".to_string(),
+            ],
+            follow_ups: vec![
+                "Goal context: milestone".to_string(),
+                "[child-exited: cancelled child:quiet]".to_string(),
+                "edit this".to_string(),
+            ],
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices {
+                steering: vec![2, 3],
+                follow_up: vec![1],
+            },
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        // spacer + the one human preview (the follow-up lane's "edit
+        // this") + the condensed row + the hint.
+        assert_eq!(rows.len(), 4);
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(texts[1].trim(), "Follow-up: edit this");
+        assert_eq!(
+            texts[2].trim(),
+            "1 agent message, 1 heartbeat, 3 child status notices, and 1 other internal prompt queued",
+            "each origin counts across both lanes, child status between heartbeats and other"
+        );
+        assert_eq!(
+            texts[3].trim(),
+            "╰─ alt+up to browse and edit queued messages"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("child-exited"))
+                .count(),
+            0,
+            "no notice renders its own row"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("edit this"))
+                .count(),
+            1
+        );
+    }
+
+    /// The browse affordance still walks the parked notices — the queue
+    /// stays inspectable with the child/status detail (the operator's
+    /// requirement): the selection walks every item, internal prompts
+    /// and notices included, oldest-first down the follow-up lane.
+    #[test]
+    fn browse_still_walks_the_parked_notices() {
+        let queue = QueuedMessages {
+            steering: Vec::new(),
+            follow_ups: vec![
+                "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string(),
+                "then summarize".to_string(),
+            ],
+            starting: None,
+            rlm_child_status: RlmChildStatusIndices {
+                steering: Vec::new(),
+                follow_up: vec![0],
+            },
+        };
+        let mut selection = QueueSelection::default();
+        let text = selection.browse(&queue, "draft", QueueBrowseDirection::Older);
+        assert_eq!(text.as_deref(), Some("then summarize"));
+        let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
+        assert_eq!(
+            text.as_deref(),
+            Some("[child-exited: no-reply child:lane]\n\nLast assistant text: done"),
+            "the notice is walkable with its full detail"
         );
     }
 }
