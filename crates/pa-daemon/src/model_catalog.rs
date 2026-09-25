@@ -608,7 +608,16 @@ mod tests {
         // and the private entitlement are gone the moment the scope moved.
         assert!(!has_model(&fresh, "live/team-a-marker"));
         assert!(!has_model(&fresh, "internal/team-a-private"));
-        // The refreshed requests carried the new credentials only.
+        // The refreshed requests carried the new credentials only. The
+        // team header carries the account's EFFECTIVE team — an ambient
+        // `PRIME_TEAM_ID` pins it (the production pin, set on the fleet
+        // VMs), otherwise the stored team-b header rides — and the old
+        // account's team never rides a refreshed fetch.
+        let pinned_team = std::env::var("PRIME_TEAM_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let expected_team = pinned_team.as_deref().unwrap_or("team-b");
         let heads = fixture.server.recorded_requests();
         assert!(heads.len() > requests_before, "the forced refresh fetched");
         let refreshed_heads = &heads[requests_before..];
@@ -632,8 +641,14 @@ mod tests {
         assert!(
             refreshed_heads
                 .iter()
-                .any(|head| head.contains("X-Prime-Team-ID: team-b")),
-            "the private fetch rode the new team header"
+                .any(|head| head.contains(&format!("X-Prime-Team-ID: {expected_team}"))),
+            "the private fetch rode the new effective team header ({expected_team}): {refreshed_heads:?}"
+        );
+        assert!(
+            refreshed_heads
+                .iter()
+                .all(|head| !head.contains("X-Prime-Team-ID: team-a")),
+            "the old account's team never rides the refreshed fetches: {refreshed_heads:?}"
         );
     }
 
