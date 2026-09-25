@@ -382,8 +382,8 @@ fn scope_name(entry: &HarnessEntry) -> &'static str {
     }
 }
 
-fn kind_name(entry: &HarnessEntry) -> &'static str {
-    match entry.kind {
+fn refinement_kind_name(kind: RefinementKind) -> &'static str {
+    match kind {
         RefinementKind::Prompt => "prompt",
         RefinementKind::Memory => "memory",
         RefinementKind::Skill => "skill",
@@ -410,23 +410,32 @@ pub fn harness_digest_fingerprint(
     state: &HarnessState,
     render_flags: HarnessDigestRenderFlags,
 ) -> String {
-    let mut entries: Vec<&HarnessEntry> = state
+    // The section key is the renderer's grouping (the formatter prints
+    // entries under their section, never `entry.kind`), so the material
+    // keys `kind` by the section: an entry moved between sections renders
+    // differently and must invalidate the digest, even when its `kind`
+    // field disagrees with its section (a hand-edited store).
+    let mut entries: Vec<(&'static str, &HarnessEntry)> = state
         .entries
-        .values()
-        .flat_map(|records| records.values())
+        .iter()
+        .flat_map(|(kind, records)| {
+            records
+                .values()
+                .map(move |entry| (refinement_kind_name(*kind), entry))
+        })
         .collect();
-    entries.sort_by(|a, b| {
-        format!("{}\0{}\0{}", scope_name(a), kind_name(a), a.id).cmp(&format!(
+    entries.sort_by(|(a_kind, a), (b_kind, b)| {
+        format!("{}\0{}\0{}", scope_name(a), a_kind, a.id).cmp(&format!(
             "{}\0{}\0{}",
             scope_name(b),
-            kind_name(b),
+            b_kind,
             b.id
         ))
     });
-    let entry_material = |entry: &HarnessEntry| {
+    let entry_material = |kind: &'static str, entry: &HarnessEntry| {
         let mut material = serde_json::Map::new();
         material.insert("scope".to_string(), serde_json::json!(scope_name(entry)));
-        material.insert("kind".to_string(), serde_json::json!(kind_name(entry)));
+        material.insert("kind".to_string(), serde_json::json!(kind));
         material.insert("id".to_string(), serde_json::json!(entry.id));
         material.insert("title".to_string(), serde_json::json!(entry.title));
         material.insert("path".to_string(), serde_json::json!(entry.path));
@@ -494,7 +503,12 @@ pub fn harness_digest_fingerprint(
     );
     material.insert(
         "entries".to_string(),
-        serde_json::Value::Array(entries.iter().map(|entry| entry_material(entry)).collect()),
+        serde_json::Value::Array(
+            entries
+                .iter()
+                .map(|(kind, entry)| entry_material(kind, *entry))
+                .collect(),
+        ),
     );
     material.insert(
         "refinements".to_string(),
@@ -771,6 +785,23 @@ mod tests {
         let mut reordered = state.clone();
         reordered.refinements.reverse();
         assert_ne!(harness_digest_fingerprint(&reordered, flags), baseline);
+        // The material keys `kind` by the SECTION the formatter prints
+        // under: an entry moved between sections (even one whose `kind`
+        // field still disagrees, as a hand-edited store can) renders
+        // differently and must invalidate the digest.
+        let mut moved = state.clone();
+        let moved_skill = moved
+            .entries
+            .get_mut(&RefinementKind::Skill)
+            .unwrap()
+            .remove("skill_a")
+            .expect("the seeded skill");
+        moved
+            .entries
+            .get_mut(&RefinementKind::Prompt)
+            .unwrap()
+            .insert("skill_a".to_string(), moved_skill);
+        assert_ne!(harness_digest_fingerprint(&moved, flags), baseline);
     }
 
     #[test]

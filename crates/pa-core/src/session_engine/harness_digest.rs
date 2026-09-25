@@ -209,26 +209,13 @@ fn digest_from_frame(text: &str) -> Option<&str> {
     Some(end.trim_end_matches('\n'))
 }
 
-/// Split a leading digest frame off a loop user row's text: the raw digest
-/// and the text after the frame's blank-line separator (TS
-/// `convertToLlm` renders the digest block with `\n\n` before what
-/// follows). A standalone converted digest row leaves an empty remainder;
-/// a compaction-summary row leaves its summary text.
-fn split_leading_digest_frame(text: &str) -> Option<(&str, &str)> {
-    let after_prefix = text.strip_prefix(super::messages::HARNESS_DIGEST_PREFIX)?;
-    let suffix_at = after_prefix.find(super::messages::HARNESS_DIGEST_SUFFIX)?;
-    let digest = after_prefix[..suffix_at].trim_end_matches('\n');
-    let mut remainder = &after_prefix[suffix_at + super::messages::HARNESS_DIGEST_SUFFIX.len()..];
-    if let Some(after_separator) = remainder.strip_prefix("\n\n") {
-        remainder = after_separator;
-    }
-    Some((digest, remainder))
-}
-
 /// Whether one loop-context row is a delivered digest row: the custom wire
-/// shape (TS custom rows) or the user turn a context rebuild converted it
-/// into (the whole row is the digest frame).
-fn is_digest_row(message: &AgentMessage) -> bool {
+/// shape (TS custom rows), or the user turn a context rebuild converted the
+/// newest in-context digest into — matched byte-exactly against that
+/// digest's frame. A converted row is the whole frame and nothing else, so
+/// a user turn that merely quotes the digest (or prefixes/suffixes anything
+/// around it) is never mistaken for bookkeeping and survives the refresh.
+fn is_digest_row(message: &AgentMessage, latest_digest: Option<&str>) -> bool {
     match message {
         AgentMessage::Custom(custom) => {
             custom
@@ -237,11 +224,9 @@ fn is_digest_row(message: &AgentMessage) -> bool {
                 .and_then(serde_json::Value::as_str)
                 == Some(super::headless::HARNESS_DIGEST_CUSTOM_TYPE)
         }
-        AgentMessage::Standard(Message::User(user)) => {
-            let text = loop_user_text(&user.content);
-            split_leading_digest_frame(&text)
-                .is_some_and(|(_, remainder)| remainder.trim().is_empty())
-        }
+        AgentMessage::Standard(Message::User(user)) => latest_digest.is_some_and(|digest| {
+            loop_user_text(&user.content) == harness_digest_message_text(digest)
+        }),
         _ => false,
     }
 }
@@ -249,12 +234,21 @@ fn is_digest_row(message: &AgentMessage) -> bool {
 /// Strip a live compaction-summary row's superseded digest block (TS #2394
 /// clears `harnessDigest` on the in-context summary): the summary text
 /// stays, byte-identical with a summary that never carried a snapshot.
-fn strip_compaction_digest_block(message: AgentMessage) -> AgentMessage {
+/// The block must be the newest in-context digest's frame — the row a
+/// rebuild produced — never a user turn that quotes the digest prefix.
+fn strip_compaction_digest_block(
+    message: AgentMessage,
+    latest_digest: Option<&str>,
+) -> AgentMessage {
     let AgentMessage::Standard(Message::User(user)) = &message else {
         return message;
     };
+    let Some(digest) = latest_digest else {
+        return message;
+    };
     let text = loop_user_text(&user.content);
-    let Some((_, summary_text)) = split_leading_digest_frame(&text) else {
+    let frame = format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}\n\n");
+    let Some(summary_text) = text.strip_prefix(&frame) else {
         return message;
     };
     if !summary_text.starts_with(COMPACTION_SUMMARY_PREFIX) {
@@ -592,6 +586,11 @@ impl super::AgentSession {
         let Some(render) = self.fresh_digest().await else {
             return Ok(());
         };
+        // The newest in-context digest is the provenance marker for the
+        // rows a rebuild converted: they are its exact frame, so the strip
+        // never matches a user turn that merely quotes the digest.
+        let latest_digest = latest_context_digest_details(&self.agent.state().await.messages)
+            .map(|details| details.digest);
         let message = harness_digest_prompt_row(
             &render.digest,
             super::now_millis(),
@@ -603,8 +602,8 @@ impl super::AgentSession {
             .await
             .messages
             .into_iter()
-            .filter(|existing| !is_digest_row(existing))
-            .map(strip_compaction_digest_block)
+            .filter(|existing| !is_digest_row(existing, latest_digest.as_deref()))
+            .map(|row| strip_compaction_digest_block(row, latest_digest.as_deref()))
             .collect();
         messages.push(message);
         self.agent.set_messages(messages).await;
@@ -810,50 +809,78 @@ mod tests {
     #[test]
     fn append_replaces_older_digest_rows_and_strips_snapshot_blocks() {
         // A delivered custom digest row and its converted user-turn form are
-        // both digest rows (TS #2394 drops every older copy on append).
+        // both digest rows (TS #2394 drops every older copy on append) —
+        // the converted form matches the newest in-context digest's frame
+        // byte-exactly, nothing looser.
         let custom = harness_digest_prompt_row("older digest", 1, "fp-1");
-        assert!(is_digest_row(&custom));
+        assert!(is_digest_row(&custom, None));
         let converted = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text(harness_digest_message_text("older digest")),
             timestamp: 1,
         }));
-        assert!(is_digest_row(&converted));
+        assert!(is_digest_row(&converted, Some("older digest")));
+        // A user turn that quotes the digest — trailing text follows, or
+        // the frame of a DIFFERENT digest — never matches, so submissions
+        // survive the refresh. No newest digest means no converted rows
+        // exist to match either.
+        let quoted = AgentMessage::Standard(Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "{} what is this block?",
+                harness_digest_message_text("older digest")
+            )),
+            timestamp: 2,
+        }));
+        assert!(!is_digest_row(&quoted, Some("older digest")));
+        assert!(!is_digest_row(&converted, Some("another digest")));
+        assert!(!is_digest_row(&converted, None));
         // A plain user row and an unrelated custom row are not.
         let plain = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text("a question".to_string()),
             timestamp: 2,
         }));
-        assert!(!is_digest_row(&plain));
+        assert!(!is_digest_row(&plain, Some("older digest")));
         let unrelated = AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
             role: "custom".to_string(),
             payload: serde_json::json!({"customType": "extension_note"}),
         });
-        assert!(!is_digest_row(&unrelated));
+        assert!(!is_digest_row(&unrelated, Some("older digest")));
 
         // A live compaction-summary row yields its superseded digest block
         // when a fresh digest is appended: the summary text stays,
         // byte-identical with a summary that never carried a snapshot.
         let summary_text =
             format!("{COMPACTION_SUMMARY_PREFIX}the story so far{COMPACTION_SUMMARY_SUFFIX}");
-        let summary_with_block = AgentMessage::Standard(Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "{HARNESS_DIGEST_PREFIX}stale snapshot{HARNESS_DIGEST_SUFFIX}\n\n{summary_text}"
-            )),
-            timestamp: 3,
-        }));
-        let stripped = strip_compaction_digest_block(summary_with_block);
+        let block_with = |summary_text: String| {
+            AgentMessage::Standard(Message::User(UserMessage {
+                content: UserContent::Text(format!(
+                    "{HARNESS_DIGEST_PREFIX}stale snapshot{HARNESS_DIGEST_SUFFIX}\n\n{summary_text}"
+                )),
+                timestamp: 3,
+            }))
+        };
+        let summary_with_block = block_with(summary_text.clone());
+        let stripped = strip_compaction_digest_block(summary_with_block, Some("stale snapshot"));
         let AgentMessage::Standard(Message::User(user)) = &stripped else {
             panic!("expected the compaction row to stay");
         };
         assert_eq!(loop_user_text(&user.content), summary_text);
-        assert!(!is_digest_row(&stripped));
-        // The same strip on an already-plain summary row is a no-op.
+        assert!(!is_digest_row(&stripped, Some("stale snapshot")));
+        // The same strip on an already-plain summary row is a no-op, as is
+        // a strip without a newest digest to anchor the frame.
         let plain_summary = AgentMessage::Standard(Message::User(UserMessage {
             content: UserContent::Text(summary_text),
             timestamp: 4,
         }));
-        let untouched = strip_compaction_digest_block(plain_summary.clone());
+        let untouched =
+            strip_compaction_digest_block(plain_summary.clone(), Some("stale snapshot"));
         assert_eq!(untouched, plain_summary);
+        let block_again = block_with(format!(
+            "{COMPACTION_SUMMARY_PREFIX}the story so far{COMPACTION_SUMMARY_SUFFIX}"
+        ));
+        assert_eq!(
+            strip_compaction_digest_block(block_again.clone(), None),
+            block_again
+        );
     }
 
     #[test]
