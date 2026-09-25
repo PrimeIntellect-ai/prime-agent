@@ -606,7 +606,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     // on one connection are dispatched concurrently.
     let ids = ["c1", "c2", "c3", "c4"];
     for id in ids {
-        client.send_command(id, subagent_create(&format!("sub-{}", id)));
+        client.send_command(id, subagent_create(&format!("sub-{id}")));
     }
     let mut successes = Vec::new();
     let mut failures = 0;
