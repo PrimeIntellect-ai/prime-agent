@@ -18,9 +18,10 @@
 
 use pa_types::ai::Model;
 
+use crate::refinement::executor::AutoRefineReview;
 use crate::refinement::RefinementResult;
 
-use super::refine::now_millis;
+use super::refine::{now_millis, AutoRefineRound};
 use super::AgentSession;
 
 /// The boundary a pending trigger is serviced at.
@@ -61,6 +62,11 @@ pub(crate) struct CompactAutoRefineState {
     /// version drops its result — a review resolved against the abandoned
     /// branch never applies its edits.
     branch_version: u64,
+    /// An approving review retained behind an active agent turn (TS
+    /// `_pendingAutoRefineReview`): the next serviced boundary runs its
+    /// refinement without a new review model call; a branch move's
+    /// discard drops it with the trigger.
+    pending_review: Option<AutoRefineReview>,
 }
 
 impl AgentSession {
@@ -78,13 +84,17 @@ impl AgentSession {
             .pending = true;
     }
 
-    /// Whether a compaction armed the trigger (TS `_compactAutoRefinePending`):
-    /// the scheduling surfaces' cheap pre-check before resolving a model.
+    /// Whether a compaction armed the trigger or an approving review is
+    /// retained (TS `_compactAutoRefinePending`, which stays set through the
+    /// round and clears only when the outcome consumes it): the scheduling
+    /// surfaces' cheap pre-check before resolving a model keeps servicing a
+    /// retained review at the next quiescent boundary.
     pub fn compact_auto_refine_pending(&self) -> bool {
-        self.compact_auto_refine
+        let state = self
+            .compact_auto_refine
             .lock()
-            .expect("compact auto-refine state lock")
-            .pending
+            .expect("compact auto-refine state lock");
+        state.pending || state.pending_review.is_some()
     }
 
     /// Whether the branch invalidation version is still the one the
@@ -111,6 +121,7 @@ impl AgentSession {
             .lock()
             .expect("compact auto-refine state lock");
         state.pending = false;
+        state.pending_review = None;
         state.branch_version += 1;
     }
 
@@ -138,20 +149,22 @@ impl AgentSession {
         surface: CompactAutoRefineSurface,
     ) -> anyhow::Result<Option<RefinementResult>> {
         let gates = self.auto_refine_gates();
-        let (settled_turns, branch_version) = {
+        let (retained_review, settled_turns, branch_version) = {
             let mut state = self
                 .compact_auto_refine
                 .lock()
                 .expect("compact auto-refine state lock");
-            if !state.pending {
+            if !state.pending && state.pending_review.is_none() {
                 return Ok(None);
             }
             // TS gate order (`_maybeAutoRefine` / the serialized
             // checkpoint's compact step): the refine surface, then the
             // `enabled` gate, then the `compact` gate — a dropped
-            // trigger clears the pending flag.
+            // trigger clears the pending flag and any retained review
+            // (TS `_discardPendingAutoRefine`).
             if !self.auto_refine_allowed() || !gates.enabled || !gates.compact {
                 state.pending = false;
+                state.pending_review = None;
                 return Ok(None);
             }
             let under_cooldown = state
@@ -173,19 +186,37 @@ impl AgentSession {
             if state.in_flight {
                 return Ok(None);
             }
-            state.pending = false;
-            state.in_flight = true;
-            (state.settled_turns_since_review, state.branch_version)
+            // TS `_maybeAutoRefine`'s retained-review arm: an approving
+            // review deferred behind an active turn runs its refinement
+            // here without a new review model call (the cooldown above
+            // gates the retry a failed run schedules).
+            if let Some(review) = state.pending_review.clone() {
+                state.in_flight = true;
+                (
+                    Some(review),
+                    state.settled_turns_since_review,
+                    state.branch_version,
+                )
+            } else {
+                state.pending = false;
+                state.in_flight = true;
+                (None, state.settled_turns_since_review, state.branch_version)
+            }
         };
-        let outcome = self
-            .auto_refine_after_compaction(
+        let outcome = if let Some(review) = retained_review.as_ref() {
+            self.run_approved_refine(review, model, api_key, global_harness_dir)
+                .await
+                .map(AutoRefineRound::Ran)
+        } else {
+            self.auto_refine_after_compaction(
                 model,
                 api_key,
                 global_harness_dir,
                 settled_turns,
                 branch_version,
             )
-            .await;
+            .await
+        };
         let outcome = {
             let mut state = self
                 .compact_auto_refine
@@ -206,15 +237,39 @@ impl AgentSession {
             if state.branch_version != branch_version {
                 return Ok(None);
             }
+            // A deferred round is not consumed (TS retains the approval
+            // without stamping): the review stays for the next serviced
+            // boundary, and neither the cooldown stamp nor the counter
+            // reset runs.
+            if let Ok(AutoRefineRound::Deferred(review)) = &outcome {
+                state.pending_review = Some(review.clone());
+                return Ok(None);
+            }
             // TS stamps the cooldown and resets the turn counter for every
             // fresh attempt — decline, success, and failure alike — so a
             // persistent failure cannot retry a full review on every
             // boundary.
             state.last_review_at = Some(now_millis());
             state.settled_turns_since_review = 0;
+            // The retained review's terminal outcomes consume it (TS
+            // `_runApprovedRefine` clears the pending review on success);
+            // a failed retained run keeps it for a post-cooldown retry
+            // (TS's generic-error arm).
+            if retained_review.is_some() {
+                if let Ok(AutoRefineRound::Ran(_)) = &outcome {
+                    state.pending_review = None;
+                }
+            }
             outcome
         };
-        outcome
+        match outcome {
+            Ok(AutoRefineRound::Declined) => Ok(None),
+            Ok(AutoRefineRound::Ran(result)) => Ok(Some(result)),
+            // Unreachable: the deferred outcome is consumed in the block
+            // above.
+            Ok(AutoRefineRound::Deferred(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 

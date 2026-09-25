@@ -356,23 +356,42 @@ pub struct RefineOptions {
     pub rollback_id: Option<String>,
 }
 
+/// The compact-trigger round's resolution (TS `_maybeAutoRefine`'s arms):
+/// the reviewer's decline, the retention of an approving review behind an
+/// active agent turn, or the ran refinement.
+pub(crate) enum AutoRefineRound {
+    /// The reviewer declined (or the round resolved against a bumped
+    /// branch version): no refinement ran. The caller stamps the review
+    /// cooldown for a fresh round (TS's decline arm).
+    Declined,
+    /// The review approved while an agent turn was streaming: the
+    /// refinement run (its session-mutex hold and the live-context
+    /// rebuild) never runs mid-stream. The review is retained and the
+    /// next serviced boundary runs it (TS `_pendingAutoRefineReview`).
+    Deferred(AutoRefineReview),
+    /// The refinement ran (TS `_runApprovedRefine`'s success arm).
+    Ran(RefinementResult),
+}
+
 impl AgentSession {
-    /// The compact-trigger auto-refine round (TS `_runSerializedAutoRefineReview`
-    /// with `reason: "compact"`): the review gate first — an LLM call over the
+    /// The compact-trigger auto-refine round (TS `_maybeAutoRefine`'s
+    /// compact arm): the review gate first — an LLM call over the
     /// conversation, the merged harness state, and the refinement history —
     /// and, only when the reviewer approves, the refinement run carrying the
-    /// auto-refine instructions. `Ok(None)` is the reviewer's decline: no
-    /// refinement ran and nothing surfaces. The caller stamps its review
-    /// cooldown for every outcome (decline, success, and failure alike, the TS
-    /// contract).
-    pub async fn auto_refine_after_compaction(
+    /// auto-refine instructions. A decline resolves `Declined`; an approval
+    /// landing while an agent turn is streaming resolves `Deferred` (the
+    /// review is retained and never applied mid-stream); a ran refinement
+    /// resolves `Ran`. The caller stamps the review cooldown for every fresh
+    /// consumed outcome (decline, success, and failure alike, the TS
+    /// contract) and never for a deferred one.
+    pub(crate) async fn auto_refine_after_compaction(
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
         turns_since_last_review: u32,
         branch_version: u64,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+    ) -> anyhow::Result<AutoRefineRound> {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
         // `_loadMergedHarnessState`, `_loadRefinementHistory`).
@@ -414,7 +433,7 @@ impl AgentSession {
         )
         .await?;
         if !review.should_refine {
-            return Ok(None);
+            return Ok(AutoRefineRound::Declined);
         }
         // TS `_reviewAutoRefine`'s post-await branch check
         // (`branchVersion !== this._autoRefineBranchVersion`): a branch
@@ -424,26 +443,53 @@ impl AgentSession {
         // (its harness edits, audit rows, and message rebuilds) never
         // starts.
         if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
-            return Ok(None);
+            return Ok(AutoRefineRound::Declined);
         }
+        // TS `_maybeAutoRefine`'s post-review active-agent gate
+        // (`_shouldSkipAutoRefineForActiveAgent`: `isStreaming ||
+        // isCompacting`): a turn admitted while the review's model call
+        // was in flight is streaming now, and the refinement run holds
+        // the session mutex across its planner model call and then
+        // rebuilds the live loop context — running it mid-stream stalls
+        // the turn at its session seams and swaps its context
+        // underneath it. The approval is retained instead, and the next
+        // serviced boundary runs the refinement on a quiescent session
+        // (TS `_pendingAutoRefineReview` + the idle re-run; the port's
+        // compaction surfaces all run inside an active turn, so the
+        // agent's streaming state is the live seam).
+        if self.agent().state().await.is_streaming {
+            return Ok(AutoRefineRound::Deferred(review));
+        }
+        Ok(AutoRefineRound::Ran(
+            self.run_approved_refine(&review, model, api_key, global_harness_dir)
+                .await?,
+        ))
+    }
+
+    /// The approved review's refinement run (TS `_runApprovedRefine`):
+    /// the retained-review path and a fresh approval share it — the
+    /// auto-refine instructions built from the review, then the one
+    /// refinement run whose result consumes the review.
+    pub(crate) async fn run_approved_refine(
+        &self,
+        review: &AutoRefineReview,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+    ) -> anyhow::Result<RefinementResult> {
         let options = RefineOptions {
             global: false,
-            instructions: Some(auto_refine_instructions(
-                AUTO_REFINE_COMPACT_REASON,
-                &review,
-            )),
+            instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
             rollback_id: None,
         };
-        Ok(Some(
-            self.refine(
-                &options,
-                RefinementSource::Auto,
-                model,
-                api_key,
-                global_harness_dir,
-            )
-            .await?,
-        ))
+        self.refine(
+            &options,
+            RefinementSource::Auto,
+            model,
+            api_key,
+            global_harness_dir,
+        )
+        .await
     }
 }
 

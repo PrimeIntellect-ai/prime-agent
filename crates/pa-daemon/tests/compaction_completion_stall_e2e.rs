@@ -5,7 +5,12 @@
 //! `setTimeout(0)` round, never between the compaction and the settled
 //! turn).
 //!
-//! Two regressions over a seeded mega session (~12MB):
+//! Three regressions over a seeded mega session (~12MB):
+//! * an approving review that lands while the next turn is streaming
+//!   defers its refinement to the next settle (TS
+//!   `_pendingAutoRefineReview`): no refinement rows surface mid-stream,
+//!   the streaming turn settles untouched, and the retained review runs
+//!   its refinement without a new review model call;
 //! * a mocked-slow review (6s reply) cannot hold the crossing turn's
 //!   settle — the `prompt_and_wait` response lands while the review is
 //!   still in flight, a prompt admitted mid-review runs against the
@@ -24,7 +29,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +55,14 @@ const COMPLETION_BOUND_MS: u64 = 2_000;
 
 /// A declining review reply (the TS `AutoRefineReview` JSON shape).
 const REVIEW_DECLINE: &str = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
+
+/// An approving review reply (the TS `AutoRefineReview` JSON shape).
+const REVIEW_APPROVE: &str =
+    r#"{"shouldRefine": true, "rationale": "the fattening markers recur"}"#;
+
+/// The refinement plan the mock answers the retained review's planner
+/// call with: an empty edits array, the shape `plan_refinement` parses.
+const REFINE_EMPTY_PLAN: &str = r#"{"edits": [], "rationale": "no durable evidence"}"#;
 
 /// The fixed compaction summary the mock answers the summarizer with
 /// (the marker the compacted context must carry on the next request).
@@ -78,11 +91,15 @@ impl Drop for Supervisor {
 /// review's reply is delayed past the whole settle (the heavyweight
 /// phase the completion path must never wait on).
 struct StallMock {
+    requests: Arc<Mutex<Vec<Value>>>,
     turn_requests: Arc<Mutex<Vec<Instant>>>,
     turn_bodies: Arc<Mutex<Vec<Value>>>,
     review_request_at: Arc<Mutex<Option<Instant>>>,
     review_replied_at: Arc<Mutex<Option<Instant>>>,
     summarizer_delay_ms: Arc<AtomicU64>,
+    review_delay_ms: Arc<AtomicU64>,
+    approve_review: Arc<AtomicBool>,
+    turn_delay_ms: Arc<AtomicU64>,
     port: u16,
 }
 
@@ -102,8 +119,12 @@ impl StallMock {
         let review_replied_for_thread = Arc::clone(&review_replied_at);
         let summarizer_delay = Arc::new(AtomicU64::new(0));
         let review_delay = Arc::new(AtomicU64::new(REVIEW_DELAY_MS));
+        let approve_review = Arc::new(AtomicBool::new(false));
+        let turn_delay = Arc::new(AtomicU64::new(0));
         let summarizer_delay_thread = Arc::clone(&summarizer_delay);
         let review_delay_thread = Arc::clone(&review_delay);
+        let approve_review_thread = Arc::clone(&approve_review);
+        let turn_delay_thread = Arc::clone(&turn_delay);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -114,6 +135,8 @@ impl StallMock {
                 let review_replied = Arc::clone(&review_replied_for_thread);
                 let summarizer_delay = Arc::clone(&summarizer_delay_thread);
                 let review_delay = Arc::clone(&review_delay_thread);
+                let approve_review = Arc::clone(&approve_review_thread);
+                let turn_delay = Arc::clone(&turn_delay_thread);
                 std::thread::spawn(move || {
                     let _ = serve(
                         stream,
@@ -124,16 +147,22 @@ impl StallMock {
                         review_replied,
                         summarizer_delay,
                         review_delay,
+                        approve_review,
+                        turn_delay,
                     );
                 });
             }
         });
         StallMock {
+            requests,
             turn_requests,
             turn_bodies,
             review_request_at,
             review_replied_at,
             summarizer_delay_ms: summarizer_delay,
+            review_delay_ms: review_delay,
+            approve_review,
+            turn_delay_ms: turn_delay,
             port,
         }
     }
@@ -220,6 +249,14 @@ fn is_review_request(body: &Value) -> bool {
     })
 }
 
+fn is_refine_plan_request(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| {
+        messages
+            .iter()
+            .any(|message| message_text(message).contains("<user_refine_instructions>"))
+    })
+}
+
 fn read_body(reader: &mut BufReader<TcpStream>) -> std::io::Result<Value> {
     let mut head = String::new();
     loop {
@@ -289,6 +326,8 @@ fn serve(
     review_replied_at: Arc<Mutex<Option<Instant>>>,
     summarizer_delay_ms: Arc<AtomicU64>,
     review_delay_ms: Arc<AtomicU64>,
+    approve_review: Arc<AtomicBool>,
+    turn_delay_ms: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let body = read_body(&mut reader)?;
@@ -298,7 +337,15 @@ fn serve(
         let delay = review_delay_ms.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(delay));
         *review_replied_at.lock().expect("review lock") = Some(Instant::now());
-        return write_sse(&mut stream, REVIEW_DECLINE.to_string(), small_usage());
+        let reply = if approve_review.load(Ordering::SeqCst) {
+            REVIEW_APPROVE
+        } else {
+            REVIEW_DECLINE
+        };
+        return write_sse(&mut stream, reply.to_string(), small_usage());
+    }
+    if is_refine_plan_request(&body) {
+        return write_sse(&mut stream, REFINE_EMPTY_PLAN.to_string(), small_usage());
     }
     if is_summarizer_request(&body) {
         let delay = summarizer_delay_ms.load(Ordering::SeqCst);
@@ -309,6 +356,10 @@ fn serve(
     }
     if is_status_line_request(&body) {
         return write_sse(&mut stream, "idle".to_string(), small_usage());
+    }
+    let turn_delay = turn_delay_ms.load(Ordering::SeqCst);
+    if turn_delay > 0 {
+        std::thread::sleep(Duration::from_millis(turn_delay));
     }
     let index = {
         let mut turns = turn_requests.lock().expect("turn lock");
@@ -898,4 +949,134 @@ fn interrupted_threshold_compaction_settles_consistent() {
          legitimate compaction summary: {}",
         request_text.chars().take(2_000).collect::<String>()
     );
+}
+
+/// An approving review that lands while the next turn is streaming never
+/// runs its refinement mid-stream: the round defers (TS
+/// `_pendingAutoRefineReview` retained behind
+/// `_shouldSkipAutoRefineForActiveAgent`), the streaming turn settles
+/// untouched, and the retained review runs its refinement at the next
+/// serviced boundary without a new review model call.
+#[test]
+#[ignore] // seeds ~12MB; asserts the deferred-refinement contract
+fn approving_review_while_a_turn_streams_defers_its_refinement() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = StallMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let trace_path = dir.path().join("compaction-trace.jsonl");
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &trace_path);
+    let mut client = TimedClient::connect(&socket);
+    let session_id = create_and_attach(&mut client, &session_dir);
+    seed_mega_session(&mut client, &session_id, &mock);
+
+    // The review approves, and both the review's reply (3s) and the next
+    // turn's provider reply (7s) are mocked slow: the approval lands
+    // while the turn is still streaming.
+    mock.review_delay_ms.store(3_000, Ordering::SeqCst);
+    mock.approve_review.store(true, Ordering::SeqCst);
+    mock.turn_delay_ms.store(7_000, Ordering::SeqCst);
+
+    prompt_and_wait(&mut client, "px", &session_id, "crossing turn");
+
+    // The next turn is admitted while the round's review is in flight;
+    // its response arrives when the turn settles (the 7s provider
+    // reply).
+    client.send_command(
+        "pn",
+        json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": session_id,
+            "message": "next turn over the in-flight review",
+        }),
+    );
+
+    // The approval lands mid-stream (bounded wait on the mock's reply
+    // stamp).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline
+        && mock
+            .review_replied_at
+            .lock()
+            .expect("review lock")
+            .is_none()
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        mock.review_replied_at
+            .lock()
+            .expect("review lock")
+            .is_some(),
+        "the approval never landed"
+    );
+
+    // The deferred round surfaced no refinement rows while the turn was
+    // streaming.
+    client.drain_events(300);
+    assert!(
+        !client.events.iter().any(|(event, _)| {
+            event["type"] == "message_end" && event["message"]["customType"] == "refinement_outcome"
+        }),
+        "the deferred refinement surfaced rows while the turn streamed"
+    );
+
+    // The streaming turn settles normally; its settle services the
+    // retained review.
+    let settled = client.read_response("pn");
+    assert_eq!(
+        settled["success"], true,
+        "the streaming turn failed: {settled}"
+    );
+    let turn_settled_at = Instant::now();
+
+    // The retained review's refinement outcome row arrives (bounded
+    // wait) AFTER the streaming turn settled — never mid-stream.
+    let mut outcome_at = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        client.drain_events(300);
+        outcome_at = client
+            .events
+            .iter()
+            .find(|(event, _)| {
+                event["type"] == "message_end"
+                    && event["message"]["customType"] == "refinement_outcome"
+            })
+            .map(|(_, at)| *at);
+        if outcome_at.is_some() {
+            break;
+        }
+    }
+    let outcome_at = outcome_at.expect("the retained review never ran its refinement");
+    assert!(
+        outcome_at >= turn_settled_at,
+        "the refinement ran before the streaming turn settled ({outcome_at:?} < {turn_settled_at:?})"
+    );
+
+    // The retained round ran its refinement without a new review model
+    // call: exactly one review request and one refinement plan request
+    // ever reached the mock.
+    let requests = mock.requests.lock().expect("mock lock").clone();
+    let review_count = requests
+        .iter()
+        .filter(|body| is_review_request(body))
+        .count();
+    assert_eq!(
+        review_count, 1,
+        "the retained review re-ran a review model call"
+    );
+    let plan_count = requests
+        .iter()
+        .filter(|body| is_refine_plan_request(body))
+        .count();
+    assert_eq!(
+        plan_count, 1,
+        "the retained review never ran its refinement plan call"
+    );
+
+    let (has_compaction, _) = session_chain(&session_dir);
+    assert!(has_compaction, "the compaction entry persisted");
 }
