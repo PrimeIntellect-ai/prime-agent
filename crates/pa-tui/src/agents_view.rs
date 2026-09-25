@@ -3392,7 +3392,7 @@ mod tests {
     }
 
     /// A deleted path never reappears behind a slow catalog fetch: the
-    /// SavedLoaded apply filters the recorded deleted paths, so a stale
+    /// `SavedLoaded` apply filters the recorded deleted paths, so a stale
     /// response cannot restore a row the daemon already deleted.
     #[test]
     fn a_deleted_path_survives_a_late_catalog_apply() {
