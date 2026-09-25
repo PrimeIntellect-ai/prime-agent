@@ -1828,14 +1828,21 @@ mod tests {
         // `auto_compaction_due`: the live role must survive both round trips.
         let loop_messages: Vec<pa_agent::types::AgentMessage> = live
             .iter()
-            .filter_map(super::super::session_message_to_loop)
+            .map(|message| {
+                super::super::session_message_to_loop(message)
+                    .expect("session message must convert to loop message")
+            })
             .collect();
         live = loop_messages
             .iter()
-            .filter_map(|message| serde_json::to_value(message).ok())
-            .filter_map(|value| serde_json::from_value(value).ok())
+            .map(|message| serde_json::to_value(message).expect("loop message must serialize"))
+            .map(|value| serde_json::from_value(value).expect("loop message must deserialize"))
             .collect();
         assert!(matches!(&live[0], AgentMessage::CompactionSummary(_)));
+        assert!(live.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
+        )));
         for (custom_type, text) in [
             ("agent_message", "message from agent"),
             ("ipython_state", "kernel survived compaction"),
