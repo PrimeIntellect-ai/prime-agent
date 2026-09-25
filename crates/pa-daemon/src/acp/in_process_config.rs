@@ -338,10 +338,10 @@ async fn apply_in_process_model_switch(
             mode.actual_cwd.as_path(),
             mode.agent_dir.as_path(),
         );
-        settings
-            .get_default_thinking_level()
-            .map(pa_core::settings::ThinkingLevelSetting::model_level)
-            .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium)
+        settings.get_default_thinking_level().map_or(
+            pa_types::ai::ModelThinkingLevel::Medium,
+            pa_core::settings::ThinkingLevelSetting::model_level,
+        )
     };
     let effective = pa_ai::models::clamp_thinking_level(&model, requested);
     apply_level_change(session, mode, effective, model.reasoning)
