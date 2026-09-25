@@ -1165,6 +1165,11 @@ impl SessionInfoGeneration {
 /// resident (session-manager.ts).
 const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
 
+/// The cached-state count ceiling: files with no usage records never trip
+/// the usage budget, so the state count needs its own cap. Eviction stays
+/// LRU-first (never the old clear-all, which forced a full rescan).
+const SESSION_SCAN_MAX_CACHED_STATES: usize = 512;
+
 /// TS `sessionScanStates` + `storeSessionScanState`'s accounting: the
 /// states map with its insertion order (JS Map iteration order — the LRU
 /// eviction walks from the front) and the retained-usage-entry counter.
@@ -1204,7 +1209,9 @@ impl SessionInfoScanCache {
         self.retained_usage_entries += state.accounted_usage_entries;
         self.order.push(path.to_path_buf());
         self.states.insert(path.to_path_buf(), state);
-        while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES {
+        while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
+            || self.states.len() > SESSION_SCAN_MAX_CACHED_STATES
+        {
             let Some(front) = self.order.first().cloned() else {
                 break;
             };

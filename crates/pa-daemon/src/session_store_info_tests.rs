@@ -491,3 +491,28 @@ fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
     let completed = read_session_info(&path).unwrap();
     assert_eq!(completed.name.as_deref(), Some("tail-name"));
 }
+
+#[test]
+fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
+    let dir = test_dir();
+    // Zero-usage session files (a header only): their accounted usage is 0,
+    // so only the state-count cap can evict them (LRU-first, never clear-all).
+    for index in 0..(SESSION_SCAN_MAX_CACHED_STATES + 8) {
+        let path = dir.join(format!("zero-{index}.jsonl"));
+        append_rows(
+            &path,
+            &[
+                json!({"type":"session","id":format!("z{index}"),"timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            ],
+        );
+        let info = read_session_info(&path).unwrap();
+        assert_eq!(info.message_count, 0);
+    }
+    let cache = super::session_info_cache().lock().unwrap();
+    assert!(
+        cache.states.len() <= super::SESSION_SCAN_MAX_CACHED_STATES,
+        "the state count must stay under the cap, got {}",
+        cache.states.len()
+    );
+    assert_eq!(cache.order.len(), cache.states.len());
+}
