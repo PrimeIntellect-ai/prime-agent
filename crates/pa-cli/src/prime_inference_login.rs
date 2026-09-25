@@ -209,23 +209,22 @@ async fn select_team(
     if inputs
         .prime_team_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
     {
         auth.reload();
         return "Using team from PRIME_TEAM_ID.".to_string();
     }
     ui.progress("Loading Prime teams...");
-    let teams = match fetch_prime_teams(
+    let Ok(teams) = fetch_prime_teams(
         inputs.http,
         &inputs.config.base_url,
         api_key,
         DEFAULT_REQUEST_TIMEOUT_MS,
     )
     .await
-    {
-        Ok(teams) => teams,
-        Err(_) => return default_team_status(auth, inputs.prime_team_id),
+    else {
+        return default_team_status(auth, inputs.prime_team_id);
     };
     if teams.is_empty() {
         auth.set_prime_inference_team_selection(None, Some(api_key));
@@ -260,8 +259,8 @@ async fn select_team(
 fn default_team_status(auth: &AuthStorage, prime_team_id: Option<&str>) -> String {
     if prime_team_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
     {
         return "Using team from PRIME_TEAM_ID.".to_string();
     }

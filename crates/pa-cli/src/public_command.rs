@@ -208,7 +208,7 @@ fn print_requested_help(path: &[String]) -> PublicCommandResult {
     let suggestion = find_command_suggestion(&path[path.len() - 1], &candidates);
     let mut message = format!("Unknown command: {}", path.join(" "));
     let hint = suggestion.map(|suggestion| {
-        let mut full = parent.to_vec();
+        let mut full = parent.clone();
         full.push(suggestion);
         format!("Did you mean \"{APP_NAME} help {}\"?", full.join(" "))
     });

@@ -232,9 +232,9 @@ fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::Interacti
         cwd: dir.to_path_buf(),
         session_dir: Some(dir.join("agent").join("sessions")),
         script_path: Some(scripted_engine(dir)),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -257,7 +257,7 @@ fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::Interacti
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     }
 }
@@ -308,7 +308,7 @@ async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -348,7 +348,7 @@ async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
             .request_ok(DaemonCommand::GetMcpConnections {
                 id: None,
                 active_session_id: session.clone(),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .await;
         let elapsed = request_started.elapsed();
@@ -529,7 +529,7 @@ async fn get_mcp_connections_answers_instantly_mid_turn() {
             active_session_id: session.clone(),
             message: "hold this turn open".to_string(),
             input: empty_prompt_input(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("start the held turn");
@@ -542,7 +542,7 @@ async fn get_mcp_connections_answers_instantly_mid_turn() {
         .request_ok(DaemonCommand::GetMcpConnections {
             id: None,
             active_session_id: session.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("mid-turn get_mcp_connections");

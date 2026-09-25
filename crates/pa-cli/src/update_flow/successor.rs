@@ -34,7 +34,7 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
             .get("supervisorOwnerToken")
             .and_then(Value::as_str)
             .map(str::to_string),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -155,7 +155,7 @@ mod tests {
             process_start_id: None,
             supervisor_generation: None,
             supervisor_owner_token: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         assert!(wait_for_exit(&identity, 1_000).await);
     }

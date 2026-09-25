@@ -8,6 +8,7 @@
 //! runtime row keeping its persisted depth) and Enter re-opens it.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -121,22 +122,22 @@ fn write_fixture(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\""
     );
     if let Some(parent) = parent {
-        content.push_str(&format!(",\"parentSession\":\"{}\"", parent.display()));
+        let _ = write!(content, ",\"parentSession\":\"{}\"", parent.display());
     }
-    content.push_str(&format!(",\"rlmDepth\":{rlm_depth}}}"));
+    let _ = write!(content, ",\"rlmDepth\":{rlm_depth}}}");
     content.push('\n');
-    content.push_str(&format!(
+    let _ = write!(content,
         "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
+        let _ = write!(content,
             "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
             index * 1000
-        ));
-        content.push_str(&format!(
+        );
+        let _ = write!(content,
             "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -306,12 +307,12 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         session_dir: Some(session_dir.clone()),
         script_path: None,
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         no_session: false,
         session: SessionSelection::Resume(child_path.clone()),
         initial_message: None,
@@ -331,7 +332,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: view.opened_rlm_depth,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: view.opened_has_children,
         client_settings: None,
     };

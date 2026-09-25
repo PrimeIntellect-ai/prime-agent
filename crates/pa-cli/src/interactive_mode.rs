@@ -1023,7 +1023,7 @@ async fn shutdown_stale_daemon(
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await;
     let busy = sessions.map_or(true, |data| {
@@ -1047,7 +1047,7 @@ async fn shutdown_stale_daemon(
             .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
                 id: None,
                 force: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .await;
         client.close();
@@ -1163,7 +1163,7 @@ mod tests {
                 agent_dir: dir.join("agent"),
                 ..Default::default()
             },
-            session: Default::default(),
+            session: crate::mode::SessionOptions::default(),
             messages: Vec::new(),
             file_args: Vec::new(),
             daemon_socket: None,
@@ -1339,7 +1339,7 @@ mod tests {
                     agent_dir: dir.join("agent"),
                     ..Default::default()
                 },
-                session: Default::default(),
+                session: crate::mode::SessionOptions::default(),
                 messages: Vec::new(),
                 file_args: Vec::new(),
                 daemon_socket: None,
@@ -1509,7 +1509,7 @@ mod tests {
                     agent_dir: dir.join("agent"),
                     ..Default::default()
                 },
-                session: Default::default(),
+                session: crate::mode::SessionOptions::default(),
                 messages: Vec::new(),
                 file_args: Vec::new(),
                 daemon_socket: None,
@@ -1534,7 +1534,7 @@ mod tests {
         let options = build_tui_options(
             &run_options(dir.path()),
             dir.path().join("d.sock"),
-            Default::default(),
+            std::sync::Arc::default(),
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "    ");
@@ -1545,7 +1545,7 @@ mod tests {
         let options = build_tui_options(
             &run_options(bare.path()),
             bare.path().join("d.sock"),
-            Default::default(),
+            std::sync::Arc::default(),
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "  ");

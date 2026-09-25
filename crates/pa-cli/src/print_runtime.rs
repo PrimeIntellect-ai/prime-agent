@@ -716,7 +716,7 @@ fn assert_session_not_active_in_daemon(
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
         if list.success {
@@ -996,7 +996,11 @@ async fn run_prompts_and_emit(
             .await?;
         engine
             .session
-            .prompt_with_images(prompt, images, Default::default())
+            .prompt_with_images(
+                prompt,
+                images,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;

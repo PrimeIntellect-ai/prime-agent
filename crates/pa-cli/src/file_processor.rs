@@ -11,6 +11,7 @@
 //! auto-resize off, TS attaches the raw payload regardless of size, and so
 //! does this path.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use pa_agent::types::ImageContent;
@@ -59,20 +60,14 @@ pub fn process_file_arguments(
             // uses), with the auto-resize setting gating the size limit.
             Ok(Some(image)) => {
                 if auto_resize_images && image.data.len() > DEFAULT_MAX_BYTES {
-                    processed.text.push_str(
-                        &format!(
-                            "<file name=\"{resolved}\">[Image omitted: could not be resized below the inline image size limit.]</file>\n",
-                        ),
-                    );
+                    let _ = write!(processed.text, "<file name=\"{resolved}\">[Image omitted: could not be resized below the inline image size limit.]</file>\n");
                     continue;
                 }
                 processed.images.push(ImageContent {
                     data: image.data,
                     mime_type: image.mime_type,
                 });
-                processed
-                    .text
-                    .push_str(&format!("<file name=\"{resolved}\"></file>\n"));
+                let _ = write!(processed.text, "<file name=\"{resolved}\"></file>\n");
             }
             // Not an image: embed the content in a file block. Node's
             // utf-8 read decodes invalid sequences lossily (U+FFFD), so
@@ -82,9 +77,10 @@ pub fn process_file_arguments(
                     message: format!("Error: Could not read file {resolved}: {error}"),
                 })?;
                 let content = String::from_utf8_lossy(&bytes);
-                processed
-                    .text
-                    .push_str(&format!("<file name=\"{resolved}\">\n{content}\n</file>\n"));
+                let _ = write!(
+                    processed.text,
+                    "<file name=\"{resolved}\">\n{content}\n</file>\n"
+                );
             }
             Err(error) => {
                 return Err(FileProcessingError {
