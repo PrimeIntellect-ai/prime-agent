@@ -518,6 +518,11 @@ pub struct Worker {
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
+    /// The `/model` catalog background-refresh coalescing gate: at most
+    /// one refresh runs per worker with one queued trailing re-arm, so a
+    /// picker burst or an auth-change storm costs one refresh, not N
+    /// parallel entitlement fetches.
+    pub(crate) model_catalog_refresh_gate: std::sync::Arc<crate::model_catalog::RefreshGate>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     /// Live side-question runs (registry, guards, event frames).
     side_questions: crate::side_question::SideQuestionManager,
@@ -1094,6 +1099,9 @@ impl Worker {
             work_notify,
             idle_notify,
             events,
+            model_catalog_refresh_gate: std::sync::Arc::new(
+                crate::model_catalog::RefreshGate::default(),
+            ),
             recovery,
             side_questions,
             peer_grants: PeerGrantStore::new(),

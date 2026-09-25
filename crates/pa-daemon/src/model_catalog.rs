@@ -25,12 +25,24 @@
 //! the split-process port of `authStorage.onChange` → forced
 //! `scheduleCatalogRefresh`) forces the `AuthChange` refresh immediately.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::protocol::{response_success, DaemonResponse};
 use crate::worker::{OutboundFrame, Worker};
+
+/// The per-worker `/model` catalog background-refresh coalescing gate:
+/// at most one refresh runs with one queued trailing re-arm (the
+/// heartbeat-refresh shape), so concurrent picker opens or an
+/// auth-change storm cost one refresh cycle, never N parallel
+/// entitlement fetches.
+#[derive(Default)]
+pub(crate) struct RefreshGate {
+    in_flight: std::sync::atomic::AtomicBool,
+    queued: std::sync::atomic::AtomicBool,
+}
 
 impl Worker {
     /// `get_model_catalog`: the full catalog and the providers with
@@ -81,20 +93,51 @@ impl Worker {
     /// entitlements — settled off the response path. A refresh that
     /// changes the served snapshot broadcasts `model_catalog_changed`;
     /// failures keep the last-good snapshot (the caches' contract) and
-    /// stay silent.
+    /// stay silent. The worker's [`RefreshGate`] coalesces concurrent
+    /// requests into one running refresh plus one trailing re-arm (the
+    /// heartbeat-refresh shape), so a picker burst never fans out into
+    /// parallel entitlement fetches.
     fn spawn_catalog_refresh(&self, trigger: pa_core::models::RefreshTrigger, served: Value) {
+        let gate = std::sync::Arc::clone(&self.model_catalog_refresh_gate);
+        if gate.in_flight.swap(true, Ordering::SeqCst) {
+            // A refresh already runs for this worker: remember the request
+            // and return — the running task re-arms exactly once when it
+            // lands, so N concurrent opens cost one refresh, not N.
+            gate.queued.store(true, Ordering::SeqCst);
+            return;
+        }
         let agent_dir = self.config.agent_dir.clone();
         let events = Arc::clone(&self.events);
         tokio::spawn(async move {
-            let auth = pa_core::auth::AuthStorage::create(&agent_dir);
-            let mut registry =
-                pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-            let available = registry
-                .refresh_available_models_with_trigger(trigger)
-                .await;
-            let refreshed = catalog_payload(&registry, &available);
-            if refreshed != served {
-                events.send(OutboundFrame::model_catalog_changed());
+            let mut baseline = served;
+            let mut trigger = trigger;
+            loop {
+                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                let mut registry =
+                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                let available = registry
+                    .refresh_available_models_with_trigger(trigger)
+                    .await;
+                let refreshed = catalog_payload(&registry, &available);
+                if refreshed != baseline {
+                    events.send(OutboundFrame::model_catalog_changed());
+                }
+                baseline = refreshed;
+                gate.in_flight.store(false, Ordering::SeqCst);
+                if !gate.queued.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                if gate.in_flight.swap(true, Ordering::SeqCst) {
+                    // A later request re-armed first; its task covers the
+                    // trailing refresh.
+                    return;
+                }
+                // The trailing re-arm stays gated: a mid-flight scope
+                // change is served by the fresh fetch (a new scope's
+                // caches are cold, so the hourly gate passes), and the
+                // next request's own scope observation re-detects and
+                // forces if anything flipped again.
+                trigger = pa_core::models::RefreshTrigger::PickerOpen;
             }
         });
     }
@@ -121,14 +164,23 @@ fn catalog_payload(
         .map(|model| format!("{}/{}", model.provider, model.id))
         .collect();
     // The catalog keeps every model except private Prime Inference models
-    // the current credentials do not authorize.
-    let models: Vec<Value> = registry
+    // the current credentials do not authorize, in a canonical
+    // (provider, id) order: the private-models append comes from a
+    // HashMap iteration, so identical model sets would otherwise
+    // serialize in different orders — a spurious broadcast (the served
+    // and refreshed payloads are compared verbatim) and a reordering of
+    // an open picker's rows.
+    let mut entries: Vec<&pa_types::ai::Model> = registry
         .get_all()
         .iter()
         .filter(|model| {
             !pa_core::models::is_private_prime_inference_model(model)
                 || available_keys.contains(&format!("{}/{}", model.provider, model.id))
         })
+        .collect();
+    entries.sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
+    let models: Vec<Value> = entries
+        .into_iter()
         .map(|model| serde_json::to_value(model).unwrap_or(Value::Null))
         .collect();
     json!({
@@ -509,6 +561,26 @@ mod tests {
             .any(|model| model["id"] == id)
     }
 
+    /// The payload's models are in canonical (provider, id) order: the
+    /// served snapshot and the refreshed one are compared verbatim, so a
+    /// HashMap-order append would broadcast spurious changes and reorder
+    /// an open picker.
+    fn assert_canonical_models_order(payload: &Value) {
+        let models = payload["models"].as_array().expect("models array");
+        let keys: Vec<(String, String)> = models
+            .iter()
+            .map(|model| {
+                (
+                    model["provider"].as_str().unwrap_or_default().to_string(),
+                    model["id"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "the payload's models are canonically ordered");
+    }
+
     /// Whether a `model_catalog_changed` frame arrives within `bound`
     /// (other frames pass through and do not count): the negative-assert
     /// seam — a spurious broadcast lands inside the bound, an honestly
@@ -603,6 +675,8 @@ mod tests {
             has_model(&fresh, "probe-v2"),
             "the refreshed provider catalog"
         );
+        assert_canonical_models_order(&fresh);
+        assert_canonical_models_order(&served);
         assert!(has_model(&fresh, "live/team-b-marker"));
         // The old account's view never serves the new scope: the marker
         // and the private entitlement are gone the moment the scope moved.
@@ -654,6 +728,80 @@ mod tests {
                 .contains("x-prime-team-id: team-a")),
             "the old account's team never rides the refreshed fetches: {refreshed_heads:?}"
         );
+    }
+
+    /// Concurrent opens coalesce: an auth-change burst forces the refresh
+    /// once — the refresh gate queues the rest — so the mock server sees
+    /// exactly one refresh cycle (the provider catalog, the PI snapshot,
+    /// the entitlement fetch), never one set of fetches per request, and
+    /// every concurrent open answers with the same canonical payload.
+    #[tokio::test]
+    async fn concurrent_opens_coalesce_into_one_refresh() {
+        let mut fixture = fixture(create_phase_answers()).await;
+        write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
+        let (release, held) = gate();
+        fixture.server.push(held);
+        fixture.server.push(Answer::Raw(ok_json(pi_snapshot_payload(
+            "live/team-b-marker",
+        ))));
+        fixture
+            .server
+            .push(Answer::Raw(ok_json(private_payload(&[]))));
+        let requests_before = fixture.server.request_count();
+
+        let (first, second, third, fourth, fifth) = tokio::join!(
+            get_model_catalog(&fixture.worker, "catalog-session"),
+            get_model_catalog(&fixture.worker, "catalog-session"),
+            get_model_catalog(&fixture.worker, "catalog-session"),
+            get_model_catalog(&fixture.worker, "catalog-session"),
+            get_model_catalog(&fixture.worker, "catalog-session"),
+        );
+        for payload in [&first, &second, &third, &fourth, &fifth] {
+            assert!(has_model(payload, "probe-v1"), "the warm provider catalog");
+            assert_canonical_models_order(payload);
+        }
+        assert_eq!(
+            first, second,
+            "every concurrent open served the same canonical payload"
+        );
+        assert_eq!(second, third);
+        assert_eq!(third, fourth);
+        assert_eq!(fourth, fifth);
+        // Exactly one refresh left the worker while the provider fetch was
+        // held: the first open's forced refresh; the other four queued.
+        // The deadline is on the request log (the forced refresh's
+        // provider fetch must appear), never on a fixed sleep.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < requests_before + 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the forced refresh never started: {:?}",
+                fixture.server.recorded_requests()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            fixture.server.request_count() - requests_before,
+            1,
+            "only the one running refresh reached the server: {:?}",
+            fixture.server.recorded_requests()
+        );
+
+        // Release the held fetch: the one refresh cycle lands (provider +
+        // snapshot + entitlement = 3 requests total), the queued trailing
+        // re-arm finds every gate warm and fetches nothing.
+        let _ = release.send(ok_json(catalog_aggregate(&["probe-v1", "probe-v2"])));
+        await_catalog_changed(&mut fixture.events).await;
+        assert_eq!(
+            fixture.server.request_count() - requests_before,
+            3,
+            "the burst cost exactly one refresh cycle: {:?}",
+            fixture.server.recorded_requests()
+        );
+        let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(has_model(&fresh, "probe-v2"));
+        assert!(has_model(&fresh, "live/team-b-marker"));
+        assert_canonical_models_order(&fresh);
     }
 
     /// Repeat picker opens inside the hourly window stay gated: no new
