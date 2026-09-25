@@ -638,16 +638,20 @@ mod tests {
                 .all(|header| header.contains("Bearer sk-account-b")),
             "no old credentials leak into the refreshed fetches: {auth_headers:?}"
         );
+        // HTTP/1.1 header names are case-insensitive and the client writes
+        // them lowercase: match the name case-insensitively, the team value
+        // exactly.
         assert!(
-            refreshed_heads
-                .iter()
-                .any(|head| head.contains(&format!("X-Prime-Team-ID: {expected_team}"))),
+            refreshed_heads.iter().any(|head| {
+                head.to_ascii_lowercase()
+                    .contains(&format!("x-prime-team-id: {expected_team}"))
+            }),
             "the private fetch rode the new effective team header ({expected_team}): {refreshed_heads:?}"
         );
         assert!(
             refreshed_heads
                 .iter()
-                .all(|head| !head.contains("X-Prime-Team-ID: team-a")),
+                .all(|head| !head.to_ascii_lowercase().contains("x-prime-team-id: team-a")),
             "the old account's team never rides the refreshed fetches: {refreshed_heads:?}"
         );
     }
