@@ -816,6 +816,11 @@ pub struct Worker {
     pub(crate) compaction: crate::compaction::CompactionManager,
     /// Session-tree navigation: `/tree` moves, branch summaries, forks.
     pub(crate) tree_navigation: crate::branch_navigation::TreeNavigation,
+    /// The `get_context_tree` children cache: the artifact-tree walk is a
+    /// multi-second disk read on a grown session store (the operator's
+    /// `/context` timeout), so it runs as a background refresh and the
+    /// request serves the cached snapshot (`context_tree_cache`).
+    pub(crate) context_tree: std::sync::Arc<crate::context_tree_cache::ContextTreeCache>,
     /// Session export: the `/export` HTML and JSONL branches.
     exports: crate::session_export::ExportCommands,
     /// Session-scoped ACP MCP servers for engines without their own store
@@ -1367,6 +1372,7 @@ impl Worker {
             peer_grants: PeerGrantStore::new(),
             compaction,
             tree_navigation,
+            context_tree: std::sync::Arc::new(crate::context_tree_cache::ContextTreeCache::new()),
             exports,
             acp_mcp: std::sync::Arc::new(std::sync::Mutex::new(acp_mcp)),
             user_bash,
@@ -2559,7 +2565,7 @@ impl Worker {
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header (TS
             // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent
-            // session keeps its persisted depth. The runtime kind stays the
+            // session keeps its persisted depth. The runtime kind keeps the
             // create's runtime identity (TS `metadata.kind`) — a resumed
             // subagent file is a top-level runtime that merely carries its
             // persisted depth, so the roster does not re-nest it under its
@@ -2648,6 +2654,21 @@ impl Worker {
             let _ = registry.refresh_available_models().await;
         });
         self.work_notify.notify_one();
+        // Warm the context-tree cache at session open: the background walk
+        // fills the cache while the client settles, so an early `/context`
+        // answers from it instead of walking the artifact tree inline.
+        self.poke_context_tree_refresh();
+        // The delete boundary invalidates the cache's rows for the deleted
+        // child immediately (the next background refresh would otherwise
+        // keep its last row through the settled-children backfill).
+        if let Some(agent_engine) = &self.agent_engine {
+            if let Some(children) = &agent_engine.children {
+                let cache = std::sync::Arc::clone(&self.context_tree);
+                children.set_delete_notifier(std::sync::Arc::new(move |child_id| {
+                    cache.invalidate_child(child_id);
+                }));
+            }
+        }
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
         if interrupted_compaction_requested {
             data["interruptedCompactionPersisted"] =
@@ -2714,6 +2735,12 @@ impl Worker {
         if let Err(response) = self.require_created("attach") {
             return response;
         }
+        // Warm the context-tree cache at every (re)attach (the operators'
+        // Esc agents-view round trip re-attaches): the background walk
+        // fills the cache while the client rebuilds its view, so the
+        // next `/context` finds it ready instead of walking the artifact
+        // tree inline.
+        self.poke_context_tree_refresh();
         let client_id = payload
             .get("clientId")
             .and_then(Value::as_str)

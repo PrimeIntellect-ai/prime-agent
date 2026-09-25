@@ -123,14 +123,17 @@ pub struct AgentView {
     /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam):
     /// while set, it owns the whole frame like the model picker.
     pub effort_picker: Option<crate::effort_picker::EffortPicker>,
-    /// The `/mcp` inline connections view (TS the configuration menu's
-    /// MCP Connections tab): while set, it owns the editor dock like the
-    /// model picker.
+    /// The `/mcp` inline connections view (the MCP surface's own
+    /// picker): while set, it owns the editor dock like the model
+    /// picker.
     pub mcp_view: Option<crate::mcp_view::McpView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
     pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
+    /// The read-only goal panel (the dock's `Pursuing goal` row): while
+    /// `Some`, the panel owns the frame exactly like the docked pickers.
+    pub goal_panel: Option<crate::goal_surface::GoalPanel>,
     /// The dedicated bash view (the dock's Bash group's destination):
     /// while set, it owns the editor dock like the inline pickers.
     pub bash_view: Option<crate::bash_view::BashView>,
@@ -302,6 +305,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             heartbeats_picker: None,
+            goal_panel: None,
             bash_view: None,
             share_loader: None,
             reload_box: None,
@@ -1251,6 +1255,15 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
+        } else if let Some(panel) = &self.goal_panel {
+            let mut dock = prompt_context;
+            dock.extend(crate::goal_surface::render_goal_panel(
+                panel,
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+            ));
+            Some(dock)
         } else if let Some(view) = self.bash_view.as_ref() {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
@@ -1456,6 +1469,7 @@ impl AgentView {
             || self.model_picker.is_some()
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
+            || self.goal_panel.is_some()
             || self.bash_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()

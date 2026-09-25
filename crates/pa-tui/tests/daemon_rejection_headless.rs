@@ -645,27 +645,42 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
     );
 }
 
-/// A genuinely dead connection is still fatal: the transport failure
-/// surfaces as the run's error, not an inline row — real daemon loss
-/// must not be swallowed.
+/// A genuinely dead connection on the prompt is handled, not fatal: the
+/// transport failure surfaces as the TS error row with the draft
+/// restored, the reader-death watch arms the bounded reconnect driver,
+/// and the pane stays mounted (the operator directive: the user never
+/// loses their TUI to a daemon hiccup). The loss is surfaced twice, so
+/// it can never be silently swallowed.
 #[test]
-fn dead_connection_on_prompt_still_exits_the_run() {
+fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
     let steps = vec![
         HeadlessStep::Type("hello".to_string()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ];
-    let error = run_plan_with(steps, |supervisor| {
+    let run = run_plan_with(steps, |supervisor| {
         supervisor.close_on_prompt = true;
     })
-    .expect_err("a dead connection on the prompt request must exit the run");
-    assert!(
-        !pa_tui::daemon_client::is_daemon_rejection(&error),
-        "a dead connection is a transport failure, not a rejection: {error}"
+    .expect("a dead connection keeps the run mounted");
+    let all = run.frames.join(
+        "
+",
     );
+    // The TS `showError` row with the transport failure.
     assert!(
-        error.to_string().contains("closed"),
-        "the transport failure names the closed connection: {error}"
+        all.contains("\u{26a0} Error: the daemon connection closed"),
+        "the dead connection surfaces as the error row:\n{all}"
+    );
+    // The reconnect driver owns the recovery (the reader-death watch
+    // armed it); the note rides the chat.
+    assert!(
+        all.contains("the daemon connection closed — reconnecting"),
+        "the reconnect driver is armed for the loss:\n{all}"
+    );
+    // The draft returns to the editor (TS restores the input).
+    assert!(
+        all.contains("hello"),
+        "the dead-connection draft returned to the editor:\n{all}"
     );
 }
 
