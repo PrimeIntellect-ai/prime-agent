@@ -720,6 +720,10 @@ async fn start_kernel_impl(
         }
         Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {}
         Ok(bootstrap) => {
+            // The kernel booted but its runtime did not initialize: the venv
+            // is the prime suspect, so drop the memoized runtime-ready result
+            // and let the next start re-probe (and rebuild when broken).
+            crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             let details = [bootstrap.stderr.clone()]
                 .into_iter()
                 .chain(bootstrap.error.iter().map(|e| e.traceback.join("\n")))

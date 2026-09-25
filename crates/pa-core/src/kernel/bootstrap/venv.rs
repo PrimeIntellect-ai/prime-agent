@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, Context};
 use sha2::Digest;
@@ -758,9 +759,71 @@ pub(crate) async fn sync_python_skills(
     write_bootstrap_version(venv, runtime_identity, &merged)
 }
 
+/// Process-global memo of a successful runtime-ready probe: the probe is a
+/// full interpreter start (the `import rlm` chain), and re-running it
+/// before every kernel start re-pays a cost the kernel spawn itself is
+/// about to pay. Memoized on success only: the key carries every input the
+/// probe observes (interpreter path, runtime identity, the venv's
+/// recorded bootstrap state), so a venv rebuilt by anyone — a newer
+/// concurrent daemon rewrites `.bootstrap-version` — misses the memo and
+/// revalidates. A failed kernel start drops the memo
+/// ([`invalidate_runtime_probe_cache`]), so the startup retry re-probes
+/// and rebuilds exactly like the uncached flow: a venv broken out of band
+/// self-heals one retry later instead of one probe earlier.
+static RUNTIME_PROBE_MEMO: Mutex<Option<HashMap<String, ()>>> = Mutex::new(None);
+
+fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, ()>>> {
+    RUNTIME_PROBE_MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The memo key: every input the runtime-ready probe observes.
+fn runtime_probe_key(python: &str, runtime_identity: &str, version_raw: &str) -> String {
+    format!(
+        "{python}\u{0}{runtime_identity}\u{0}sha256:{:x}",
+        sha2::Sha256::digest(version_raw.as_bytes())
+    )
+}
+
+/// The runtime-ready check, memoized on success. `version_raw` is the raw
+/// `.bootstrap-version` text the caller already read.
+fn has_prime_agent_runtime_memoized(
+    python: &str,
+    runtime_identity: &str,
+    version_raw: &str,
+) -> bool {
+    let key = runtime_probe_key(python, runtime_identity, version_raw);
+    if lock_probe_memo().as_ref().is_some_and(|memo| memo.contains_key(&key)) {
+        return true;
+    }
+    if !has_prime_agent_runtime(python) {
+        return false;
+    }
+    lock_probe_memo()
+        .get_or_insert_with(HashMap::new)
+        .insert(key, ());
+    true
+}
+
+/// Drop every memoized runtime-ready result: the next kernel start re-runs
+/// the probe (and rebuilds the venv when the probe finds it broken).
+pub fn invalidate_runtime_probe_cache() {
+    *lock_probe_memo() = None;
+}
+
+/// The parsed `.bootstrap-version` plus its raw text (the probe-memo key
+/// input), in one read.
+fn read_bootstrap_version_raw(venv: &Path) -> (Option<BootstrapVersion>, String) {
+    let raw = std::fs::read_to_string(venv.join(BOOTSTRAP_VERSION_FILE)).unwrap_or_default();
+    let parsed: Option<BootstrapVersion> = serde_json::from_str(&raw).ok();
+    (parsed.filter(|v| v.schema > 0), raw)
+}
+
 pub(crate) fn kernel_base_ready(python: &str, venv: &Path, runtime_identity: &str) -> bool {
-    has_prime_agent_runtime(python)
-        && bootstrap_base_version_current(read_bootstrap_version(venv), runtime_identity)
+    let (version, raw) = read_bootstrap_version_raw(venv);
+    bootstrap_base_version_current(version, runtime_identity)
+        && has_prime_agent_runtime_memoized(python, runtime_identity, &raw)
 }
 
 pub(crate) fn kernel_ready(
@@ -769,12 +832,9 @@ pub(crate) fn kernel_ready(
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
-    has_prime_agent_runtime(python)
-        && bootstrap_version_current(
-            read_bootstrap_version(venv),
-            runtime_identity,
-            python_skills,
-        )
+    let (version, raw) = read_bootstrap_version_raw(venv);
+    bootstrap_version_current(version, runtime_identity, python_skills)
+        && has_prime_agent_runtime_memoized(python, runtime_identity, &raw)
 }
 
 #[cfg(test)]
@@ -877,6 +937,26 @@ mod tests {
             read_bootstrap_version(dir.path()),
             "sha256:other"
         ));
+    }
+
+    #[test]
+    fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
+        let key = runtime_probe_key("/py", "sha256:runtime", "raw");
+        assert_eq!(key, runtime_probe_key("/py", "sha256:runtime", "raw"));
+        assert_ne!(key, runtime_probe_key("/other-py", "sha256:runtime", "raw"));
+        assert_ne!(key, runtime_probe_key("/py", "sha256:other", "raw"));
+        assert_ne!(key, runtime_probe_key("/py", "sha256:runtime", "raw2"));
+
+        lock_probe_memo()
+            .get_or_insert_with(HashMap::new)
+            .insert(key.clone(), ());
+        assert!(lock_probe_memo()
+            .as_ref()
+            .is_some_and(|memo| memo.contains_key(&key)));
+        invalidate_runtime_probe_cache();
+        assert!(lock_probe_memo()
+            .as_ref()
+            .is_none_or(|memo| !memo.contains_key(&key)));
     }
 
     #[test]
