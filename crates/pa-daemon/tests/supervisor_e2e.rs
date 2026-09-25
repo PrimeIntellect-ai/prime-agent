@@ -664,6 +664,11 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     assert_eq!(data["tokens"]["cacheRead"], 0);
     assert_eq!(data["tokens"]["cacheWrite"], 0);
     assert_eq!(data["tokens"]["total"], 128);
+    // The deliberate TS delta: the full-session total the top bar shows
+    // (the whole gap-bridged branch's cumulative spend, subagents
+    // included). The scripted turn's spend is the whole session here, so
+    // it equals the active `cost`.
+    assert_eq!(data["totalCost"], 0.0);
     let stats_keys: Vec<&str> = data
         .as_object()
         .expect("stats object")
@@ -672,7 +677,8 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         .collect();
     // TS `SessionStats` key order (sessionFile, sessionId, userMessages,
     // assistantMessages, toolCalls, toolResults, totalMessages, tokens,
-    // cost): the JSON map preserves insertion order.
+    // cost) with this port's `totalCost` appended after `cost`: the JSON
+    // map preserves insertion order.
     assert_eq!(
         stats_keys,
         vec![
@@ -685,6 +691,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
             "totalMessages",
             "tokens",
             "cost",
+            "totalCost",
         ]
     );
 

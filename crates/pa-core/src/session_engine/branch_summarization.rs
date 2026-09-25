@@ -29,6 +29,12 @@ pub struct BranchSummaryResult {
     pub aborted: bool,
     pub error: Option<String>,
     pub usage: Option<pa_types::ai::Usage>,
+    /// The model that served the summary call (TS #2411's routed
+    /// auxiliary model, or the session model when no auxiliary is
+    /// configured): the caller persists it on the entry so the per-model
+    /// cost fold bills the spend on the model that billed it, not the
+    /// branch's `model_change` timeline.
+    pub model: Option<(String, String)>,
 }
 
 /// Prepared summarization inputs.
@@ -243,6 +249,7 @@ pub fn finalize_branch_summary(
         aborted: false,
         error: None,
         usage: None,
+        model: None,
     }
 }
 
@@ -469,6 +476,7 @@ pub async fn generate_branch_summary(
         .join("\n");
     let mut result = finalize_branch_summary(&response_text, &preparation);
     result.usage = (response.usage.total_tokens > 0).then_some(response.usage);
+    result.model = Some((model.provider.clone(), model.id.clone()));
     result
 }
 
