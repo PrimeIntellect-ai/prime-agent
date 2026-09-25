@@ -6,7 +6,7 @@
 //! arenas, so those phases' peaks stay resident in RSS forever. The helpers
 //! here are pure allocator plumbing: no data, capability, or protocol
 //! behavior changes, and they are no-ops wherever the platform has no
-//! glibc seam (every non-Linux build).
+//! glibc seam (every non-glibc/Linux build).
 
 /// Cap glibc's per-thread arenas.
 ///

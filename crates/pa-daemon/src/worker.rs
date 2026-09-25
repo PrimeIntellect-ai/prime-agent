@@ -1802,7 +1802,7 @@ impl Worker {
         // big transient Value trees; the frame is out, so return their
         // freed heap to the OS instead of letting the arenas hold the
         // phase's peak for the process lifetime.
-        pa_core::memory_release::trim_freed_heap_if_large(payload.len());
+        pa_types::memory_release::trim_freed_heap_if_large(payload.len());
     }
 
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
@@ -1853,7 +1853,7 @@ impl Worker {
             }
             // The hydrated full file was a transient whole-file copy on
             // top of the installed history: release its freed heap.
-            pa_core::memory_release::trim_freed_heap();
+            pa_types::memory_release::trim_freed_heap();
         }
         match command_type {
             "create" => self.handle_create(payload).await,
@@ -2636,7 +2636,7 @@ impl Worker {
         // its load copies (window walks, parsed entry trees) are dropped
         // by now — return that freed heap to the OS so the load's peak
         // does not stay resident.
-        pa_core::memory_release::trim_freed_heap();
+        pa_types::memory_release::trim_freed_heap();
         response_success(None, "create", Some(data))
     }
 

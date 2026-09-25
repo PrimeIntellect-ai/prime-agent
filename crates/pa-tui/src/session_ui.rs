@@ -1083,7 +1083,7 @@ impl SessionUi {
         // folded transcript together; the frame and tree drop here, so
         // return their freed heap to the OS instead of keeping the load's
         // peak resident for the TUI's lifetime.
-        crate::memory_release::trim_freed_heap();
+        pa_types::memory_release::trim_freed_heap();
         Ok(())
     }
 
