@@ -231,6 +231,11 @@ pub fn event_stream() -> (
 impl AssistantMessageEventStreamHandle {
     /// Push an event. Ignored after the stream was ended or closed, and after a
     /// terminal event resolved the result (TS `EventStream.push` after `done`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `closed` or `result` mutex is poisoned (another thread
+    /// panicked while holding one of them).
     pub fn push(&self, event: AssistantMessageEvent) {
         if *self.shared.closed.lock().unwrap() {
             return;
@@ -249,6 +254,11 @@ impl AssistantMessageEventStreamHandle {
     ///
     /// Like the TS `EventStream.end`, already-queued events are still yielded
     /// by the consumer before iteration finishes; further pushes are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `closed` or `result` mutex is poisoned (another thread
+    /// panicked while holding one of them).
     pub fn end(&self, result: Option<AssistantMessage>) {
         *self.shared.closed.lock().unwrap() = true;
         if let Some(message) = result {
