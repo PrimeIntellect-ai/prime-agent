@@ -605,7 +605,7 @@ async fn run_onboarding_phase(
         // The model-ready branch (TS `runOnboardingFlow`'s ready case):
         // the immediate splash mounts the trace question alone.
         let screen = crate::onboarding::OnboardingScreen::new();
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         match outcome {
             PaneOutcome::Exit => return Ok(true),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
@@ -645,7 +645,7 @@ async fn run_onboarding_phase(
     // questions. A flow that aborts (a cancelled or failed sign-in,
     // the exit keys) leaves the marker unset — the next launch retries.
     let screen = crate::onboarding::OnboardingScreen::welcome();
-    let (mut screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+    let (mut screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
@@ -693,7 +693,7 @@ async fn run_onboarding_phase(
             .await
     });
     let (mut screen, outcome) =
-        drive_onboarding_pane(view, &mut drive, screen, Some(prime_flow)).await?;
+        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow)).await?;
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
@@ -779,7 +779,7 @@ async fn run_onboarding_phase(
             crate::onboarding_flow::ProviderPicker::new(options),
         ));
         let (picked_screen, outcome) =
-            drive_onboarding_pane(view, &mut drive, screen, None).await?;
+            drive_onboarding_pane(view, &mut *drive, screen, None).await?;
         screen = picked_screen;
         let pick = match outcome {
             PaneOutcome::Exit => return Ok(true),
@@ -833,7 +833,7 @@ async fn run_onboarding_phase(
                     }
                 });
                 let (prompted_screen, outcome) =
-                    drive_onboarding_pane(view, &mut drive, screen, Some(prompt_flow)).await?;
+                    drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
                 screen = prompted_screen;
                 match outcome {
                     PaneOutcome::Exit => return Ok(true),
@@ -868,7 +868,7 @@ async fn run_onboarding_phase(
                             async move { service_auth.0.login_on_panel(&row, panel).await },
                         );
                     let (login_screen, outcome) =
-                        drive_onboarding_pane(view, &mut drive, screen, Some(provider_login))
+                        drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login))
                             .await?;
                     screen = login_screen;
                     match outcome {
@@ -903,7 +903,7 @@ async fn run_onboarding_phase(
             crate::onboarding::trace_question_config(),
         ),
     ));
-    let (_screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+    let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
     match outcome {
         PaneOutcome::Exit => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {

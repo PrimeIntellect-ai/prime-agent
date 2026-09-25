@@ -33,7 +33,7 @@ struct StartupModelProbe {
     cli_model: Option<String>,
     /// The `--models` scope pattern list, resolved against the fresh
     /// catalog on every probe.
-    models: Option<String>,
+    models: Option<Vec<String>>,
     is_continuing: bool,
     /// An explicit `--api-key` counts as configured auth (it rides the
     /// resolved model's provider as a runtime key).
@@ -210,7 +210,7 @@ fn onboarding_task(
             created_at: std::time::Instant::now(),
             probe,
         }),
-        model_ready: std::sync::Arc::new(move || readiness_probe.clone().resolve().1),
+        model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),
         current_model,
         provider_auth,
     })
