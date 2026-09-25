@@ -780,9 +780,8 @@ mod tests {
             pushes[0]["removed"].is_null() || pushes[0]["removed"] == json!([]),
             "the passivated top-level row is not a removal: {pushes:?}"
         );
-        let roster = supervisor.roster.lock().unwrap();
-        let passivated = roster
-            .entries()
+        let entries = supervisor.roster.lock().unwrap().entries();
+        let passivated = entries
             .iter()
             .find(|entry| {
                 entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
@@ -794,7 +793,6 @@ mod tests {
                 && passivated.summary.get("activeSessionId").is_none(),
             "the live-only fields dropped with the passivation: {passivated:?}"
         );
-        drop(roster);
         // A LATER stop's unowned sweep never revisits the passivated
         // top-level row (the sweep's business is the dead seeded
         // families, not the stopped sessions' visible rows).
