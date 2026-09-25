@@ -318,7 +318,7 @@ describe("kernel bootstrap", () => {
 		expect((await stat(join(venv, ".bootstrap-version"))).mtimeMs).toBe(0);
 	});
 
-	it("retries a busy marker swap before the first install and keeps a failed skill out of the record", async () => {
+	it("retries a busy marker swap before the first install, keeps a failed skill out of the record, and retries it on the next start in the same process", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
 		const installedSkill = createPythonSkill("agent-a");
@@ -339,6 +339,14 @@ describe("kernel bootstrap", () => {
 		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
 			installedSkill.importName,
 		]);
+		// The partial success must not be cached: the next start in this process retries the failed skill.
+		delete process.env.UV_FAIL_ARG;
+		await expect(ensureKernelPython({ pythonSkills: [installedSkill, brokenSkill] })).resolves.toBe(
+			join(venv, "bin", "python"),
+		);
+		const lines = readFileSync(logPath, "utf8").split("\n");
+		expect(lines.filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`))).toHaveLength(2);
+		expect(lines.filter((line) => line.includes(`--editable ${installedSkill.packagePath}`))).toHaveLength(1);
 	});
 
 	// test-policy: allow explicit-test-timeout -- bounds real killed tsx respawn and resume variance, not the assertion
@@ -424,6 +432,60 @@ describe("kernel bootstrap", () => {
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
+	});
+
+	function prepareWarmVenv(): { venv: string; python: string } {
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		return { venv, python };
+	}
+
+	it("reuses validated venvs across starts, revalidates on change, and never caches the override", async () => {
+		const logPath = installFakeUv();
+		const { venv, python } = prepareWarmVenv();
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		// Cached success: a probe-failing interpreter still resolves without re-running the ready check.
+		writeFakePython(python, []);
+		await expect(ensureKernelPython()).resolves.toBe(python);
+		expect(existsSync(logPath)).toBe(false);
+
+		// A rewritten marker invalidates the entry; the rebuild then fails partway
+		// without leaving a resurrectable entry ("dill" is a real install arg).
+		writeBootstrapVersion(venv);
+		process.env.UV_FAIL_ARG = "dill";
+		await expect(ensureKernelPython()).rejects.toThrow(/Failed to set up the Python kernel runtime/);
+
+		delete process.env.UV_FAIL_ARG;
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		const overridePython = join(tempDir, "override-python");
+		writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		await expect(ensureKernelPython()).resolves.toBe(overridePython);
+		writeFakePython(overridePython, []);
+		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime/);
+	});
+
+	it("revalidates when the venv override or the python skills change after a cached success", async () => {
+		const logPath = installFakeUv();
+		const { python } = prepareWarmVenv();
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		const otherVenv = join(tempDir, "kernel-venv-b");
+		process.env.PRIME_AGENT_KERNEL_VENV = otherVenv;
+		const otherPython = join(otherVenv, "bin", "python");
+		await expect(ensureKernelPython()).resolves.toBe(otherPython);
+
+		const pythonSkill = createPythonSkill();
+		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(otherPython);
+		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`venv ${otherVenv}`);
+		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
 	});
 
 	it.each([
