@@ -1145,9 +1145,9 @@ impl Supervisor {
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
                 // The give-up settles the dead worker's rows exactly like
-                // a stop (a subagent under a surviving root passivates and
-                // keeps its model/thinking/cwd; everything else is
-                // removed). No ledger reseed, no transcript read.
+                // a stop (every owned non-ephemeral, non-queued row
+                // passivates and keeps its model/thinking/cwd). No ledger
+                // reseed, no transcript read.
                 let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
                 self.passivate_roster_worker(&resident.worker_id, ephemeral)
                     .await;
@@ -2326,6 +2326,11 @@ impl Supervisor {
                     let roster_subscribed = Arc::clone(&roster_subscribed);
                     let connection = Arc::clone(&connection);
                     let dispatch_tx = dispatch_tx.clone();
+                    // The stream clone a mid-handler streaming command
+                    // (list_saved_sessions) writes its progress frames
+                    // through: the SAME channel the response later takes,
+                    // so the frames stay strictly ordered ahead of it.
+                    let stream_tx = dispatch_tx.clone();
                     let connection_id = connection_id.clone();
                     tokio::spawn(async move {
                         let (lines, stop) = supervisor
@@ -2336,6 +2341,7 @@ impl Supervisor {
                                 &roster_subscribed,
                                 &connection,
                                 &connection_id,
+                                &stream_tx,
                             )
                             .await;
                         if dispatch_tx.send((lines, stop)).is_err() && stop {
@@ -2467,6 +2473,7 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -2586,6 +2593,7 @@ impl Supervisor {
                 connection_id,
                 command_id,
                 type_name,
+                stream,
             )
             .await;
         if mutating {
@@ -2607,6 +2615,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2651,7 +2660,9 @@ impl Supervisor {
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::ListSavedSessions { .. } => {
-                let lines = self.handle_saved_session_list(command, &command_id).await;
+                let lines = self
+                    .handle_saved_session_list(command, &command_id, stream)
+                    .await;
                 (lines, false)
             }
             DaemonCommand::RosterSubscribe { .. } => {
@@ -3765,6 +3776,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3835,7 +3847,59 @@ impl Supervisor {
             }
         };
         let scope_current = scope.as_str() == Some("current");
-        let mut infos = crate::session_store::list_sessions(&dir);
+        // The catalog streams WHILE the scan runs (TS
+        // `listSessionsFromDir`'s per-file `onSession`/`onProgress`: the
+        // client's rows appear through the scan instead of after it). The
+        // frames ride the SAME per-connection channel the final response
+        // later travels, so the stream stays strictly ordered ahead of its
+        // own response; the fold runs on the blocking pool, so a grown
+        // store never head-of-lines a runtime worker (the #2723 class).
+        let stream_rows = stream.clone();
+        let scan_command_id = command_id.to_string();
+        let scan_active_session_id = active_session_id.cloned();
+        let scan_cwd = cwd.clone();
+        let scan = tokio::task::spawn_blocking(move || {
+            crate::session_scan::list_sessions_with(&dir, |index, total, info| {
+                if scope_current && info.cwd != scan_cwd {
+                    return;
+                }
+                let row = saved_session_row(info);
+                let mut item = json!({
+                    "id": scan_command_id,
+                    "type": "session_list_item",
+                    "command": "list_saved_sessions",
+                    "session": row,
+                });
+                if let Some(active_session_id) = scan_active_session_id.as_deref() {
+                    item["activeSessionId"] = json!(active_session_id);
+                }
+                let mut progress = json!({
+                    "id": scan_command_id,
+                    "type": "session_list_progress",
+                    "command": "list_saved_sessions",
+                    "loaded": index + 1,
+                    "total": total,
+                });
+                if let Some(active_session_id) = scan_active_session_id.as_deref() {
+                    progress["activeSessionId"] = json!(active_session_id);
+                }
+                let _ = stream_rows.send((vec![item, progress], false));
+            })
+        });
+        let mut infos = match scan.await {
+            Ok(infos) => infos,
+            Err(error) => {
+                return vec![response_line(&response_failure(
+                    Some(command_id),
+                    "list_saved_sessions",
+                    &format!("the saved-session scan failed: {error}"),
+                    None,
+                ))];
+            }
+        };
+        // The current-cwd scope keeps only the session's own rows in the
+        // terminal array (the stream above already skipped the others'
+        // frames): the response is the authoritative catalog.
         if scope_current {
             infos.retain(|info| info.cwd == cwd);
         }
@@ -3880,11 +3944,27 @@ impl Supervisor {
                 Vec::new()
             }
         };
-        let mut merged = passive
+        // The passive ledger children stream too (TS
+        // `withPassiveRlmDescendantInfos`'s `onSession`): items only, no
+        // progress - the saved phase above owns the progress counts.
+        let mut merged: Vec<_> = passive
             .iter()
             .map(crate::rlm_roster::passive_child_info)
             .filter(|info| !scope_current || info.cwd == cwd)
-            .collect::<Vec<_>>();
+            .collect();
+        for info in &merged {
+            let row = saved_session_row(info);
+            let mut item = json!({
+                "id": command_id,
+                "type": "session_list_item",
+                "command": "list_saved_sessions",
+                "session": row,
+            });
+            if let Some(active_session_id) = active_session_id {
+                item["activeSessionId"] = json!(active_session_id);
+            }
+            let _ = stream.send((vec![item], false));
+        }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
         // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
@@ -3907,32 +3987,10 @@ impl Supervisor {
                 ));
             }
         }
-        let total = infos.len();
+        // The streamed rows already reached the client through the scan
+        // (and the passive merge above); the terminal response is the
+        // authoritative array (the scan never re-orders after streaming).
         let mut lines = Vec::new();
-        for (index, info) in infos.iter().enumerate() {
-            let row = saved_session_row(info);
-            let mut item = json!({
-                "id": command_id,
-                "type": "session_list_item",
-                "command": "list_saved_sessions",
-                "session": row,
-            });
-            if let Some(active_session_id) = active_session_id {
-                item["activeSessionId"] = json!(active_session_id);
-            }
-            lines.push(item);
-            let mut progress = json!({
-                "id": command_id,
-                "type": "session_list_progress",
-                "command": "list_saved_sessions",
-                "loaded": index + 1,
-                "total": total,
-            });
-            if let Some(active_session_id) = active_session_id {
-                progress["activeSessionId"] = json!(active_session_id);
-            }
-            lines.push(progress);
-        }
         let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
         lines.push(response_line(&response_success(
             Some(command_id),
@@ -4852,10 +4910,11 @@ impl Supervisor {
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
         // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
-        // settle in place (a subagent under a surviving root passivates
-        // and keeps its model/thinking/cwd; a tombstoned child, a queued
-        // child, an ephemeral worker's rows, and the top-level row
-        // itself are removed). No ledger reseed, no transcript read.
+        // settle in place (every owned non-ephemeral, non-queued row
+        // passivates and keeps its model/thinking/cwd, the top-level row
+        // included; a tombstoned child, a queued child, and an ephemeral
+        // worker's rows die with the stop). No ledger reseed, no
+        // transcript read.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
     }
