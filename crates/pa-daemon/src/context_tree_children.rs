@@ -25,8 +25,12 @@
 //! durable RLM ledger tombstones at every level of the walk (the caller
 //! resolves this session's deletions into skip ids and hands the whole
 //! record down, so each recursion level skips its own).
-//! The TS child-node cache is not ported yet (the walk runs per
-//! /context call, not per top-bar refresh).
+//!
+//! Caller cadence: the walk is a pure function of the artifact tree, so
+//! it runs from the worker's background context-tree cache
+//! (`context_tree_cache.rs`) as a refresh, not per `/context` call —
+//! `handle_get_context_tree` serves the cached snapshot with the live
+//! roster overlaid.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -83,17 +87,13 @@ pub fn load_context_tree_child(
     // usage totals: a ghost-parent gap must not strip a child of its
     // identity either. The context estimate below stays strict — it
     // mirrors the model-facing truth.
-    let branch = store
-        .branch_bridged()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let all_entries = store.entries().to_vec();
+    let branch = store.branch_bridged();
+    let all_entries = store.entries();
     let (own_usage, total_usage) =
-        crate::state_getters::compute_own_and_total_usage(&branch, &all_entries);
+        crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
     let label = branch
         .iter()
-        .find_map(branch_user_label)
+        .find_map(|entry| branch_user_label(entry))
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| "child agent".to_string());
     let status = status_from_branch(&branch);
@@ -238,7 +238,7 @@ fn compact_label(text: &str) -> String {
 
 /// The terminal status a persisted branch implies (TS `statusFromBranch`):
 /// errored and aborted runs must not render as successful.
-fn status_from_branch(branch: &[crate::session_store::SessionEntry]) -> &'static str {
+fn status_from_branch(branch: &[&crate::session_store::SessionEntry]) -> &'static str {
     for entry in branch.iter().rev() {
         let Some(message) = entry.fields.get("message") else {
             continue;
@@ -257,7 +257,7 @@ fn status_from_branch(branch: &[crate::session_store::SessionEntry]) -> &'static
 
 /// The branch's effective model (TS walks `model_change` entries, last
 /// wins).
-fn branch_model(branch: &[crate::session_store::SessionEntry]) -> Option<(String, String)> {
+fn branch_model(branch: &[&crate::session_store::SessionEntry]) -> Option<(String, String)> {
     branch.iter().rev().find_map(|entry| {
         (entry.type_ == "model_change").then(|| {
             let provider = entry
