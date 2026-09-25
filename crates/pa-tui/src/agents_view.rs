@@ -2552,11 +2552,12 @@ async fn run_agents_view_surface(
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
     let mut saved_flush: Option<tokio::time::Instant> = None;
-    // The in-flight stop-or-delete dispatch: the view's teardown waits
-    // for it (bounded) so an exit right after the second ctrl+x cannot
-    // drop the request on the floor (the loop's client close would take
-    // the connection down before the detached task ever sent).
-    let mut delete_dispatch: Option<tokio::task::JoinHandle<()>> = None;
+    // The in-flight stop-or-delete dispatches: the view's teardown
+    // waits for them (bounded, one window for all) so an exit right
+    // after a confirmed ctrl+x cannot drop a request on the floor (the
+    // loop's client close would take the connection down before a
+    // detached task ever sent).
+    let mut delete_dispatches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     while mode.running {
         let mut redraw = false;
@@ -2589,8 +2590,11 @@ async fn run_agents_view_surface(
                     // line (the roster push refreshes the rows behind
                     // it).
                     if let Some(action) = mode.take_delete_action() {
-                        delete_dispatch =
-                            Some(spawn_delete_dispatch(&client, ui_tx.clone(), action));
+                        delete_dispatches.push(spawn_delete_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            action,
+                        ));
                     }
                 }
                 UiInput::Resize | UiInput::Settled => {}
@@ -2762,8 +2766,12 @@ async fn run_agents_view_surface(
     // closes (bounded): an exit right after the second ctrl+x must not
     // drop the request on the floor (the loop's client close would take
     // the connection down before the detached task ever sent).
-    if let Some(dispatch) = delete_dispatch.take() {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await;
+    // One bounded window covers every in-flight dispatch: they run
+    // concurrently, so the exit wait stays the same size no matter
+    // how many confirms are outstanding.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    for dispatch in delete_dispatches {
+        let _ = tokio::time::timeout_at(deadline, dispatch).await;
     }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
