@@ -17,9 +17,7 @@ use super::config_options::{
     config_options_value, model_value, publish_config_options, session_config_options, PickerModel,
     SessionConfigOption,
 };
-use super::daemon::{
-    DaemonAcpState, DaemonLink, HostedSession, REQUEST_TIMEOUT_MS, TURN_TIMEOUT_MS,
-};
+use super::daemon::{DaemonAcpState, DaemonLink, REQUEST_TIMEOUT_MS, TURN_TIMEOUT_MS};
 use super::jsonrpc;
 use super::producer::{self, UpdateProducer};
 use super::types;
