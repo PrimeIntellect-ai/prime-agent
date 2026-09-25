@@ -248,9 +248,9 @@ fn expected_merged_sums(rows: &[serde_json::Value]) -> String {
     rows.sort_by(|a, b| a["file"].as_str().cmp(&b["file"].as_str()));
     let mut sums = String::new();
     for row in rows {
-        let _ = write!(
+        let _ = writeln!(
             sums,
-            "{}  {}\n",
+            "{}  {}",
             row["sha256"].as_str().unwrap(),
             row["file"].as_str().unwrap()
         );

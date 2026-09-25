@@ -1189,6 +1189,7 @@ mod tests {
     // The sink's answers flow through the pa-tui trait; the tests call the
     // trait methods directly (the impl header alone does not import them).
     use pa_tui::interactive::OnboardingSink;
+    use serde_json::Map;
 
     #[test]
     fn session_flags_map_to_selections() {
@@ -1650,11 +1651,11 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: user_text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )]),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .expect("write user message");
         session
@@ -1663,7 +1664,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "the answer".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -1677,7 +1678,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .expect("write assistant message");
         let id = session.get_session_id().to_string();
@@ -1938,7 +1939,11 @@ mod tests {
         options.config.agent_dir = dir.path().join("agent");
         options.session.fork = Some(id);
         options.session.session_dir = Some(session_dir.clone());
-        let tui = build_tui_options(&options, dir.path().join("d.sock"), Default::default())
+        let tui = build_tui_options(
+            &options,
+            dir.path().join("d.sock"),
+            std::sync::Arc::default(),
+        )
             .expect("the interactive launch forks instead of refusing");
 
         let SessionSelection::Resume(fork) = &tui.session else {
