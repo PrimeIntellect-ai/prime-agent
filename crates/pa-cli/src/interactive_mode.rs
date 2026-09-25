@@ -1905,7 +1905,7 @@ mod tests {
         std::fs::create_dir_all(&project).expect("project");
         std::fs::create_dir_all(&session_dir).expect("sessions dir");
         let fifo = session_dir.join("pipe.jsonl");
-        nix::sys::stat::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
         let error = fork_startup_selection(
             fifo.to_str().expect("utf8 path"),
             &project,
