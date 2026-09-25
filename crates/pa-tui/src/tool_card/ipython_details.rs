@@ -150,13 +150,14 @@ pub(crate) fn is_edit_confirmation(text: Option<&str>, diffs: &[Value]) -> bool 
 
 /// One parsed sent agent message (TS `SentAgentMessageDisplay`): the body
 /// text, whether the receipt is `delivered` (vs `queued`), and the
-/// `to <role> <name>` participant (TS `formatAgentMessageParticipant`
+/// counterpart agent's display name (TS `formatAgentMessageParticipant`
 /// with the `"sent"` direction: name, then active session id, session id,
-/// then `unknown`).
+/// then `unknown`; the `to <role>` prefix and the role word fold into the
+/// viewer-relative arrow — the operator's 2026-09-25 directive).
 pub(crate) struct SentAgentMessage {
     pub(crate) message: String,
     pub(crate) delivered: bool,
-    pub(crate) participant: String,
+    pub(crate) counterpart: String,
 }
 
 /// Parse one `sentAgentMessages` entry; `None` on a malformed record
@@ -165,7 +166,7 @@ pub(crate) fn parse_sent_agent_message(value: &Value) -> Option<SentAgentMessage
     let message = value.get("message")?.as_str()?.to_string();
     let delivered = value.get("deliveryStatus").and_then(Value::as_str) == Some("delivered");
     let target = value.get("target").unwrap_or(&Value::Null);
-    let name = ["sessionName", "activeSessionId", "sessionId"]
+    let counterpart = ["sessionName", "activeSessionId", "sessionId"]
         .iter()
         .find_map(|key| {
             target
@@ -175,14 +176,10 @@ pub(crate) fn parse_sent_agent_message(value: &Value) -> Option<SentAgentMessage
                 .filter(|name| !name.trim().is_empty())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let participant = match value.get("receiverRole").and_then(Value::as_str) {
-        Some(role) => format!("to {role} {name}"),
-        None => format!("to {name}"),
-    };
     Some(SentAgentMessage {
         message,
         delivered,
-        participant,
+        counterpart,
     })
 }
 
@@ -314,7 +311,7 @@ mod tests {
         .expect("delivered receipt");
         assert!(delivered.delivered);
         assert_eq!(delivered.message, "Ping.");
-        assert_eq!(delivered.participant, "to parent Worker");
+        assert_eq!(delivered.counterpart, "Worker");
         // Name -> active session id -> session id -> unknown (TS
         // `formatAgentMessageParticipant` fallback order).
         let by_active = parse_sent_agent_message(&serde_json::json!({
@@ -326,7 +323,7 @@ mod tests {
         }))
         .expect("queued receipt");
         assert!(!by_active.delivered);
-        assert_eq!(by_active.participant, "to sibling a1");
+        assert_eq!(by_active.counterpart, "a1");
         let by_session = parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_3",
             "message": "Ping.",
@@ -334,14 +331,14 @@ mod tests {
             "target": { "sessionId": "s1" },
         }))
         .expect("bare target");
-        assert_eq!(by_session.participant, "to s1");
+        assert_eq!(by_session.counterpart, "s1");
         let unknown = parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_4",
             "message": "Ping.",
             "deliveryStatus": "queued",
         }))
         .expect("missing target falls back to unknown");
-        assert_eq!(unknown.participant, "to unknown");
+        assert_eq!(unknown.counterpart, "unknown");
         // A missing message renders nothing.
         assert!(parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_5",

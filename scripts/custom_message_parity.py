@@ -3,7 +3,7 @@
 against the installed TS prime-agent binary rendering the SAME session
 transcript containing every decorated custom-message row:
 
-  - a received agent message (icon + participant + preview + body),
+  - a received agent message (icon + label + participant + body),
   - an ipython cell that sent an agent message (the sent receipt rows
     render below the code, body in the expanded view),
   - a heartbeat prompt (pulse + schedule),
@@ -29,13 +29,18 @@ agent-message bodies and shell-completion output open up). Frames are
 normalized for volatile content and diffed; the exit code is non-zero when
 any state differs.
 
-One documented divergence (Kevin directive 2026-09-21, live dogfood): the
-Rust received agent-message header renders the collapsed one-line body
-preview (`... \u00b7 <preview>`) that the TS `agentMessageSummaryLine`
-signature supports but no current TS caller passes. The diff normalizes
-that preview segment out of the Rust frames and the run separately asserts
-the preview IS present; the TS side is expected to adopt the same preview
-so the normalization can be dropped.
+One documented divergence (operator directive 2026-09-25): the
+agent-message rows render the viewer-relative notice on the Rust side —
+the shared `Agent message` label, the ↑/↓ arrow from the row's
+actual direction (↓ received, ↑ sent/queued), and the
+counterpart agent's name only, with no collapsed body preview — where the
+TS frames render the direction word plus the `from/to <role> <name>`
+participant. The collapsed body preview the Rust side used to render (the
+Kevin directive 2026-09-21 divergence) is gone with it, so its strip and
+assert are retired. The diff canonicalizes the whole summary composition
+to one marker per frame and the run separately asserts each side's exact
+row; the TS side is expected to adopt the same shape so the
+canonicalization can be dropped.
 
 Second documented divergence (Kevin directive 2026-09-23, product
 improvement BEYOND TS): the RLM child rows render the
@@ -413,13 +418,21 @@ def normalize(frame, root):
     # the dropped RLM child rows), so the canonicalization is scoped to
     # the agent-message compositions: the glyph followed by its SGR runs
     # and the margin space up to the row label (received/sent/queued all
-    # start `Agent message`). The label and participant still diff; the
-    # run separately asserts each side's glyph.
+    # start `Agent message`). The run separately asserts each side's
+    # glyph.
     frame = re.sub(
         "[\u25c6\u2709]((?:\x1b\[[0-9;]*m| )*)Agent message",
         r"<AMICON>\1Agent message",
         frame,
     )
+    # The label/participant composition (see the module docstring, the
+    # operator's 2026-09-25 directive): Rust renders the shared
+    # `Agent message` label with the viewer-relative arrow plus the
+    # counterpart name only (↓ received, ↑ sent/queued), TS the direction
+    # word plus the `from/to <role> <name>` participant. The summary row
+    # is its own line, so the whole composition canonicalizes to one
+    # marker per frame; the run separately asserts each side's exact row.
+    frame = re.sub(r"<AMICON>[^\n]*", "<AMICON><AMROW>", frame)
     # The TS product's ripgrep notice (a startup environment notice when
     # rg is missing under PI_OFFLINE; the Rust build has no equivalent
     # row yet) is box environment, not transcript parity.
@@ -484,23 +497,13 @@ def capture_plain_text(frame):
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", frame)
 
 
-# The fixture agent-message body (the Rust-only preview source, see the
-# module docstring for the divergence).
+# The fixture agent-message body (the expandable body of the received
+# row; the collapsed row carries no preview since the 2026-09-25
+# directive — see the module docstring).
 AGENT_MESSAGE_BODY = (
     "Decorations parity: the received row renders with the diamond, "
     "label, and participant."
 )
-
-
-def strip_rust_agent_message_preview(frame):
-    """Remove the Rust-only collapsed body preview segment
-    (`\u00b7 <preview>`) from the received agent-message header so the
-    frame diff covers the shapes the TS binary renders today. The harness
-    separately asserts the preview IS present on the Rust side."""
-    return re.sub(
-        r" \u00b7 " + re.escape(AGENT_MESSAGE_BODY[:40]) + r"[^\n]*", "", frame
-    )
-
 
 # The RLM child rows (the second carried divergence, see the module
 # docstring): the Rust diamond rows replace the TS generic label.
@@ -586,15 +589,21 @@ def assert_heartbeat_row(side, collapsed, expanded):
 
 
 def assert_agent_message_rows(side, collapsed, expanded):
-    """The agent-message row contract per side (the Kevin-directed
-    2026-09-24 divergence): the Rust frames render the \u2709 mail
-    envelope on every agent-message row (the received transcript row and
-    the sent receipt row); the TS frames render the \u25c6 diamond (the
-    baseline the divergence moves away from). The \u25c6 stays correct on
-    the OTHER diamond rows (the refinement header renders on both sides)."""
-    received = "Agent message received \u00b7 from child model-probe"
-    sent = "Agent message sent \u00b7 to parent Worker"
+    """The agent-message row contract per side. Icon divergence (the
+    Kevin-directed 2026-09-24 directive): the Rust frames render the
+    \u2709 mail envelope on every agent-message row (the received
+    transcript row and the sent receipt row); the TS frames render the
+    \u25c6 diamond (the baseline the divergence moves away from). The
+    \u25c6 stays correct on the OTHER diamond rows (the refinement
+    header renders on both sides). Label/participant divergence (the
+    operator's 2026-09-25 directive): the Rust rows render the shared
+    `Agent message` label with the viewer-relative arrow plus the
+    counterpart agent's name only (\u2193 received, \u2191 sent/queued);
+    the TS rows keep the direction word plus the `from/to <role> <name>`
+    participant, and the collapsed Rust row carries no body preview."""
     if side == "rust":
+        received = "Agent message \u00b7 \u2193 model-probe"
+        sent = "Agent message \u00b7 \u2191 Worker"
         assert "\u2709 " + received in collapsed, (
             "rust: envelope received row missing collapsed"
         )
@@ -602,6 +611,8 @@ def assert_agent_message_rows(side, collapsed, expanded):
         assert "\u25c6 " + received not in collapsed, "rust: diamond received row rendered"
         assert "\u25c6 " + sent not in collapsed, "rust: diamond sent row rendered"
     else:
+        received = "Agent message received \u00b7 from child model-probe"
+        sent = "Agent message sent \u00b7 to parent Worker"
         assert "\u25c6 " + received in collapsed, "ts: diamond received row missing (baseline)"
         assert "\u25c6 " + sent in collapsed, "ts: diamond sent row missing (baseline)"
         assert "\u2709 " not in collapsed, "ts: envelope glyph rendered"
@@ -692,11 +703,20 @@ def assert_sent_reach(side, collapsed, expanded):
     """The Ctrl+O contract for this fixture: collapsed frames show the
     agent-message and sent-receipt summaries only; the expanded frames show
     the \u2570\u2500-guttered bodies. Any miss means the expand toggle
-    does not reach the agent-message rows."""
-    assert "Agent message received" in collapsed, f"{side}: summary missing collapsed"
-    assert "Agent message sent \u00b7 to parent Worker" in collapsed, (
-        f"{side}: sent receipt summary missing collapsed"
-    )
+    does not reach the agent-message rows. The summary strings follow the
+    per-side row contract (see assert_agent_message_rows)."""
+    if side == "rust":
+        assert "Agent message \u00b7 \u2193 model-probe" in collapsed, (
+            f"{side}: summary missing collapsed"
+        )
+        assert "Agent message \u00b7 \u2191 Worker" in collapsed, (
+            f"{side}: sent receipt summary missing collapsed"
+        )
+    else:
+        assert "Agent message received" in collapsed, f"{side}: summary missing collapsed"
+        assert "Agent message sent \u00b7 to parent Worker" in collapsed, (
+            f"{side}: sent receipt summary missing collapsed"
+        )
     assert "\u2570\u2500 Decorations parity" not in collapsed, (
         f"{side}: received body visible while collapsed"
     )
@@ -1073,7 +1093,7 @@ def main():
                     strip_rlm_child_rows(ts_frames[state]), state
                 )
                 rust_kept, rust_removed = split_refinement_expansion(
-                    strip_rlm_child_rows(strip_rust_agent_message_preview(rust_frames[state])),
+                    strip_rlm_child_rows(rust_frames[state]),
                     state,
                 )
                 # The expanded block's rows leave the byte diff (the
@@ -1083,11 +1103,14 @@ def main():
                     assert_refinement_content(ts_removed, rust_removed)
                 ts_norm = normalize(ts_kept, base)
                 rust_norm = normalize(rust_kept, base)
-                # The carried divergence: the Rust header shows the
-                # collapsed preview; the TS binary does not (yet).
+                # The carried label/arrow divergence: the collapsed Rust
+                # row carries no body preview (the 2026-09-25 directive),
+                # exactly like the TS header — the body only opens up in
+                # the expanded view (the `\u2570\u2500` gutter, never the
+                # `\u00b7` preview segment).
                 rust_plain = capture_plain_text(rust_frames[state])
-                assert " \u00b7 " + AGENT_MESSAGE_BODY[:40] in rust_plain, (
-                    f"rust preview missing in {state}"
+                assert " \u00b7 " + AGENT_MESSAGE_BODY[:40] not in rust_plain, (
+                    f"rust preview rendered in {state}"
                 )
                 assert " \u00b7 " + AGENT_MESSAGE_BODY[:40] not in capture_plain_text(
                     ts_frames[state]

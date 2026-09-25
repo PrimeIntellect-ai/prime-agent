@@ -141,7 +141,7 @@ fn hidden_thinking_binds_visible_text_breaks() {
     chat.push(ChatEntry::AgentMessage(Box::new(
         crate::custom_message::AgentMessageRow {
             direction: crate::custom_message::AgentMessageDirection::Received,
-            participant: "from parent".to_string(),
+            counterpart: "root".to_string(),
             message: "steer".to_string(),
         },
     )));

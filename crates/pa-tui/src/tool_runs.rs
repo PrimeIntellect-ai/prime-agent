@@ -156,8 +156,7 @@ fn class_label(card: &ToolCallCard) -> String {
 
 /// Count the sent-agent-message receipts one run carries (the
 /// `agent_message.send` tool results riding the ipython cell details:
-/// the `Agent message sent`/`Agent message queued` rows under each
-/// card).
+/// the sent/queued agent-message receipt rows under each card).
 fn message_receipts(cards: &[&ToolCallCard]) -> (usize, usize) {
     let (mut sent, mut queued) = (0, 0);
     for card in cards {
