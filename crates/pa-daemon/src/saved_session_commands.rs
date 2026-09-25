@@ -47,7 +47,7 @@ fn reservation_key(scope: &NameScope) -> String {
         scope.parent_session_path.as_deref(),
         scope.parent_session_id.as_deref(),
     ) {
-        (0, _, _) => ("root".to_string(), String::new()),
+        (0, _, _) | (_, None, None) => ("root".to_string(), String::new()),
         (_, Some(path), _) => (
             "path".to_string(),
             canonical_session_path(Path::new(path))
@@ -55,7 +55,6 @@ fn reservation_key(scope: &NameScope) -> String {
                 .to_string(),
         ),
         (_, None, Some(id)) => ("id".to_string(), id.to_string()),
-        (_, None, None) => ("root".to_string(), String::new()),
     };
     json!([scope.depth, parent_type, parent_value, scope.name]).to_string()
 }
@@ -200,9 +199,7 @@ pub(crate) fn capture_saved_session_delete(
     // directory) is never a session, and opening one for reading BLOCKS
     // indefinitely on Linux (a FIFO waits for a writer) - the capture
     // reads nothing there.
-    let regular = std::fs::metadata(Path::new(session_path))
-        .map(|meta| meta.is_file())
-        .unwrap_or(false);
+    let regular = std::fs::metadata(Path::new(session_path)).is_ok_and(|meta| meta.is_file());
     // The pre-unlink canonical key: captured while the file exists, so a
     // symlink delete keys the edge at its target.
     let canonical_path = canonical_session_path(Path::new(session_path))
@@ -976,11 +973,11 @@ mod tombstone_usage_tests {
             }
         });
         {
+            use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
                 .unwrap();
-            use std::io::Write;
             writeln!(file, "{usage_row}").unwrap();
         }
         path

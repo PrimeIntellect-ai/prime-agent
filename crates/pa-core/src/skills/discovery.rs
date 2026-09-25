@@ -101,8 +101,7 @@ pub(crate) fn load_skill_from_file(
     let name = frontmatter
         .get("name")
         .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| parent_dir_name.clone());
+        .map_or_else(|| parent_dir_name.clone(), str::to_string);
 
     for error in validate_skill_name(&name, &parent_dir_name) {
         diagnostics.push(ResourceDiagnostic::Warning {
@@ -115,11 +114,7 @@ pub(crate) fn load_skill_from_file(
         return (None, diagnostics);
     }
 
-    let python = if file_path
-        .file_name()
-        .map(|n| n == "SKILL.md")
-        .unwrap_or(false)
-    {
+    let python = if file_path.file_name().is_some_and(|n| n == "SKILL.md") {
         detect_python_skill(skill_dir, &name, &mut diagnostics)
     } else {
         None
@@ -271,10 +266,7 @@ fn load_skills_from_dir_internal(
         }
         let path = entry.path();
         let meta = std::fs::metadata(&path).ok();
-        let is_file = meta
-            .as_ref()
-            .map(std::fs::Metadata::is_file)
-            .unwrap_or(false);
+        let is_file = meta.as_ref().is_some_and(std::fs::Metadata::is_file);
         names.push((path, is_file, false));
     }
     // SKILL.md in this directory: stop after loading it.

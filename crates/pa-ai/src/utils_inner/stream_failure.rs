@@ -236,41 +236,37 @@ impl ProviderConnectionError {
         match (&self.profile, &self.kind) {
             (
                 ConnectionErrorProfile::Sdk,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => "Connection error.".to_string(),
-            (ConnectionErrorProfile::Sdk, ConnectionErrorKind::Timeout) => {
-                "Request timed out.".to_string()
-            }
             (
-                ConnectionErrorProfile::Sdk,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
-            ) => "Connection error.".to_string(),
+                ConnectionErrorProfile::Sdk | ConnectionErrorProfile::AwsHttp1 { .. },
+                ConnectionErrorKind::Timeout,
+            ) => "Request timed out.".to_string(),
             // Raw `fetch` (bun) and the mistral `RequestTimeoutError` append
             // the raw cause to a fixed timeout prefix; the refused-connect
             // text is the runtime's own fixed message.
             (
                 ConnectionErrorProfile::RawFetch,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
-            ) => RUNTIME_CONNECT_REFUSED_MESSAGE.to_string(),
-            (ConnectionErrorProfile::RawFetch, ConnectionErrorKind::Timeout) => {
-                format!("Request timed out: {}", self.cause)
-            }
-            (
-                ConnectionErrorProfile::RawFetch,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => RUNTIME_CONNECT_REFUSED_MESSAGE.to_string(),
             (
-                ConnectionErrorProfile::MistralSdk,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
-            ) => format!(
-                "Unexpected HTTP client error: TypeError: {RUNTIME_CONNECT_REFUSED_MESSAGE}"
-            ),
-            (ConnectionErrorProfile::MistralSdk, ConnectionErrorKind::Timeout) => {
+                ConnectionErrorProfile::RawFetch | ConnectionErrorProfile::MistralSdk,
+                ConnectionErrorKind::Timeout,
+            ) => {
                 format!("Request timed out: {}", self.cause)
             }
             (
                 ConnectionErrorProfile::MistralSdk,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => format!(
                 "Unexpected HTTP client error: TypeError: {RUNTIME_CONNECT_REFUSED_MESSAGE}"
             ),
@@ -279,9 +275,6 @@ impl ProviderConnectionError {
             }
             (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Reset) => {
                 "read ECONNRESET".to_string()
-            }
-            (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Timeout) => {
-                "Request timed out.".to_string()
             }
             (
                 ConnectionErrorProfile::AwsHttp1 { .. },
@@ -341,7 +334,6 @@ impl ProviderConnectionError {
     /// SDK family records none).
     pub fn error_code(&self) -> Option<&'static str> {
         match (&self.profile, &self.kind) {
-            (ConnectionErrorProfile::Sdk, _) => None,
             (ConnectionErrorProfile::RawFetch, _) => Some("ConnectionRefused"),
             (ConnectionErrorProfile::MistralSdk, _) => Some("UnexpectedClientError"),
             (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Connect) => {
@@ -352,15 +344,17 @@ impl ProviderConnectionError {
             }
             // The TS client configures no AWS transport timeout, so there is
             // no ground-truth code; the classification records none.
-            (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Timeout) => None,
-            (
+            (ConnectionErrorProfile::Sdk, _)
+            | (
                 ConnectionErrorProfile::AwsHttp1 { .. },
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
-            ) => None,
+                ConnectionErrorKind::Timeout
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
+            )
+            | (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Timeout) => None,
             (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Connect) => {
                 Some("ERR_HTTP2_STREAM_CANCEL")
             }
-            (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Timeout) => None,
             (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Reset) => {
                 Some("ERR_HTTP2_ERROR")
             }
@@ -516,8 +510,7 @@ fn kind_message(kind: StreamFailureKind) -> &'static str {
     KIND_MESSAGES
         .iter()
         .find(|(candidate, _)| *candidate == kind)
-        .map(|(_, message)| *message)
-        .unwrap_or("Provider stream failed")
+        .map_or("Provider stream failed", |(_, message)| *message)
 }
 
 /// Build a user-facing message like "Provider overloaded (overloaded_error, 529) [request_id: req_abc]".
@@ -616,9 +609,7 @@ pub fn stream_failure_from_stop_reason(
         raw: None,
     };
     if info.kind == StreamFailureKind::Unknown
-        && raw_stop_reason
-            .map(|reason| reason.to_lowercase().contains("malformed"))
-            .unwrap_or(false)
+        && raw_stop_reason.is_some_and(|reason| reason.to_lowercase().contains("malformed"))
     {
         info.kind = StreamFailureKind::MalformedResponse;
     }

@@ -247,16 +247,15 @@ fn parse_daemon_command_value(
         .unwrap_or("unknown");
     // Keep the tag for the error after deserialization consumes the command value.
     let type_name = type_name.to_string();
-    let command = match serde_json::from_value::<DaemonCommand>(command_value) {
-        Ok(command) => command,
-        Err(_) => {
-            if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
-                return Err(EnvelopeParseError::UnknownCommand(type_name));
-            }
-            return Err(EnvelopeParseError::Invalid(format!(
-                "malformed {type_name} command"
-            )));
+    let command = if let Ok(command) = serde_json::from_value::<DaemonCommand>(command_value) {
+        command
+    } else {
+        if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
+            return Err(EnvelopeParseError::UnknownCommand(type_name));
         }
+        return Err(EnvelopeParseError::Invalid(format!(
+            "malformed {type_name} command"
+        )));
     };
     Ok(DaemonCommandEnvelope {
         id: envelope_id,
@@ -805,32 +804,32 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         } => Some(active_session_id),
         DaemonCommand::ListSavedSessions {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::Detach {
+        }
+        | DaemonCommand::Detach {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesStatus {
+        }
+        | DaemonCommand::AgentMessagesStatus {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesPause {
+        }
+        | DaemonCommand::AgentMessagesPause {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesResume {
+        }
+        | DaemonCommand::AgentMessagesResume {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronList {
+        }
+        | DaemonCommand::CronList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::HeartbeatsList {
+        }
+        | DaemonCommand::HeartbeatsList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronCancel {
+        }
+        | DaemonCommand::CronCancel {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::RenameSavedSession {
+        }
+        | DaemonCommand::RenameSavedSession {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::DeleteSavedSession {
+        }
+        | DaemonCommand::DeleteSavedSession {
             active_session_id, ..
         } => active_session_id.as_deref(),
         // Control-plane commands carry no session selector.

@@ -162,7 +162,7 @@ fn resolve_var_ref<'a>(value: &'a str, vars: &'a BTreeMap<String, String>) -> &'
     if value.is_empty() || value.starts_with('#') {
         return value;
     }
-    vars.get(value).map(String::as_str).unwrap_or(value)
+    vars.get(value).map_or(value, String::as_str)
 }
 
 /// Resolve a color value: hex string, var reference, or "" (terminal default).
@@ -244,8 +244,7 @@ pub fn rgb_to_256(rgb: (u8, u8, u8)) -> u8 {
                     .partial_cmp(&(value - f64::from(values[*index])).abs())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(index, _)| index)
-            .unwrap_or(0)
+            .map_or(0, |(index, _)| index)
     };
     let distance = |other: (u8, u8, u8)| -> f64 {
         let (dr, dg, db) = (

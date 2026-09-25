@@ -81,9 +81,7 @@ impl FileAuthStorageBackend {
         }
         Err(anyhow::anyhow!(
             "Failed to acquire auth storage lock: {}",
-            last_error
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "busy".into())
+            last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
     }
 }

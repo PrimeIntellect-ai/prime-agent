@@ -76,7 +76,7 @@ pub(crate) fn assistant_row_count(
     for (index, block) in blocks.iter().enumerate() {
         match block {
             MessageBlock::Text(text) => {
-                count += markdown_row_count(text.trim(), content_width, &md)
+                count += markdown_row_count(text.trim(), content_width, &md);
             }
             MessageBlock::Thinking(text) => {
                 count +=

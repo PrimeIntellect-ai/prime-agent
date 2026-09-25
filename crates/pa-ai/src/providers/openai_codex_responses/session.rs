@@ -45,8 +45,7 @@ pub fn is_websocket_sse_fallback_active(session_id: Option<&str>) -> bool {
     match session_id {
         Some(session_id) => session_state()
             .lock()
-            .map(|state| state.sse_fallback_sessions.contains(session_id))
-            .unwrap_or(false),
+            .is_ok_and(|state| state.sse_fallback_sessions.contains(session_id)),
         None => false,
     }
 }
@@ -93,15 +92,12 @@ pub fn reset_debug_stats(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    match session_id {
-        Some(session_id) => {
-            state.stats.remove(session_id);
-            state.sse_fallback_sessions.remove(session_id);
-        }
-        None => {
-            state.stats.clear();
-            state.sse_fallback_sessions.clear();
-        }
+    if let Some(session_id) = session_id {
+        state.stats.remove(session_id);
+        state.sse_fallback_sessions.remove(session_id);
+    } else {
+        state.stats.clear();
+        state.sse_fallback_sessions.clear();
     }
 }
 
@@ -161,23 +157,19 @@ pub fn record_request_stats(
     let input_items = request_body
         .get("input")
         .and_then(Value::as_array)
-        .map(|items| items.len() as u64)
-        .unwrap_or(0);
+        .map_or(0, |items| items.len() as u64);
     stats.last_input_items = input_items;
-    match request_body
+    if let Some(previous_response_id) = request_body
         .get("previous_response_id")
         .and_then(Value::as_str)
     {
-        Some(previous_response_id) => {
-            stats.delta_requests += 1;
-            stats.last_delta_input_items = Some(input_items);
-            stats.last_previous_response_id = Some(previous_response_id.to_string());
-        }
-        None => {
-            stats.full_context_requests += 1;
-            stats.last_delta_input_items = None;
-            stats.last_previous_response_id = None;
-        }
+        stats.delta_requests += 1;
+        stats.last_delta_input_items = Some(input_items);
+        stats.last_previous_response_id = Some(previous_response_id.to_string());
+    } else {
+        stats.full_context_requests += 1;
+        stats.last_delta_input_items = None;
+        stats.last_previous_response_id = None;
     }
 }
 

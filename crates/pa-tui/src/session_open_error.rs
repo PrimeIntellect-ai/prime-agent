@@ -121,8 +121,7 @@ pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
 pub fn roster_rows(data: &Value) -> &[Value] {
     data.get("sessions")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
+        .map_or(&[], Vec::as_slice)
 }
 
 /// The first line of the refusal: the TS `SessionAlreadyActiveError`

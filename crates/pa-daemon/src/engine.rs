@@ -1082,16 +1082,15 @@ impl ScriptedEngine {
                         "continuationsUsed": 0,
                     })
                 }),
-                message: goal
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
+                message: goal.get("message").and_then(Value::as_str).map_or_else(
+                    || {
                         format!(
                             "[goal: continuation]\n\n{}",
                             goal.get("objective").and_then(Value::as_str).unwrap_or("")
                         )
-                    }),
+                    },
+                    str::to_string,
+                ),
                 emit_update_on_prompt: goal
                     .get("emitUpdateOnPrompt")
                     .and_then(Value::as_bool)
@@ -1155,12 +1154,10 @@ impl SessionEngine for ScriptedEngine {
     /// The scripted thread goal's state, or the empty state (no goal
     /// section scripted).
     fn goal_state_value(&self) -> Value {
-        self.goal
-            .as_ref()
-            .map(|goal| goal.state.clone())
-            .unwrap_or_else(|| {
-                serde_json::to_value(pa_core::goals::empty_goal_state()).unwrap_or(Value::Null)
-            })
+        self.goal.as_ref().map_or_else(
+            || serde_json::to_value(pa_core::goals::empty_goal_state()).unwrap_or(Value::Null),
+            |goal| goal.state.clone(),
+        )
     }
 
     /// The scripted post-compaction mint: one continuation turn built from
@@ -1770,7 +1767,6 @@ mod tests {
                 seen_clone.fetch_add(1, Ordering::SeqCst);
                 match event {
                     EngineEvent::UserMessage(_) => false, // cancel right away
-                    EngineEvent::Done(_) | EngineEvent::DoneAborted => true,
                     _ => true,
                 }
             },

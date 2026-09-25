@@ -174,8 +174,7 @@ async fn run_autonomous_quality_gates(
                 state
                     .last_gate_failure
                     .as_ref()
-                    .map(|failure| failure.attempt)
-                    .unwrap_or(0),
+                    .map_or(0, |failure| failure.attempt),
             ) + 1;
             state.gate_attempts.insert(command.clone(), attempt);
             let mut failure = state.last_gate_failure.clone().unwrap();
@@ -375,9 +374,10 @@ fn hash_untracked_path(path: &Path) -> String {
         return "missing".to_string();
     };
     if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(path)
-            .map(|target| target.to_string_lossy().to_string())
-            .unwrap_or_else(|error| error.to_string());
+        let target = std::fs::read_link(path).map_or_else(
+            |error| error.to_string(),
+            |target| target.to_string_lossy().to_string(),
+        );
         return format!("symlink:{target}");
     }
     if !metadata.is_file() {
@@ -388,8 +388,7 @@ fn hash_untracked_path(path: &Path) -> String {
                 .modified()
                 .ok()
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_millis())
         );
     }
     match std::fs::read(path) {

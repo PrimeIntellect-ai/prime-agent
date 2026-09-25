@@ -556,12 +556,14 @@ fn run_plan(
     let _ = handle.join();
     Ok(RunOutcome {
         frames: outcome.frames,
-        prompt_requests: Arc::try_unwrap(prompt_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
-        create_requests: Arc::try_unwrap(create_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        prompt_requests: Arc::try_unwrap(prompt_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
+        create_requests: Arc::try_unwrap(create_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
         return_to_agents_view: outcome.return_to_agents_view,
         agents_view_notice: outcome.agents_view_notice,
     })

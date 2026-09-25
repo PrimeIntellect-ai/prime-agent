@@ -92,7 +92,7 @@ async fn prepare_tool_call_inner(
             signal,
         )
         .await?;
-        if before_result.as_ref().map(|r| r.block).unwrap_or(false) {
+        if before_result.as_ref().is_some_and(|r| r.block) {
             let reason = before_result
                 .and_then(|r| r.reason)
                 .unwrap_or_else(|| "Tool execution was blocked".to_string());
@@ -195,7 +195,7 @@ pub(crate) async fn execute_prepared_tool_call(
                     }
                 }
                 Err(error) => {
-                    let aborted = signal.map(AbortSignal::is_aborted).unwrap_or(false);
+                    let aborted = signal.is_some_and(AbortSignal::is_aborted);
                     if !(aborted && is_abort_error(&error)) {
                         return ExecutedToolCallOutcome {
                             result: error_tool_result(signal, &error),
@@ -231,7 +231,7 @@ pub(crate) async fn execute_prepared_tool_call(
 }
 
 fn error_tool_result(signal: Option<&AbortSignal>, error: &anyhow::Error) -> AgentToolResult {
-    if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
+    if signal.is_some_and(AbortSignal::is_aborted) {
         AgentToolResult::error("Tool execution aborted")
     } else {
         AgentToolResult::error(format!("{error:#}"))

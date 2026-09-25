@@ -126,8 +126,7 @@ pub fn pre_render_custom_tools(
         let blocks = message
             .get("content")
             .and_then(Value::as_array)
-            .map(std::vec::Vec::as_slice)
-            .unwrap_or(NO_BLOCKS);
+            .map_or(NO_BLOCKS, std::vec::Vec::as_slice);
         let role = message.get("role").and_then(Value::as_str);
         if role == Some("assistant") {
             for block in blocks {

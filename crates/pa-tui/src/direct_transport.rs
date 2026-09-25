@@ -173,12 +173,11 @@ pub(crate) fn supervisor_supports_direct(hello: &Value) -> bool {
     hello
         .get("serverCapabilities")
         .and_then(Value::as_array)
-        .map(|capabilities: &Vec<Value>| {
+        .is_some_and(|capabilities: &Vec<Value>| {
             capabilities
                 .iter()
                 .any(|capability| capability.as_str() == Some(DIRECT_PEER_TRANSPORT_CAPABILITY))
         })
-        .unwrap_or(false)
 }
 
 /// Connect to the worker socket, complete the hello + `peer_auth` handshake,
@@ -364,8 +363,7 @@ async fn read_peer_auth_response<R: tokio::io::AsyncRead + Unpin>(
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 /// ISO-8601 UTC timestamp to epoch milliseconds (the ticket `expiresAt`

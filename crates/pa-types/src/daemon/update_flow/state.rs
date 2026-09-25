@@ -56,7 +56,7 @@ impl UpdateState {
     pub fn successors(self) -> &'static [UpdateState] {
         match self {
             Self::Acquire => &[UpdateState::Join, UpdateState::Planning],
-            Self::Join => &[],
+            Self::Join | Self::Complete | Self::Skipped | Self::Aborted | Self::Failed => &[],
             Self::Planning => &[
                 UpdateState::Downloading,
                 UpdateState::Skipped,
@@ -72,10 +72,6 @@ impl UpdateState {
             Self::Booting => &[UpdateState::Restoring, UpdateState::Rollback],
             Self::Restoring => &[UpdateState::Complete],
             Self::Rollback => &[UpdateState::Booting, UpdateState::Failed],
-            Self::Complete => &[],
-            Self::Skipped => &[],
-            Self::Aborted => &[],
-            Self::Failed => &[],
         }
     }
 
