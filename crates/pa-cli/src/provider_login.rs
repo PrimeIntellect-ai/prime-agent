@@ -373,24 +373,6 @@ impl ProviderAuth {
                 });
             }
 
-            // The MCP OAuth integrations (Service rows; the device flow
-            // runs like `/mcp login`).
-            for mcp in provider.mcp_manager().list_status() {
-                if !mcp.uses_oauth {
-                    continue;
-                }
-                let id = format!("mcp:{}", mcp.server);
-                let (credential, status) = provider.credential_status(&id);
-                rows.push(ProviderRow {
-                    status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
-                    id,
-                    name: mcp.label,
-                    auth_type: AuthType::Oauth,
-                    category: AuthCategory::Service,
-                    flow: AuthFlow::TerminalFlow,
-                });
-            }
-
             // The API-key model providers (TS `isApiKeyLoginProvider` over
             // the registry's provider set).
             let registry = ModelRegistry::create(
@@ -430,17 +412,6 @@ impl ProviderAuth {
                     flow,
                 });
             }
-
-            // The web search credential (a service, not a model provider).
-            let (credential, status) = provider.credential_status(SERPER_CREDENTIAL_ID);
-            rows.push(ProviderRow {
-                status: status_indicator(credential.as_ref(), &status, AuthType::ApiKey),
-                id: SERPER_CREDENTIAL_ID.to_string(),
-                name: SERPER_CREDENTIAL_NAME.to_string(),
-                auth_type: AuthType::ApiKey,
-                category: AuthCategory::Service,
-                flow: AuthFlow::ApiKeyPrompt,
-            });
 
             // TS sort: configured first, prime-inference first among them,
             // then oauth before api key by name.
@@ -767,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_options_lists_the_subscription_and_mcp_rows() {
+    async fn login_options_list_providers_only() {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).expect("agent dir");
@@ -782,14 +753,22 @@ mod tests {
                 "the {id} subscription row renders"
             );
         }
-        // The web search credential is a service row.
-        assert!(rows.iter().any(|row| row.id == "serper"));
+        // The operator's 2026-09-24 directive: /login is providers only —
+        // the service rows (MCP OAuth integrations, the web search
+        // credential) never appear; the /mcp view owns MCP logins.
+        assert!(
+            rows.iter()
+                .all(|row| row.category == AuthCategory::Provider),
+            "no service rows ride the login list: {rows:?}"
+        );
+        assert!(!rows.iter().any(|row| row.id == "serper"));
+        assert!(!rows.iter().any(|row| row.id.starts_with("mcp:")));
         // Prime Inference sorts first among the api-key rows (TS rule).
         assert!(
             rows.iter()
                 .position(|row| row.id == PRIME_INFERENCE_PROVIDER_ID)
-                <= rows.iter().position(|row| row.id == "serper"),
-            "prime-inference sorts before the service rows"
+                < rows.iter().position(|row| row.id == "anthropic"),
+            "prime-inference sorts before the other api-key rows"
         );
     }
 

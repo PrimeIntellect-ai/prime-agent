@@ -1,6 +1,6 @@
 //! Provider auth management (`/login`, `/logout`): the TS providers
-//! selector (`OAuthSelectorComponent` in its inline mode — the panel the
-//! configuration menu's Providers tab mounts) plus the command contract
+//! selector (`OAuthSelectorComponent` in its inline mode) plus the
+//! command contract
 //! the composition root implements (TS `ProviderAuthFlows`:
 //! `getLoginProviderOptions` / `getLogoutProviderOptions` / the login
 //! flows / `runLogout`). The TUI owns the panel, the search, and the
@@ -31,14 +31,6 @@ impl AuthType {
             AuthType::ApiKey => "api key",
         }
     }
-}
-
-/// The tab a provider row belongs to (TS `category`): model providers or
-/// services (MCP integrations, web search).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthCategory {
-    Provider,
-    Service,
 }
 
 /// How the login runs: the TUI prompts for the key in the panel, or the
@@ -195,8 +187,6 @@ pub struct ProviderAuthSelector {
     filtered: Vec<usize>,
     selected: usize,
     search: SearchInput,
-    categories: Vec<AuthCategory>,
-    active: AuthCategory,
     visible: usize,
 }
 
@@ -205,18 +195,6 @@ impl ProviderAuthSelector {
     /// Provider tab; the empty list still opens (TS renders the empty
     /// message in the panel).
     pub fn new(kind: AuthSelectorKind, providers: Vec<ProviderRow>) -> Self {
-        let categories: Vec<AuthCategory> = [AuthCategory::Provider, AuthCategory::Service]
-            .into_iter()
-            .filter(|category| {
-                providers
-                    .iter()
-                    .any(|provider| provider.category == *category)
-            })
-            .collect();
-        let active = categories
-            .first()
-            .copied()
-            .unwrap_or(AuthCategory::Provider);
         let mut selector = ProviderAuthSelector {
             kind,
             mode: Mode::List,
@@ -224,8 +202,6 @@ impl ProviderAuthSelector {
             filtered: Vec::new(),
             selected: 0,
             search: SearchInput::new(),
-            categories,
-            active,
             visible: PREFERRED_VISIBLE_PROVIDERS,
         };
         selector.refilter();
@@ -252,17 +228,16 @@ impl ProviderAuthSelector {
 
     fn refilter(&mut self) {
         let query = self.search.value().to_string();
-        let in_category: Vec<usize> = self
+        let rows: Vec<usize> = self
             .providers
             .iter()
             .enumerate()
-            .filter(|(_, provider)| provider.category == self.active)
             .map(|(index, _)| index)
             .collect();
         self.filtered = if query.is_empty() {
-            in_category
+            rows
         } else {
-            fuzzy_filter(&in_category, &query, |index| {
+            fuzzy_filter(&rows, &query, |index| {
                 let provider = &self.providers[*index];
                 format!(
                     "{} {} {}",
@@ -279,22 +254,6 @@ impl ProviderAuthSelector {
         self.filtered
             .get(self.selected)
             .map(|index| self.providers[*index].clone())
-    }
-
-    fn switch_category(&mut self, direction: isize) {
-        if self.categories.len() < 2 {
-            return;
-        }
-        let current = self
-            .categories
-            .iter()
-            .position(|category| *category == self.active)
-            .unwrap_or(0);
-        let len = self.categories.len() as isize;
-        let next = (current as isize + direction).rem_euclid(len) as usize;
-        self.active = self.categories[next];
-        self.search.set_value("");
-        self.refilter();
     }
 
     /// One key id (TS `handleInput`).
@@ -361,18 +320,6 @@ impl ProviderAuthSelector {
                         self.selected = target.clamp(0, self.filtered.len() as isize - 1) as usize;
                     }
                     return AuthSelectorAction::None;
-                }
-                // Left/right switch tabs only while the search is empty
-                // (TS keeps them for cursor editing otherwise).
-                if self.categories.len() > 1 && self.search.value().is_empty() {
-                    for (binding, direction) in
-                        [("tui.editor.cursorLeft", -1), ("tui.editor.cursorRight", 1)]
-                    {
-                        if kb.matches(key, binding) {
-                            self.switch_category(direction);
-                            return AuthSelectorAction::None;
-                        }
-                    }
                 }
                 if kb.matches(key, "tui.select.confirm") {
                     return match self.selected_row() {
@@ -442,35 +389,6 @@ impl ProviderAuthSelector {
                 return lines;
             }
             Mode::List => {}
-        }
-        // The tab bar (TS `updateTabBar`): the active tab bold + accent,
-        // the rest muted, joined by a muted "  ·  ".
-        if self.categories.len() > 1 {
-            let labels = [
-                (AuthCategory::Provider, "Providers"),
-                (AuthCategory::Service, "MCP Connections"),
-            ];
-            let mut spans: Line = Vec::new();
-            let mut first = true;
-            for (category, label) in labels {
-                if !self.categories.contains(&category) {
-                    continue;
-                }
-                if !first {
-                    spans.push(theme.fg_span(ThemeColor::Muted, "  ·  ".to_string()));
-                }
-                first = false;
-                if category == self.active {
-                    spans.push(theme.fg_span(ThemeColor::Accent, label.to_string()));
-                } else {
-                    spans.push(theme.fg_span(ThemeColor::Muted, label.to_string()));
-                }
-            }
-            spans.push(theme.fg_span(ThemeColor::Muted, "   ←/→ switch".to_string()));
-            let mut line = vec![crate::Span::raw("  ")];
-            line.extend(spans);
-            lines.push(line);
-            lines.push(Vec::new());
         }
         let mut search = search_field_lines(
             theme,
@@ -545,7 +463,7 @@ impl ProviderAuthSelector {
         }
         lines.push(vec![theme.fg_span(
             ThemeColor::Muted,
-            "  ↑↓ navigate  ←/→ tabs  enter select  escape cancel".to_string(),
+            "  ↑↓ navigate  enter select  escape cancel".to_string(),
         )]);
         lines.push(vec![
             theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
@@ -602,17 +520,21 @@ mod tests {
         }
     }
 
+    /// The selector has no tab machinery (the operator's 2026-09-24
+    /// directive: /login for providers, /mcp for MCP — never a switcher):
+    /// left/right always edit the filter, and every row the hook supplies
+    /// renders in the one flat list.
     #[test]
-    fn tabs_switch_only_while_the_search_is_empty() {
+    fn left_and_right_always_edit_the_search() {
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic(), linear()]);
-        // The service tab exists: right switches to it.
-        selector.handle_key("right", &kb());
-        assert_eq!(selector.active, AuthCategory::Service);
-        // While filtering, right edits the query instead.
         selector.handle_key("l", &kb());
         selector.handle_key("right", &kb());
-        assert_eq!(selector.active, AuthCategory::Service);
+        assert_eq!(selector.search.value(), "l");
+        // The rows stay one flat list, whatever their category field
+        /// carries (the login hook supplies providers only; logout lists
+        /// every stored credential).
+        assert_eq!(selector.providers.len(), 2);
     }
 
     #[test]
@@ -685,6 +607,10 @@ mod tests {
 
     #[test]
     fn the_panel_renders_the_ts_chrome() {
+        // The selector carries no tab machinery (the operator's
+        // 2026-09-24 directive: /login is the providers picker alone) —
+        // the panel chrome is the bordered search field, the rows, and
+        // the hint, with no tab labels and no switch hint.
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), linear()]);
         selector.render(&theme(), 80);
@@ -701,9 +627,13 @@ mod tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Connect with a subscription or API key.")));
-        assert!(text.iter().any(|row| row.contains("MCP Connections")));
+        assert!(!text.iter().any(|row| row.contains("MCP Connections")));
         assert!(text.iter().any(|row| row.contains("OpenAI · api key")));
         assert!(text.iter().any(|row| row.contains("Search providers")));
+        assert!(
+            !text.iter().any(|row| row.contains("tabs")),
+            "no tab hint rides the panel: {text:?}"
+        );
     }
 
     #[test]
