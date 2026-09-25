@@ -351,15 +351,18 @@ impl AgentView {
         let mut rows = Vec::with_capacity(height);
         // The window-relative start of each section the walk appends (the
         // click map's materialization point): entries map to their chat
-        // index, the tail to its bash-block click row.
-        let mut section_starts: Vec<(usize, usize)> = Vec::new();
+        // index, the tail to its bash-block click row. A section clipped at
+        // the window top (its first `from` rows sit above the viewport)
+        // records its TRUE start — the clip offset shifts it — so entry
+        // click rows project to the rows the entry actually occupies.
+        let mut section_starts: Vec<(usize, usize, usize)> = Vec::new();
         while rows.len() < height && section <= last {
             let start_row = rows.len();
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
             rows.extend_from_slice(&source[from..to]);
-            section_starts.push((section, start_row));
+            section_starts.push((section, start_row, from));
             section += 1;
             row = 0;
         }
@@ -410,14 +413,18 @@ impl AgentView {
             Anchor::Top(offset) => offset,
         };
         let mut clicks = crate::click_regions::WindowClickMap::default();
-        for (section, start_row) in section_starts {
+        for (section, start_row, from) in section_starts {
             if section == 0 {
                 continue;
             }
+            // The clipped rows sit above the window's first frame row:
+            // the section's true start is its first visible row minus the
+            // clip offset (never underflowing the walk's origin).
+            let abs_row = (start + start_row).saturating_sub(from);
             if section == last {
-                clicks.tail_start = Some(start + start_row);
+                clicks.tail_start = Some(abs_row);
             } else {
-                clicks.entries.push((section - 1, start + start_row));
+                clicks.entries.push((section - 1, abs_row));
             }
         }
         (rows, start, clicks)

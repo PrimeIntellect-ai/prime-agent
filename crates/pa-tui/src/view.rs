@@ -431,6 +431,10 @@ impl AgentView {
             let rows = self.count_entry_rows(index, self.layout_width);
             self.sparse_tail_delta(-(rows as isize), index);
         }
+        // The popped entry's expansion override goes with it: a later
+        // replacement appended at the same index inherits the global
+        // detail, never the old card's click state.
+        self.entry_expanded.remove(&index);
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
         self.entry_heights.pop();
@@ -593,9 +597,18 @@ impl AgentView {
     }
 
     /// Reset every per-entry expansion override (TS `applyChatExpansion`
-    /// fans the cycled global state out to all components on Ctrl+O).
+    /// fans the cycled global state out to all components on Ctrl+O). The
+    /// per-entry row caches go with the overrides: they are keyed by the
+    /// global detail level, so a render stored under an override would
+    /// otherwise replay it after the cycle returns to that level.
     pub(crate) fn clear_entry_expanded(&mut self) {
         self.entry_expanded.clear();
+        for slot in &mut self.entry_layout {
+            *slot = [None, None, None];
+        }
+        for slot in &mut self.entry_heights {
+            *slot = [None, None, None];
+        }
     }
 
     /// Toggle the side-question pane's bash block expansion (TS
@@ -1641,11 +1654,19 @@ impl AgentView {
             }
         }
         if let Some(map) = &self.editor_click {
-            if map.first_dock_row >= cropped {
-                let first = top_rows + window_height + map.first_dock_row - cropped;
-                for offset in 0..map.visible.len() {
-                    clicks.push_editor_row(first + offset, first, width);
+            // The dock crops from its front: content rows cropped away drop
+            // their targets, the still-visible ones keep theirs (TS clips
+            // regions to the rows actually rendered). The anchor is where
+            // the region's FIRST line would sit, so the dispatched
+            // position stays the full visible-window line index the editor
+            // map resolves even when that line cropped away.
+            for offset in 0..map.visible.len() {
+                let dock_row = map.first_dock_row + offset;
+                if dock_row < cropped {
+                    continue;
                 }
+                let row = top_rows + window_height + dock_row - cropped;
+                clicks.push_editor_row(row, row - offset, width);
             }
         }
         // A paused viewport carries the follow hint over the last transcript
@@ -3114,7 +3135,10 @@ mod tests {
             !again.contains("RESULT-ONE") && !again.contains("RESULT-TWO"),
             "the card collapsed again: {again}"
         );
-        // The global cycle resets the overrides wholesale.
+        // The global cycle resets the overrides wholesale — and the
+        // per-entry caches with them: cycling back to this detail level
+        // must never replay a click's render (the cache slots are keyed
+        // by the global level, so the override-era rows are stale).
         v.toggle_entry_expanded(1);
         v.detail = v.detail.next();
         v.clear_entry_expanded();
@@ -3122,6 +3146,13 @@ mod tests {
         assert!(
             !cycled.contains("RESULT-TWO"),
             "the cycle cleared the overrides"
+        );
+        v.detail = v.detail.next();
+        v.detail = v.detail.next();
+        let wrapped = transcript_text(&mut v, 80);
+        assert!(
+            !wrapped.contains("RESULT-ONE") && !wrapped.contains("RESULT-TWO"),
+            "no override-era rows replay after the full cycle: {wrapped}"
         );
     }
 

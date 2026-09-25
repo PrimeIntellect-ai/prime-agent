@@ -6167,6 +6167,9 @@ impl SessionUi {
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
             return;
         }
+        // TS runs the executable path with the handler and URL as its
+        // arguments (`execFile`): the rundll32 path is the PROGRAM, never
+        // a positional argument.
         #[cfg(target_os = "windows")]
         let (program, mut args) = {
             let system_root =
@@ -6175,12 +6178,8 @@ impl SessionUi {
                 .join("System32")
                 .join("rundll32.exe");
             (
-                "rundll32",
-                vec![
-                    rundll32.to_string_lossy().into_owned(),
-                    "url.dll,FileProtocolHandler".to_string(),
-                    href,
-                ],
+                rundll32.to_string_lossy().into_owned(),
+                vec!["url.dll,FileProtocolHandler".to_string(), href],
             )
         };
         #[cfg(all(unix, not(target_os = "macos")))]
