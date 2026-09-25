@@ -937,7 +937,13 @@ def _revive_with_live_globals(
             changed = changed or revived is not arg
             keywords[key] = revived
         if not changed:
-            return memo.setdefault(id(value), value)
+            # An unchanged partial still carries its original attributes:
+            # __main__ callables there would keep frozen snapshot globals, so
+            # revive them in place. Memoize first — an attribute can cycle
+            # back to this partial.
+            memo[id(value)] = value
+            value.__dict__.update({key: revive(attr) for key, attr in value.__dict__.items()})
+            return value
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
         # Memoize before the attribute walk: attributes can hold the partial
         # itself (a self-cycle or mutual partials), and unlike the function

@@ -826,6 +826,11 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(one(events, "result")["text"], "(2, 'v')")
 
+    def test_restore_unchanged_partial_revives_function_attributes_pr2471(self):
+        code = "import functools\nG = 1\ndef helper():\n    return G\np = functools.partial(len)\np.callback = helper"
+        self._snapshot_restore("up", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("up4", "G = 2\np.callback()"), "result")["text"], "2")
+
     def test_restore_rebuilt_partial_revives_function_attributes_pr2471(self):
         code = (
             "import functools\nG = 1\ndef helper():\n    return G\ndef apply(fn):\n    return fn()\n"
