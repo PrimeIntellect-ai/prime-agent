@@ -505,6 +505,15 @@ pub enum TurnUpdate {
         /// `/compact <instructions>` focus guidance.
         custom_instructions: Option<String>,
     },
+    /// `compaction_summary_delta`: one streamed chunk of the summary the
+    /// compaction model is generating (the operator's "stream the
+    /// compacted summary" feature). The chunks accumulate onto the live
+    /// loader's state; the settling `compaction_end` clears the streamed
+    /// block when its durable summary row lands.
+    CompactionSummaryDelta {
+        /// The delta text (one summarizer text delta, verbatim).
+        delta: String,
+    },
     /// `compaction_end`: the compaction settled. Success carries the result
     /// (summary + token counts); skip/failure carries the error message and
     /// its severity (TS shows those for `manual` runs).
@@ -579,6 +588,13 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .get("customInstructions")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+        }),
+        "compaction_summary_delta" => Some(TurnUpdate::CompactionSummaryDelta {
+            delta: event
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         }),
         "compaction_end" => Some(TurnUpdate::CompactionEnd {
             reason: event
@@ -2788,6 +2804,26 @@ mod tests {
                 aborted: false,
                 error_message: Some("Session is too short to compact".to_string()),
                 error_severity: Some("warning".to_string()),
+            })
+        );
+        // A summary delta carries its text chunk verbatim (the live
+        // streamed block's input; the settling end stays the summary's
+        // only durable source).
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "compaction_summary_delta",
+                "delta": "The session covered the goal.",
+            })),
+            Some(TurnUpdate::CompactionSummaryDelta {
+                delta: "The session covered the goal.".to_string(),
+            })
+        );
+        // A missing delta field decodes as an empty chunk, never a drop
+        // (the accumulation stays a pure append — the frame is real).
+        assert_eq!(
+            event_to_update(&json!({ "type": "compaction_summary_delta" })),
+            Some(TurnUpdate::CompactionSummaryDelta {
+                delta: String::new(),
             })
         );
     }

@@ -169,6 +169,18 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The live compaction summary-delta sink
+    /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
+    /// delta the session's compactions stream reaches it, in arrival
+    /// order — the daemon's `compaction_summary_delta` broadcast seam for
+    /// the expanded TUI's live block. Interior-mutable so the embedding
+    /// can install it on the assembled session (`&self`, not the
+    /// `&mut self` the build-time setters take: the daemon wires it after
+    /// the build from the worker's event pump). `None` (the default,
+    /// including every non-daemon embedding) keeps the one-shot
+    /// summarizer completion — no deltas, no broadcast, no behavior
+    /// change.
+    compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
 }
 
 impl AgentSession {
@@ -232,6 +244,7 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            compaction_summary_sink: std::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -288,6 +301,24 @@ impl AgentSession {
         probe: Option<std::sync::Arc<dyn ipython_state::CompactionKernelProbe>>,
     ) {
         self.kernel_state = probe;
+    }
+
+    /// Install the live compaction summary-delta sink (the daemon's
+    /// `compaction_summary_delta` broadcast seam): every summarizer text
+    /// delta the session's compactions stream reaches the sink while the
+    /// summary generates, in arrival order. The daemon wires this onto
+    /// the assembled session (the worker's event pump); every other
+    /// embedding leaves it unset — the one-shot summarizer completion,
+    /// byte-identical to the pre-seam behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink slot's mutex is poisoned.
+    pub fn set_compaction_summary_sink(&self, sink: compaction_exec::SummaryDeltaSink) {
+        *self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock") = Some(sink);
     }
 
     /// Whether the session may run auto-refinement (TS
@@ -431,6 +462,11 @@ impl AgentSession {
         let digest_inputs = self.harness_digest_inputs().await;
         let mut outcome = {
             let mut session = self.session.lock().await;
+            let summary_delta = self
+                .compaction_summary_sink
+                .lock()
+                .expect("compaction summary sink lock")
+                .clone();
             crate::session_engine::compact_session::execute_compaction(
                 &mut session,
                 crate::session_engine::compact_session::CompactOptions {
@@ -441,6 +477,7 @@ impl AgentSession {
                     abort,
                     harness_digest: digest_inputs,
                     auxiliary: self.auxiliary_model.as_ref(),
+                    summary_delta,
                 },
             )
             .await?

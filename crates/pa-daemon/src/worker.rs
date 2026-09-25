@@ -1165,6 +1165,28 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The live compaction summary-delta sink (the
+                // `compaction_summary_delta` broadcast, the operator's
+                // "stream the compacted summary" feature): every
+                // summarizer text delta the engine's compactions stream
+                // reaches the attached clients as one ephemeral
+                // session-event frame between the owning
+                // `compaction_start` and the settling `compaction_end`.
+                // The frames sequence + broadcast exactly like the
+                // worker's other session events (never persisted, never
+                // a roster trigger), so the ordering contract with the
+                // compaction loader's start/end pair holds.
+                let summary_core = Arc::clone(&core);
+                let summary_events = events.clone();
+                let summary_sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink =
+                    Arc::new(move |delta| {
+                        emit_worker_event_with(
+                            &summary_core,
+                            &summary_events,
+                            crate::compaction::compaction_summary_delta_event(delta),
+                        );
+                    });
+                concrete.set_compaction_summary_sink(summary_sink);
                 // The bash-completion wake seam (TS
                 // `_promptInjectedMessage` for `bash.completed` and
                 // `_withdrawAsyncBashCompletionNotice` for

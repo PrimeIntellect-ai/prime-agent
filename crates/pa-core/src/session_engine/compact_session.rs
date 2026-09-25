@@ -8,7 +8,7 @@ use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult}
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
     complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
-    CompactionDetails, CompactionResult, SummarySlice, NO_PRIOR_HISTORY,
+    CompactionDetails, CompactionResult, SummaryDeltaSink, SummarySlice, NO_PRIOR_HISTORY,
 };
 use super::messages::convert_to_llm;
 use crate::session::manager::SessionManager;
@@ -41,6 +41,13 @@ pub struct CompactOptions<'a> {
     /// `auxiliaryModel` setting with a context-window fit check, falling
     /// back to the caller's session model. `None` keeps the session model.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
+    /// The live summary-delta sink ([`SummaryDeltaSink`]): every text
+    /// delta the summarizer model streams reaches it in arrival order
+    /// (the daemon's `compaction_summary_delta` broadcast for the
+    /// expanded TUI's live block). `None` keeps the one-shot completion
+    /// — the summarizer call itself is identical either way; only the
+    /// stream consumption differs.
+    pub summary_delta: Option<SummaryDeltaSink>,
 }
 
 /// The history summary's completion budget (TS `generateSummary`:
@@ -463,6 +470,7 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             history_max_tokens,
             request,
+            options.summary_delta.clone(),
             "Summarization failed",
         )
         .await
@@ -478,6 +486,11 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             turn_prefix_max_tokens,
             request,
+            // A split turn's two summarizer calls run concurrently, so
+            // both streams feed the same live sink — the interleaved
+            // order is the true live view (each call's deltas arrive in
+            // order relative to itself).
+            options.summary_delta.clone(),
             "Turn prefix summarization failed",
         )
         .await?;
@@ -789,6 +802,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -961,6 +975,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1017,6 +1032,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1134,6 +1150,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1396,6 +1413,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1423,6 +1441,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1550,6 +1569,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1583,6 +1603,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1643,6 +1664,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1669,6 +1691,56 @@ mod tests {
             Message::User(user) => assert!(user.content.text().contains("[compaction-summary]")),
             other => panic!("expected summary user message, got {other:?}"),
         }
+        registration.unregister();
+    }
+
+    /// The live summary-delta sink receives every summarizer text delta
+    /// as the model generates it (the daemon's `compaction_summary_delta`
+    /// broadcast): the deltas arrive in order, their concatenation is the
+    /// generated summary, and the final result still comes from the
+    /// terminal assistant message — the sink never gates the run, and
+    /// `None` keeps the one-shot completion untouched.
+    #[tokio::test]
+    async fn execute_compaction_streams_summary_deltas_to_the_sink() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let sink_deltas = std::sync::Arc::clone(&deltas);
+        let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
+            sink_deltas.lock().unwrap().push(delta.to_string());
+        });
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 20,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: Some(sink),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        let deltas = deltas.lock().unwrap().join("");
+        // The streamed deltas concatenate to exactly the generated
+        // summary text (the faux provider chunks the scripted response
+        // into provider-sized pieces; the sink receives each chunk).
+        assert!(!deltas.is_empty(), "the sink saw at least one delta");
+        assert_eq!(deltas, "## Goal\nsummarized goal");
+        // The final summary is the same text the deltas carried — the
+        // terminal assistant message, never the sink's accumulation.
+        assert_eq!(run.result.summary, "## Goal\nsummarized goal");
         registration.unregister();
     }
 
@@ -1742,6 +1814,7 @@ mod tests {
                 abort: None,
                 harness_digest: Some(inputs),
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1814,6 +1887,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1855,6 +1929,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1909,6 +1984,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1943,6 +2019,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1985,6 +2062,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -2091,6 +2169,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await

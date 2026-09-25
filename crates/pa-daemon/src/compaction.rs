@@ -321,6 +321,18 @@ pub(crate) fn compaction_start_event(reason: &str, custom_instructions: Option<&
     event
 }
 
+/// The `compaction_summary_delta` event payload (the live compaction
+/// block, the operator's "stream the compacted summary" feature): one
+/// frame per summarizer text delta, between the owning
+/// `compaction_start` and the settling `compaction_end`. The frames are
+/// ephemeral — never persisted, never replayed, absent from the roster
+/// triggers — and the `compaction_end` result stays the summary's only
+/// durable source: a client that missed deltas (a late attach, a lost
+/// frame) still resolves the same final summary row.
+pub(crate) fn compaction_summary_delta_event(delta: &str) -> Value {
+    json!({ "type": "compaction_summary_delta", "delta": delta })
+}
+
 /// The client-facing `CompactionResult` of a successful compaction (TS
 /// `_performCompaction`'s return, the `data` of the `compact` response and
 /// the `result` of the settled `compaction_end` event): summary,
@@ -559,6 +571,13 @@ mod tests {
         assert_eq!(
             compaction_start_event("manual", None),
             json!({ "type": "compaction_start", "reason": "manual" })
+        );
+        // The live streamed-summary delta (the operator's "stream the
+        // compacted summary" feature): one frame per summarizer text
+        // delta, verbatim, nothing else on the frame.
+        assert_eq!(
+            compaction_summary_delta_event("one chunk of the summary"),
+            json!({ "type": "compaction_summary_delta", "delta": "one chunk of the summary" })
         );
         assert_eq!(
             compaction_end_event(
