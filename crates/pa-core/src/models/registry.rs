@@ -41,6 +41,46 @@ pub struct ResolvedRequestAuth {
     pub error: Option<String>,
 }
 
+/// Why a `set_model` selection failed to resolve (the daemon's
+/// `set_model` classification): the provider is not signed in (the
+/// client offers the sign-in flow and retries) or the model is genuinely
+/// not in the catalog (the TS refusal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetModelSelectionError {
+    /// The model exists in the catalog, but its provider has no
+    /// credential and none is stale: sign in, then retry the switch.
+    ProviderUnauthenticated { provider: String },
+    /// No such model in the catalog (the TS `set_model` message).
+    NotFound { provider: String, model_id: String },
+}
+
+impl SetModelSelectionError {
+    /// The refused provider of the sign-in variant (the daemon's typed
+    /// `errorInfo` payload); `None` on the not-found refusal.
+    pub fn unauthenticated_provider(&self) -> Option<&str> {
+        match self {
+            SetModelSelectionError::ProviderUnauthenticated { provider } => Some(provider),
+            SetModelSelectionError::NotFound { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SetModelSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetModelSelectionError::ProviderUnauthenticated { provider } => write!(
+                f,
+                "Provider \"{provider}\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again."
+            ),
+            SetModelSelectionError::NotFound { provider, model_id } => {
+                write!(f, "Model not found: {provider}/{model_id}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SetModelSelectionError {}
+
 /// Composed model catalog with auth-aware availability.
 pub struct ModelRegistry {
     pub auth: AuthStorage,
@@ -136,6 +176,71 @@ impl ModelRegistry {
     pub fn has_configured_auth(&self, model: &Model) -> bool {
         self.auth.has_auth(&model.provider)
             || self.has_configured_provider_request_auth(&model.provider)
+    }
+
+    /// The provider's auth status without credential values (TS
+    /// `getProviderAuthStatus`): callers that classify unauthenticated
+    /// vs stale providers (the daemon `set_model` resolution) read it
+    /// instead of probing for keys.
+    pub fn get_provider_auth_status(&self, provider: &str) -> crate::auth::types::AuthStatus {
+        self.auth.get_auth_status(provider)
+    }
+
+    /// `set_model`'s model resolution (the TS daemon's available-list
+    /// lookup with its stale fallback and the sign-in classification):
+    /// an available model resolves directly; a catalog model whose
+    /// provider has no credential at all (and none marked stale) is the
+    /// typed sign-in refusal — the client offers the provider's login
+    /// and retries the switch, instead of the old dead-end "Model not
+    /// found" — while everything else (an unauthorized private Prime
+    /// Inference model, an unknown id) keeps the TS refusal.
+    ///
+    /// Stale-auth providers keep the switch exactly like the TS daemon
+    /// (`session.modelRegistry.find`'s full-catalog fallback: the lookup
+    /// never mutates stale state, `session.setModel` owns the clear).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetModelSelectionError::ProviderUnauthenticated`] when the
+    /// model exists but its provider has no credential (and none is
+    /// stale), or [`SetModelSelectionError::NotFound`] when no catalog
+    /// model matches.
+    pub fn resolve_set_model_selection(
+        &self,
+        provider: &str,
+        model_id: &str,
+    ) -> Result<&Model, SetModelSelectionError> {
+        let matches = |model: &Model| model.provider == provider && model.id == model_id;
+        if let Some(model) = self
+            .get_available()
+            .into_iter()
+            .find(|model| matches(model))
+        {
+            return Ok(model);
+        }
+        // The catalog lists every provider's models, so a model can exist
+        // while its provider is not signed in — the picker's discovery
+        // path. The stale fallback resolves from the full catalog (TS
+        // `find`); a provider without any credential is the sign-in
+        // refusal; anything else (authorized private models aside) stays
+        // the TS "Model not found".
+        let Some(model) = self.get_all().iter().find(|model| matches(model)) else {
+            return Err(SetModelSelectionError::NotFound {
+                provider: provider.to_string(),
+                model_id: model_id.to_string(),
+            });
+        };
+        if self.get_provider_auth_status(provider).source
+            == Some(crate::auth::types::AuthSource::Stale)
+        {
+            return Ok(model);
+        }
+        if !self.has_configured_auth(model) {
+            return Err(SetModelSelectionError::ProviderUnauthenticated {
+                provider: provider.to_string(),
+            });
+        }
+        Ok(model)
     }
 
     fn has_configured_provider_request_auth(&self, provider: &str) -> bool {
