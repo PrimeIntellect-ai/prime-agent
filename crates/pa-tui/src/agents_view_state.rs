@@ -1108,6 +1108,7 @@ mod tests {
             None,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             None,
         );
         let age = rows
