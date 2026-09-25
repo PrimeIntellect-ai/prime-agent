@@ -12,12 +12,14 @@
 ///
 /// The default arena limit (`8 * ncores`) lets a burst of allocation from
 /// tokio worker and blocking-pool threads grow one arena per thread; every
-/// arena keeps its high-water pages. A small cap keeps the parallelism the
-/// runtime actually uses while collapsing that sprawl.
+/// arena keeps its high-water pages. A moderate cap leaves the parallel
+/// workers their arenas (a hard cap showed up as allocation contention in
+/// the 16-way parallel e2e suite) while collapsing the default's arena
+/// sprawl.
 pub fn cap_thread_arenas() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
-        libc::mallopt(libc::M_ARENA_MAX, 4);
+        libc::mallopt(libc::M_ARENA_MAX, 8);
     }
 }
 
