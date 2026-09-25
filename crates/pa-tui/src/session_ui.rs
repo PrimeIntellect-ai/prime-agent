@@ -1170,7 +1170,8 @@ impl SessionUi {
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
         let dock = crate::chrome::ActivityDock {
-            subagents_running: counts.running,
+            subagents_running_direct: counts.running_direct,
+            subagents_running_nested: counts.running_nested,
             subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
