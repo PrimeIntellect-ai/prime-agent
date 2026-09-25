@@ -95,7 +95,7 @@ impl Worker {
         // answers from memory in bounded time even on a grown store. The
         // artifact-tree walk is the cache's background refresh
         // (`context_tree_cache`), never the request path.
-        let (label, context_usage, own_usage, total_usage, session_id) = {
+        let (label, context_usage, own_usage, total_usage, session_id, own_usage_by_model) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let label = store
@@ -105,15 +105,30 @@ impl Worker {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
             let session_id = store.map(|store| store.session_id().to_string());
-            let (own_usage, total_usage) = match store {
+            // The per-model own-usage breakdown rides the node when every
+            // usage-carrying row resolved to a model (None degrades to the
+            // plain TS totals): a session that switched models mid-run —
+            // or whose subagents billed on other models — shows which
+            // model billed what.
+            let (own_usage, total_usage, own_usage_by_model) = match store {
                 Some(store) => {
                     let branch = store.branch_bridged();
                     let all_entries = store.entries();
-                    compute_own_and_total_usage(&branch, all_entries)
+                    let (own_usage, total_usage) =
+                        compute_own_and_total_usage(&branch, all_entries);
+                    let own_usage_by_model = compute_own_usage_by_model(&branch, all_entries);
+                    (own_usage, total_usage, own_usage_by_model)
                 }
-                None => (empty_usage(), empty_usage()),
+                None => (empty_usage(), empty_usage(), None),
             };
-            (label, context_usage, own_usage, total_usage, session_id)
+            (
+                label,
+                context_usage,
+                own_usage,
+                total_usage,
+                session_id,
+                own_usage_by_model,
+            )
         };
         let model = self.engine.model_metadata().and_then(|model| {
             Some(json!({
@@ -144,6 +159,9 @@ impl Worker {
         }
         if let Some(usage) = context_usage {
             tree["contextUsage"] = usage;
+        }
+        if let Some(by_model) = own_usage_by_model {
+            tree["ownUsageByModel"] = json!(by_model);
         }
         response_success(None, "get_context_tree", Some(tree))
     }
@@ -430,6 +448,141 @@ pub(crate) fn compute_own_and_total_usage(
     (own, total)
 }
 
+/// The branch's own usage broken down by serving model (the operator's
+/// cost question: a session that switches models mid-conversation — or
+/// hosts subagents on other models — shows which model billed what).
+///
+/// Each assistant row folds into the bucket of the model on its message
+/// envelope (the request-time serving model — cost blocks were computed
+/// against that model's rates, so each bucket holds only spend billed at
+/// those rates); `compaction` / `branch_summary` rows follow the branch's
+/// `model_change` timeline (the summarizer runs on the session's current
+/// model). Child-usage attributions subtract from the target row's model
+/// bucket exactly like [`compute_own_and_total_usage`] subtracts from
+/// `ownUsage`, so the buckets sum to the node's own usage. `None` when any
+/// usage-carrying row resolves to no model (a foreign file without
+/// `model_change` rows or model-tagged assistants): a partial breakdown
+/// would not add up to the displayed totals, so the caller omits the
+/// field and the display degrades to the plain TS totals.
+pub(crate) fn compute_own_usage_by_model(
+    branch: &[&crate::session_store::SessionEntry],
+    all_entries: &[crate::session_store::SessionEntry],
+) -> Option<Vec<Value>> {
+    // The buckets in first-seen order: JSON arrays keep the fold order,
+    // so the display renders the model the session started on first.
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut position: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    let mut buckets: Vec<Value> = Vec::new();
+    // The branch's model timeline (compaction rows bill on the current
+    // model at their position) and the assistant id -> bucket map the
+    // attribution subtraction reads.
+    let mut current: Option<(String, String)> = None;
+    let mut assistant_buckets: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    let mut unresolved = false;
+    let mut bucket_for =
+        |key: Option<(String, String)>, buckets: &mut Vec<Value>| -> Option<usize> {
+            let key = key?;
+            let at = *position.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                buckets.push(empty_usage());
+                buckets.len() - 1
+            });
+            Some(at)
+        };
+    for entry in branch {
+        let usage = match entry.type_.as_str() {
+            "model_change" => {
+                let provider = entry
+                    .fields
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let model_id = entry
+                    .fields
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                current = (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()));
+                continue;
+            }
+            "message" => {
+                let Some(message) = entry.fields.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let usage = message.get("usage");
+                if usage.is_none() {
+                    // An assistant row without usage bills nothing; the
+                    // own-usage fold skips it the same way (an attribution
+                    // targeting it subtracts from a zero base).
+                    continue;
+                }
+                // The serving model on the envelope outranks the timeline
+                // (the row is the request's own record).
+                let provider = message
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let model_id = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let key = (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()))
+                    .or(current.clone());
+                match bucket_for(key, &mut buckets) {
+                    Some(at) => {
+                        add_usage(&mut buckets[at], usage.expect("checked"));
+                        assistant_buckets.insert(entry.id.as_str(), at);
+                    }
+                    None => unresolved = true,
+                }
+                continue;
+            }
+            "compaction" | "branch_summary" => entry.fields.get("usage"),
+            _ => continue,
+        };
+        if let Some(usage) = usage {
+            match bucket_for(current.clone(), &mut buckets) {
+                Some(at) => add_usage(&mut buckets[at], usage),
+                None => unresolved = true,
+            }
+        }
+    }
+    if unresolved {
+        return None;
+    }
+    for entry in all_entries {
+        if entry.type_ != "child_usage_attributed" {
+            continue;
+        }
+        let Some(target_id) = entry.fields.get("targetId").and_then(Value::as_str) else {
+            continue;
+        };
+        let (Some(at), Some(child_usage)) = (
+            assistant_buckets.get(target_id).copied(),
+            entry.fields.get("childUsage"),
+        ) else {
+            continue;
+        };
+        subtract_usage(&mut buckets[at], child_usage);
+    }
+    Some(
+        order
+            .into_iter()
+            .zip(buckets)
+            .map(|((provider, model_id), own_usage)| {
+                json!({ "provider": provider, "id": model_id, "ownUsage": own_usage })
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +834,112 @@ mod tests {
         assert_eq!(stats["tokens"]["output"], json!(5863));
         assert_eq!(stats["tokens"]["cacheRead"], json!(18560));
         assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
+        // The title's full-session total: the same folded aggregate —
+        // the six attributed children's spend rides the assistant rows
+        // (the fixture has no compaction, so the active region and the
+        // whole session coincide here).
+        assert_eq!(stats["totalCost"].as_f64(), Some(0.008_995_7));
+    }
+
+    /// The operator's cost question, proven over the real file path: a
+    /// session that switches models mid-conversation accumulates the
+    /// correct per-model costs INCLUDING the switch's cache-write burst.
+    /// The synthetic file's cost blocks are the provider-computed records
+    /// (`calculate_cost` against the catalog rates: gpt-5.6-sol $4/$20 per
+    /// M; claude-opus-4-6 $5/$25/M, cacheRead $0.5/M, cacheWrite $6.25/M
+    /// = the 1.25x write multiplier): the sol turn bills $0.44; the first
+    /// opus request re-caches the whole history — 104k cache-write tokens
+    /// at $6.25/M = $0.65 exactly — and bills $0.70; the next opus turn
+    /// hits the cache ($0.0775). The per-model buckets carry each model's
+    /// share with the fold's exact float sums, and the grand totals are
+    /// per-model-summed across the switch.
+    #[tokio::test]
+    async fn get_context_tree_breaks_own_usage_down_by_model() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("switched.jsonl");
+        let usage = |input: u64,
+                     output: u64,
+                     cache_read: u64,
+                     cache_write: u64,
+                     total: u64,
+                     (ci, co, cr, cw, ct): (f64, f64, f64, f64, f64)| {
+            json!({
+                "input": input, "output": output, "cacheRead": cache_read,
+                "cacheWrite": cache_write, "totalTokens": total,
+                "cost": {"input": ci, "output": co, "cacheRead": cr,
+                          "cacheWrite": cw, "total": ct},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "switched-0001", "timestamp": "2026-09-24T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-24T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-24T00:00:01.000Z", "message": {"role": "user", "content": "audit the costs"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-24T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(100_000, 2000, 0, 0, 1200, (0.4, 0.04, 0.0, 0.0, 0.44))}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-24T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-24T00:00:04.000Z", "message": {"role": "user", "content": "switch to opus"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-24T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(5000, 1000, 0, 104_000, 110_000, (0.025, 0.025, 0.0, 0.65, 0.7))}}),
+            json!({"type": "message", "id": "e5", "parentId": "e4", "timestamp": "2026-09-24T00:00:06.000Z", "message": {"role": "user", "content": "and now a cache hit"}}),
+            json!({"type": "message", "id": "e6", "parentId": "e5", "timestamp": "2026-09-24T00:00:07.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "cheap"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(500, 800, 110_000, 0, 110_500, (0.0025, 0.02, 0.055, 0.0, 0.0775))}}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        // The grand totals sum every record's stored cost — the honest
+        // per-model-summed total across the switch.
+        assert_eq!(tree["ownUsage"]["input"], json!(105_500));
+        assert_eq!(tree["ownUsage"]["output"], json!(3800));
+        assert_eq!(tree["ownUsage"]["cacheRead"], json!(110_000));
+        assert_eq!(tree["ownUsage"]["cacheWrite"], json!(104_000));
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(221_700));
+        assert_eq!(
+            tree["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.4 + 0.04 + 0.7 + 0.0775)
+        );
+        // The per-model breakdown: first-seen order, each bucket holding
+        // exactly the records that model served.
+        let buckets = tree["ownUsageByModel"]
+            .as_array()
+            .expect("the by-model breakdown is present");
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["provider"], json!("openai"));
+        assert_eq!(buckets[0]["id"], json!("gpt-5.6-sol"));
+        assert_eq!(buckets[0]["ownUsage"]["input"], json!(100_000));
+        assert_eq!(buckets[0]["ownUsage"]["output"], json!(2000));
+        assert_eq!(buckets[0]["ownUsage"]["cacheWrite"], json!(0));
+        assert_eq!(
+            buckets[0]["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.4 + 0.04)
+        );
+        assert_eq!(buckets[1]["provider"], json!("anthropic"));
+        assert_eq!(buckets[1]["id"], json!("claude-opus-4-6"));
+        assert_eq!(buckets[1]["ownUsage"]["input"], json!(5500));
+        assert_eq!(buckets[1]["ownUsage"]["output"], json!(1800));
+        assert_eq!(buckets[1]["ownUsage"]["cacheRead"], json!(110_000));
+        assert_eq!(buckets[1]["ownUsage"]["cacheWrite"], json!(104_000));
+        // The switch's cache-write burst bills at the new model's write
+        // rate: 104k tokens x $6.25/M (1.25x the $5/M input rate) is
+        // exactly $0.65.
+        assert_eq!(
+            buckets[1]["ownUsage"]["cost"]["cacheWrite"].as_f64(),
+            Some(104_000.0 * 6.25 / 1_000_000.0)
+        );
+        assert_eq!(
+            buckets[1]["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.7 + 0.0775)
+        );
     }
 
     /// `get_context_tree` surfaces the persisted child sessions under the

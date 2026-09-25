@@ -73,6 +73,11 @@ struct Envelope {
     parent_id: Option<String>,
     message: Option<MessageMetadata>,
     custom_type: Option<String>,
+    /// The entry's own usage block (`compaction` / `branch_summary`
+    /// rows carry the summarizer's spend at the top level, outside any
+    /// message; message rows never carry one here).
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +140,12 @@ pub struct WindowStats {
     pub cache_write: u64,
     #[serde(with = "super::window_cache::float_bits")]
     pub cost: f64,
+    /// The discarded prefix's `compaction` / `branch_summary` spend (the
+    /// summarizer's own bill): the full-session total reads it; the
+    /// active TS stats never do. Defaults on caches written before the
+    /// field existed.
+    #[serde(default)]
+    pub summarization_cost: f64,
 }
 
 /// One older-path assistant row's spend-relevant usage: the walk records
@@ -340,6 +351,21 @@ impl WindowedSessionStore {
             }
             let on_path = expected.as_deref() == Some(id);
             if on_path {
+                if window_done && matches!(meta.kind.as_str(), "compaction" | "branch_summary") {
+                    // The discarded prefix's summarizer spend rides the
+                    // entry's own usage block (never a message): the
+                    // full-session total (`get_session_stats` `totalCost`)
+                    // bills it exactly like the retained region's
+                    // compaction rows, while the active TS stats stay
+                    // messages-only.
+                    if let Some(usage) = &meta.usage {
+                        older_path_stats.summarization_cost += usage
+                            .get("cost")
+                            .and_then(|cost| cost.get("total"))
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or_default();
+                    }
+                }
                 if window_done && meta.kind == "message" {
                     if let Some(message) = &meta.message {
                         older_path_stats.total_messages += 1;

@@ -91,6 +91,10 @@ pub fn load_context_tree_child(
     let all_entries = store.entries();
     let (own_usage, total_usage) =
         crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
+    // The per-model own-usage breakdown rides the child node too (a
+    // subagent on another model — or a child that itself switched —
+    // shows which model billed its spend).
+    let own_usage_by_model = crate::state_getters::compute_own_usage_by_model(&branch, all_entries);
     let label = branch
         .iter()
         .find_map(|entry| branch_user_label(entry))
@@ -113,6 +117,9 @@ pub fn load_context_tree_child(
         {
             node["contextUsage"] = usage;
         }
+    }
+    if let Some(by_model) = own_usage_by_model {
+        node["ownUsageByModel"] = json!(by_model);
     }
     // The child's own deleted subagents stay hidden one level down: the
     // tombstones key by the deleted child's parent session file, and the
@@ -396,6 +403,152 @@ mod tests {
         )
         .expect("node builds");
         assert_eq!(node["status"], json!("cancelled"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A subagent's node carries its spend attributed to ITS model (the
+    /// operator's cost question: each subagent's row bills at the model
+    /// that served it): the child ran on claude-opus-4-6 while its file
+    /// also folds a grandchild's attributed usage onto its assistant row
+    /// — the load-time fold gives the row the aggregate (its own spend +
+    /// the grandchild's), and the by-model bucket subtracts the
+    /// attribution exactly like `ownUsage`, so the opus bucket holds only
+    /// the child's own spend ($0.065 = $0.088 aggregate - $0.023
+    /// grandchild).
+    #[test]
+    fn disk_child_attributes_its_own_spend_to_its_model() {
+        let root = dir();
+        let artifacts = root.join("session-artifacts");
+        let parent = artifacts.join("01a0parent-0000");
+        let child_dir = parent.join("sub-opus-worker");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let own_usage = json!({
+            "input": 5000, "output": 1000, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 6100,
+            "cost": {"input": 0.025, "output": 0.025, "cacheRead": 0,
+                      "cacheWrite": 0, "total": 0.065},
+        });
+        let child_usage = json!({
+            "input": 1000, "output": 200, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 300,
+            "cost": {"input": 0.01, "output": 0.01, "cacheRead": 0,
+                      "cacheWrite": 0, "total": 0.023},
+        });
+        let aggregate_usage = json!({
+            "input": 6000, "output": 1200, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 6100,
+            "cost": {"input": 0.035, "output": 0.035, "cacheRead": 0,
+                      "cacheWrite": 0, "total": 0.088},
+        });
+        let lines = [
+            json!({
+                "type": "session", "version": 3, "id": "01a0child-opus",
+                "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp",
+            }),
+            json!({
+                "type": "model_change", "id": "c0", "parentId": null,
+                "timestamp": "2026-09-22T00:00:00.500Z",
+                "provider": "anthropic", "modelId": "claude-opus-4-6",
+            }),
+            json!({
+                "type": "message", "id": "c1", "parentId": "c0",
+                "timestamp": "2026-09-22T00:00:01.000Z",
+                "message": {"role": "user", "content": "port the audit trail"},
+            }),
+            json!({
+                "type": "message", "id": "c2", "parentId": "c1",
+                "timestamp": "2026-09-22T00:00:02.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "provider": "anthropic", "model": "claude-opus-4-6",
+                    "stopReason": "stop", "usage": own_usage,
+                },
+            }),
+            json!({
+                "type": "child_usage_attributed", "id": "c3", "parentId": "c2",
+                "timestamp": "2026-09-22T00:00:03.000Z",
+                "targetId": "c2", "childUsage": child_usage,
+                "aggregateUsage": aggregate_usage,
+            }),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(child_dir.join("01a0child-opus.jsonl"), content).unwrap();
+        let node = load_context_tree_child(
+            &artifacts,
+            &child_dir,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
+        assert_eq!(
+            node["model"],
+            json!({ "provider": "anthropic", "id": "claude-opus-4-6" })
+        );
+        // The own/total split keeps the accounting reader's contract.
+        assert_eq!(node["ownUsage"]["input"], json!(5000));
+        assert_eq!(node["ownUsage"]["output"], json!(1000));
+        assert_eq!(node["totalUsage"]["input"], json!(6000));
+        assert_eq!(
+            node["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.088 - 0.023)
+        );
+        // The by-model breakdown attributes the child's own spend to the
+        // model that served it, with the grandchild's attribution removed.
+        let buckets = node["ownUsageByModel"]
+            .as_array()
+            .expect("the by-model breakdown is present");
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0]["provider"], json!("anthropic"));
+        assert_eq!(buckets[0]["id"], json!("claude-opus-4-6"));
+        assert_eq!(buckets[0]["ownUsage"]["input"], json!(5000));
+        assert_eq!(buckets[0]["ownUsage"]["output"], json!(1000));
+        assert_eq!(buckets[0]["ownUsage"]["totalTokens"], json!(5800));
+        assert_eq!(
+            buckets[0]["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.088 - 0.023)
+        );
+        // A file whose usage rows resolve to no model degrades to the
+        // plain totals: no partial breakdown (an absent wire field).
+        let modelless = parent.join("sub-modelless");
+        std::fs::create_dir_all(&modelless).unwrap();
+        let bare = [
+            json!({
+                "type": "session", "version": 3, "id": "01a0child-bare",
+                "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp",
+            }),
+            json!({
+                "type": "message", "id": "b1", "parentId": null,
+                "timestamp": "2026-09-22T00:00:01.000Z",
+                "message": {"role": "user", "content": "hi"},
+            }),
+            json!({
+                "type": "message", "id": "b2", "parentId": "b1",
+                "timestamp": "2026-09-22T00:00:02.000Z",
+                "message": {"role": "assistant",
+                            "content": [{ "type": "text", "text": "x" }],
+                            "stopReason": "stop", "usage": own_usage},
+            }),
+        ];
+        let content = bare
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(modelless.join("01a0child-bare.jsonl"), content).unwrap();
+        let node = load_context_tree_child(
+            &artifacts,
+            &modelless,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
+        assert!(node.get("ownUsageByModel").is_none());
+        assert!(node.get("model").is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
