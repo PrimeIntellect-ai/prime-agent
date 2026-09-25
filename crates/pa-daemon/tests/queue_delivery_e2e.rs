@@ -810,6 +810,38 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "turn one, then follow C's turn: {:?}",
         mock.request_log()
     );
+    // The settle's projection (empty lanes, no active action) lands right
+    // after the turn's unwind frames — an observable readiness wait, not
+    // a fixed quiet window: the runner's post-turn work can outlast any
+    // fixed drain under load, and the parked-lane projections before the
+    // delivery (non-empty lanes) never match this shape.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let settled_index = loop {
+        client.drain_events(Duration::from_millis(400));
+        let found = client
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| {
+                event.get("type").and_then(Value::as_str) == Some("session_action_update")
+                    && event["actions"]["steering"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                    && event["actions"]["followUps"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                    && event["actions"]["active"].is_null()
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = found {
+            break index;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the settle's projection never fired; events: {:?}",
+            event_types(&client.events)
+        );
+    };
 
     let events = &client.events;
     let action_updates: Vec<usize> = events
@@ -894,15 +926,15 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "running follows the turn's first assistant frame (events: {:?})",
         event_types(events)
     );
-    let settled = action_updates
-        .last()
-        .expect("the settle's projection fired");
-    assert!(
-        events[*settled]["actions"]["active"].is_null(),
-        "the settle's projection carries no active action (events: {:?})",
+    // The settle's projection is the delivery's last queue frame: the
+    // empty-lane, no-active-action shape the readiness wait found.
+    assert_eq!(
+        action_updates.last(),
+        Some(&settled_index),
+        "the settle's projection is the last queue frame (events: {:?})",
         event_types(events)
     );
-    assert!(*settled > running);
+    assert!(settled_index > running);
 }
 
 fn event_types(events: &[Value]) -> Vec<String> {
