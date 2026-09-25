@@ -644,6 +644,9 @@ mod tests {
         // sends on first poll), so the test spawns them and reads the
         // requests off the channel's receiving side, bounded by a recv
         // timeout that fails the test — never a green-on-timeout retry.
+        // The prompt futures borrow their adapter, so they drive on a
+        // select instead of a spawned 'static task (the first poll sends
+        // the request; the pending future drops with this scope).
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let panel = AuthPanelHandle::new(tx);
         let copilot = PanelSubscriptionLoginUi::new(panel, "github-copilot");
@@ -667,21 +670,23 @@ mod tests {
             }
             _ => panic!("expected the waiting line request"),
         }
-        // The domain prompt: spawned (the boxed future sends its
-        // PastePrompt on first poll, then pends on the answer this test
-        // never gives).
-        let domain = copilot.on_prompt(&OAuthPrompt {
+        // The domain prompt: the boxed future sends its PastePrompt on
+        // first poll, then pends on the answer this test never gives.
+        let mut domain = copilot.on_prompt(&OAuthPrompt {
             message: "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
             placeholder: Some("company.ghe.com".to_string()),
             allow_empty: true,
         });
-        let domain_task = tokio::spawn(async move {
-            let _ = domain.await;
-        });
-        let prompt_request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        let prompt_request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                request = rx.recv() => request.expect("the channel stays open"),
+                _ = &mut domain => {
+                    panic!("the prompt future settled without an answer")
+                }
+            }
+        })
             .await
-            .expect("the prompt request sends once polled")
-            .expect("the channel stays open");
+            .expect("the prompt request sends once polled");
         match prompt_request {
             // TS `showPrompt` renders the placeholder as an example.
             pa_tui::auth_panel::AuthPanelRequest::PastePrompt {
@@ -697,9 +702,8 @@ mod tests {
             }
             _ => panic!("expected the paste prompt request"),
         }
-        // The pending prompt task is dropped: no answer is expected
-        // (the test never mounts the panel).
-        domain_task.abort();
+        // The pending prompt future drops with this scope: no answer is
+        // expected (the test never mounts the panel).
 
         // The Anthropic adapter renders the url block without the
         // waiting line and arms the TS manual paste.
@@ -721,16 +725,19 @@ mod tests {
             }
             _ => panic!("expected the url block request"),
         }
-        let manual = anthropic
+        let mut manual = anthropic
             .on_manual_code_input()
             .expect("the panel supplies the paste");
-        let manual_task = tokio::spawn(async move {
-            let _ = manual.await;
-        });
-        let paste_request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        let paste_request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                request = rx.recv() => request.expect("the channel stays open"),
+                _ = &mut manual => {
+                    panic!("the paste future settled without an answer")
+                }
+            }
+        })
             .await
-            .expect("the paste request sends once polled")
-            .expect("the channel stays open");
+            .expect("the paste request sends once polled");
         match paste_request {
             pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } => {
                 assert_eq!(
@@ -740,6 +747,5 @@ mod tests {
             }
             _ => panic!("expected the paste request"),
         }
-        manual_task.abort();
     }
 }
