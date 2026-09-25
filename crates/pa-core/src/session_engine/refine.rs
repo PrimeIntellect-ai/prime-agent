@@ -408,7 +408,7 @@ impl AgentSession {
         let entries = snapshot.await?;
         let history = crate::refinement::merge_refinement_history(
             &history,
-            session_refinement_history(&entries),
+            &session_refinement_history(&entries),
         );
         let messages: Vec<AgentMessage> = entries
             .into_iter()
