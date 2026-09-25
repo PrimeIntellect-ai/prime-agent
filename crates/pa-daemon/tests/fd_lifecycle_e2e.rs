@@ -756,12 +756,13 @@ fn booted_supervisor_persists_its_config() {
     .expect("supervisor config is valid json");
     assert_eq!(config["version"], 1, "config version: {config}");
     assert_eq!(
-        config["socketPath"], socket.to_string_lossy(),
+        config["socketPath"].as_str(),
+        Some(socket.to_string_lossy().to_string().as_str()),
         "config names this supervisor's socket: {config}"
     );
     assert_eq!(
-        config["defaultSessionDir"],
-        agent_dir.join("sessions").to_string_lossy(),
+        config["defaultSessionDir"].as_str(),
+        Some(agent_dir.join("sessions").to_string_lossy().to_string().as_str()),
         "config carries the resolved default session dir: {config}"
     );
 
