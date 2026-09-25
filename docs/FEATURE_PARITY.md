@@ -89,11 +89,15 @@ Notable systemic findings:
   see its row below), and `pa-tui/src/input.rs` coalesces marker-less
   multi-line bursts; see `scripts/bracketed_paste_parity.py`.)
 - The turn interrupt sends `abort_and_send_queued` (TS `abortAndSendQueued`,
-  schema 29: abort the run and deliver the parked steering at the boundary,
-  abort-only when no steering is queued); the compaction interrupt sends
-  `abort_compaction`, and a running user-bash command's interrupt sends
-  `abort_bash`. `AbortRetry`/`AbortBranchSummary` wire commands exist but
-  are never sent from the UI.
+  schema 29: abort the run and deliver the parked steering at the boundary —
+  INTENTIONAL DIVERGENCE, operator ruling 2026-09-25: the abort keeps the
+  whole queue flowing, so a follow-up-only queue starts its oldest item
+  right after the aborted turn settles and later follow-ups drain one turn
+  per completed turn, where TS parks the queue until an outside resume site
+  fires; abort-only when the abort leaves nothing queued); the compaction
+  interrupt sends `abort_compaction`, and a running user-bash command's
+  interrupt sends `abort_bash`. `AbortRetry`/`AbortBranchSummary` wire
+  commands exist but are never sent from the UI.
 - The `/btw` side-question engine and wire protocol exist (`pa-daemon/src/side_question.rs`,
   `start_side_question`/`abort_side_question`); the client pane family landed in
   `pa-tui/src/side_question.rs` — only the in-pane `!` bash arm remains
@@ -874,7 +878,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:6606 | showStatus back-to-back in-place rewrite | crates/pa-tui/src/session_ui.rs:788-806 + crates/pa-tui/src/view.rs:246-263 | MATCHES | — |
 | interactive-mode.ts:7838 | showNewVersionNotification | MISSING | MISSING | update-notices |
 | interactive-mode.ts:7843 | showPackageUpdateNotification | MISSING | MISSING | update-notices |
-| interactive-mode.ts:7852 | updatePendingMessagesDisplay (steering/follow-up previews + hint) | crates/pa-tui/src/queued.rs:133-165 + 228-236 — INTENTIONAL DIVERGENCE (operator request 2026-09-24, queue-condensed-display): the queued internal prompts (heartbeat fires, agent messages, goal contexts, background-command notices) condense into one summed-count row below the human previews, so the strip prioritizes human-inserted prompts; TS renders every internal prompt as its own preview row — expected to adopt (the browse/edit affordances still walk every queued item; only the strip rows condense) | DIVERGES | queue-condensed-display (TS expected to adopt) |
+| interactive-mode.ts:7852 | updatePendingMessagesDisplay (steering/follow-up previews + hint) | crates/pa-tui/src/queued.rs:221-272 + 322-333 — INTENTIONAL DIVERGENCE (operator request 2026-09-24, queue-condensed-display; per-origin counts refined 2026-09-25): the queued internal prompts (heartbeat fires, agent messages, goal contexts, background-command notices) condense into one counted row below the human previews naming each origin with its own plural-correct count ("1 agent message, 1 heartbeat, and 1 other internal prompt queued"; zero-count origins never list), so the strip prioritizes human-inserted prompts; TS renders every internal prompt as its own preview row — expected to adopt (the browse/edit affordances still walk every queued item; only the strip rows condense) | DIVERGES | queue-condensed-display (TS expected to adopt) |
 | interactive-mode.ts:7881 | flushPendingBashComponents / pendingMessagesContainer (live bash above indicator) | crates/pa-tui/src/view.rs::pending_bash + session_ui.rs::flush_pending_bash (mount above the indicator while a turn streams; flush at turn_end, the next prompt, and the rebuilt view) | MATCHES | bash-mode |
 | interactive-mode.ts:7893 | showSelector (inline picker replaces editor) | crates/pa-tui/src/session_ui.rs:1285-1309 + view.rs:952-989 | MATCHES | — |
 | interactive-mode.ts:7906 | showFullPaneOverlay (full-width overlay surface) | crates/pa-tui/src/view.rs:946-951 (onboarding pane only) | PARTIAL | heartbeats-menu |

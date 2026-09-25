@@ -7171,9 +7171,10 @@ impl SessionUi {
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
     /// fires `void abortAndSendQueued()` when streaming, schema 29): the
-    /// daemon aborts the run and, with visible steering parked at the
-    /// boundary, delivers it right after the aborted run settles — a
-    /// plain abort when the steering queue is empty. A daemon without the
+    /// daemon aborts the run and the queue keeps flowing behind the
+    /// settled turn — parked steering delivers as one batched turn, then
+    /// the follow-up lane drains one turn per completed turn; a plain
+    /// abort when the abort leaves nothing queued. A daemon without the
     /// schema-29 capability gets the plain abort (TS
     /// `supportsServerCapability` + the `isUnknownDaemonCommandError`
     /// catch, both arms of TS `abortAndSendQueued`). The request never
@@ -8554,7 +8555,25 @@ impl SessionUi {
                 view.compaction = Some(CompactionState {
                     reason: CompactionReason::parse(&reason),
                     custom_instructions,
+                    // A fresh run starts with an empty live summary:
+                    // the deltas of THIS run accumulate from here (a
+                    // replayed `compaction_start` after a re-attach
+                    // drops the previous run's partial text too).
+                    summary: String::new(),
                 });
+            }
+            TurnUpdate::CompactionSummaryDelta { delta } => {
+                // One streamed chunk of the summary the compaction
+                // model is generating: append onto the live loader's
+                // state (the expanded view renders the accumulated
+                // text under the loader, nested like the expanded
+                // summary row that settles it). A delta without a live
+                // loader (a late attach mid-run, a stale frame after
+                // `compaction_end`) drops — the settling end still
+                // carries the full summary.
+                if let Some(compaction) = view.compaction.as_mut() {
+                    compaction.summary.push_str(&delta);
+                }
             }
             TurnUpdate::CompactionEnd {
                 reason,
@@ -8651,10 +8670,12 @@ impl SessionUi {
             TurnUpdate::QueueUpdated {
                 steering,
                 follow_ups,
+                starting,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
+                    starting,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor

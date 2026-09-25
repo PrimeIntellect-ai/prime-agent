@@ -314,7 +314,10 @@ impl AgentView {
             queue_selected: None,
             chat: Vec::new(),
             pending_bash: Vec::new(),
-            detail: Detail::Overview,
+            // TS #2447: a chat starts at the middle conversation-detail
+            // level (edit diffs expanded, thinking visible, tool output
+            // collapsed); Ctrl+O keeps cycling overview -> details -> all.
+            detail: Detail::Details,
             working: None,
             compaction: None,
             compaction_generation: 0,
@@ -1986,6 +1989,24 @@ mod tests {
     /// the shared `format_key_text`, so the row shows `Alt+\u{2191}` on
     /// Linux/Windows hosts and `Option+\u{2191}` on macOS (TS
     /// `formatKeyPart`'s darwin branch).
+    /// TS #2447: a fresh chat starts at the middle conversation-detail
+    /// level (`details`: edit diffs expanded, thinking visible, tool
+    /// output collapsed) instead of the most-collapsed overview; the
+    /// Ctrl+O cycle from there is unchanged (details -> all -> overview).
+    #[test]
+    fn a_chat_starts_at_the_middle_detail_level() {
+        let mut v = view();
+        assert_eq!(v.detail, Detail::Details, "the startup level is details");
+        assert!(v.detail.show_thinking());
+        assert!(v.detail.edit_diffs_expanded());
+        assert!(!v.detail.tool_output_expanded());
+        assert_eq!(v.detail.next(), Detail::All);
+        v.detail = v.detail.next();
+        assert_eq!(v.detail.next(), Detail::Overview);
+        v.detail = v.detail.next();
+        assert_eq!(v.detail.next(), Detail::Details);
+    }
+
     /// The `!`/`!!` prompt (TS `getBashPromptInfo` + `formatPromptPrefix`):
     /// the typed prefix hides behind the styled `! `/`!! ` prompt, later
     /// lines keep the prompt column, and the prompt carries the editor
@@ -2081,7 +2102,7 @@ mod tests {
         assert!(frame.iter().all(|l| str_width(&text_of(l)) <= 80));
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("prime agent v0.0.0"));
-        assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
+        assert!(joined.contains("Details mode (Ctrl+O to expand)"));
         assert!(joined.contains(">"));
     }
 
@@ -2181,6 +2202,7 @@ mod tests {
         v.compaction = Some(crate::chat::CompactionState {
             reason: crate::chat::CompactionReason::Manual,
             custom_instructions: None,
+            summary: String::new(),
         });
         let frame = v.render_frame(80, 24);
         let flat: Vec<String> = frame.iter().map(row_text).collect();
@@ -2211,6 +2233,77 @@ mod tests {
         assert!(
             flat.iter().any(|l| l.trim() == "the story so far"),
             "{flat:?}"
+        );
+    }
+
+    /// The live streamed-summary block (the operator's "stream the
+    /// compacted summary" feature): while a compaction runs, the expanded
+    /// view (`all` detail) renders the accumulated delta text under the
+    /// loader row on the branch grammar; collapsed details keep the
+    /// loader alone; the settling end clears the streamed block when the
+    /// durable summary row lands.
+    #[test]
+    fn compaction_streams_the_summary_under_the_loader_in_expanded_detail() {
+        let mut v = view();
+        v.detail = crate::chat::Detail::All;
+        v.compaction = Some(crate::chat::CompactionState {
+            reason: crate::chat::CompactionReason::Threshold,
+            custom_instructions: None,
+            summary: "The session covered the fleet work.".to_string(),
+        });
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        let loader = flat
+            .iter()
+            .position(|l| l.contains("Auto-compacting..."))
+            .expect("the loader row renders");
+        // The streamed block hangs off the loader row on the branch
+        // gutter, the content visible under the spinner.
+        let gutter = &flat[loader + 1];
+        assert!(
+            gutter
+                .trim_start()
+                .starts_with(crate::branch::BRANCH_GUTTER),
+            "the live block nests under the loader: {flat:?}"
+        );
+        assert!(
+            gutter.contains("The session covered the fleet work."),
+            "{flat:?}"
+        );
+        // Collapsed detail (`overview`): the loader stands alone — no
+        // streamed block (TS keeps the loader plain outside `all`).
+        v.detail = crate::chat::Detail::Overview;
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        assert!(
+            flat.iter().any(|l| l.contains("Auto-compacting...")),
+            "{flat:?}"
+        );
+        assert!(
+            !flat
+                .iter()
+                .any(|l| l.contains("The session covered the fleet work.")),
+            "no streamed block outside the expanded detail: {flat:?}"
+        );
+        // `compaction_end` resolves the streamed block into the durable
+        // summary row (the loader and the live block clear together).
+        v.detail = crate::chat::Detail::All;
+        v.compaction = None;
+        v.push_entry(crate::chat::ChatEntry::CompactionSummary {
+            summary: "The session covered the fleet work.".to_string(),
+            tokens_before: 1234,
+            custom_instructions: None,
+        });
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        assert!(
+            !flat.iter().any(|l| l.contains("Auto-compacting...")),
+            "the loader cleared: {flat:?}"
+        );
+        assert!(
+            flat.iter()
+                .any(|l| l.trim() == "\u{25c6} Context compacted"),
+            "the durable summary row replaced the streamed block: {flat:?}"
         );
     }
 
@@ -2338,7 +2431,7 @@ mod tests {
         assert!(frame.len() == 24 && inline.len() != frame.len());
         // The dock rows ride at the end (prompt context, editor, tray).
         let joined = inline.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Collapsed mode"));
+        assert!(joined.contains("Details mode"));
     }
 
     #[test]
@@ -2351,7 +2444,7 @@ mod tests {
         assert_eq!(frame.len(), 40);
         // The editor prompt sits above the (empty) tray row.
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Collapsed mode"));
+        assert!(joined.contains("Details mode"));
     }
 
     fn view_with(entries: Vec<ChatEntry>) -> AgentView {
@@ -2483,6 +2576,9 @@ mod tests {
             error: None,
             aborted: false,
         }))]);
+        // The hidden-thinking scenario starts at the collapsed overview
+        // level (the startup level is the middle details since TS #2447).
+        view.detail = Detail::Overview;
         let overview = transcript_text(&mut view, 80);
         view.detail = view.detail.next();
         let details = transcript_text(&mut view, 80);
@@ -2502,8 +2598,8 @@ mod tests {
             tokens_before: 12345,
             custom_instructions: Some("the goal".to_string()),
         }]);
-        // Collapsed at the default `overview`: the header plus the
-        // whitespace-collapsed EventSummary, never the token metadata.
+        // Collapsed at the startup `details` (TS #2447): the header plus
+        // the whitespace-collapsed EventSummary, never the token metadata.
         let collapsed = transcript_text(&mut view, 80);
         assert!(collapsed.contains("\u{25c6} Context compacted"));
         assert!(collapsed.contains("## Summary the session story, first line"));
@@ -2511,12 +2607,6 @@ mod tests {
         // The row is cacheable; the first render stored it. A detail
         // change must re-flow it (the cache drops wholesale), or the
         // block would stay collapsed forever.
-        view.detail = view.detail.next();
-        let details = transcript_text(&mut view, 80);
-        assert!(
-            !details.contains("Compacted from"),
-            "detail `details` keeps the block collapsed: {details}"
-        );
         view.detail = view.detail.next();
         let expanded = transcript_text(&mut view, 80);
         assert!(
@@ -2529,12 +2619,19 @@ mod tests {
             expanded.contains("Summary"),
             "the expanded markdown body renders: {expanded}"
         );
-        // The cycle wraps to `overview`: the block collapses again.
+        // The cycle wraps through `overview` (the other collapsed level):
+        // the block collapses again.
         view.detail = view.detail.next();
         let collapsed_again = transcript_text(&mut view, 80);
         assert!(
             !collapsed_again.contains("Compacted from"),
             "the cycle back to `overview` collapses the block: {collapsed_again}"
+        );
+        view.detail = Detail::Details;
+        let at_details = transcript_text(&mut view, 80);
+        assert!(
+            !at_details.contains("Compacted from"),
+            "the middle `details` level keeps the block collapsed too: {at_details}"
         );
     }
 

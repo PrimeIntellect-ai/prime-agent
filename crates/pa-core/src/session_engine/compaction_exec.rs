@@ -108,11 +108,27 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
     })]
 }
 
+/// The live summary-delta sink (the daemon's `compaction_summary_delta`
+/// broadcast seam): called with every text delta the summarizer model
+/// streams, in arrival order, while the summary is being generated. The
+/// compaction itself is unaffected — the sink is fire-and-forget, its
+/// emissions never gate the run — and the final summary still comes
+/// from the terminal assistant message, never from the sink's
+/// accumulated text. A caller whose run assembles several calls into one
+/// summary keeps the sink's stream in the summary's final order itself
+/// (see `execute_compaction`'s split-turn flush).
+pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Run one summarizer wire call through `pa_ai::complete_simple` (TS
 /// `completeSimple` under `SUMMARIZATION_SYSTEM_PROMPT`). `headers` are
 /// the routed model's merged request headers (TS `_resolveAuxiliaryModel`
 /// returns `headers` alongside the model and key); the session-model
 /// fallback passes None — its path never wired them.
+/// `on_delta` is the live summary sink ([`SummaryDeltaSink`]): `Some`
+/// consumes the provider stream event-by-event and forwards every text
+/// delta (the live compaction block the expanded TUI renders); `None`
+/// keeps the one-shot `complete_simple` completion, byte-identical to the
+/// pre-streaming path.
 /// `failure` labels the error-stop bail exactly like the TS throw sites:
 /// "Summarization failed" for the history call, "Turn prefix
 /// summarization failed" for the turn-prefix call.
@@ -127,6 +143,7 @@ pub async fn complete_summary_call(
     headers: Option<std::collections::BTreeMap<String, String>>,
     max_tokens: u64,
     request_messages: Vec<AgentMessage>,
+    on_delta: Option<SummaryDeltaSink>,
     failure: &'static str,
 ) -> anyhow::Result<SummarySlice> {
     let messages = request_messages
@@ -149,7 +166,24 @@ pub async fn complete_summary_call(
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
-    let assistant = pa_ai::complete_simple(model, &context, Some(stream_options)).await?;
+    let assistant = match on_delta {
+        None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
+        Some(on_delta) => {
+            // The live path rides the same provider stream
+            // `complete_simple` awaits the end of: every text delta is
+            // forwarded to the sink as it arrives, and the terminal
+            // event's message is the summary exactly like the one-shot
+            // arm. Thinking deltas stay off the sink — the final summary
+            // carries only the text blocks.
+            let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
+            while let Some(event) = stream.next_event().await {
+                if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
+                    on_delta(delta);
+                }
+            }
+            stream.result().await
+        }
+    };
     if assistant.stop_reason == pa_types::ai::StopReason::Error {
         anyhow::bail!(
             "{failure}: {}",
