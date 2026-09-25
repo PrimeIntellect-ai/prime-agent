@@ -25,6 +25,12 @@ pub struct FauxScript {
 /// Entry forms: a plain string, `{"text": "..."}`, or
 /// `{"content": [{"type": "thinking"|"text"|"toolCall", ...}], "stopReason"?}`.
 /// The stop reason defaults to `toolUse` when the entry carries a tool call.
+///
+/// # Errors
+///
+/// Returns `Err` when the script is not a JSON object, when `responses` is not
+/// an array, or when a response entry or content block is malformed (wrong
+/// entry or block type, unknown stop reason, or missing block fields).
 pub fn parse_faux_script(script: &Value) -> Result<FauxScript, String> {
     let Some(object) = script.as_object() else {
         return Err("the faux script must be a JSON object".to_string());

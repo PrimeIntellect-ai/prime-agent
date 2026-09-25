@@ -1,7 +1,7 @@
 //! http2 transport-failure classification for the bedrock h2 transports.
 //!
 //! The TS bedrock client's default transport is the AWS SDK's
-//! NodeHttp2Handler on bun's `node:http2`: HTTP/2 with h2c prior knowledge
+//! `NodeHttp2Handler` on bun's `node:http2`: HTTP/2 with h2c prior knowledge
 //! over cleartext (and h2-only ALPN over TLS). When the transport fails, the
 //! observable surface is bun's `node:http2` error text and codes — which the
 //! provider-error probe pinned byte-for-byte against the TS binary. This
@@ -41,7 +41,7 @@ pub(crate) fn nghttp2_code_name(reason: h2::Reason) -> String {
 pub(crate) enum H2ErrorShape {
     /// A GOAWAY frame received from the peer (connection-level failure).
     RemoteGoAway { code: u32 },
-    /// A RST_STREAM frame received from the peer (stream-level failure).
+    /// A `RST_STREAM` frame received from the peer (stream-level failure).
     RemoteReset { reason: h2::Reason },
     /// An h2 library-detected protocol violation (e.g. an HTTP/1.1 answer at
     /// a prior-knowledge peer surfaces as a locally-initiated GOAWAY with the
