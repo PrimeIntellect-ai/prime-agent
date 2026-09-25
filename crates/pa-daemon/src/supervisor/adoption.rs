@@ -1,6 +1,8 @@
 //! Worker adoption: the boot discovery pass and the per-worker
 //! adoption outcomes.
 
+use std::sync::Arc;
+
 /// The boot the descriptor-adoption pass runs under. An update boot
 /// relaunches kept workers from their descriptors before the roster
 /// restore walks the rows (spec §6 step 2's create-or-adopt order). A

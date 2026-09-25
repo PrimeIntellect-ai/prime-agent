@@ -11,7 +11,8 @@ mod adoption;
 mod launch_budget;
 mod options;
 
-pub use options::{ClientRouting, SupervisorOptions};
+pub use options::SupervisorOptions;
+pub(crate) use options::ClientRouting;
 use adoption::{AdoptionBoot, AdoptionOutcome};
 use launch_budget::{
     DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS, WORKER_CONNECT_BACKOFF_MS,
