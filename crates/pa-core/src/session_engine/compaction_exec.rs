@@ -112,9 +112,11 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
 /// broadcast seam): called with every text delta the summarizer model
 /// streams, in arrival order, while the summary is being generated. The
 /// compaction itself is unaffected — the sink is fire-and-forget, its
-/// errors and emissions never gate the run — and the final summary still
-/// comes from the terminal assistant message, never from the sink's
-/// accumulated text.
+/// emissions never gate the run — and the final summary still comes
+/// from the terminal assistant message, never from the sink's
+/// accumulated text. A caller whose run assembles several calls into one
+/// summary keeps the sink's stream in the summary's final order itself
+/// (see `execute_compaction`'s split-turn flush).
 pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Run one summarizer wire call through `pa_ai::complete_simple` (TS
