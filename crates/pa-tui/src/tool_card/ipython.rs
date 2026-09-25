@@ -431,8 +431,7 @@ fn render_sent_agent_messages(
         lines.push(|| {
             let summary = crate::custom_message::render::agent_message_summary_line(
                 direction,
-                &sent.participant,
-                None,
+                &sent.counterpart,
                 theme,
             );
             let mut row: Line = vec![Span::raw(" ")];
