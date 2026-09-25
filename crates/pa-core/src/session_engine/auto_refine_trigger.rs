@@ -295,7 +295,7 @@ impl AgentSession {
             // The declined round is silent; a deferred round is consumed
             // in the block above (the arm exists for match
             // exhaustiveness and mirrors its `Ok(None)`).
-            Ok(AutoRefineRound::Declined) | Ok(AutoRefineRound::Deferred(_)) => Ok(None),
+            Ok(AutoRefineRound::Declined | AutoRefineRound::Deferred(_)) => Ok(None),
             Err(error) => Err(error),
         }
     }
