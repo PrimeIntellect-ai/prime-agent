@@ -7200,7 +7200,9 @@ impl SessionUi {
             &format!("Sign in to {applied.provider} to use {applied.provider}/{applied.model_id}"),
             view,
         );
-        view.editor.set_text("");
+        // The picker's Apply arm already settled the editor (the command
+        // partial cleared, a restored draft kept) — the sign-in route never
+        // rewrites it.
         let mut selector =
             crate::provider_auth::ProviderAuthSelector::new(AuthSelectorKind::Login, rows);
         selector.preselect_provider(&applied.provider);
