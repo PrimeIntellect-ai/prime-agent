@@ -156,7 +156,6 @@ impl Worker {
                     priority: match action.get("priority").and_then(Value::as_str) {
                         Some("pinned") => crate::worker::QueuePriority::Pinned,
                         Some("user") => crate::worker::QueuePriority::Human,
-                        Some("background") => crate::worker::QueuePriority::Background,
                         Some(_) => crate::worker::QueuePriority::Background,
                         None if payload
                             .get("customMessage")
