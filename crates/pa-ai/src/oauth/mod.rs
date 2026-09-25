@@ -1,5 +1,5 @@
 //! The AI library's OAuth flows (TS `packages/ai/src/utils/oauth`): the
-//! ChatGPT Plus/Pro (Codex Subscription) provider — the PKCE
+//! `ChatGPT` Plus/Pro (Codex Subscription) provider — the PKCE
 //! authorization request, the localhost callback server, the token
 //! exchange, the JWT account-id claim, and the token refresh. The other
 //! subscription providers (TS `anthropic.ts`, `github-copilot.ts`,

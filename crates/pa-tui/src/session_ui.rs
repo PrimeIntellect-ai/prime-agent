@@ -404,6 +404,12 @@ pub(crate) struct SessionUi {
     /// panel through it; the run loop owns the receiving side and folds
     /// each request into the mounted panel).
     auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
+    /// The running panel login's cooperative cancel signal (#2770):
+    /// armed only by the flows that check it between their poll steps
+    /// (the codex subscription login); Esc/ctrl+c on the mounted panel
+    /// marks it and unmounts, and a cancelled flow never writes its
+    /// credential.
+    auth_panel_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
