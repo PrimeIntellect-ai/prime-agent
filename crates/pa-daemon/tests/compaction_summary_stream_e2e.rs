@@ -11,7 +11,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,8 +33,6 @@ const FULL_SUMMARY: &str = "The session covered the fleet work: one compaction s
 
 struct Supervisor {
     child: Child,
-    #[allow(dead_code)]
-    socket: PathBuf,
 }
 
 impl Drop for Supervisor {
@@ -219,6 +217,8 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     )
 }
 
+// The supervisor child is reaped by `Supervisor`'s `Drop` (kill + wait),
+// so the detached-process lint does not apply.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -242,10 +242,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if socket.exists() {
-            return Supervisor {
-                child,
-                socket: socket.to_path_buf(),
-            };
+            return Supervisor { child };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
