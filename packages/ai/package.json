@@ -109,7 +109,7 @@
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",
-		"vitest": "^4.1.10",
+		"vitest": "^5.0.1",
 		"yaml": "^2.9.0"
 	}
 }
