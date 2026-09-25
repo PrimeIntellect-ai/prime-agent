@@ -282,17 +282,23 @@ fn receipt_listing(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// A recorded JSON file, waiting for the turn that writes it.
+/// A recorded JSON file, waiting for the turn that writes it. The
+/// recording cell writes the receipt non-atomically (`open(w).write`),
+/// so the file can exist while its content is still empty or partial:
+/// readiness is a successful parse, not file existence — a read that
+/// does not parse yet polls on like a missing one until the deadline.
 fn read_recorded(dir: &Path, name: &str) -> Value {
     let path = dir.join(name);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&content).expect("recorded json");
+            if let Ok(value) = serde_json::from_str(&content) {
+                return value;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "record {name} never appeared in {}: existing: {}",
+            "record {name} never appeared or never parsed in {}: existing: {}",
             dir.display(),
             receipt_listing(dir)
         );
@@ -847,6 +853,19 @@ async fn family_edges_never_cross_families_end_to_end() {
     }
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
     let kid_b_active = &kids[1].0;
+
+    // The kid's script accounts for the parent's broadcast draining into
+    // its steering queue as the spawn turn's follow-up (the filler turn):
+    // parent-a's first turn — the spawn-settle notice — runs the cell
+    // that sends it. That notice rides a watcher with second-scale
+    // cadence, so gate the drives on its own observable: once the
+    // broadcast receipt exists the delivery completed, the broadcast is
+    // already ahead of every drive in the FIFO steering lane, and each
+    // scripted cell lands on its driven turn no matter when the drain
+    // fires. Ungated, a slow notice shifts every cell one turn late and
+    // the observe cell runs out of driven turns — its receipt then never
+    // appears (the receipt-absent red).
+    let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
 
     // Drive kid-a's kernel turns: the cross-family sibling probe, the
     // parent reply, and its own broadcast.

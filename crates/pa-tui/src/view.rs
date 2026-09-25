@@ -1397,11 +1397,17 @@ impl AgentView {
         let toasts: Vec<String> = if self.selection.is_dragging() {
             Vec::new()
         } else {
-            self.toasts.active(now).map(str::to_string).collect()
+            self.toasts.active(now)
         };
         if !toasts.is_empty() {
-            // The action ack renders in the Success color.
-            let style = self.theme.fg_style(crate::theme::ThemeColor::Success);
+            // The action ack renders as the Success-colored pill: REVERSED
+            // flips the Success color onto the pill's background (the
+            // follow-hint overlay's badge grammar), so the toast reads as a
+            // compact highlighted chip, not a bare line.
+            let style = self
+                .theme
+                .fg_style(crate::theme::ThemeColor::Success)
+                .add_modifier(Modifier::REVERSED);
             crate::toast::overlay_toasts(
                 &mut frame,
                 top_rows,
@@ -2613,12 +2619,26 @@ mod tests {
         assert!(frame1.contains("and more"));
     }
 
-    /// The action toast overlays the top transcript rows right-aligned
-    /// (the newest at the bottom of the stack) and auto-dismisses once its
-    /// TTL passes.
+    /// The action toast renders as a compact right-aligned pill over the
+    /// top transcript rows — the covered row keeps its own content, the
+    /// toast never spans the row — and auto-dismisses once its TTL passes.
+    /// Consecutive identical actions coalesce into one refreshed toast
+    /// (the count bump), never stacked duplicate rows.
     #[test]
-    fn action_toasts_overlay_the_top_rows_and_auto_dismiss() {
-        let mut view = view();
+    fn action_toasts_render_as_a_pill_coalesce_and_auto_dismiss() {
+        // A transcript taller than the window puts real content on the
+        // window's top row (the tail-aligned window), so the pill lands
+        // over a covered row that has content to keep.
+        let mut view = view_with(vec![ChatEntry::ClientText {
+            rows: (0..40)
+                .map(|index| {
+                    vec![crate::info_commands::ClientSpan {
+                        text: format!("covered line {index}"),
+                        color: None,
+                    }]
+                })
+                .collect(),
+        }]);
         view.toasts.push("Copied to clipboard");
         let frame = view.render_frame(60, 24);
         let rows: Vec<String> = frame
@@ -2629,12 +2649,55 @@ mod tests {
             .iter()
             .position(|row| row.contains("Copied to clipboard"))
             .expect("the toast renders");
-        // Right-aligned: the row leads with blanks and the top bar stays
-        // above the overlay (fullscreen: row 0).
+        // Right-aligned: the top bar stays above the overlay (fullscreen:
+        // row 0).
         assert!(toast_row >= 1, "the toast sits below the top bar");
-        // Right-aligned: the overlaid row is the label alone (its column
-        // padding trimmed), not the transcript row beneath it.
-        assert_eq!(rows[toast_row].trim(), "Copied to clipboard");
+        // The pill is compact: the covered transcript row keeps its own
+        // content beside the toast (the toast never spans the row).
+        assert!(
+            rows[toast_row].contains("covered line"),
+            "the covered row keeps its content: {:?}",
+            rows[toast_row]
+        );
+        // The pill reads as a toast chip: the Success color flipped onto
+        // the pill's background (REVERSED), not a bare dim line.
+        let frame = view.render_frame(60, 24);
+        let pill = frame
+            .iter()
+            .flatten()
+            .find(|span| span.content.contains("Copied to clipboard"))
+            .expect("the pill renders");
+        assert!(
+            pill.style.add_modifier.contains(Modifier::REVERSED),
+            "the pill carries the reversed-chip style: {:?}",
+            pill.style
+        );
+        // Consecutive identical actions coalesce: the stack holds one
+        // toast with the count bump, not stacked duplicate rows.
+        view.toasts.push("Copied to clipboard");
+        view.toasts.push("Copied to clipboard");
+        let frame = view.render_frame(60, 24);
+        let joined: String = frame
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let toast_rows = joined
+            .lines()
+            .filter(|row| row.contains("Copied to clipboard"))
+            .count();
+        assert_eq!(
+            toast_rows, 1,
+            "one coalesced toast row, not stacked: {joined}"
+        );
+        assert!(
+            joined.contains("Copied to clipboard (x3)"),
+            "the count bump acknowledges every copy: {joined}"
+        );
         // The overlay expires with its TTL.
         view.toasts
             .age_by(crate::toast::TOAST_TTL + std::time::Duration::from_millis(1));
