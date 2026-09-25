@@ -62,13 +62,29 @@ pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
             }
         }
         // Transport failures while the daemon exits for the restart and
-        // while its successor boots: the socket closes under the request,
-        // the connect is refused until the successor listens, and the
-        // connect/handshake/response requests time out in between.
+        // while its successor boots: the socket closes under the request
+        // (the close-reason render, the pending-fail resolution, the dead
+        // writer, and the pre-handshake death), the connect is refused
+        // until the successor listens, and the connect/handshake/response
+        // requests time out in between.
         let text = cause.to_string();
         text.starts_with("Connection to the Prime Agent daemon closed")
+            || text.starts_with("the daemon connection closed")
+            || text.starts_with("the daemon connection is closed")
             || text.starts_with("Failed to connect to the Prime Agent daemon")
             || is_daemon_transport_timeout(&text)
+    })
+}
+
+/// True when the error is the open wait's deadline failure: the TS loop
+/// catches it and the guidance ("try opening this agent again once the
+/// update finishes") lands on the agents view's status line — never a
+/// process exit.
+pub(crate) fn is_update_restart_deadline_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .starts_with("The Prime Agent daemon did not finish its update restart within")
     })
 }
 
@@ -76,8 +92,10 @@ pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
 /// Agent daemon`, `... waiting for the Prime Agent daemon handshake`, and
 /// `... waiting for the Prime Agent daemon response` (TS matches
 /// `response to`; the client's own rendered form is the same prefix).
+/// Case-insensitive: the hello/connect paths capitalize `Timed`, the
+/// session's own bounded requests say `timed out after ...`.
 fn is_daemon_transport_timeout(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix("Timed out after ") else {
+    let Some(rest) = text.to_lowercase().strip_prefix("timed out after ") else {
         return false;
     };
     let Some((digits, tail)) = rest.split_once("ms ") else {
@@ -86,9 +104,9 @@ fn is_daemon_transport_timeout(text: &str) -> bool {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    tail.starts_with("connecting to the Prime Agent daemon")
-        || tail.starts_with("waiting for the Prime Agent daemon handshake")
-        || tail.starts_with("waiting for the Prime Agent daemon response")
+    tail.starts_with("connecting to the prime agent daemon")
+        || tail.starts_with("waiting for the prime agent daemon handshake")
+        || tail.starts_with("waiting for the prime agent daemon response")
 }
 
 /// TS `daemonUpdateRestartDeadlineError`: the bounded wait's failure —
@@ -294,6 +312,21 @@ mod tests {
                 "closed",
                 anyhow!("Connection to the Prime Agent daemon closed. Socket: /s."),
             ),
+            // The transport's own failure shapes when the daemon exits
+            // mid-request (the pending-fail resolution, the dead writer,
+            // the pre-handshake death).
+            (
+                "pending-fail closed",
+                anyhow!("the daemon connection closed"),
+            ),
+            (
+                "pre-handshake closed",
+                anyhow!("the daemon connection closed before the handshake"),
+            ),
+            (
+                "dead writer",
+                anyhow!("the daemon connection is closed"),
+            ),
             (
                 "response timeout",
                 anyhow!("Timed out after 30000ms waiting for the Prime Agent daemon response. Socket: /s."),
@@ -416,7 +449,9 @@ mod tests {
         );
     }
 
-    /// The transport-timeout shapes classify exactly (the TS prefix set).
+    /// The transport-timeout shapes classify exactly (the TS prefix set),
+    /// in both capitalizations (the hello/connect paths capitalize
+    /// `Timed`, the session's own bounded requests do not).
     #[test]
     fn the_transport_timeout_shapes_classify_exactly() {
         for text in [
@@ -424,6 +459,7 @@ mod tests {
             "Timed out after 5000ms waiting for the Prime Agent daemon handshake. Socket: /s.",
             "Timed out after 30000ms waiting for the Prime Agent daemon response. Socket: /s.",
             "Timed out after 30000ms waiting for the Prime Agent daemon response to \"create\".",
+            "timed out after 30000ms waiting for the Prime Agent daemon response",
         ] {
             assert!(is_daemon_transport_timeout(text), "{text}");
             assert!(
@@ -441,6 +477,25 @@ mod tests {
         assert!(!is_daemon_transport_timeout(
             "Timed out after 5x00ms connecting to the Prime Agent daemon"
         ));
+    }
+
+    /// The deadline failure's routing predicate: the deadline error (the
+    /// status-line guidance) classifies; an unrelated failure does not.
+    #[test]
+    fn the_deadline_error_classifies_for_the_handoff() {
+        let deadline = update_restart_deadline_error(240_000, Some(&preparing_rejection()));
+        assert!(is_update_restart_deadline_error(&deadline));
+        assert!(
+            deadline
+                .to_string()
+                .starts_with("The Prime Agent daemon did not finish its update restart within"),
+            "{deadline}"
+        );
+        assert!(deadline.to_string().contains("Last error:"));
+        assert!(!is_update_restart_deadline_error(&preparing_rejection()));
+        assert!(!is_update_restart_deadline_error(&anyhow!(
+            "the daemon rejected the create request: File not found: /tmp/scope.jsonl"
+        )));
     }
 
     /// The pinned TS constants: the wait budget mirrors the attached

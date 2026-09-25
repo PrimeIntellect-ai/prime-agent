@@ -733,7 +733,7 @@ impl ReconnectLoop {
 /// open versus the CLI's own open): the agents-view open waits through a
 /// daemon update restart (TS #2391) instead of failing the open hard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionOpenRoute {
+pub(crate) enum SessionOpenRoute {
     /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single
     /// attempt, today's behavior — a preparing-restart create refusal
     /// hands off to the agents view with the refusal as its status line.
@@ -1032,6 +1032,20 @@ async fn run_interactive_surface(
             // session-picker fallback: the agents view opens with the
             // refusal as its status line and the client never exits.
             if crate::daemon_client::is_daemon_rejection(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
+            }
+            // The open wait's deadline failure is the same handoff (TS
+            // `runAgentsViewLoop` catches it as "Failed to open agent:"):
+            // the guidance to retry once the update finishes must land on
+            // the view the user came from — never tear the process down.
+            if crate::update_restart_wait::is_update_restart_deadline_error(&error) {
                 exit_guard.cancel();
                 let frames = renderer.finish(&mut view, true);
                 return Ok(InteractiveOutcome {
