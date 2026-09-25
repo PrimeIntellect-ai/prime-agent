@@ -1484,6 +1484,13 @@ mod tests {
             "the first turn completes and anchors the chain"
         );
         assert_eq!(first.response_id.as_deref(), Some("resp_1"));
+        {
+            use crate::providers::openai_codex_responses::session::session_state;
+            let state = session_state().lock().expect("state");
+            let entry = state.connections.get(&session_id);
+            eprintln!("[test] cached entry: {entry:?}");
+            drop(state);
+        }
 
         let second_stream = stream_openai_codex_responses(
             &model,
