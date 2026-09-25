@@ -1568,6 +1568,12 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async installGit(source: GitSource, scope: SourceScope): Promise<void> {
+		if (source.repo.startsWith("-")) {
+			throw new Error(`Invalid git repo "${source.repo}": must not start with "-"`);
+		}
+		if (source.ref?.startsWith("-")) {
+			throw new Error(`Invalid git ref "${source.ref}": must not start with "-"`);
+		}
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (existsSync(targetDir)) {
 			return;
@@ -1578,7 +1584,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		mkdirSync(dirname(targetDir), { recursive: true });
 
-		await this.runCommand("git", ["clone", source.repo, targetDir]);
+		await this.runCommand("git", ["clone", "--", source.repo, targetDir]);
 		if (source.ref) {
 			await this.runCommand("git", ["checkout", source.ref], { cwd: targetDir });
 		}

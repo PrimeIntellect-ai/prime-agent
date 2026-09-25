@@ -1,0 +1,1 @@
+- Fixed git package installs to reject a repo URL or ref that starts with "-" and to pass "--" to git clone, so a malicious package entry can no longer inject git options.

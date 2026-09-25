@@ -715,6 +715,52 @@ Content`,
 		});
 	});
 
+	describe("git argument injection", () => {
+		it.each([
+			{
+				name: "repo",
+				run: (pm: DefaultPackageManager) =>
+					(pm as any).installGit(
+						{
+							type: "git",
+							repo: "--upload-pack=touch /tmp/pwned",
+							host: "github.com",
+							path: "user/repo",
+							pinned: false,
+						},
+						"user",
+					),
+				expected: /Invalid git repo "--upload-pack=touch \/tmp\/pwned"/,
+			},
+			{
+				name: "ref",
+				run: (pm: DefaultPackageManager) => pm.install("git:github.com/user/repo@-c"),
+				expected: /Invalid git ref "-c"/,
+			},
+		])("rejects a git $name that starts with '-' without running git", async ({ run, expected }) => {
+			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+
+			await expect(run(packageManager)).rejects.toThrow(expected);
+
+			expect(runCommandSpy).not.toHaveBeenCalled();
+		});
+
+		it("clones with '--' before the repo URL and checks out a pinned ref", async () => {
+			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
+			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+
+			await packageManager.install("git:github.com/user/repo@v1");
+
+			expect(runCommandSpy).toHaveBeenNthCalledWith(1, "git", [
+				"clone",
+				"--",
+				"https://github.com/user/repo",
+				targetDir,
+			]);
+			expect(runCommandSpy).toHaveBeenNthCalledWith(2, "git", ["checkout", "v1"], { cwd: targetDir });
+		});
+	});
+
 	describe("source parsing", () => {
 		it("should emit progress events on install attempt", async () => {
 			const events: ProgressEvent[] = [];
