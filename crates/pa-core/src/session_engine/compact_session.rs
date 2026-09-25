@@ -1,7 +1,6 @@
 //! `/compact` execution: resolve the cut over session entries, run the
 //! summarizer, persist the compaction entry, and rebuild the agent context.
 
-use pa_types::ai::Message;
 use pa_types::session::{AgentMessage, FileEntry};
 
 use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult};
@@ -10,7 +9,6 @@ use super::compaction_exec::{
     complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
     CompactionDetails, CompactionResult, SummaryDeltaSink, SummarySlice, NO_PRIOR_HISTORY,
 };
-use super::messages::convert_to_llm;
 use crate::session::manager::SessionManager;
 
 /// Options for `execute_compaction`.
@@ -179,19 +177,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
     let context = crate::session::build_session_context(entries, leaf_id);
     estimate_context_tokens(&context.messages).tokens
-}
-
-/// Session `AgentMessage` -> LLM Message (post `convertToLlm`).
-fn to_llm_messages(messages: &[AgentMessage]) -> Vec<Message> {
-    convert_to_llm(messages)
-        .into_iter()
-        .filter_map(|message| match message {
-            AgentMessage::User(user) => Some(Message::User(user)),
-            AgentMessage::Assistant(assistant) => Some(Message::Assistant(assistant)),
-            AgentMessage::ToolResult(result) => Some(Message::ToolResult(result)),
-            _ => None,
-        })
-        .collect()
 }
 
 /// One completed compaction run: the result plus the entry to persist.
@@ -639,10 +624,10 @@ pub async fn execute_compaction(
     })))
 }
 
-/// Rebuild the agent's message list after compaction (summary-first context).
-pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<Message> {
-    let context = session.active_context();
-    to_llm_messages(&context.messages)
+/// Rebuild the live agent context after compaction. Keep session-only roles
+/// (especially the compaction boundary) until the provider conversion seam.
+pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<AgentMessage> {
+    session.active_context().messages
 }
 
 /// The cut computed for a session (test seam for decision verification).
@@ -1765,13 +1750,130 @@ mod tests {
             .get_entries()
             .iter()
             .any(|entry| matches!(entry, FileEntry::Compaction { .. })));
-        // The rebuilt context starts with the summary message.
+        // The live context keeps the summary role; provider conversion
+        // still formats it as a user turn.
         let rebuilt = rebuilt_context_after_compaction(&session);
         assert!(!rebuilt.is_empty());
-        match &rebuilt[0] {
-            Message::User(user) => assert!(user.content.text().contains("[compaction-summary]")),
+        assert!(matches!(&rebuilt[0], AgentMessage::CompactionSummary(_)));
+        let provider_messages = super::super::messages::convert_to_llm(&rebuilt);
+        match &provider_messages[0] {
+            AgentMessage::User(user) => {
+                assert!(user.content.text().contains("[compaction-summary]"));
+            }
             other => panic!("expected summary user message, got {other:?}"),
         }
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() {
+        let registration = faux_registration();
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Goal\nsummarized goal",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Turn Context\nsummarized prefix",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+        ]);
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
+        let mut assistant = match session.active_context().messages.last().unwrap() {
+            AgentMessage::Assistant(assistant) => assistant.clone(),
+            other => panic!("expected last assistant, got {other:?}"),
+        };
+        assistant.usage.input = 126_010;
+        assistant.usage.total_tokens = 126_010;
+        assistant.timestamp = 1;
+        session
+            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text("threshold crossing turn".to_string()),
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        session
+            .append_message(AgentMessage::Assistant(assistant.clone()))
+            .unwrap();
+        let settings = super::super::compaction::CompactionSettings {
+            reserve_tokens: 127_500,
+            keep_recent_tokens: 20,
+            ..Default::default()
+        };
+        assert!(super::super::compaction::threshold_compaction_due(
+            &session.active_context().messages,
+            128_000,
+            0,
+            &settings
+        ));
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings,
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        let mut live = rebuilt_context_after_compaction(&session);
+        let summary_timestamp = match &live[0] {
+            AgentMessage::CompactionSummary(summary) => summary.timestamp,
+            other => panic!("expected live compaction boundary, got {other:?}"),
+        };
+        assert!(live.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
+        )));
+        // Cross the same session/agent wire boundary as `set_messages` and
+        // `auto_compaction_due`: the live role must survive both round trips.
+        let loop_messages: Vec<pa_agent::types::AgentMessage> = live
+            .iter()
+            .map(|message| {
+                super::super::session_message_to_loop(message)
+                    .expect("session message must convert to loop message")
+            })
+            .collect();
+        live = loop_messages
+            .iter()
+            .map(|message| serde_json::to_value(message).expect("loop message must serialize"))
+            .map(|value| serde_json::from_value(value).expect("loop message must deserialize"))
+            .collect();
+        assert!(matches!(&live[0], AgentMessage::CompactionSummary(_)));
+        assert!(live.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
+        )));
+        for (custom_type, text) in [
+            ("agent_message", "message from agent"),
+            ("ipython_state", "kernel survived compaction"),
+        ] {
+            live.push(AgentMessage::Custom(pa_types::session::CustomMessage {
+                custom_type: custom_type.to_string(),
+                content: UserContent::Text(text.to_string()),
+                display: true,
+                details: None,
+                timestamp: summary_timestamp + 1,
+                rest: Default::default(),
+            }));
+        }
+        assert!(!super::super::compaction::threshold_compaction_due(
+            &live, 128_000, 0, &settings
+        ));
+        assistant.timestamp = summary_timestamp + 2;
+        live.push(AgentMessage::Assistant(assistant));
+        assert!(super::super::compaction::threshold_compaction_due(
+            &live, 128_000, 0, &settings
+        ));
         registration.unregister();
     }
 
@@ -2062,10 +2164,12 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some(digest)
         );
-        // The rebuilt context leads with the digest block before the
-        // compaction summary (TS `convertToLlm` on the compaction head).
+        // Provider conversion leads with the digest block before the
+        // compaction summary; the live context keeps the summary marker.
         let rebuilt = rebuilt_context_after_compaction(&session);
-        let Message::User(user) = &rebuilt[0] else {
+        assert!(matches!(&rebuilt[0], AgentMessage::CompactionSummary(_)));
+        let provider_messages = super::super::messages::convert_to_llm(&rebuilt);
+        let AgentMessage::User(user) = &provider_messages[0] else {
             panic!("expected compaction head user message");
         };
         let text = user.content.text();
