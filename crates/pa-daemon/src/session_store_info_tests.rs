@@ -12,7 +12,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut message_count = 0usize;
     let mut first_message = String::new();
     let mut all_messages_text = String::new();
-    let mut agent_status: Option<Value> = None;
     let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
     for line in content.lines() {
@@ -65,11 +64,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                 {
                     thinking_level = Some(level.to_string());
                 }
-            }
-            // Keep the latest recap/verdict (TS `agent_status` fold): the
-            // `summary` text is part of the agents-view search corpus.
-            "agent_status" => {
-                agent_status = entry.fields.get("status").cloned();
             }
             "child_usage_attributed" => {
                 let usage_field = |name: &str| {
@@ -159,7 +153,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
             first_message
         },
         all_messages_text,
-        agent_status,
         usage: usage_scan.summary(),
         deleted_descendant_usage: None,
     })
@@ -219,7 +212,6 @@ fn streaming_fold_matches_legacy_across_large_file_and_appends() {
             json!({"type":"model_change","id":"mc","timestamp":"2026-09-23T00:00:00.000Z","provider":"p2","modelId":"m2"}),
             json!({"type":"session_state","id":"st","timestamp":"2026-09-23T00:00:00.000Z","state":{"status":"sleep"}}),
             json!({"type":"thinking_level_change","id":"tl","timestamp":"2026-09-23T00:00:00.000Z","thinkingLevel":"high"}),
-            json!({"type":"agent_status","id":"as","timestamp":"2026-09-23T00:00:00.000Z","status":{"summary":"latest"}}),
         ],
     );
     assert_fold_matches(&path);

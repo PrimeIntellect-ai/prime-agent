@@ -1232,7 +1232,7 @@ impl AgentView {
     /// summary box (TS `SubagentSummaryLine` under the tray).
     pub fn render_dock(&mut self, width: usize) -> Vec<Line> {
         // The queued-input strip sits directly above the prompt dock rows
-        // (TS `queuedMessagesContainer` above the recap/editor).
+        // (TS `queuedMessagesContainer` above the editor).
         let browse_key = {
             let kb = self.editor.keybindings();
             crate::keybindings::format_key_text(&kb.get_keys("app.message.navigateOlder").join("/"))
@@ -1958,10 +1958,6 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
             card.set_complete(exit_code, cancelled, truncated, full_output_path);
             ChatEntry::BashExecution(Box::new(card))
         }
-        TranscriptItem::AgentStatus { summary, .. } => ChatEntry::Status {
-            text: summary,
-            kind: crate::chat::StatusKind::Info,
-        },
         TranscriptItem::ModelChange { model_id, .. } => ChatEntry::Status {
             text: format!("\u{2699} {model_id}"),
             kind: crate::chat::StatusKind::Info,

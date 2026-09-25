@@ -365,8 +365,8 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
     lines
 }
 
-/// The plain row above the prompt: optional recap left, detail status right
-/// (TS `PromptContextLine`, always `["", row]`).
+/// The plain row above the prompt: the detail status right (TS
+/// `PromptContextLine`, always `["", row]`).
 pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) -> Vec<Line> {
     if width < 1 {
         return Vec::new();

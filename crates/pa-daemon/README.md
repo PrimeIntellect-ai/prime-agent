@@ -103,8 +103,7 @@ files), so passivated children stay roster-visible (TS
 `walkPassiveRlmSubagents` / `withPassiveRlmDescendantInfos`). The saved
 session scan (`session_store.rs`) folds each file once into the durable
 catalog row, including the agents-view search corpus the TS scan builds:
-the capped `allMessagesText` transcript text (64 KiB) and the latest
-`agentStatus` recap. Archived sessions live in
+the capped `allMessagesText` transcript text (64 KiB). Archived sessions live in
 `<agent-dir>/sessions-archive` and never reach the catalog scan, so search
 covers live sessions only.
 Supervisor-backed RLM child sessions
@@ -118,11 +117,7 @@ command carries the RLM recursion identity (`rlmDepth`/`rlmMaxDepth`/
 `parentSessionPath`/`thinking`) so respawned children keep their depth. Per-session model binding: the
 create-config `provider`/`model`/`apiKey` are authoritative for worker model
 resolution (explicit CLI flags reach the worker; env remains the no-flag
-fallback). Post-turn status-line requests (dashboard recap,
-`daemon-session-summarizer.ts` port) issued by workers, with settled idle
-verdicts persisted as `agent_status` session entries (real classifications
-and transcript error verdicts only; respawns seed from the persisted
-verdict). Worker session files carry the TS creation prefix
+fallback). Worker session files carry the TS creation prefix
 (`model_change`/`thinking_level_change`/`service_tier_change`), and queue
 snapshots persist to the worker recovery journal, not the session file.
 Queue-lane command surface (`queue_commands.rs`): the full TS

@@ -107,12 +107,6 @@ pub struct SessionSummary {
     pub worker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state: Option<String>,
     /// The worker's roster-delta sequence counter at snapshot time (every
     /// roster delta this worker stamped before the snapshot carries a
     /// sequence at or below it): the supervisor's authoritative pulls
@@ -202,8 +196,6 @@ pub struct AgentConnectionState {
     pub active_tool_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recap: Option<String>,
 }
 
 #[cfg(test)]

@@ -584,6 +584,13 @@ impl Supervisor {
         // refresh only adds live pricing and catalog-repo/new entries.
         pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
+        // The plugins service catalog's keep-warm (the `/mcp` view's remote
+        // catalog): the same supervisor-owned cadence — a forced startup
+        // refresh plus the hourly loop, fire-and-forget, failures keep the
+        // last-good disk cache (the packaged bundled snapshot serves
+        // until the first fetch lands).
+        pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
+        pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
         // Adoption telemetry for the wiring: one `daemon event` (kind
         // `catalog_refresh`) when the startup refresh settles — the
         // served model count, primitives only. The awaited refresh is
@@ -1650,18 +1657,6 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, payload));
-                    } else if outbound_type == "session_status" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
                         let routing = active_session_id.map_or(
                             ClientRouting::Broadcast,
                             |active_session_id| ClientRouting::AttachedSession {
@@ -5182,11 +5177,6 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
         "allMessagesText": info.all_messages_text,
         "state": info.state.as_ref().map(|state| json!({ "status": state })),
     });
-    if let Some(status) = &info.agent_status {
-        row.as_object_mut()
-            .expect("row object")
-            .insert("agentStatus".to_string(), status.clone());
-    }
     let object = row.as_object_mut().expect("row object");
     if let Some(name) = &info.name {
         object.insert("name".to_string(), json!(name));
