@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use pa_types::session::FileEntry;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// One wire flat node: the full entry plus its active label.
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +133,7 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn node(id: &str, parent: Option<&str>, timestamp: &str) -> TreeNodeData {
         TreeNodeData {

@@ -5,8 +5,6 @@
 //! the TS provider surfaces verbatim — unlike the anthropic/responses
 //! providers, which classify through `formatStreamFailureMessage`.
 
-use std::collections::HashMap;
-
 use serde_json::Value;
 
 use crate::utils_inner::stream_failure::{ProviderError, ProviderHttpError};
@@ -124,6 +122,7 @@ fn js_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// The exact composition the TS `openai` SDK produces for an `OpenAI` error
     /// body and the TS provider surfaces verbatim (the parity harness's

@@ -10,6 +10,7 @@
 //! fix this measurement grounds.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -198,7 +199,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         })
         .to_string(),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        let _ = write!(payload, "data: {data}\n\n");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(

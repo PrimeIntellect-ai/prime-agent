@@ -7,8 +7,6 @@
 //! friendly errors, and service-tier pricing. The stream processing itself is
 //! the shared Responses processor ([`crate::providers::openai_responses_shared`]).
 
-use std::collections::HashMap;
-
 use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_env_api_key;
@@ -783,6 +781,7 @@ impl Provider for OpenAICodexResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// The user-facing text for a failed codex stream is the verbatim error
     /// message; the raw-`fetch` SSE connection failure surfaces the

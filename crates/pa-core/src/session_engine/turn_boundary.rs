@@ -638,7 +638,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 50,
-                cost: pa_agent::types::UsageCost::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
@@ -1154,7 +1154,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 130,
-            cost: pa_agent::types::UsageCost::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         session.append_message(assistant).unwrap();
         session

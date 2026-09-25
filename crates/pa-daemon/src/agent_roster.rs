@@ -12,7 +12,7 @@ use std::path::Path;
 use pa_types::daemon::agent_roster::{
     classify_summary_value, roster_agent_id_for_summary, slim_roster_summary, AgentRosterEntry,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.

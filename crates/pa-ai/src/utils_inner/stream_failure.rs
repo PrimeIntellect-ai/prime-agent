@@ -3,7 +3,6 @@
 //! into a generic string before it is logged and persisted.
 //! Ported from `packages/ai/src/utils/stream-failure.ts`.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
@@ -953,6 +952,7 @@ pub fn record_stream_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn classifies_provider_error_types() {

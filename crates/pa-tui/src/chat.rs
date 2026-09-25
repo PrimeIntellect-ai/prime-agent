@@ -575,6 +575,7 @@ pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osc133::RowMarkers;
     use crate::theme::{ColorMode, Theme, ThemeColor};
 
     fn theme() -> Theme {

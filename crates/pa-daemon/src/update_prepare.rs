@@ -557,6 +557,7 @@ mod tests {
 
     use super::*;
     use pa_types::daemon::{update_marker_path, update_roster_path, UpdateSupervisorIdentity};
+    use serde_json::Map;
 
     fn budget() -> UpdateTimeoutBudget {
         // CI-scale budgets keep every test sub-second.

@@ -30,7 +30,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::protocol::{create_daemon_event_meta, DaemonOutbound};
 use crate::worker::OutboundFrame;

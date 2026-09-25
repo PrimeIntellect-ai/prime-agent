@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::engine::{CompactionOutcome, CompactionRequest, SessionEngine};
 use crate::protocol::DaemonOutbound;

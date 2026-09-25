@@ -13,8 +13,6 @@ use crate::{Line, Span};
 use pa_types::session::FileEntry;
 use ratatui::style::{Modifier, Style};
 
-use serde_json::Map;
-
 /// Tree filter modes (TS `FilterMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterMode {
@@ -1087,6 +1085,7 @@ fn utc_date(secs: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use crate::tree_nodes::{build_tree, TreeNodeData};
+    use serde_json::Map;
 
     fn message_node(id: &str, parent: Option<&str>, timestamp: &str, text: &str) -> TreeNodeData {
         TreeNodeData {

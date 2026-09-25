@@ -5,8 +5,6 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use serde_json::Map;
-
 use crate::types::{AssistantContent, AssistantMessage, StopReason};
 
 fn overflow_patterns() -> &'static Vec<Regex> {
@@ -128,6 +126,7 @@ fn content_text(message: &AssistantMessage) -> String {
 mod tests {
     use super::*;
     use crate::types::{Usage, UsageCost};
+    use serde_json::Map;
 
     fn message(
         stop_reason: StopReason,

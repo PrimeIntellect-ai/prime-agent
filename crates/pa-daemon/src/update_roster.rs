@@ -31,7 +31,7 @@ use pa_types::daemon::{
     UpdateRosterSessionKind, UpdateRosterSubagent, UpdateRosterSubagentStatus, UpdateRosterWorker,
     UpdateSupervisorIdentity, UPDATE_ROSTER_FORMAT_VERSION,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::lease::canonical_session_path;
 use crate::rlm_ledger::{read_rlm_subagent_display, RlmSpawnLedger};

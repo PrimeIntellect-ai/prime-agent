@@ -819,7 +819,7 @@ impl DaemonClient {
                 DaemonCommand::GetDirectWorkerTransport {
                     id: None,
                     active_session_id: active_session_id.to_string(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 TICKET_TIMEOUT_MS,
             )

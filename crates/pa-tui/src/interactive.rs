@@ -10,7 +10,7 @@
 //! headless source is the verifier seam: it exercises the identical
 //! attach/submit/stream/render path without a TTY.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -2895,6 +2895,7 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn headless_error_returns_never_touch_the_terminal() {

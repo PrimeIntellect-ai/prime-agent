@@ -26,7 +26,7 @@ use pa_types::daemon::update_flow::{
     UpdateRosterSession, UpdateStatusCounts, UpdateStatusFailure, UPDATE_ROSTER_ENV,
 };
 use pa_types::daemon::{DaemonCommand, UpdateId};
-use serde_json::json;
+use serde_json::{json, Map};
 use tokio::sync::Notify;
 
 use crate::registry::ResidentWorker;

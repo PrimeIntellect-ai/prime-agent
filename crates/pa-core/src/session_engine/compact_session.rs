@@ -657,6 +657,7 @@ pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPoi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
 
@@ -1844,7 +1845,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1853,7 +1854,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1867,7 +1868,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })
         };
         session.append_message(user("turn one")).unwrap();

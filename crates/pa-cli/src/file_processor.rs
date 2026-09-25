@@ -60,14 +60,17 @@ pub fn process_file_arguments(
             // uses), with the auto-resize setting gating the size limit.
             Ok(Some(image)) => {
                 if auto_resize_images && image.data.len() > DEFAULT_MAX_BYTES {
-                    let _ = write!(processed.text, "<file name=\"{resolved}\">[Image omitted: could not be resized below the inline image size limit.]</file>\n");
+                    let _ = writeln!(
+                    processed.text,
+                    "<file name=\"{resolved}\">[Image omitted: could not be resized below the inline image size limit.]</file>"
+                );
                     continue;
                 }
                 processed.images.push(ImageContent {
                     data: image.data,
                     mime_type: image.mime_type,
                 });
-                let _ = write!(processed.text, "<file name=\"{resolved}\"></file>\n");
+                let _ = writeln!(processed.text, "<file name=\"{resolved}\"></file>");
             }
             // Not an image: embed the content in a file block. Node's
             // utf-8 read decodes invalid sequences lossily (U+FFFD), so
@@ -77,9 +80,9 @@ pub fn process_file_arguments(
                     message: format!("Error: Could not read file {resolved}: {error}"),
                 })?;
                 let content = String::from_utf8_lossy(&bytes);
-                let _ = write!(
+                let _ = writeln!(
                     processed.text,
-                    "<file name=\"{resolved}\">\n{content}\n</file>\n"
+                    "<file name=\"{resolved}\">\n{content}\n</file>"
                 );
             }
             Err(error) => {

@@ -4,6 +4,7 @@
 //! `daemon-supervisor.ts`; the store itself lives in `agent_roster.rs`,
 //! and the seeding/hydration arms live in `supervisor_roster_seed.rs`).
 
+use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

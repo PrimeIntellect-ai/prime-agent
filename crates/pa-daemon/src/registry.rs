@@ -475,6 +475,7 @@ pub(crate) fn selector_matches(candidate: &str, suffix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn resident(worker_id: &str) -> Arc<ResidentWorker> {
         ResidentWorker::new(

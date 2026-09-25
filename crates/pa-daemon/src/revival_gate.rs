@@ -158,6 +158,7 @@ fn session_is_archived(session_file: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::util::{iso_from_unix_ms, now_ms};
+    use serde_json::Map;
 
     fn descriptor(session_file: Option<&Path>) -> DaemonWorkerDescriptor {
         DaemonWorkerDescriptor {

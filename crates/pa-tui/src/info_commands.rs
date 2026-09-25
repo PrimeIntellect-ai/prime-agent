@@ -733,10 +733,9 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
     }
     let _ = write!(
         header,
-        "  {}  {}  {}",
+        "  {}  {}  context",
         pad_start("tokens", token_width),
-        pad_start("cost", cost_width),
-        "context"
+        pad_start("cost", cost_width)
     );
     lines.push(vec![dim(header)]);
     for (index, row) in rows.iter().enumerate() {

@@ -13,6 +13,7 @@
 //! supervisor has no client-owned worker lifecycle (every worker it spawns or
 //! adopts is a resident session), so there is no such class to refuse.
 
+use serde_json::Map;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use pa_types::daemon::{
     DaemonPeerTransportTicket, DaemonWorkerCommand, DaemonWorkerLifecycle, DaemonWorkerPeerGrant,
 };
 
+use serde_json::Map;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;

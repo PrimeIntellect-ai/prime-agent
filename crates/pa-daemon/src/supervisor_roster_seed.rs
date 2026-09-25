@@ -5,6 +5,7 @@
 //! `daemon-supervisor.ts`'s roster code; subscribe, worker deltas,
 //! pushes, and stop-passivation live in `supervisor_roster.rs`).
 
+use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

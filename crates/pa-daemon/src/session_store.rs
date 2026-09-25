@@ -9,7 +9,7 @@
 use anyhow::{anyhow, Context, Result};
 use pa_types::ai::Usage;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Read, Write};

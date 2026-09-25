@@ -6,6 +6,7 @@
 //! Supervisors connect over a private-framed Unix socket and authenticate
 //! with the bootstrap token before any command.
 
+use serde_json::Map;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

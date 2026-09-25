@@ -374,6 +374,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn grant_context() -> GrantContext {
         GrantContext {

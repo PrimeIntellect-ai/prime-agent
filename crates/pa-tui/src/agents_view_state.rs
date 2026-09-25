@@ -679,6 +679,7 @@ mod tests {
     use super::*;
     use crate::agents_view_forest::session_title;
     use serde_json::json;
+    use std::collections::HashSet;
 
     fn roster_entry(agent: &str, status: &str, summary: Value) -> Value {
         json!({ "agentId": agent, "status": status, "summary": summary })

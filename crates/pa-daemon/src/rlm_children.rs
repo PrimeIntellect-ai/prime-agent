@@ -11,6 +11,7 @@
 //! session. The kernel-visible surface (handles, roster rows, collect
 //! snapshots, selector errors) is TS parity.
 
+use serde_json::Map;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

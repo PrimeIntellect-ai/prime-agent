@@ -5119,14 +5119,11 @@ impl SessionUi {
             format!("/export {}", resolved.args)
         };
         let output_path = export_share::path_command_argument(&command_text, "/export");
-        let request = if output_path
-            .as_deref()
-            .is_some_and(|path| {
-                std::path::Path::new(path)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-            })
-        {
+        let request = if output_path.as_deref().is_some_and(|path| {
+            std::path::Path::new(path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+        }) {
             DaemonCommand::ExportJsonl {
                 id: None,
                 active_session_id: self.active_session_id.clone(),

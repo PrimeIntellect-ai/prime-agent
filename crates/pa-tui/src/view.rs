@@ -12,7 +12,6 @@ use crate::chrome::{
     conversation_detail_status, render_prompt_context, render_top_bar, render_tray, ChromeState,
 };
 use crate::editor::Editor;
-use crate::osc133::RowMarkers;
 use crate::prompt_highlight::{
     command_token, editor_chunk_highlights, editor_text_spans, find_arg_tokens, ArgTokenSpan,
 };
@@ -1974,6 +1973,7 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
 mod tests {
     use super::*;
     use crate::chat::{AssistantMessage, MessageBlock};
+    use crate::osc133::RowMarkers;
     use crate::theme::{ColorMode, Theme};
     use crate::tool_card::{ToolCallCard, ToolResultView};
 

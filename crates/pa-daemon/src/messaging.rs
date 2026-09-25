@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use pa_types::daemon::{DaemonCommand, DaemonWorkerCommand};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;

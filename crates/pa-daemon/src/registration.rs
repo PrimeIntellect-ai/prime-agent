@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use pa_types::daemon::DaemonCommand;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 

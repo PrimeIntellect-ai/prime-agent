@@ -594,7 +594,7 @@ mod tests {
             serde_json::json!({"type":"custom","id":"invalid","parentId":"compact","customType":GOAL_STATE_CUSTOM_TYPE,"data":{"active":true}}),
         ];
         let original: String = rows.iter().fold(String::new(), |mut output, row| {
-            let _ = write!(output, "{row}\n");
+            let _ = writeln!(output, "{row}");
             output
         });
         std::fs::write(&path, &original).unwrap();

@@ -327,7 +327,7 @@ async fn run_stream(
                                 blocks.blocks.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
                                     text_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -344,7 +344,7 @@ async fn run_stream(
                                         thinking: String::new(),
                                         thinking_signature: Some(String::new()),
                                         redacted: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -367,7 +367,7 @@ async fn run_stream(
                                                 .to_string(),
                                         ),
                                         redacted: Some(true),
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -405,7 +405,7 @@ async fn run_stream(
                                         .cloned()
                                         .unwrap_or_default(),
                                     thought_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());

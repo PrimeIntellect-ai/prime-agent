@@ -309,6 +309,7 @@ use std::io::Write as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     #[test]
     fn write_file_atomic_replaces_an_existing_destination() {

@@ -16,7 +16,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Mutex;
 

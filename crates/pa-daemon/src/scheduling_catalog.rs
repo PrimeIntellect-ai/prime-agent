@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use pa_core::cron::store::{AgentCronJobStore, HeartbeatManagementAction};
 use pa_core::cron::{is_heartbeat_cron_job, AgentCronJob, JobStatus};

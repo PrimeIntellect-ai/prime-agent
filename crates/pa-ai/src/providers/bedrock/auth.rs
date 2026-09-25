@@ -186,7 +186,7 @@ pub fn sigv4_headers(
         canonical_headers
             .iter()
             .fold(String::new(), |mut text, (name, value)| {
-                let _ = write!(text, "{name}:{value}\n");
+                let _ = writeln!(text, "{name}:{value}");
                 text
             });
 
