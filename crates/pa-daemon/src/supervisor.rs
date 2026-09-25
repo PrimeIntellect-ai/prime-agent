@@ -5163,7 +5163,7 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
                 (descriptor.pid, descriptor.process_start_id.clone())
             };
             let alive = is_process_alive(pid as u32).unwrap_or(false)
-                && start_id.as_deref().map_or(true, |start| {
+                && start_id.as_deref().is_none_or(|start| {
                     crate::protocol::process_start_id(pid as u32).as_deref() == Some(start)
                 });
             if !alive {

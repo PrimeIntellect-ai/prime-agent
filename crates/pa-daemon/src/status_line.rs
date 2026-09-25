@@ -344,7 +344,7 @@ impl<S: StatusSession> StatusLineRunner<S> {
         // Settled idle verdicts persist; sweeps and fallbacks never grow the
         // session journal (TS `commitStatus`).
         let persist = !is_working && real_verdict;
-        let changed = previous.as_ref().map_or(true, |state| {
+        let changed = previous.as_ref().is_none_or(|state| {
             state.summary != status.summary
                 || state.task_state != status.task_state
                 || (!is_working && state.based_on_message_count != status.based_on_message_count)

@@ -762,7 +762,7 @@ async fn handle_session_prompt(
         .await
         .session
         .as_mut()
-        .map_or(true, |hosted| std::mem::take(&mut hosted.cancel_requested));
+        .is_none_or(|hosted| std::mem::take(&mut hosted.cancel_requested));
     if cancelled {
         producer.finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(

@@ -1005,10 +1005,10 @@ async fn shutdown_stale_daemon(
             rest: Default::default(),
         })
         .await;
-    let busy = sessions.map_or(true, |data| {
+    let busy = sessions.is_none_or(|data| {
         data.get("sessions")
             .and_then(serde_json::Value::as_array)
-            .map_or(true, |rows| {
+            .is_none_or(|rows| {
                 rows.iter()
                     .any(|row| row.get("isSessionActive") == Some(&serde_json::json!(true)))
             })

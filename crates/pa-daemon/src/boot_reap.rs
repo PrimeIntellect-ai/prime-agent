@@ -579,7 +579,7 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
             }
             let identity_holds = match &descriptor.process_start_id {
                 Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
-                    .map_or(true, |observed| observed == expected.as_str()),
+                    .is_none_or(|observed| observed == expected.as_str()),
                 None => true,
             };
             if identity_holds {

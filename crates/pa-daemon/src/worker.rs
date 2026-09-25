@@ -5696,9 +5696,7 @@ impl TurnRunner {
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
                     })],
-                    EngineEvent::Done(Ok(()))
-                    | EngineEvent::Done(Err(_))
-                    | EngineEvent::DoneAborted => Vec::new(),
+                    EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
