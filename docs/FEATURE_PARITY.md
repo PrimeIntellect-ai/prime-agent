@@ -89,11 +89,15 @@ Notable systemic findings:
   see its row below), and `pa-tui/src/input.rs` coalesces marker-less
   multi-line bursts; see `scripts/bracketed_paste_parity.py`.)
 - The turn interrupt sends `abort_and_send_queued` (TS `abortAndSendQueued`,
-  schema 29: abort the run and deliver the parked steering at the boundary,
-  abort-only when no steering is queued); the compaction interrupt sends
-  `abort_compaction`, and a running user-bash command's interrupt sends
-  `abort_bash`. `AbortRetry`/`AbortBranchSummary` wire commands exist but
-  are never sent from the UI.
+  schema 29: abort the run and deliver the parked steering at the boundary —
+  INTENTIONAL DIVERGENCE, operator ruling 2026-09-25: the abort keeps the
+  whole queue flowing, so a follow-up-only queue starts its oldest item
+  right after the aborted turn settles and later follow-ups drain one turn
+  per completed turn, where TS parks the queue until an outside resume site
+  fires; abort-only when the abort leaves nothing queued); the compaction
+  interrupt sends `abort_compaction`, and a running user-bash command's
+  interrupt sends `abort_bash`. `AbortRetry`/`AbortBranchSummary` wire
+  commands exist but are never sent from the UI.
 - The `/btw` side-question engine and wire protocol exist (`pa-daemon/src/side_question.rs`,
   `start_side_question`/`abort_side_question`); the client pane family landed in
   `pa-tui/src/side_question.rs` — only the in-pane `!` bash arm remains

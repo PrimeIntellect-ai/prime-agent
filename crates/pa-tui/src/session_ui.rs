@@ -7171,9 +7171,10 @@ impl SessionUi {
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
     /// fires `void abortAndSendQueued()` when streaming, schema 29): the
-    /// daemon aborts the run and, with visible steering parked at the
-    /// boundary, delivers it right after the aborted run settles — a
-    /// plain abort when the steering queue is empty. A daemon without the
+    /// daemon aborts the run and the queue keeps flowing behind the
+    /// settled turn — parked steering delivers as one batched turn, then
+    /// the follow-up lane drains one turn per completed turn; a plain
+    /// abort when the abort leaves nothing queued. A daemon without the
     /// schema-29 capability gets the plain abort (TS
     /// `supportsServerCapability` + the `isUnknownDaemonCommandError`
     /// catch, both arms of TS `abortAndSendQueued`). The request never
