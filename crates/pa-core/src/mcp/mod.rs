@@ -8,6 +8,7 @@ mod catalog_schema;
 mod catalog_status_views;
 mod catalog_views;
 mod connection_store;
+mod fetch_lane;
 mod local_catalog;
 mod login;
 mod manager_catalog;
@@ -22,6 +23,10 @@ mod url_checks;
 
 pub use catalog_views::{
     mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
+};
+pub use fetch_lane::{
+    install_plugins_catalog_cache, plugins_catalog_cache_for, spawn_hourly_plugins_refresh,
+    startup_plugins_refresh, PluginsCatalog,
 };
 pub use login::{wire_begin_login, McpLoginContext, McpOAuth};
 pub use manager_catalog::{

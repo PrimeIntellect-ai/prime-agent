@@ -550,6 +550,13 @@ impl Supervisor {
         // refresh only adds live pricing and catalog-repo/new entries.
         pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
+        // The plugins service catalog's keep-warm (the `/mcp` view's remote
+        // catalog): the same supervisor-owned cadence — a forced startup
+        // refresh plus the hourly loop, fire-and-forget, failures keep the
+        // last-good disk cache (the packaged bundled snapshot serves
+        // until the first fetch lands).
+        pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
+        pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
         // Adoption telemetry for the wiring: one `daemon event` (kind
         // `catalog_refresh`) when the startup refresh settles — the
         // served model count, primitives only. The awaited refresh is
