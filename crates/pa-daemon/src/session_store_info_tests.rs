@@ -308,7 +308,7 @@ fn captured_fixture_cold_and_warm_timings() {
         let start = std::time::Instant::now();
         let reference = legacy_read_session_info(path);
         legacy.push(start.elapsed());
-        super::session_info_cache().lock().unwrap().remove(path);
+        super::session_info_cache().lock().unwrap().drop_state(path);
         let start = std::time::Instant::now();
         let result = read_session_info(path);
         cold.push(start.elapsed());
