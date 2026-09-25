@@ -516,18 +516,15 @@ mod tests {
         }
     }
 
-    /// The selector has no tab machinery (the operator's 2026-09-24
-    /// directive: /login for providers, /mcp for MCP — never a switcher).
-    /// The exact case the old tab arm hijacked — an EMPTY search with
-    /// left/right — now does nothing to the query and switches nothing;
-    /// with text in the filter the keys still edit it.
+    /// Left and right over the filter: inert over an empty query (there
+    /// is nothing to move the caret across), and caret-moving edits with
+    /// text in it. The row set never changes on either press.
     #[test]
     fn left_and_right_always_edit_the_search() {
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic(), linear()]);
-        // Empty search: the old arm's exact gate. Left and right are
-        // inert over an empty filter (nothing to move), and the row set
-        // never changes shape — no second surface can appear.
+        // An empty query: both presses keep it empty and keep every row
+        // in the one list.
         assert_eq!(selector.search.value(), "");
         selector.handle_key("right", &kb());
         selector.handle_key("left", &kb());
@@ -537,8 +534,7 @@ mod tests {
             2,
             "every row stays in the one list"
         );
-        // With text: the keys move the filter caret (the search input's
-        // own semantics), never a category.
+        // With text: the keys move the filter caret.
         selector.handle_key("l", &kb());
         selector.handle_key("right", &kb());
         assert_eq!(selector.search.value(), "l");
