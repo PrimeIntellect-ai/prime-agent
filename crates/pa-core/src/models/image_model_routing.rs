@@ -35,7 +35,7 @@ fn takes_image_input(model: &Model) -> bool {
 /// TS `formatImageModelRequiredMessage`: the session model cannot serve the
 /// attached images and no image model is configured. Name the model, the
 /// setting, and the alternatives so the user can act immediately.
-pub fn format_image_model_required_message(session_model_id: &str) -> String {
+fn format_image_model_required_message(session_model_id: &str) -> String {
     format!(
         "This turn attaches images, but the selected model ({session_model_id}) does not accept image input.\n\nPick one:\n- Switch the session model to an image-capable one with /model, or\n- Set imageModel in settings.json to an image-capable model (\"provider/model-id\" or a bare id), e.g. \"anthropic/claude-sonnet-4-5\"\n\nThen resend the message. Without it the request would silently drop the images."
     )
@@ -43,7 +43,7 @@ pub fn format_image_model_required_message(session_model_id: &str) -> String {
 
 /// TS `formatImageModelUnusableMessage`: the configured `imageModel` could
 /// not be resolved to an available, image-capable, authenticated model.
-pub fn format_image_model_unusable_message(reference: &str) -> String {
+fn format_image_model_unusable_message(reference: &str) -> String {
     format!(
         "imageModel \"{reference}\" could not be resolved to an available, image-capable, authenticated model.\n\nFix the imageModel setting (settings.json) or authenticate the provider, then resend the message."
     )

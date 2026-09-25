@@ -29,7 +29,6 @@ pub use custom::{
     ProviderOverride,
 };
 pub use image_model_routing::{
-    format_image_model_required_message, format_image_model_unusable_message,
     resolve_image_model_override, ImageModelRoutingInputs, ResolvedImageModel,
 };
 pub use prime_inference::{
