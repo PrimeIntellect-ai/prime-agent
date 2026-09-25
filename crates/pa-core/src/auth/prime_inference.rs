@@ -1,8 +1,10 @@
 //! Prime Inference login, API-key surface: the auth endpoints (the whoami
 //! access check, the team list), and the production prime-cli config
-//! reuse. Port of the API-key paths of prime-inference-auth.ts; the
-//! browser challenge (the RSA-encrypted `auth_challenge` flow) is not
-//! ported — the interactive flow prompts for a pasted key instead.
+//! reuse. Port of the API-key paths of prime-inference-auth.ts; the login
+//! orchestration (the prime-cli reuse, the browser challenge over the
+//! shared `auth_challenge` core, the access checks) is
+//! `prime_inference_login.rs`'s, and the interactive surface (the URL
+//! raced against the paste prompt) lives in the composition root.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -13,8 +15,9 @@ use super::types::PrimeTeamCredential;
 
 /// TS `DEFAULT_PRIME_API_BASE_URL`: the Prime API the login talks to.
 pub const DEFAULT_PRIME_API_BASE_URL: &str = "https://api.primeintellect.ai";
-/// TS `DEFAULT_PRIME_FRONTEND_URL`: the browser challenge target (the
-/// production guard consults it; the flow itself does not open it).
+/// TS `DEFAULT_PRIME_FRONTEND_URL`: the browser challenge's URL host (the
+/// production guard consults it and the challenge URL rides it; the flow
+/// itself never opens a browser — the composition root does).
 pub const DEFAULT_PRIME_FRONTEND_URL: &str = "https://app.primeintellect.ai";
 /// TS `DEFAULT_PRIME_INFERENCE_URL` (module-local there too): the value
 /// the prime-cli config's `inference_url` must carry to count as

@@ -6,7 +6,7 @@ The config file uses the same namespaced keybinding ids that Prime Agent uses in
 
 Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
 
-After editing `keybindings.json`, restart Prime Agent to apply the changes (the TS product's `/reload` hot-reload of keybindings is not wired in this build yet).
+After editing `keybindings.json`, restart Prime Agent to apply the changes — or run `/reload`, which re-reads the file (together with extensions, skills, prompts, and themes) without leaving the session.
 
 ## Key Format
 
@@ -19,6 +19,16 @@ After editing `keybindings.json`, restart Prime Agent to apply the changes (the 
 - **Symbols:** `` ` ``, `-`, `=`, `[`, `]`, `\`, `;`, `'`, `,`, `.`, `/`, `!`, `@`, `#`, `$`, `%`, `^`, `&`, `*`, `(`, `)`, `_`, `+`, `|`, `~`, `{`, `}`, `:`, `<`, `>`, `?`
 
 Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1`, etc.
+
+## Terminal Key Support
+
+What reaches the app depends on the terminal, not on Prime Agent:
+
+- **Ctrl+Home/End and Ctrl+Up/Down** are sent by common Linux terminals (GNOME Terminal, xterm, Konsole) and by every terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, alacritty). On macOS, Ctrl+Up/Down stay reserved by Mission Control until you remap or disable those system shortcuts.
+- **`super+` keys are the macOS Cmd keys.** They arrive only from terminals that report the kitty keyboard protocol (Prime Agent enables it when the terminal answers its query). A terminal that keeps Cmd+Arrow for its own shortcuts or its scrollback never sends it to the app: stock macOS Terminal and iTerm2 do exactly that, so do not expect Cmd+Up/Down to work there without a terminal-side mapping.
+- **macOS Terminal.app** reserves Home/End/Cmd+Home/End for its own scrollback; nothing reaches the app until you add profile key mappings (Settings → Profiles → Keyboard), for example Home → `\033[H`, End → `\033[F`, Cmd+Up → `\033[1;9A`, Cmd+Down → `\033[1;9B`.
+- **iTerm2** ships with Home/End/Cmd+Arrow doing nothing. The "Natural Text Editing" preset (Profiles → Keys → Key Mappings) maps Cmd+Left/Right to line start/end and Option+Left/Right to word motion; a custom key mapping with "Send Escape Sequences" `[1;9A` / `[1;9B` makes Cmd+Up/Down jump to the document start/end in the prompt editor and the first/last item in the agents view. Ctrl+Up/Down require disabling or remapping macOS's Mission Control shortcuts, while the Option keys work without any mapping.
+- In the **agents view**, `home`/`end` jump the list to the first/last row; the search field keeps `ctrl+a`/`ctrl+e` for its own line ends. In every prompt editor, `home`/`end` stay line start/end.
 
 ## All Actions
 
@@ -34,8 +44,8 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.editor.cursorWordRight` | `alt+right`, `ctrl+right`, `alt+f` | Move cursor word right |
 | `tui.editor.cursorLineStart` | `home`, `ctrl+a`, `super+left` | Move to line start |
 | `tui.editor.cursorLineEnd` | `end`, `ctrl+e`, `super+right` | Move to line end |
-| `tui.editor.cursorDocStart` | `ctrl+home`, `super+up` | Move to start of text |
-| `tui.editor.cursorDocEnd` | `ctrl+end`, `super+down` | Move to end of text |
+| `tui.editor.cursorDocStart` | `ctrl+home`, `super+home`, `super+up` | Move to start of text |
+| `tui.editor.cursorDocEnd` | `ctrl+end`, `super+end`, `super+down` | Move to end of text |
 | `tui.editor.cursorParagraphUp` | `ctrl+up` | Move one paragraph up |
 | `tui.editor.cursorParagraphDown` | `ctrl+down` | Move one paragraph down |
 | `tui.editor.jumpForward` | `ctrl+]` | Jump forward to character |
@@ -105,6 +115,8 @@ Typing, Backspace, Delete, and paste replace an active selection; Escape drops t
 | `tui.select.down` | `down` | Move selection down |
 | `tui.select.pageUp` | `pageUp` | Page up in list |
 | `tui.select.pageDown` | `pageDown` | Page down in list |
+| `tui.select.top` | `home`, `ctrl+home`, `super+home`, `super+up` | Select first item in list |
+| `tui.select.bottom` | `end`, `ctrl+end`, `super+end`, `super+down` | Select last item in list |
 | `tui.select.confirm` | `enter` | Confirm selection |
 | `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
 

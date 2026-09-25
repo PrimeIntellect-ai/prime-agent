@@ -329,21 +329,12 @@ fn validate_schedule_args(args: &[String]) -> bool {
     true
 }
 
-/// The parsed `prime-agent update` invocation.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct UpdateInvocation {
-    force: bool,
-    rollback: bool,
-    channel: Option<pa_core::update::version::UpdateChannel>,
-    archive: Option<std::path::PathBuf>,
-    source: Option<String>,
-}
-
-/// Parse `update`'s options: the TS booleans plus the direct-install pair
-/// (`--archive <path>` with the required `--source <https-url>`). Returns
-/// `None` on a usage failure (already reported).
-fn parse_update_options(args: &[String]) -> Option<UpdateInvocation> {
-    let mut invocation = UpdateInvocation::default();
+/// Parse `update`'s options into the shared [`crate::self_update::SelfUpdateOptions`]:
+/// the TS booleans plus the direct-install pair (`--archive <path>` with the
+/// required `--source <https-url>`). Returns `None` on a usage failure
+/// (already reported).
+fn parse_update_options(args: &[String]) -> Option<crate::self_update::SelfUpdateOptions> {
+    let mut invocation = crate::self_update::SelfUpdateOptions::default();
     let mut index = 0;
     let mut channel: Option<&str> = None;
     while index < args.len() {
@@ -638,115 +629,25 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     // setting (`/nightly off`) is the default the update follows
     // (`options.channel ?? persistedChannel`), an explicit nightly switch
     // warns and confirms, and a completed run persists the explicit
-    // switch (`commitChannel`).
-    let agent_dir = crate::config::get_agent_dir();
+    // switch (`commitChannel`) — one shared body with the `package update`
+    // self target (`crate::self_update`).
     let persisted_wire = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
-            pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_update_channel()
+            pa_core::settings::SettingsManager::create(&cwd, crate::config::get_agent_dir())
+                .get_update_channel()
         })
-        .map(|channel| {
-            match channel {
-                pa_core::settings::UpdateChannel::Stable => "stable",
-                pa_core::settings::UpdateChannel::Nightly => "nightly",
-            }
-            .to_string()
-        });
-    if options.channel == Some(pa_core::update::version::UpdateChannel::Nightly)
-        && persisted_wire.as_deref() != Some("nightly")
-    {
-        println!(
-            "Nightly releases are unreleased Prime Agent builds. They can be broken, and a broken update can leave Prime Agent unusable until you roll back or reinstall."
-        );
-        // TS `setSelfUpdateAbortedExitCode`: the interactive child's
-        // marker changes the abort code (75 vs 1) so the TUI's update
-        // run can tell an aborted switch from a real failure.
-        let abort_code = if std::env::var(SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref() == Ok("1") {
-            75
-        } else {
-            1
-        };
-        if !options.force {
-            if !std::io::stdin().is_terminal() {
-                eprintln!(
-                    "Switching to the nightly channel needs confirmation. Re-run with --force to proceed."
-                );
-                return handled_with_exit(abort_code);
-            }
-            if !crate::daemon_discovery::stop::prompt_yes_no(
-                "Switching to the nightly channel and continue with the update?",
-            ) {
-                println!("Update cancelled. Nothing was changed.");
-                return handled_with_exit(abort_code);
-            }
-        }
+        .map(crate::self_update::settings_channel_wire_name)
+        .map(str::to_string);
+    if let Some(abort_code) = crate::self_update::confirm_nightly_switch(
+        options.force,
+        options.channel,
+        persisted_wire.as_deref(),
+        std::io::stdin().is_terminal(),
+    ) {
+        return handled_with_exit(abort_code);
     }
-    // The effective channel: an explicit flag wins, else the persisted
-    // one, else the running version infers it.
-    let channel = options.channel.or_else(|| {
-        persisted_wire
-            .as_deref()
-            .and_then(pa_core::update::version::UpdateChannel::from_wire)
-    });
-
-    let command_options = crate::update_flow::update_command::UpdateCommandOptions {
-        force: options.force,
-        rollback: options.rollback,
-        channel,
-        archive: options.archive,
-        source: options.source,
-    };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return fail(
-                format!("Could not start the update runtime: {error}."),
-                None,
-            );
-        }
-    };
-    match runtime.block_on(crate::update_flow::update_command::run_update_command(
-        &command_options,
-    )) {
-        Ok(code) => {
-            // TS `commitChannel`: a completed run persists an explicit
-            // switch (Complete and Skipped alike — a channel pin applies
-            // even when no newer release was needed) and reports it. The
-            // not-attempted exit (75) reaches here only as the child-mode
-            // no-change skip: a declined confirmation returns earlier and
-            // never runs the update flow.
-            let flag_wire = options
-                .channel
-                .map(pa_core::update::version::UpdateChannel::wire_name);
-            if (code == 0 || code == 75)
-                && flag_wire.is_some()
-                && flag_wire != persisted_wire.as_deref()
-            {
-                let wire = flag_wire.unwrap_or_default();
-                if let Ok(cwd) = std::env::current_dir() {
-                    let settings_channel = match wire {
-                        "nightly" => pa_core::settings::UpdateChannel::Nightly,
-                        _ => pa_core::settings::UpdateChannel::Stable,
-                    };
-                    let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                    if settings.set_update_channel(settings_channel).is_ok() {
-                        println!("Updates now follow the {wire} channel.");
-                    }
-                }
-            }
-            PublicCommandResult {
-                handled: true,
-                args: vec![],
-                explicit_agents_view: false,
-                attach_agent: None,
-                exit_code: Some(code),
-            }
-        }
-        Err(error) => fail(format!("{error:#}"), None),
-    }
+    handled_with_exit(crate::self_update::run(&options, persisted_wire))
 }
 
 fn run_attach(rest: &[String]) -> PublicCommandResult {
@@ -902,7 +803,7 @@ fn require_operand_count(
 mod update_options_tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Option<UpdateInvocation> {
+    fn parse(args: &[&str]) -> Option<crate::self_update::SelfUpdateOptions> {
         let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         parse_update_options(&args)
     }

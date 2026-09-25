@@ -30,7 +30,9 @@ use crate::image_markers::{
 use crate::info_commands;
 use crate::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
 use crate::keys::key_event_to_id;
-use crate::model_picker::{CurrentModel, ModelPicker, ModelPickerAction, ModelPickerOptions};
+use crate::model_picker::{
+    CurrentModel, ModelPicker, ModelPickerAction, ModelPickerOptions, ModelSelectionApplied,
+};
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
@@ -210,6 +212,30 @@ struct TraceUploadAllRun {
 enum TracesLoginIntent {
     Login,
     Enable,
+}
+
+/// The outcome of one daemon `set_model` attempt: the switch landed, the
+/// provider is not signed in (the typed refusal — the sign-in flow owns
+/// the retry), or the switch failed (the error row already rendered).
+#[derive(Debug)]
+enum SetModelOutcome {
+    Switched,
+    NeedsSignIn,
+    Failed,
+}
+
+/// A model selection parked on the provider's sign-in (TS
+/// `ensureModelProviderConfigured` → `completeModelSelection`): the
+/// picker applied a model whose provider is not signed in, the sign-in
+/// flow runs, and a successful login retries the switch — including the
+/// user-edited effort, exactly like a direct selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingModelSignIn {
+    /// The provider the sign-in serves (the login outcome must match it).
+    provider: String,
+    model_id: String,
+    /// The picked model's user-edited effort, applied after the retry.
+    effort: Option<String>,
 }
 
 /// TS status notes: the mutation status vocabulary (`applied`, `rejected`,
@@ -400,10 +426,21 @@ pub(crate) struct SessionUi {
     /// `/login` + `/logout`: the provider auth flows the composition root
     /// owns (credential storage, OAuth flows, the provider catalog).
     provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
+    /// A model selection parked on the provider's sign-in (TS
+    /// `ensureModelProviderConfigured`): the picker applied a model whose
+    /// provider is not signed in, the login flow runs, and a successful
+    /// login retries the switch automatically.
+    pending_model_sign_in: Option<PendingModelSignIn>,
     /// The inline auth panel's request channel (the login flows drive the
     /// panel through it; the run loop owns the receiving side and folds
     /// each request into the mounted panel).
     auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
+    /// The running panel login's cooperative cancel signal (#2770):
+    /// armed only by the flows that check it between their poll steps
+    /// (the codex subscription login); Esc/ctrl+c on the mounted panel
+    /// marks it and unmounts, and a cancelled flow never writes its
+    /// credential.
+    auth_panel_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
@@ -718,7 +755,9 @@ impl SessionUi {
             pending_confirm: None,
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
+            pending_model_sign_in: None,
             auth_panel_notes,
+            auth_panel_cancel: None,
             pending_update: None,
             update_commands: options.update_commands.clone(),
             exit_requested: false,
@@ -3622,9 +3661,16 @@ impl SessionUi {
             AuthSelectorAction::None => {}
             AuthSelectorAction::Cancel => {
                 view.provider_auth = None;
+                // Closing the sign-in menu abandons the parked model
+                // selection (TS: a cancelled login never applies the
+                // model).
+                self.pending_model_sign_in = None;
             }
             AuthSelectorAction::LoginError { message } => {
                 view.provider_auth = None;
+                // A failed key submission abandons the parked model
+                // selection too (an empty key never counts as a login).
+                self.pending_model_sign_in = None;
                 self.error_row(&message, view);
             }
             AuthSelectorAction::Login { provider, api_key } => {
@@ -3635,27 +3681,32 @@ impl SessionUi {
                 if let Some(api_key) = api_key {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     let outcome = auth.0.login(&provider, Some(&api_key)).await;
-                    self.apply_auth_outcome(outcome, view);
+                    self.apply_auth_outcome(outcome, &provider.id, view).await;
                 } else {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
-                        // The unported OAuth subscription stubs: the
-                        // error row is the whole flow (nothing drives
-                        // the panel).
+                        // The menu marks unported subscription rows
+                        // unavailable and Enter never selects them; a row
+                        // reaching here answers the silent cancel — no
+                        // after-selection error wall.
                         let outcome = auth.0.login(&provider, None).await;
-                        self.apply_auth_outcome(outcome, view);
+                        self.apply_auth_outcome(outcome, &provider.id, view).await;
                     }
                 }
             }
             AuthSelectorAction::Logout { provider } => {
                 view.provider_auth = None;
+                // The settled outcome drops any parked model sign-in
+                // (`apply_auth_outcome` consumes it), so a logout never
+                // leaves a model waiting on the credential it removed.
                 let auth = self.provider_auth.clone().expect("the selector was open");
                 let outcome = auth.0.logout(&provider).await;
-                self.apply_auth_outcome(outcome, view);
+                self.apply_auth_outcome(outcome, &provider.id, view).await;
             }
         }
         self.dirty = true;
@@ -3663,11 +3714,14 @@ impl SessionUi {
     }
 
     /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
-    /// Inference login): mount the inline auth panel (TS `showAuthPanel`
-    /// mounts the login dialog as the flow starts) and spawn the flow
-    /// against it. The flow's requests fold into the panel through the
-    /// run loop's channel arm; the settled outcome lands the same way
-    /// (the flow never touches the terminal).
+    /// Inference login, the Codex Subscription login): mount the inline
+    /// auth panel (TS `showAuthPanel` mounts the login dialog as the
+    /// flow starts) and spawn the flow against it. The flow's requests
+    /// fold into the panel through the run loop's channel arm; the
+    /// settled outcome lands the same way (the flow never touches the
+    /// terminal). Flows that check the cooperative cancel (#2770: the
+    /// codex subscription login) arm its shared flag so Esc/ctrl+c on
+    /// the mounted panel ends the flow without writing credentials.
     fn start_provider_panel_login(
         &mut self,
         provider: &crate::provider_auth::ProviderRow,
@@ -3679,10 +3733,29 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        // A still-running previous flow ends before its replacement arms:
+        // its flag marks the blocking body out of the way, and its late
+        // settle is skipped below so it can never close the newer panel.
+        if let Some(previous) = self.auth_panel_cancel.take() {
+            previous.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+            .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
             let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled { outcome });
+            // The driving surface already exited (Esc, or a newer login
+            // re-armed): the panel is unmounted, the outcome is cancelled
+            // or errored by the flow's own checks, and applying a stale
+            // settle would close the NEWER flow's panel — so it never
+            // lands (TS the cancelled dialog's outcome is dropped with
+            // the dialog).
+            if !panel.cancelled() {
+                panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
+                    provider: provider.id.clone(),
+                    outcome,
+                });
+            }
         });
     }
 
@@ -3699,25 +3772,50 @@ impl SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
+        let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            let kb = view.editor.keybindings();
             panel.handle_key(&id, kb);
+        }
+        // A cancel key on an armed panel flow ends it cooperatively
+        // (#2770): the flag marks the blocking body (no credential write
+        // after the exit), the panel unmounts, and the settled outcome
+        // is the silent cancel.
+        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
+        if cancel_key {
+            if let Some(cancel) = self.auth_panel_cancel.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                view.auth_panel = None;
+            }
         }
         self.dirty = true;
         Ok(())
     }
 
     /// One flow outcome (TS `completeProviderAuthentication`'s status vs
-    /// the flow's error row).
-    fn apply_auth_outcome(
+    /// the flow's error row). The parked model sign-in is consumed by the
+    /// outcome: a successful login of its provider retries the switch;
+    /// a failed or cancelled flow — or a settled login for a different
+    /// provider, which abandons the route the user left — drops the park
+    /// (the outcome's own rows render as usual).
+    async fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
+        provider: &str,
         view: &mut AgentView,
     ) {
+        let parked = self
+            .pending_model_sign_in
+            .take()
+            .filter(|pending| pending.provider == provider);
         match outcome {
             crate::provider_auth::ProviderAuthOutcome::Status(message) => {
                 self.note(&message, view);
+                if let Some(pending) = parked {
+                    self.finish_model_sign_in(pending, view).await;
+                }
             }
+            // The failed and cancelled flows drop the park above (the
+            // `take`); their own rows render as usual.
             crate::provider_auth::ProviderAuthOutcome::Error(message) => {
                 self.error_row(&message, view);
             }
@@ -3780,9 +3878,10 @@ impl SessionUi {
                     panel.mount_teams(teams, current, reply);
                 }
             }
-            AuthPanelRequest::ProviderSettled { outcome } => {
+            AuthPanelRequest::ProviderSettled { provider, outcome } => {
+                self.auth_panel_cancel = None;
                 view.auth_panel = None;
-                self.apply_auth_outcome(outcome, view);
+                self.apply_auth_outcome(outcome, &provider, view).await;
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
@@ -5933,13 +6032,33 @@ impl SessionUi {
                 } else {
                     view.editor.set_text("");
                 }
-                self.apply_model_selection(&applied.provider, &applied.model_id, view)
-                    .await;
-                // A user-edited effort applies after the model switch (TS
-                // `completeModelSelection`: `setModel`, then
-                // `applyThinkingLevel` — the level row only on success).
-                if let Some(level) = applied.effort {
-                    self.apply_thinking_level(&level, view).await;
+                // The daemon is the source of truth (TS
+                // `ensureModelProviderConfigured`'s client gate rides the
+                // connection's own configured set; the local snapshot can
+                // lag an external credential change, so the switch is
+                // sent first and the typed refusal routes the sign-in
+                // flow).
+                match self
+                    .try_set_model(&applied.provider, &applied.model_id, view)
+                    .await
+                {
+                    SetModelOutcome::Switched => {
+                        // A user-edited effort applies after the model
+                        // switch (TS `completeModelSelection`: `setModel`,
+                        // then `applyThinkingLevel` — the level row only
+                        // on success).
+                        if let Some(level) = &applied.effort {
+                            self.apply_thinking_level(level, view).await;
+                        }
+                    }
+                    // The typed refusal: the model resolved but its
+                    // provider is not signed in — the selection routes to
+                    // the provider's sign-in flow and applies after the
+                    // login lands.
+                    SetModelOutcome::NeedsSignIn => {
+                        self.begin_model_sign_in(&applied, view).await;
+                    }
+                    SetModelOutcome::Failed => {}
                 }
             }
         }
@@ -7041,14 +7160,15 @@ impl SessionUi {
     /// `completeModelSelection` status row): the daemon `set_model` command
     /// switches the live session — the agent, the provider target, and the
     /// session's settings default follow — then the client refreshes its
-    /// model label and records the `Model: <id>` status row. A failure
-    /// surfaces as the error note instead.
-    async fn apply_model_selection(
+    /// model label and records the `Model: <id>` status row. The typed
+    /// provider-unauthenticated refusal is the sign-in route (`NeedsSignIn`);
+    /// every other failure surfaces as the error note.
+    async fn try_set_model(
         &mut self,
         provider: &str,
         model_id: &str,
         view: &mut AgentView,
-    ) {
+    ) -> SetModelOutcome {
         let switched = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -7069,15 +7189,94 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
+                SetModelOutcome::Switched
             }
             Err(error) => {
+                if crate::daemon_client::rejected_provider_unauthenticated(&error).is_some() {
+                    return SetModelOutcome::NeedsSignIn;
+                }
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
                     text: format!("\u{26a0} Error: {error:#}"),
                     kind: StatusKind::Error,
                 });
                 self.dirty = true;
+                SetModelOutcome::Failed
             }
+        }
+    }
+
+    /// Route a picked model whose provider is not signed in to the
+    /// provider sign-in flow (TS `ensureModelProviderConfigured`): park
+    /// the selection, then mount the `/login` provider menu preselected on
+    /// the provider's row — a successful login retries the switch
+    /// automatically, a cancelled or failed login leaves it parked off.
+    /// A provider without a login row keeps the TS external-config error.
+    async fn begin_model_sign_in(&mut self, applied: &ModelSelectionApplied, view: &mut AgentView) {
+        let provider = &applied.provider;
+        let model_id = &applied.model_id;
+        let Some(auth) = self.provider_auth.clone() else {
+            self.error_row(
+                &format!("Authentication for {provider} must be configured externally."),
+                view,
+            );
+            return;
+        };
+        let rows = auth.0.login_options().await;
+        if !rows.iter().any(|row| row.id == applied.provider) {
+            self.error_row(
+                &format!("Authentication for {provider} must be configured externally."),
+                view,
+            );
+            return;
+        }
+        self.pending_model_sign_in = Some(PendingModelSignIn {
+            provider: provider.clone(),
+            model_id: model_id.clone(),
+            effort: applied.effort.clone(),
+        });
+        self.note(
+            &format!("Sign in to {provider} to use {provider}/{model_id}"),
+            view,
+        );
+        // The picker's Apply arm already settled the editor (the command
+        // partial cleared, a restored draft kept) — the sign-in route never
+        // rewrites it.
+        let mut selector =
+            crate::provider_auth::ProviderAuthSelector::new(AuthSelectorKind::Login, rows);
+        selector.preselect_provider(provider);
+        view.provider_auth = Some(selector);
+        self.dirty = true;
+    }
+
+    /// The parked sign-in's retry (TS `completeModelSelection` after a
+    /// successful `loginProvider`): refresh the catalog (the picker's
+    /// "require sign in" marks clear), retry the switch exactly once —
+    /// a still-unavailable provider keeps TS's post-login refusal — and
+    /// apply the parked effort only after the switch lands.
+    async fn finish_model_sign_in(&mut self, pending: PendingModelSignIn, view: &mut AgentView) {
+        let PendingModelSignIn {
+            provider,
+            model_id,
+            effort,
+        } = pending;
+        self.spawn_model_catalog_refresh();
+        match self.try_set_model(&provider, &model_id, view).await {
+            SetModelOutcome::Switched => {
+                if let Some(level) = &effort {
+                    self.apply_thinking_level(level, view).await;
+                }
+            }
+            // The login succeeded but the provider still refuses the
+            // switch: TS's post-login re-check message (never a second
+            // sign-in route).
+            SetModelOutcome::NeedsSignIn => {
+                self.error_row(
+                    &format!("Authentication completed, but {provider} is still unavailable."),
+                    view,
+                );
+            }
+            SetModelOutcome::Failed => {}
         }
     }
 
@@ -9529,6 +9728,7 @@ async fn describe_session_open_failure(
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
         message,
+        error_info: None,
     })
 }
 

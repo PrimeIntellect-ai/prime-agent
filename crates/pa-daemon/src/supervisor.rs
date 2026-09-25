@@ -841,6 +841,83 @@ impl Supervisor {
         self.spawn_roster_boot_seed();
     }
 
+    /// Complete a tombstoned stop for a worker encountered at adoption —
+    /// the boot scan's descriptor pass and a live re-registration alike
+    /// (TS `adoptOrRecoverWorker`'s `stopRequestedAt` branch: adoption
+    /// finishes the stop, never adopts the worker as healthy). The
+    /// tombstone's variant rides `archive_on_stop`: the kill stop
+    /// (`Some(true)`) is irreversible — its killed close cancels jobs,
+    /// archives the file, and cascades children; the per-session stop
+    /// (`Some(false)`) keeps the session resumable — its graceful
+    /// shutdown close and its schedule-cancel belt are all it owns.
+    async fn finish_tombstoned_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>, alive: bool) {
+        let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
+        if alive {
+            // The worker outlived the stop (a crash between the tombstone
+            // and the forward, or a survivor of the escalation): connect
+            // to it and forward the ORIGINAL stop intent — kill for the
+            // kill stop, shutdown for the resumable per-session stop. A
+            // failed connect degrades to the dead-worker finalize below.
+            resident.intentional_stop.store(true, Ordering::SeqCst);
+            if self
+                .connect_worker(resident, worker_connect_deadline())
+                .await
+                .is_ok()
+            {
+                let command = if kill_stop { "kill" } else { "shutdown" };
+                let _ = self
+                    .route_command(resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .await;
+            }
+        }
+        // TS `scheduleWorkerStopFinalization`: the interrupted stop's
+        // cleanup re-runs instead of a relaunch, honoring the variant.
+        if kill_stop {
+            // The descriptor survives an unsettled finalize (a later boot
+            // retries the archived-state belt); a settled stop still dies
+            // only with a provably-gone process. The forwarded kill
+            // releases the lease without exiting the worker, and the
+            // registration path's refused worker is not yet in the
+            // registry, so the finalize's registry-coverage checks cannot
+            // observe it — the settle is not a death certificate. The
+            // retire pass's escalation is: a survivor keeps its
+            // tombstoned descriptor for the next boot exactly like the
+            // per-session arm, and only a provable death removes it.
+            let settled = self.finalize_worker_stop(resident, None).await;
+            if settled {
+                self.retire_worker_after_stop(resident).await;
+                self.log_line(&format!(
+                    "finished the tombstoned stop of session worker {}",
+                    resident.worker_id
+                ));
+            } else {
+                self.log_line(&format!(
+                    "tombstoned stop of session worker {} not settled; descriptor kept",
+                    resident.worker_id
+                ));
+            }
+        } else {
+            // The per-session stop's durable half is the ephemeral
+            // schedule cancel (no archived-state belt — the session stays
+            // resumable), and the descriptor dies only with a
+            // provably-gone process: the retire pass removes it once the
+            // escalation confirms death and keeps a survivor's tombstone
+            // for the next boot (never orphaning a live lease holder
+            // behind a deleted descriptor). Only an owned (ephemeral)
+            // stop cancels its tree — `stop_worker`'s own gate: a
+            // resident RLM child's preserved jobs must survive a parent's
+            // stop-driven death.
+            if resident.descriptor.lock().await.owner_client_id.is_some() {
+                self.finalize_owned_stop(resident).await;
+            }
+            self.retire_worker_after_stop(resident).await;
+            self.log_line(&format!(
+                "finished the tombstoned per-session stop of session worker {}",
+                resident.worker_id
+            ));
+        }
+    }
+
     /// Adopt one persisted worker descriptor. Serialized against worker
     /// self-registration by the per-worker adoption gate: whichever path
     /// arrives first (descriptor scan or live re-registration) builds the
@@ -866,47 +943,13 @@ impl Supervisor {
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         // The stop tombstone outranks liveness (TS's stop ownership: the
-        // kill was durable intent BEFORE the worker was told): a
-        // supervisor that died between `persist_stop_tombstone` and the
-        // worker's shutdown finishes the stop on the next boot — never
-        // adopts the still-reachable worker as healthy (that would drop
-        // the kill and leave the stopped session resident).
+        // stop was durable intent BEFORE the worker was told): a
+        // supervisor that died between the tombstone and the worker's
+        // shutdown finishes the stop on the next boot — never adopts the
+        // still-reachable worker as healthy (that would drop the stop and
+        // leave the stopped session resident).
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
-            if alive {
-                // The worker outlived the crash and may never have received
-                // the kill (the crash window is between the tombstone and
-                // the forward): connect to it and forward the ORIGINAL
-                // kill — the killed close is the stop's intent (it cancels
-                // its jobs, archives its file, and cascades its children
-                // with the same killed reason; a shutdown would keep the
-                // resume entries of workers the stop was killing). A failed
-                // connect degrades to the dead-worker finalize below.
-                resident.intentional_stop.store(true, Ordering::SeqCst);
-                if self
-                    .connect_worker(&resident, worker_connect_deadline())
-                    .await
-                    .is_ok()
-                {
-                    let _ = self
-                        .route_command(&resident, "kill", json!({}), ROUTE_TIMEOUT_MS)
-                        .await;
-                }
-            }
-            // TS `scheduleWorkerStopFinalization`: the interrupted stop's
-            // cleanup re-runs instead of a relaunch. The descriptor
-            // survives an unsettled finalize (a later boot retries the
-            // archived-state belt); a settled stop deletes it.
-            let settled = self.finalize_worker_stop(&resident, None).await;
-            if settled {
-                let _ = std::fs::remove_file(&resident.descriptor_path);
-                self.log_line(&format!(
-                    "finished the tombstoned stop of session worker {worker_id}"
-                ));
-            } else {
-                self.log_line(&format!(
-                    "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
-                ));
-            }
+            self.finish_tombstoned_stop(&resident, alive).await;
             return AdoptionOutcome::Stopped;
         }
         // The adoption answer plus the revival's spawned child, when one
@@ -1145,9 +1188,9 @@ impl Supervisor {
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
                 // The give-up settles the dead worker's rows exactly like
-                // a stop (a subagent under a surviving root passivates and
-                // keeps its model/thinking/cwd; everything else is
-                // removed). No ledger reseed, no transcript read.
+                // a stop (every owned non-ephemeral, non-queued row
+                // passivates and keeps its model/thinking/cwd). No ledger
+                // reseed, no transcript read.
                 let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
                 self.passivate_roster_worker(&resident.worker_id, ephemeral)
                     .await;
@@ -2326,6 +2369,11 @@ impl Supervisor {
                     let roster_subscribed = Arc::clone(&roster_subscribed);
                     let connection = Arc::clone(&connection);
                     let dispatch_tx = dispatch_tx.clone();
+                    // The stream clone a mid-handler streaming command
+                    // (list_saved_sessions) writes its progress frames
+                    // through: the SAME channel the response later takes,
+                    // so the frames stay strictly ordered ahead of it.
+                    let stream_tx = dispatch_tx.clone();
                     let connection_id = connection_id.clone();
                     tokio::spawn(async move {
                         let (lines, stop) = supervisor
@@ -2336,6 +2384,7 @@ impl Supervisor {
                                 &roster_subscribed,
                                 &connection,
                                 &connection_id,
+                                &stream_tx,
                             )
                             .await;
                         if dispatch_tx.send((lines, stop)).is_err() && stop {
@@ -2459,6 +2508,10 @@ impl Supervisor {
 
     /// Handle one client command line: returns outbound lines in order and
     /// whether this client connection should stop.
+    // One more dispatch-context input than the lint's budget: the
+    // per-connection stream sender rides the same context bundle
+    // `execute_parsed_command` takes (its own allow below).
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_client(
         self: &Arc<Self>,
         line: &str,
@@ -2467,6 +2520,7 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -2586,6 +2640,7 @@ impl Supervisor {
                 connection_id,
                 command_id,
                 type_name,
+                stream,
             )
             .await;
         if mutating {
@@ -2607,6 +2662,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2651,7 +2707,9 @@ impl Supervisor {
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::ListSavedSessions { .. } => {
-                let lines = self.handle_saved_session_list(command, &command_id).await;
+                let lines = self
+                    .handle_saved_session_list(command, &command_id, stream)
+                    .await;
                 (lines, false)
             }
             DaemonCommand::RosterSubscribe { .. } => {
@@ -3586,7 +3644,23 @@ impl Supervisor {
             Some(resident) => resident,
             None => match self.adopt_registered_worker(&registration, token).await {
                 Ok(resident) => resident,
-                Err(error) => return fail(&format!("{error:#}")),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    // The definitive unknown-worker refusal is the one
+                    // registration verdict the box incident left invisible:
+                    // a live worker whose descriptor is gone can never be
+                    // adopted again, and before the self-heal it lingered
+                    // silently, holding its session lease against every
+                    // future resume. The refusal is now observable (log +
+                    // telemetry) and the worker retires on it.
+                    if message.starts_with(crate::registration::UNKNOWN_SESSION_WORKER_PREFIX) {
+                        self.log_line(&format!(
+                            "session worker {active_session_id} registration refused (no descriptor on this supervisor); the worker retires and its session file stays resumable"
+                        ));
+                        self.note_daemon_event("registration_refused", None);
+                    }
+                    return fail(&message);
+                }
             },
         };
         // Refresh the durable identity from the live worker (the token was
@@ -3726,11 +3800,31 @@ impl Supervisor {
         let descriptor_path = self
             .descriptor_dir
             .join(format!("{}.json", registration.active_session_id));
-        let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
-            return Err(anyhow!(
-                "Unknown session worker: {}",
-                registration.active_session_id
-            ));
+        let content = match std::fs::read_to_string(&descriptor_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The TS unknown-worker error: this supervisor holds no
+                // descriptor for the identity, so it can never adopt the
+                // registrant. The worker treats the verdict as terminal
+                // (the refused-registration self-heal) and retires
+                // instead of retrying forever.
+                return Err(anyhow!(
+                    "{}: {}",
+                    crate::registration::UNKNOWN_SESSION_WORKER_PREFIX,
+                    registration.active_session_id
+                ));
+            }
+            // An unreadable descriptor is NOT an unknown worker: the
+            // identity exists on disk, and retiring it over a transient
+            // I/O failure (permissions, a torn read) would strand a live
+            // lease holder behind a healable condition. The worker keeps
+            // its backoff loop; the next attempt re-reads the file.
+            Err(error) => {
+                return Err(anyhow!(
+                    "descriptor read failed for {}: {error}",
+                    registration.active_session_id
+                ));
+            }
         };
         let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
@@ -3744,6 +3838,44 @@ impl Supervisor {
             descriptor,
             descriptor_path,
         );
+        // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s
+        // stopRequestedAt branch): adoption finishes the stop — the
+        // original command forwarded, the variant's finalize belt, the
+        // descriptor retired with the process — and never adopts the
+        // worker as healthy (that would undo the stop and leave the
+        // stopped session held by the leftover process). The refusal is
+        // transient: the worker's next attempt reads the retired
+        // descriptor (or the still-tombstoned one) and converges on the
+        // stop's completion - the definitive verdict once the process is
+        // provably gone.
+        if resident.descriptor.lock().await.stop_requested_at.is_some() {
+            // The registering process is the identity the stop must
+            // retire: the persisted descriptor still carries the stopped
+            // worker's stale pid, so observing the registrant's live
+            // identity first keeps the retire pass's escalation - and the
+            // descriptor's death - tied to the process that actually
+            // holds the session (TS `adoptOrRecoverWorker` persists the
+            // observed start id after its authenticated connect).
+            // Without this, a replacement registrant's stop would retire
+            // the stale pid, conclude the replacement was gone, and
+            // orphan the live worker as an unadoptable lease holder.
+            {
+                let mut descriptor = resident.descriptor.lock().await;
+                if descriptor.pid != registration.pid {
+                    descriptor.pid = registration.pid;
+                }
+                if let Some(start_id) = crate::lease::get_process_start_id(registration.pid as u32)
+                {
+                    descriptor.process_start_id = Some(start_id);
+                }
+                let _ = crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor);
+            }
+            self.finish_tombstoned_stop(&resident, true).await;
+            return Err(anyhow!(
+                "session worker {} is stopping: the stop was forwarded; registration refused",
+                registration.active_session_id
+            ));
+        }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
         // The self-registered worker's session already exists: routed
@@ -3765,6 +3897,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
+        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3835,7 +3968,67 @@ impl Supervisor {
             }
         };
         let scope_current = scope.as_str() == Some("current");
-        let mut infos = crate::session_store::list_sessions(&dir);
+        // The catalog streams WHILE the scan runs (TS
+        // `listSessionsFromDir`'s per-file `onSession`/`onProgress`: the
+        // client's rows appear through the scan instead of after it). The
+        // frames ride the SAME per-connection channel the final response
+        // later travels, so the stream stays strictly ordered ahead of its
+        // own response; the fold runs on the blocking pool, so a grown
+        // store never head-of-lines a runtime worker (the #2723 class).
+        let stream_rows = stream.clone();
+        let scan_command_id = command_id.to_string();
+        let scan_active_session_id = active_session_id.as_ref().cloned();
+        let scan_cwd = cwd.clone();
+        let scan = tokio::task::spawn_blocking(move || {
+            let mut file_total = 0usize;
+            let infos = crate::session_scan::list_sessions_with(&dir, |index, total, info| {
+                file_total = total;
+                if scope_current && info.cwd != scan_cwd {
+                    // The row is out of scope, but the scan itself goes on.
+                    return true;
+                }
+                let row = saved_session_row(info);
+                let mut item = json!({
+                    "id": scan_command_id,
+                    "type": "session_list_item",
+                    "command": "list_saved_sessions",
+                    "session": row,
+                });
+                if let Some(active_session_id) = scan_active_session_id.as_deref() {
+                    item["activeSessionId"] = json!(active_session_id);
+                }
+                let mut progress = json!({
+                    "id": scan_command_id,
+                    "type": "session_list_progress",
+                    "command": "list_saved_sessions",
+                    "loaded": index + 1,
+                    "total": total,
+                });
+                if let Some(active_session_id) = scan_active_session_id.as_deref() {
+                    progress["activeSessionId"] = json!(active_session_id);
+                }
+                // A failed send is the connection loop's death notice (its
+                // receiver is gone): the remaining folds serve nobody, so
+                // the callback stops the scan (the response travels the
+                // same dead channel and drops with it).
+                stream_rows.send((vec![item, progress], false)).is_ok()
+            });
+            (infos, file_total)
+        });
+        let (mut infos, file_total) = match scan.await {
+            Ok(scanned) => scanned,
+            Err(error) => {
+                return vec![response_line(&response_failure(
+                    Some(command_id),
+                    "list_saved_sessions",
+                    &format!("the saved-session scan failed: {error}"),
+                    None,
+                ))];
+            }
+        };
+        // The current-cwd scope keeps only the session's own rows in the
+        // terminal array (the stream above already skipped the others'
+        // frames): the response is the authoritative catalog.
         if scope_current {
             infos.retain(|info| info.cwd == cwd);
         }
@@ -3880,11 +4073,27 @@ impl Supervisor {
                 Vec::new()
             }
         };
-        let mut merged = passive
+        // The passive ledger children stream too (TS
+        // `withPassiveRlmDescendantInfos`'s `onSession`): items only, no
+        // progress - the saved phase above owns the progress counts.
+        let mut merged: Vec<_> = passive
             .iter()
             .map(crate::rlm_roster::passive_child_info)
             .filter(|info| !scope_current || info.cwd == cwd)
-            .collect::<Vec<_>>();
+            .collect();
+        for info in &merged {
+            let row = saved_session_row(info);
+            let mut item = json!({
+                "id": command_id,
+                "type": "session_list_item",
+                "command": "list_saved_sessions",
+                "session": row,
+            });
+            if let Some(active_session_id) = active_session_id {
+                item["activeSessionId"] = json!(active_session_id);
+            }
+            let _ = stream.send((vec![item], false));
+        }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
         // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
@@ -3907,32 +4116,30 @@ impl Supervisor {
                 ));
             }
         }
-        let total = infos.len();
-        let mut lines = Vec::new();
-        for (index, info) in infos.iter().enumerate() {
-            let row = saved_session_row(info);
-            let mut item = json!({
-                "id": command_id,
-                "type": "session_list_item",
-                "command": "list_saved_sessions",
-                "session": row,
-            });
-            if let Some(active_session_id) = active_session_id {
-                item["activeSessionId"] = json!(active_session_id);
-            }
-            lines.push(item);
-            let mut progress = json!({
+        // The scan's completion marker: the per-file progress counts
+        // DIRECTORY entries, while the rows only stream for valid files,
+        // so the last per-row progress can land short of the total when
+        // an invalid file yields no row (TS's onProgress counts every
+        // file, valid or not, so its stream always reaches its total).
+        // One final frame names the scan's end exactly; a consumer
+        // waiting for `loaded == total` observes completion.
+        if file_total > 0 {
+            let mut completion = json!({
                 "id": command_id,
                 "type": "session_list_progress",
                 "command": "list_saved_sessions",
-                "loaded": index + 1,
-                "total": total,
+                "loaded": file_total,
+                "total": file_total,
             });
             if let Some(active_session_id) = active_session_id {
-                progress["activeSessionId"] = json!(active_session_id);
+                completion["activeSessionId"] = json!(active_session_id);
             }
-            lines.push(progress);
+            let _ = stream.send((vec![completion], false));
         }
+        // The streamed rows already reached the client through the scan
+        // (and the passive merge above); the terminal response is the
+        // authoritative array (the scan never re-orders after streaming).
+        let mut lines = Vec::new();
         let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
         lines.push(response_line(&response_success(
             Some(command_id),
@@ -4761,7 +4968,19 @@ impl Supervisor {
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
                     if response.success {
-                        self.stop_worker(&resident).await;
+                        // The kill route's own tombstone already persisted
+                        // before the forward, so the stop's durable intent
+                        // stands even when this pass fails; a failure is
+                        // observable (logged) instead of silently
+                        // skipping the retire/registry/passivation tail —
+                        // the boot's tombstoned-stop finalization owns
+                        // whatever this pass could not finish.
+                        if let Err(error) = self.stop_worker(&resident).await {
+                            self.log_line(&format!(
+                                "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
+                                resident.worker_id
+                            ));
+                        }
                         // TS `stopWorkerUntracked`'s archived-stop finalize
                         // (the plain kill's durable half): the killed
                         // session tree's scheduled jobs cancel durably and
@@ -4832,7 +5051,22 @@ impl Supervisor {
         }
     }
 
-    pub(crate) async fn stop_worker(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    pub(crate) async fn stop_worker(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> anyhow::Result<()> {
+        // The stop's durable intent persists BEFORE the worker is told (TS
+        // `stopWorkerUntracked(removeDescriptor)` ->
+        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or
+        // a worker that survives the escalation below, must never be
+        // adopted as healthy by a later boot — the tombstoned descriptor
+        // routes the boot through the stop-finalization path instead. The
+        // per-session stop never archives (the plain kill's earlier
+        // tombstone keeps its archive intent); a persist failure fails the
+        // stop before the shutdown is forwarded, exactly like TS throws
+        // for non-direct-child stops, so the worker's crash-recovery
+        // contract stays intact.
+        self.persist_stop_tombstone_stop(resident).await?;
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
@@ -4840,7 +5074,11 @@ impl Supervisor {
         let _ = self
             .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
             .await;
-        let _ = std::fs::remove_file(&resident.descriptor_path);
+        // The per-session stop shares the terminal-stop contract: the
+        // descriptor dies only with a provably-gone process, so a worker
+        // that missed the routed shutdown stays adoptable (or is
+        // escalated away) instead of becoming an invisible lease holder.
+        self.retire_worker_after_stop(resident).await;
         // TS `stopWorkerUntracked`: a client-owned (ephemeral) worker's
         // scheduled jobs die with the registration
         // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
@@ -4852,12 +5090,59 @@ impl Supervisor {
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
         // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
-        // settle in place (a subagent under a surviving root passivates
-        // and keeps its model/thinking/cwd; a tombstoned child, a queued
-        // child, an ephemeral worker's rows, and the top-level row
-        // itself are removed). No ledger reseed, no transcript read.
+        // settle in place (every owned non-ephemeral, non-queued row
+        // passivates and keeps its model/thinking/cwd, the top-level row
+        // included; a tombstoned child, a queued child, and an ephemeral
+        // worker's rows die with the stop). No ledger reseed, no
+        // transcript read.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
+        Ok(())
+    }
+
+    /// Delete one stopped worker's descriptor only after its process is
+    /// provably gone (TS `stopWorkerUntracked`'s contract; the shutdown
+    /// pass and the per-session stop share it). A worker that missed the
+    /// routed `shutdown` (a dead connection, a wedged socket, a flush
+    /// outlasting the route budget) gets the identity-gated
+    /// SIGTERM -> SIGKILL escalation; deleting the descriptor of a live
+    /// worker orphans it — nothing on any later daemon can adopt or reap
+    /// it through its identity, while it keeps holding its runtime
+    /// session lease, so every open of its session then refuses with
+    /// `Session is already active in <its id>`.
+    async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        let (pid, start_id) = {
+            let descriptor = resident.descriptor.lock().await;
+            (descriptor.pid as u32, descriptor.process_start_id.clone())
+        };
+        // An unobservable identity never receives the escalation's
+        // signals (a pid that cannot be proven ours stays untouched);
+        // a live process behind such a pid keeps its tombstoned
+        // descriptor too, exactly like a SIGKILL survivor - the next
+        // boot retries the stop. The unverifiable class covers BOTH a
+        // descriptor without a recorded id and a recorded id the
+        // platform cannot observe right now (the probe returns None
+        // while the process lives).
+        let alive_unverified = (start_id.is_none()
+            || crate::lease::get_process_start_id(pid).is_none())
+            && crate::lease::is_process_alive(pid).unwrap_or(false);
+        match crate::boot_reap::stop_process(pid, start_id).await {
+            crate::boot_reap::ReapOutcome::Survived => {
+                self.log_line(&format!(
+                    "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ if alive_unverified => {
+                self.log_line(&format!(
+                    "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ => {
+                let _ = std::fs::remove_file(&resident.descriptor_path);
+            }
+        }
     }
 
     /// Run the one terminal stop pass, whichever connection first reaches it.
@@ -4894,48 +5179,7 @@ impl Supervisor {
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
-            // The terminal stop deletes the descriptor ONLY after the
-            // worker's process is provably gone (TS `stopWorkerUntracked`'s
-            // contract). A worker that missed the routed shutdown (a dead
-            // connection, a wedged socket, a flush outlasting the route
-            // budget) gets the identity-gated SIGTERM -> SIGKILL
-            // escalation. Deleting the descriptor of a live worker
-            // orphans it: nothing on any later daemon can adopt or reap it
-            // through its identity, while it keeps holding its runtime
-            // session lease - every open of its session then refuses with
-            // `Session is already active in <its id>`.
-            let (pid, start_id) = {
-                let descriptor = resident.descriptor.lock().await;
-                (descriptor.pid as u32, descriptor.process_start_id.clone())
-            };
-            // An unobservable identity never receives the escalation's
-            // signals (a pid that cannot be proven ours stays untouched);
-            // a live process behind such a pid keeps its tombstoned
-            // descriptor too, exactly like a SIGKILL survivor - the next
-            // boot retries the stop. The unverifiable class covers BOTH a
-            // descriptor without a recorded id and a recorded id the
-            // platform cannot observe right now (the probe returns None
-            // while the process lives).
-            let alive_unverified = (start_id.is_none()
-                || crate::lease::get_process_start_id(pid).is_none())
-                && crate::lease::is_process_alive(pid).unwrap_or(false);
-            match crate::boot_reap::stop_process(pid, start_id).await {
-                crate::boot_reap::ReapOutcome::Survived => {
-                    self.log_line(&format!(
-                        "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ if alive_unverified => {
-                    self.log_line(&format!(
-                        "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ => {
-                    let _ = std::fs::remove_file(&resident.descriptor_path);
-                }
-            }
+            self.retire_worker_after_stop(&resident).await;
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit;
