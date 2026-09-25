@@ -113,6 +113,8 @@ function resolveAutonomousLimit(value: AutonomousLimitSetting | undefined): numb
 
 export type MermaidRenderingMode = "off" | "final" | "streaming";
 
+export type ChatDetail = "overview" | "details" | "all";
+
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 	mermaid?: MermaidRenderingMode; // default: "streaming"
@@ -253,6 +255,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "user-only"
+	chatDetail?: ChatDetail; // Default: "details"
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
@@ -1485,6 +1488,17 @@ export class SettingsManager {
 		this.globalSettings.markdown ??= {};
 		this.globalSettings.markdown.mermaid = mode;
 		this.markModified("markdown", "mermaid");
+		this.save();
+	}
+
+	getChatDetail(): ChatDetail {
+		const detail = this.settings.chatDetail;
+		return detail === "overview" || detail === "all" ? detail : "details";
+	}
+
+	setChatDetail(detail: ChatDetail): void {
+		this.globalSettings.chatDetail = detail;
+		this.markModified("chatDetail");
 		this.save();
 	}
 
