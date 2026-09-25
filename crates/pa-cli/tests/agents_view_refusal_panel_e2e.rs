@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::{SessionSelection, UiMode};
-use serde_json::json;
 
 struct Daemon {
     child: Child,
@@ -57,7 +56,10 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if socket.exists() {
-            return Daemon { child, socket };
+            return Daemon {
+                child,
+                socket: socket.to_path_buf(),
+            };
         }
         std::thread::sleep(Duration::from_millis(20));
     }

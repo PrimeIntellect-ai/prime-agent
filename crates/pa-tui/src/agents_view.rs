@@ -1151,10 +1151,22 @@ impl AgentsViewMode {
 
         // The notice panel (a multi-line refusal from the previous run)
         // takes its rows between the list and the hint line, so the list
-        // window shrinks while the full text stays visible.
-        let notice_panel = self.notice.as_ref().map(|notice| {
-            self.render_notice(notice, width, height.saturating_sub(lines.len() + 1))
-        });
+        // window shrinks while the full text stays visible. A budget that
+        // cannot hold the borders and one content row (a degenerate pane)
+        // falls back to the hint-line status with the notice's first line.
+        let budget = height.saturating_sub(lines.len() + 1);
+        let notice_panel = match self.notice.as_ref() {
+            Some(notice) if budget >= 4 => Some(self.render_notice(notice, width, budget)),
+            _ => None,
+        };
+        let status_fallback = notice_panel
+            .is_none()
+            .then(|| {
+                self.notice
+                    .as_deref()
+                    .and_then(|notice| notice.lines().next())
+            })
+            .flatten();
         let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
         let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
         lines.extend(self.render_list(width, list_rows));
@@ -1164,7 +1176,7 @@ impl AgentsViewMode {
         while lines.len() < height.saturating_sub(1) {
             lines.push(vec![]);
         }
-        lines.push(self.render_hints(width));
+        lines.push(self.render_hints(width, status_fallback));
         while lines.len() > height {
             lines.pop();
         }
@@ -1172,31 +1184,38 @@ impl AgentsViewMode {
     }
 
     /// The notice panel: the notice's own lines wrapped to the pane's
-    /// inner width inside a bordered box, with the dismissal hint on the
-    /// last content row. The content caps at the available rows; a
-    /// capped panel says so rather than silently cutting the refusal.
+    /// inner width inside a bordered box, with the dismissal row last. The
+    /// content fits the budget (the borders and the dismissal row are the
+    /// fixed three); an overflow names the cap instead of silently
+    /// cutting the refusal.
     fn render_notice(&self, notice: &str, width: usize, budget: usize) -> Vec<Line> {
         let theme = &self.theme;
-        let inner = width.saturating_sub(4).max(10);
+        let inner = width.saturating_sub(4).max(1);
         let mut content: Vec<Line> = Vec::new();
         for line in notice.split('\n') {
             if line.trim().is_empty() {
                 content.push(vec![]);
                 continue;
             }
-            for wrapped in crate::width::wrap_text(line, inner) {
-                content.push(wrapped);
-            }
+            content.extend(crate::width::wrap_text(line, inner));
         }
-        let cap = budget.saturating_sub(2).max(1);
+        // The fixed rows: the borders and the dismissal row. The notice's
+        // content fits what is left; an overflow names the cap (the marker
+        // wraps with the same width, so a narrow pane never overflows the
+        // border).
+        let cap = budget.saturating_sub(3).max(1);
         if content.len() > cap {
             content.truncate(cap.saturating_sub(1).max(1));
-            content.push(vec![crate::Span::styled(
-                "… the notice continues — a taller pane shows it whole".to_string(),
-                theme.fg_style(ThemeColor::Dim),
-            )]);
+            content.extend(crate::width::wrap_text(
+                "… the notice continues — a taller pane shows it whole",
+                inner,
+            ));
+            content.truncate(cap);
         }
-        let mut panel = Vec::with_capacity(content.len() + 2);
+        content.push(vec![crate::Span::styled(
+            "any key dismisses".to_string(),
+            theme.fg_style(ThemeColor::Dim),
+        )]);
         let border = |left: &str, right: &str| {
             let row = vec![
                 crate::Span::styled(left.to_string(), theme.fg_style(ThemeColor::Dim)),
@@ -1208,6 +1227,7 @@ impl AgentsViewMode {
             ];
             crate::width::pad_line(row, width)
         };
+        let mut panel = Vec::with_capacity(content.len() + 2);
         panel.push(border("┌", "┐"));
         for line in content {
             let mut row = vec![crate::Span::styled(
@@ -1216,9 +1236,7 @@ impl AgentsViewMode {
             )];
             row.extend(line);
             let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
-            row.push(crate::Span::raw(
-                " ".repeat(inner.saturating_sub(used).max(0)),
-            ));
+            row.push(crate::Span::raw(" ".repeat(width.saturating_sub(used + 2))));
             row.push(crate::Span::styled(
                 " │".to_string(),
                 theme.fg_style(ThemeColor::Dim),
@@ -1473,8 +1491,9 @@ impl AgentsViewMode {
         line
     }
 
-    /// The bottom hint/status line.
-    fn render_hints(&self, width: usize) -> Line {
+    /// The bottom hint/status line. `status_override` carries the
+    /// notice's first line when the degenerate pane skipped the panel.
+    fn render_hints(&self, width: usize, status_override: Option<&str>) -> Line {
         let theme = &self.theme;
         if self.exit_armed {
             // TS `renderHints`: the exit hint renders the effective
@@ -1489,7 +1508,7 @@ impl AgentsViewMode {
             };
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        if let Some(status) = &self.status {
+        if let Some(status) = status_override.or(self.status.as_deref()) {
             return truncate_line(vec![theme.fg(ThemeColor::Error, status.clone())], width);
         }
         // TS `renderHints`: every hint slot renders the effective binding
