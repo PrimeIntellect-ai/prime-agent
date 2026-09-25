@@ -125,26 +125,23 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     }
     let header = header?;
     // Mirrors `build_info`: newest message timestamp, then the header's
-    // creation timestamp, then the file's mtime - never scan time.
+    // creation timestamp, then the file's mtime - never scan time. Zero is
+    // a real epoch timestamp; only the message arm filters it (a missing
+    // entry timestamp stamps 0, not activity). `None` renders blank.
     let modified_ms = last_activity_ms
         .filter(|ms| *ms > 0)
         .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
         .or_else(|| {
-            fs::metadata(path)
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .map(|time| {
-                    time.duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_millis() as u64)
-                })
-        })
-        .filter(|ms| *ms > 0)
+            fs::metadata(path).ok().and_then(|meta| {
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as u64)
+            })
+        });
+    let modified = modified_ms
+        .map(crate::util::iso_from_unix_ms)
         .unwrap_or_default();
-    let modified = if modified_ms > 0 {
-        crate::util::iso_from_unix_ms(modified_ms)
-    } else {
-        String::new()
-    };
     Some(SessionInfo {
         path: path.to_path_buf(),
         id: header.id,
@@ -616,6 +613,48 @@ fn message_timestamps_still_win_over_the_header_fallback() {
         info.modified,
         crate::util::iso_from_unix_ms(1_790_110_001_000)
     );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// An impossible calendar date in the header (2026-02-31): the parser
+/// rejects it instead of normalizing it into March (TS `Date.parse`
+/// rejects it too), so the fold falls to the file's mtime.
+#[test]
+fn impossible_calendar_date_header_falls_back_to_the_file_mtime() {
+    let dir = test_dir();
+    let path = dir.join("feb-31.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"feb","timestamp":"2026-02-31T00:00:00.000Z","cwd":"/test"}),
+        ],
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_110_000, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.created, "2026-02-31T00:00:00.000Z");
+    assert_eq!(
+        info.modified,
+        crate::util::iso_from_unix_ms(1_790_110_000_000)
+    );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A real epoch mtime renders as the epoch date: a durable zero stays
+/// distinct from an unavailable value (blank), and neither is ever a
+/// fabricated scan-time age.
+#[test]
+fn epoch_zero_mtime_renders_the_epoch_not_blank() {
+    let dir = test_dir();
+    let path = dir.join("epoch.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"epoch","timestamp":"not-a-date","cwd":"/test"})],
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.modified, "1970-01-01T00:00:00.000Z");
     assert_fold_matches(&path);
     fs::remove_dir_all(dir).unwrap();
 }

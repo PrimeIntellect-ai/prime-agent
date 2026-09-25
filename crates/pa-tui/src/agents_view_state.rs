@@ -1111,13 +1111,15 @@ mod tests {
         let age = rows
             .iter()
             .find(|row| row.identity.contains("old-record"))
-            .map(|row| row.age.clone())
-            .unwrap_or_else(|| {
-                panic!(
-                    "no row for the old record, identities: {:?}",
-                    rows.iter().map(|row| &row.identity).collect::<Vec<_>>()
-                )
-            });
+            .map_or_else(
+                || {
+                    panic!(
+                        "no row for the old record, identities: {:?}",
+                        rows.iter().map(|row| &row.identity).collect::<Vec<_>>()
+                    )
+                },
+                |row| row.age.clone(),
+            );
         // `modified` first: the column reads the durable last-activity
         // value, not `created` - and a scan-time fabrication would read
         // "0s" here, not the record's own five-minute-old value.

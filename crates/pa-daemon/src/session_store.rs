@@ -1577,15 +1577,15 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut reader = std::io::BufReader::new(&mut file);
     let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
-    // `modified`, captured from the open file like TS captures it at readdir.
-    let stats_mtime_ms = file
-        .metadata()
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .map(|time| {
-            time.duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64)
-        });
+    // `modified`, captured from the open file like TS captures it at
+    // readdir. `None` keeps unavailable (unreadable, pre-epoch) metadata
+    // distinct from a real epoch timestamp.
+    let stats_mtime_ms = file.metadata().ok().and_then(|meta| {
+        meta.modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+    });
     let info = state.build_info(path, stats_mtime_ms, Some(&torn_tail))?;
     // A concurrent append/replacement must never certify stale metadata.
     // Records without message timestamps never certify either: their
@@ -1676,18 +1676,20 @@ impl SessionScanState {
         // timestamp, then the file's mtime — never scan time. The port's
         // `now()` fallback refreshed `modified` to the moment of every
         // re-enumeration for records without message timestamps, so
-        // long-old sessions read as minutes old in the agents view.
+        // long-old sessions read as minutes old in the agents view. A zero
+        // here is a real epoch timestamp (a 1970 header or mtime renders
+        // 1970-01-01, like TS `toISOString`); only the message-timestamp
+        // arm filters zero, because the append path stamps a missing
+        // entry timestamp as 0, not activity. `None` — undatable header,
+        // unavailable mtime — renders blank, never a fabricated age.
         let modified_ms = acc
             .last_activity_ms
             .filter(|ms| *ms > 0)
             .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
-            .or(stats_mtime_ms.filter(|ms| *ms > 0))
+            .or(stats_mtime_ms);
+        let modified = modified_ms
+            .map(crate::util::iso_from_unix_ms)
             .unwrap_or_default();
-        let modified = if modified_ms > 0 {
-            crate::util::iso_from_unix_ms(modified_ms)
-        } else {
-            String::new()
-        };
         Some(SessionInfo {
             path: path.to_path_buf(),
             id: header.id.clone(),
