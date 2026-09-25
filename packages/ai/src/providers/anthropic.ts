@@ -11,6 +11,7 @@ import {
 	getAnthropicCacheWriteCost,
 	hasStandardAnthropicCachePricing,
 } from "../cache-pricing.js";
+import { resolveCacheRetention } from "../cache-retention.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
@@ -51,20 +52,6 @@ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copi
 import { withOpenCodeHeaders } from "./opencode-headers.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
