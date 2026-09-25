@@ -1892,18 +1892,14 @@ mod tests {
         options.agents_view_requested = true;
         assert!(
             should_open_agents_view(
-                &options,
-                /*onboarding_pending*/ false,
-                /*continue_view*/ false,
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
             ),
             "an explicit agents request still opens the view"
         );
         options.session.resume_bare = true;
         assert!(
             should_open_agents_view(
-                &options,
-                /*onboarding_pending*/ false,
-                /*continue_view*/ false,
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
             ),
             "a bare --resume still opens the view"
         );
@@ -1911,17 +1907,13 @@ mod tests {
         options.session.fork = Some("source".to_string());
         assert!(
             !should_open_agents_view(
-                &options,
-                /*onboarding_pending*/ false,
-                /*continue_view*/ false,
+                &options, /*onboarding_pending*/ false, /*continue_view*/ false,
             ),
             "a fork opens its target, never the agents view"
         );
         assert!(
             should_open_agents_view(
-                &options,
-                /*onboarding_pending*/ false,
-                /*continue_view*/ true,
+                &options, /*onboarding_pending*/ false, /*continue_view*/ true,
             ),
             "a --continue with a saved candidate still opens the view"
         );
