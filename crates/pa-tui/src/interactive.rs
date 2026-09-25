@@ -579,7 +579,6 @@ async fn run_onboarding_phase(
     session: &mut SessionUi,
     view: &mut AgentView,
     drive: &mut PaneDrive<'_>,
-    model_catalog: &[pa_types::ai::Model],
 ) -> Result<bool> {
     // One-shot: the startup gate read the marker once to mount this task,
     // but the agents-view flow re-runs the phase for every session it
@@ -588,19 +587,20 @@ async fn run_onboarding_phase(
     if task.sink.onboarding_shown() {
         return Ok(false);
     }
-    // A home that already carries a trace-sharing choice (a provisioned or
-    // copied-config home, or a `/traces` change made before the flow
-    // completed) never sees the question: the standing choice stands and
-    // the flow completes silently. The question below is the first-run
-    // step for a fresh home only — asked exactly once, then the marker
-    // gates every later run.
-    if task.sink.agent_traces_choice_written() {
-        if let Err(error) = task.sink.mark_onboarding_complete() {
-            warn_onboarding_persist_failure(session, view, &error);
-        }
-        return Ok(false);
-    }
     if (task.model_ready)() {
+        // The ready branch's standing-choice gate (the operator ruling): a
+        // home that already carries a trace-sharing choice (a provisioned
+        // or copied-config home, or a `/traces` change made before the
+        // flow completed) never sees the question — the standing choice
+        // stands and the flow completes silently. The question below is
+        // the first-run step for a fresh home only — asked exactly once,
+        // then the marker gates every later run.
+        if task.sink.agent_traces_choice_written() {
+            if let Err(error) = task.sink.mark_onboarding_complete() {
+                warn_onboarding_persist_failure(session, view, &error);
+            }
+            return Ok(false);
+        }
         // The model-ready branch (TS `runOnboardingFlow`'s ready case):
         // the immediate splash mounts the trace question alone.
         let screen = crate::onboarding::OnboardingScreen::new();
@@ -726,27 +726,20 @@ async fn run_onboarding_phase(
     }
 
     // The default-model apply (TS `prepareForModelSelectionAfterLogin`):
-    // only a home with no current model picks the Prime default.
+    // only a home with no current model picks the Prime default. The
+    // daemon resolves the model against its own registry — read fresh at
+    // the switch, so the just-stored credential is what makes GLM 5.3
+    // available (the client's startup snapshot predates the sign-in and
+    // never carries it). A resolution failure surfaces as the switch's
+    // error row and the flow still completes.
     if task.current_model.is_none() {
-        let default_id = crate::provider_auth::PRIME_INFERENCE_DEFAULT_MODEL_ID;
-        let found = model_catalog.iter().any(|model| {
-            model.provider == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                && model.id == default_id
-        });
-        if found {
-            session
-                .apply_model_selection(
-                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
-                    default_id,
-                    view,
-                )
-                .await;
-        } else {
-            session.error_row(
-                "Prime Inference login succeeded, but the default GLM 5.3 model is unavailable.",
+        session
+            .apply_model_selection(
+                crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                crate::provider_auth::PRIME_INFERENCE_DEFAULT_MODEL_ID,
                 view,
-            );
-        }
+            )
+            .await;
     }
 
     // The connect-more-providers picker (TS `askOnboardingProviders`):
@@ -902,31 +895,37 @@ async fn run_onboarding_phase(
     }
 
     // The trace question (TS `askOnboardingTraceOptIn`), the flow's last
-    // step — the merged question surface.
-    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Question(
-        crate::onboarding_choice::OnboardingChoice::new(
-            crate::onboarding::trace_question_options(),
-            None,
-            crate::onboarding::trace_question_config(),
-        ),
-    ));
-    let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
-    match outcome {
-        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
-        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
-            // `Share` opts in; `Not now` keeps traces off. A cancel
-            // writes no answer, but the flow still completed.
-            if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
-                warn_onboarding_persist_failure(session, view, &error);
+    // step — the merged question surface. A home that already carries a
+    // standing choice skips it (the operator ruling: the choice stands)
+    // while the flow still completes below — an aborted retry (the model
+    // still not ready) leaves the marker unset, so the next launch runs
+    // the sign-in again without re-asking.
+    if !task.sink.agent_traces_choice_written() {
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Question(
+            crate::onboarding_choice::OnboardingChoice::new(
+                crate::onboarding::trace_question_options(),
+                None,
+                crate::onboarding::trace_question_config(),
+            ),
+        ));
+        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        match outcome {
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
+                // `Share` opts in; `Not now` keeps traces off. A cancel
+                // writes no answer, but the flow still completed.
+                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                    warn_onboarding_persist_failure(session, view, &error);
+                }
             }
-        }
-        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
-        PaneOutcome::Decision(
-            crate::onboarding::OnboardingDecision::Begin
-            | crate::onboarding::OnboardingDecision::Pick(_),
-        )
-        | PaneOutcome::Flow(_) => {
-            unreachable!("the question panel yields Selected or Cancelled only")
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Begin
+                | crate::onboarding::OnboardingDecision::Pick(_),
+            )
+            | PaneOutcome::Flow(_) => {
+                unreachable!("the question panel yields Selected or Cancelled only")
+            }
         }
     }
     // TS `runStartupOnboarding`: only a completed flow whose model is
@@ -1430,14 +1429,8 @@ async fn run_interactive_surface(
             keybindings: view.editor.keybindings().clone(),
             auth_panel_rx: &mut auth_panel_rx,
         };
-        let exit_requested = run_onboarding_phase(
-            &task,
-            &mut session,
-            &mut view,
-            &mut drive,
-            &options.model_catalog,
-        )
-        .await?;
+        let exit_requested =
+            run_onboarding_phase(&task, &mut session, &mut view, &mut drive).await?;
         if exit_requested {
             // The exit deadline is armed from the moment the run decides to
             // leave: no cleanup below may block past it.

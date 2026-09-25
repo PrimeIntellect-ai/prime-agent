@@ -892,18 +892,6 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
     .expect("script.json");
 
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    // The fallback-model apply reads the catalog snapshot (the same seam
-    // the composition root injects); the daemon resolves the same model
-    // from its own fresh registry.
-    let glm: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
-        "id": "z-ai/glm-5.3", "name": "GLM 5.3", "api": "openai-completions",
-        "provider": "prime-inference", "baseUrl": "https://inference.example/v1",
-        "reasoning": true, "input": ["text"],
-        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-        "contextWindow": 128_000, "maxTokens": 8192
-    }))
-    .expect("catalog entry");
-    options.model_catalog = vec![glm];
     // The readiness probe mirrors the flow's contract: the home is not
     // ready until the sign-in stores its credential (the model-ready
     // gate at flow end).

@@ -81,7 +81,12 @@ impl StartupModelProbe {
     /// The completion telemetry's category columns (TS
     /// `captureOnboardingCompleted`): the resolved startup model's
     /// provider category and the credential source's auth category.
-    /// Best-effort — a resolution failure reports the unknown columns.
+    /// The storage's status candidates cover stored, environment, and
+    /// stale credentials; a model the storage cannot explain is ready
+    /// through a models.json provider key (the registry's request-auth
+    /// resolves it) or the `--api-key` flag (a runtime key the daemon
+    /// installs — the flag is the client's evidence). Best-effort — a
+    /// resolution failure reports the unknown columns.
     fn telemetry_categories(&self) -> (String, String) {
         use pa_core::auth::AuthSource;
         let Some(model) = self.resolve().0 else {
@@ -107,7 +112,19 @@ impl StartupModelProbe {
             }
             Some(AuthSource::Fallback) => "fallback".to_string(),
             Some(AuthSource::Stale) => "stale".to_string(),
-            None => "none".to_string(),
+            None => {
+                let mut registry = pa_core::models::ModelRegistry::create(
+                    auth,
+                    self.agent_dir.join("models.json"),
+                );
+                if registry.get_api_key_and_headers(&model, None).ok {
+                    "models_json".to_string()
+                } else if self.api_key.is_some() {
+                    "runtime_api_key".to_string()
+                } else {
+                    "none".to_string()
+                }
+            }
         };
         (auth_category, provider_category)
     }

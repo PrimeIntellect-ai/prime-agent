@@ -342,12 +342,16 @@ parity restored on the default), and the question is first-run-only: a
 fresh home (no trace choice written) is asked exactly once — the opt-in
 moment — while a home that already carries a standing choice (a
 provisioned/copied config, or a `/traces` change) never sees the
-question: the standing choice stands and the flow completes silently
-(TS #2368 asks such homes; deliberately not ported). Product divergences
-from TS: the browser OAuth challenge stays unported (the Prime login's
-paste prompt is the sign-in entry, same as the `/login` panel), and the
-default-model apply resolves against the composition root's catalog
-snapshot (TS re-resolves against the daemon's live available models).
+question: the standing choice stands and the flow still completes
+(TS #2368 asks such homes; deliberately not ported — and in the
+not-ready branch the standing choice skips only the question: the
+sign-in still runs, so an aborted flow's next-launch retry is never
+swallowed by the standing choice). Product divergences from TS: the
+browser OAuth challenge stays unported (the Prime login's paste prompt
+is the sign-in entry, same as the `/login` panel), and the
+default-model apply resolves through the daemon's `set_model` (its
+registry reads the just-stored credential; TS re-resolves client-side
+against the live available models).
 The completion flag gates both the startup task mount and the phase
 itself (the agents-view flow re-runs the phase per session with the same
 task, so the phase re-reads the persisted marker and never re-shows);

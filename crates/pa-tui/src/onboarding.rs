@@ -153,11 +153,6 @@ impl OnboardingScreen {
         self.panel = Some(panel);
     }
 
-    /// TS `setPanel(undefined)`: pop the mounted panel.
-    pub fn unmount_panel(&mut self) {
-        self.panel = None;
-    }
-
     /// One animation step (TS `ANIMATION_INTERVAL_MS` tick).
     pub fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
