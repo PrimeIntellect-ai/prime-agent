@@ -4749,19 +4749,14 @@ the holder exits.";
         });
         mode.roster
             .push(roster_entry("gc", "inactive", unattachable));
-        mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
-        mode.rebuild_rows();
-        // The grandchild is roster-inactive, so it rides the child's
-        // inactive line (the operator's split), not the running line.
-        // The child row's identity comes from the roster-qualified id.
-        let child_identity = mode
-            .rows
-            .iter()
-            .find(|row| row.title == "worker one")
-            .expect("child row renders")
-            .identity
-            .clone();
-        mode.expanded_inactive_parents.insert(child_identity);
+        // The grandchild is roster-inactive under the running child: the
+        // parent's inactive line flattens through the child and renders
+        // it (the running expansion never expands a child's inactive
+        // line — the purity rule keeps the running view's rows
+        // running-only, so the child's own inactive line stays shut
+        // there and the inactive path is the one that reaches it).
+        mode.expanded_inactive_parents
+            .insert("file:/x/p.jsonl".to_string());
         mode.rebuild_rows();
         let grandchild = mode
             .rows
