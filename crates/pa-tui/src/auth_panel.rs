@@ -149,7 +149,7 @@ impl FlowCancel {
         self.flag.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The bare flag's storage (the `\#2790` panel consumers load it
+    /// The bare flag's storage (the #2790 panel consumers load it
     /// directly; every `mark` is visible through it).
     pub(crate) fn flag_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.flag)
@@ -211,7 +211,7 @@ impl AuthPanelHandle {
         self.cancel.clone()
     }
 
-    /// The bare cancel flag (the `\#2790` codex login's shape): the
+    /// The bare cancel flag (the #2790 codex login's shape): the
     /// same storage the [`FlowCancel`] arms — loads observe every mark.
     pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.cancel.flag_arc()

@@ -287,9 +287,7 @@ impl ProviderPicker {
             // check, and the padding all washed.
             let mut washed_name = Span::styled(
                 name,
-                theme
-                    .fg_style(label_color)
-                    .add_modifier(Modifier::BOLD),
+                theme.fg_style(label_color).add_modifier(Modifier::BOLD),
             );
             washed_name.style = washed_name.style.bg(wash);
             line.push(washed_name);
@@ -578,7 +576,8 @@ mod tests {
         let rows = picker.render(&theme(), 60);
         let text: Vec<String> = rows.iter().map(row_text).collect();
         assert!(
-            text.iter().any(|row| row.contains("Anthropic · not available")),
+            text.iter()
+                .any(|row| row.contains("Anthropic · not available")),
             "the unavailable row carries the inline annotation: {text:?}"
         );
         // Enter on the unavailable row keeps the picker mounted.
