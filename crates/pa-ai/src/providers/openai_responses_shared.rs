@@ -1,4 +1,4 @@
-//! OpenAI Responses API message and tool conversion.
+//! `OpenAI` Responses API message and tool conversion.
 //!
 //! Port of the conversion half of
 //! `packages/ai/src/providers/openai-responses-shared.ts`: reasoning item

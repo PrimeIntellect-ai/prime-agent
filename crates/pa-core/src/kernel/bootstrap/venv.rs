@@ -565,6 +565,11 @@ fn resolve_runtime_source_dir() -> Option<PathBuf> {
 /// `pyproject.toml`, so any runtime change invalidates an existing venv.
 /// Falls back to the bare package name when the runtime resolves to a
 /// registry install (no local source).
+///
+/// # Panics
+///
+/// Panics when hashing the resolved local runtime source fails (unreadable
+/// or missing runtime files).
 pub fn resolve_runtime_identity() -> String {
     let Some(source_dir) = resolve_runtime_source_dir() else {
         return RUNTIME_REQUIREMENT.to_string();

@@ -140,7 +140,7 @@ impl Inner {
     }
 
     /// Tear the child down: stop timers, fail pending work, close pipes, kill
-    /// the process, and reap any bash() process groups it journaled.
+    /// the process, and reap any `bash()` process groups it journaled.
     pub(crate) fn cleanup_resources(&self, kill_signal: Signal) {
         {
             let mut g = lock(&self.guarded);

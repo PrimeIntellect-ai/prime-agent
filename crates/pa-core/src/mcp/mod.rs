@@ -8,6 +8,7 @@ mod catalog_schema;
 mod catalog_status_views;
 mod catalog_views;
 mod connection_store;
+mod fetch_lane;
 mod local_catalog;
 mod login;
 mod manager_catalog;
@@ -23,6 +24,7 @@ mod url_checks;
 pub use catalog_views::{
     mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
 };
+pub use fetch_lane::{spawn_hourly_plugins_refresh, startup_plugins_refresh};
 pub use login::{wire_begin_login, McpLoginContext, McpOAuth};
 pub use manager_catalog::{
     install_static_token, remove_mcp_connection, McpConnectionHandles, PasteInstallInputs,
@@ -374,6 +376,11 @@ impl McpManager {
         self.resolve_integrations_over_catalog();
     }
 
+    /// Whether ACP server configs owned by `owner_id` may be released.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ACP owner mutex is poisoned.
     pub fn can_release_acp_servers(&self, owner_id: &str) -> bool {
         self.acp_owner_id
             .lock()
@@ -382,6 +389,18 @@ impl McpManager {
             .is_none_or(|owner| owner == owner_id)
     }
 
+    /// Replace the ACP-supplied session servers, fenced by owner. Returns
+    /// `false` when nothing changed (or when clearing servers the owner does
+    /// not own), and `true` after a replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `owner_id` is empty, another client owns the
+    /// ACP server configuration, or two servers share a name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ACP owner or ACP server mutexes are poisoned.
     pub fn replace_acp_servers(
         &self,
         servers: &[AcpMcpServerConfig],
@@ -540,6 +559,11 @@ impl McpManager {
     }
 
     /// Register the `mcp.*` host-request handlers onto a handler map.
+    ///
+    /// # Panics
+    ///
+    /// The registered `mcp.refresh`, `mcp.config`, and `mcp.begin_login`
+    /// handlers panic at request time if the ACP server mutex is poisoned.
     pub fn register_host_handlers(&self, handlers: &mut HostRequestHandlers) {
         let auth = self.auth_storage.clone();
         let acp_servers = self.acp_servers.clone();
@@ -673,6 +697,10 @@ impl McpManager {
     }
 
     /// Session-scoped servers supplied by the active ACP client.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ACP server mutex is poisoned.
     pub fn get_acp_servers(&self) -> Vec<AcpMcpServerConfig> {
         self.acp_servers.lock().unwrap().values().cloned().collect()
     }

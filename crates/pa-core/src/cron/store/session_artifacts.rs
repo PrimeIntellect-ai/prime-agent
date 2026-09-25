@@ -2,7 +2,7 @@
 //! artifact files, recovery of a session's jobs from its artifact partition,
 //! and the partitioned merge-write that keeps each artifact file holding only
 //! its session's jobs and dispatches.
-//! Section of the port of the AgentCronJobStore half of core/cron-jobs.ts.
+//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

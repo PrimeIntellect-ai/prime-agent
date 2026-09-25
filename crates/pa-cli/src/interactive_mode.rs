@@ -1055,6 +1055,12 @@ async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
 /// Ensure a current daemon is listening on `socket_path`, spawning this
 /// executable in `--mode daemon` when it is not (TS `ensureDaemonRunning`:
 /// probe; a stale idle daemon is shut down, a busy one refuses replacement).
+///
+/// # Errors
+/// Returns an error when this process's executable path cannot be
+/// resolved, when a stale daemon has active work and refuses replacement,
+/// when the supervisor process cannot be spawned, or when no current
+/// daemon starts before the startup timeout.
 pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Result<()> {
     match probe_daemon(socket_path).await {
         DaemonProbe::Current => return Ok(()),
@@ -1067,6 +1073,10 @@ pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Resu
 
 /// [`ensure_daemon_running`] with an explicit supervisor executable (the
 /// product path uses this process's own binary, TS parity).
+///
+/// # Errors
+/// Returns an error when the supervisor process cannot be spawned or when
+/// no current daemon starts before the startup timeout.
 pub async fn ensure_daemon_running_with(
     exe: &Path,
     socket_path: &Path,

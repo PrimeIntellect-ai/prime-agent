@@ -10,6 +10,12 @@ use ratatui::style::{Color, Modifier};
 /// then the shared scanner (`escape_len`) handles the wider CSI grammar,
 /// control strings, and malformed sequences. An ESC immediately before a
 /// line separator stays (TS strips neither half of `ESC \n`).
+///
+/// # Panics
+///
+/// Cannot panic for any valid `str`: the internal `expect`s guard
+/// byte-scan invariants (every visited index starts a char; the
+/// two-char strip only runs once the following char exists).
 pub fn strip_ansi(text: &str) -> String {
     if !text.contains('\u{1b}') {
         return text.to_string();

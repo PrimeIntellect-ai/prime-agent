@@ -174,6 +174,11 @@ pub fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
 /// `process.kill(0, "SIGTSTP")`): with the default disposition every
 /// process in the group stops, and execution continues after SIGCONT.
 /// Errors when the signal could not be delivered.
+///
+/// # Errors
+///
+/// Returns an error when delivering `SIGTSTP` to the process group fails;
+/// the error carries the last OS error.
 #[cfg(unix)]
 pub fn stop_own_process_group() -> anyhow::Result<()> {
     // SAFETY: delivers SIGTSTP to the caller's own process group; the
@@ -200,6 +205,11 @@ extern "C" fn swallow_sigint(_signal: libc::c_int) {}
 /// Ignore SIGINT for the suspended window (TS installs a no-op `SIGINT`
 /// listener for the same reason: Ctrl+C at the shell must not kill the
 /// backgrounded process). Errors when the disposition could not be set.
+///
+/// # Errors
+///
+/// Returns an error when setting the no-op `SIGINT` handler fails; the
+/// error carries the last OS error.
 #[cfg(unix)]
 pub fn ignore_sigint_for_suspend() -> anyhow::Result<()> {
     // SAFETY: swaps only the SIGINT disposition to the no-op handler.
@@ -218,6 +228,11 @@ pub fn ignore_sigint_for_suspend() -> anyhow::Result<()> {
 /// Restore SIGINT's default disposition on the SIGCONT resume (TS removes
 /// its no-op listener before restarting the TUI). Errors when the
 /// disposition could not be set.
+///
+/// # Errors
+///
+/// Returns an error when restoring the default `SIGINT` disposition
+/// fails; the error carries the last OS error.
 #[cfg(unix)]
 pub fn restore_default_sigint() -> anyhow::Result<()> {
     // SAFETY: swaps only the SIGINT disposition back to SIG_DFL.
@@ -254,6 +269,12 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
 /// semantics: the `kill(pid, 0)` existence probe (EPERM counts as alive -
 /// the pid exists but is not ours to signal) plus the portable `ps`
 /// zombie demotion.
+///
+/// # Errors
+///
+/// Returns an error when the `kill(pid, 0)` probe fails with an error
+/// other than `ESRCH` (dead) or `EPERM` (alive), or when the `ps` zombie
+/// demotion cannot run.
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     if pid == 0 {
@@ -454,7 +475,7 @@ mod liveness_tests {
         assert!(is_process_alive(std::process::id()).expect("liveness probe"));
     }
 
-    /// A pid beyond pid_t's range cannot name a process - and must not
+    /// A pid beyond `pid_t`'s range cannot name a process - and must not
     /// wrap into kill's negative "every process" argument.
     #[test]
     fn a_pid_beyond_the_pidt_range_is_dead() {

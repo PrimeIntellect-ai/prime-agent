@@ -224,7 +224,7 @@ pub struct AgentTracesSettings {
 pub struct TelemetrySettings {
     pub enabled: Option<bool>,
     pub notice_shown: Option<bool>,
-    /// Self-hosted PostHog capture configuration. Nothing is compiled in;
+    /// Self-hosted `PostHog` capture configuration. Nothing is compiled in;
     /// an empty configuration resolves to the no-op sink.
     pub posthog: Option<PostHogSettings>,
     /// Local JSONL mirror at `<agentDir>/telemetry.jsonl` (default on:

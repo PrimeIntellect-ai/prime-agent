@@ -58,6 +58,10 @@ impl AgentSession {
     /// arms the compact-trigger review. Sessions without the refine
     /// surface (TS `_autoRefineAllowedForSession`: depth 0 with a local
     /// harness state dir) never arm — the trigger would never run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn mark_compact_auto_refine_pending(&self) {
         if !self.auto_refine_allowed() {
             return;
@@ -70,6 +74,10 @@ impl AgentSession {
 
     /// Whether a compaction armed the trigger (TS `_compactAutoRefinePending`):
     /// the scheduling surfaces' cheap pre-check before resolving a model.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn compact_auto_refine_pending(&self) -> bool {
         self.compact_auto_refine
             .lock()
@@ -79,6 +87,10 @@ impl AgentSession {
 
     /// TS `_discardPendingAutoRefine`: drop the armed trigger outright
     /// (a branch move invalidates the conversation the review would read).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn discard_compact_auto_refine(&self) {
         self.compact_auto_refine
             .lock()
@@ -86,8 +98,12 @@ impl AgentSession {
             .pending = false;
     }
 
-    /// TS `_assistantTurnsSinceAutoRefine`'s message_end increment: one
+    /// TS `_assistantTurnsSinceAutoRefine`'s `message_end` increment: one
     /// settled non-error assistant turn appended since the last review.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn note_settled_turn_since_auto_refine_review(&self) {
         self.compact_auto_refine
             .lock()
@@ -102,6 +118,14 @@ impl AgentSession {
     /// reviewer declining. `Ok(Some(result))` ran the refinement;
     /// `Err` is a failed review or refinement run (the cooldown is
     /// stamped either way).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a failed auto-refine review or refinement run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub async fn consume_compact_auto_refine(
         &self,
         model: &Model,

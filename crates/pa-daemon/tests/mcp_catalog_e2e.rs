@@ -67,7 +67,12 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
-        .env_remove("PI_OFFLINE")
+        // The fetch lane is live in the supervisor now (startup + hourly
+        // refreshes of this very cache file): PI_OFFLINE keeps those off
+        // the network so a live fetch can never race the cache state this
+        // test arranges on disk (the same posture as the model-catalog
+        // e2e; the daemon serves the arranged cache directly).
+        .env("PI_OFFLINE", "1")
         // The tests own catalog availability through the agent dir alone;
         // a stray package dir's bundled snapshot must never leak in.
         .env_remove("PI_PACKAGE_DIR")

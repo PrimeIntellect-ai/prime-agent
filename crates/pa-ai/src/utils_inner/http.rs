@@ -19,7 +19,7 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// The HTTP/1.1 client every provider shares (the transport all TS SDK
-/// clients but bedrock's default NodeHttp2Handler speak). Pinned with
+/// clients but bedrock's default `NodeHttp2Handler` speak). Pinned with
 /// `http1_only()` so that enabling the reqwest `http2` feature (bedrock)
 /// cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {

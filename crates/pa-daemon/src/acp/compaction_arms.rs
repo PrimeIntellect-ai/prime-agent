@@ -3,7 +3,7 @@
 //! and the threshold arm) plus `_runPreTurnCompaction` and
 //! `_consumePendingRequestedRefine`, ported onto the ACP transport.
 //!
-//! TS ground truth: the arms live inside the AgentSession turn loop
+//! TS ground truth: the arms live inside the `AgentSession` turn loop
 //! (agent-session.ts), so every transport that drives the session —
 //! interactive, daemon, RPC, and ACP — runs them. TS acp-mode.ts relies on
 //! it (its turn-boundary keying documents that auto-compaction rebuilds
@@ -12,7 +12,7 @@
 //! in-process ACP transport drives the pa-core session engine directly,
 //! so the arms run here, at its turn boundaries; the daemon-attached ACP
 //! transport already hosts the worker turn loop with its arms
-//! (agent_engine.rs / auto_compaction.rs / overflow_compaction.rs).
+//! (`agent_engine.rs` / `auto_compaction.rs` / `overflow_compaction.rs`).
 //!
 //! Wire shapes: every arm outcome publishes the ACP `compaction_end`
 //! mapping — a ran compaction carries `tokensBefore`/`summary`, every
@@ -668,8 +668,8 @@ mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 

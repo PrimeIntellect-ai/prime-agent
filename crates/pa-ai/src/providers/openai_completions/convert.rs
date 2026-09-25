@@ -1,4 +1,4 @@
-//! OpenAI Completions conversion: reasoning-details signatures, messages, and tools.
+//! `OpenAI` Completions conversion: reasoning-details signatures, messages, and tools.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`.
 
 use serde_json::{json, Map, Value};
@@ -483,9 +483,9 @@ pub(crate) fn parse_chunk_usage(
     usage
 }
 
-/// The user's real spend for an OpenRouter request, or `None` to keep the
-/// catalog estimate. `usage.cost` only carries what OpenRouter charged the
-/// account's credits: for BYOK requests that is just OpenRouter's fee, so
+/// The user's real spend for an `OpenRouter` request, or `None` to keep the
+/// catalog estimate. `usage.cost` only carries what `OpenRouter` charged the
+/// account's credits: for BYOK requests that is just `OpenRouter`'s fee, so
 /// real spend is the upstream provider's bill plus that fee. A cost of 0 can
 /// mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so
 /// it keeps the catalog estimate.

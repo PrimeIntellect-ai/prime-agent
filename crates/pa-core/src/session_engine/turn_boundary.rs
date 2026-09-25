@@ -503,6 +503,11 @@ fn compaction_request_skip_reason(
 /// the estimate; messages after it are added with the chars/4 heuristic.
 /// `None` when the context window is unknown; `tokens`/`percent` `None`
 /// right after a compaction without a usable post-compaction usage.
+///
+/// # Panics
+///
+/// The `expect` on the anchoring usage cannot fire: the index came from a
+/// search restricted to messages with a valid usage.
 pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Option<ContextUsage> {
     let context_window = context_window.filter(|window| *window > 0)?;
 

@@ -68,6 +68,11 @@ pub enum AutoRetryEvent {
 /// happen; `wait` sleeps one delay (returning `false` aborts the loop, like
 /// the TS abort controller). Returns the final assistant message — error or
 /// not — so the caller renders it like every other outcome.
+///
+/// # Errors
+///
+/// Returns the `attempt` future's error when a turn attempt fails, or the
+/// `emit` callback's error while observing retry events.
 pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     policy: &ProviderRetryPolicy,
     context_window: u64,

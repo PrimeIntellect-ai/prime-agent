@@ -340,7 +340,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
 }
 
 impl Harness {
-    /// Run one prompt turn and return the prompt_and_wait response.
+    /// Run one prompt turn and return the `prompt_and_wait` response.
     fn prompt(&mut self, id: &str, message: &str) -> Value {
         self.client.send_command(
             id,
@@ -379,7 +379,7 @@ impl Harness {
             .to_string()
     }
 
-    /// The persisted model_change pair.
+    /// The persisted `model_change` pair.
     fn persisted_model_change(&self) -> (String, String) {
         let entries = self.session_entries();
         let change = entries

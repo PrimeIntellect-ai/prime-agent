@@ -756,7 +756,7 @@ mod tests {
         (frames, sink)
     }
 
-    /// The goal frame kinds, in order (goal_update statuses and the
+    /// The goal frame kinds, in order (`goal_update` statuses and the
     /// session-action phases).
     fn frame_kinds(frames: &Frames) -> Vec<String> {
         frames
@@ -824,7 +824,7 @@ mod tests {
             .collect()
     }
 
-    /// Count the agent runs (agent_end events) a live subscription
+    /// Count the agent runs (`agent_end` events) a live subscription
     /// observes: the counter handle reads after the driver settles.
     async fn agent_run_counter(
         engine: &Arc<SessionEngine>,
@@ -1017,7 +1017,7 @@ mod tests {
     /// The `--goal` seed rides the first turn: the goal context row lands
     /// ahead of the user row (its slot still zero), and the seed itself
     /// never announces (the baseline swallows the construction state; the
-    /// first goal_update is the first turn's own accounting).
+    /// first `goal_update` is the first turn's own accounting).
     #[tokio::test]
     async fn seed_rides_the_first_turn_and_stays_silent() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1130,7 +1130,7 @@ mod tests {
 
     /// The natural continuation loop: an unbounded-budget goal mints one
     /// continuation context per settled turn INSIDE the one agent run (no
-    /// agent_start/agent_end between continuation turns), each mint
+    /// `agent_start/agent_end` between continuation turns), each mint
     /// publishing its continuationsUsed bump before the turn starts.
     #[tokio::test]
     async fn natural_loop_mints_continuations_inside_one_run() {
@@ -1183,8 +1183,8 @@ mod tests {
     }
 
     /// The budget-limit wrap-up steer: the crossing turn's usage flips the
-    /// goal to budget_limited (a goal_update plus the queued steering
-    /// preview between its message_end and turn_end), the run ends, and
+    /// goal to `budget_limited` (a `goal_update` plus the queued steering
+    /// preview between its `message_end` and `turn_end`), the run ends, and
     /// the steer drains as its own run (preparing/committing/running phase
     /// frames) before the queue empties.
     #[tokio::test]

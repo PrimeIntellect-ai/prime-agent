@@ -44,6 +44,13 @@ pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
 /// typed refusal — never a fallback — so both `rlm.spawn` and
 /// `rlm.create_session` refuse instead of landing a child on a model the
 /// daemon may not resolve to.
+///
+/// # Errors
+///
+/// Returns an error when the child model reference cannot be resolved
+/// (no model selected, or the reference matches no catalog model —
+/// the TS unavailable-model error), or when the resolved selector is
+/// outside the allowlist (the typed refusal).
 pub fn resolve_child_model(
     agent_dir: &Path,
     reference: Option<&str>,
@@ -112,6 +119,13 @@ fn resolve_child_model_unchecked(
 /// A requested thinking level must be supported by the resolved model (the
 /// TS spawn-time check). A model outside the local catalog (a scripted
 /// verification model) cannot be checked and passes.
+///
+/// # Errors
+///
+/// Returns an error when the resolved model's supported levels do not
+/// include the requested level (the message lists the supported levels);
+/// the unchecked cases — no level, an unsplit selector, an unknown level
+/// name, an out-of-catalog model — pass.
 pub fn assert_thinking_supported(
     agent_dir: &Path,
     level: Option<&str>,

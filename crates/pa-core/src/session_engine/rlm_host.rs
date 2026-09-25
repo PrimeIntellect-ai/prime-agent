@@ -4,7 +4,7 @@
 //! `rlm.collect`, `rlm.progress.note`, and `rlm.delete_subagent`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
-//! parses strict snake_case replies. Pure normalization lives in
+//! parses strict `snake_case` replies. Pure normalization lives in
 //! `kernel/rlm_runtime`; this module owns payload validation and the split
 //! between what pa-core decides locally (shape checks, model search, note
 //! throttling) and what the child-session host owns (spawn, roster, collect).
@@ -216,6 +216,11 @@ impl RlmSubagentHost for NoRlmChildren {
 }
 
 /// `collect` against an empty roster: every target is a miss.
+///
+/// # Errors
+///
+/// Returns an error naming the first requested target when any targets are
+/// requested; an empty target list collects to an empty result.
 pub fn no_children_collect(targets: Vec<String>) -> anyhow::Result<Vec<RlmChildResult>> {
     if let Some(target) = targets.first() {
         anyhow::bail!("No direct RLM child matches \"{target}\" in the current parent session");

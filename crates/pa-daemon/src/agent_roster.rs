@@ -14,7 +14,7 @@ use pa_types::daemon::agent_roster::{
 };
 use serde_json::Value;
 
-/// The supervisor-owned roster. Write() classifies once and its file index
+/// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.
 pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,

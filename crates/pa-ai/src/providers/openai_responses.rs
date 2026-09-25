@@ -1,4 +1,4 @@
-//! OpenAI Responses API streaming provider.
+//! `OpenAI` Responses API streaming provider.
 //! Port of `packages/ai/src/providers/openai-responses.ts`: session-affinity
 //! headers, prompt-cache retention, reasoning params with encrypted-content
 //! include, service-tier pricing, and the shared Responses stream processor.

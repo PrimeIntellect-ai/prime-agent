@@ -1,4 +1,4 @@
-//! ReplKernelManager delegations onto Inner.
+//! `ReplKernelManager` delegations onto Inner.
 
 use super::*;
 

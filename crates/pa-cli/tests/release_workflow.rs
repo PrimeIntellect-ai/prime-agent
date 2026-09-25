@@ -42,7 +42,7 @@ const TARGETS: [&str; 4] = [
     "x86_64-apple-darwin",
 ];
 
-/// The TS release-platform alias (assemble_artifacts.py `TARGET_ALIASES`).
+/// The TS release-platform alias (`assemble_artifacts.py` `TARGET_ALIASES`).
 fn platform_alias(target: &str) -> &'static str {
     match target {
         "x86_64-unknown-linux-gnu" => "linux-x64",
@@ -177,7 +177,7 @@ fn sha256_file(path: &Path) -> String {
 }
 
 /// One real (extractable) tar.gz archive: the staged `prime-agent` payload
-/// with deterministic member metadata, the assemble_artifacts.py shape.
+/// with deterministic member metadata, the `assemble_artifacts.py` shape.
 fn write_fixture_tarball(out_path: &Path) {
     let file = fs::File::create(out_path).expect("create the fixture archive");
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -201,7 +201,7 @@ fn write_fixture_tarball(out_path: &Path) {
 }
 
 /// One build-job artifact in `dir`: the tarball, its checksum line, and the
-/// per-target manifest (assemble_artifacts.py's schema). Returns the manifest
+/// per-target manifest (`assemble_artifacts.py`'s schema). Returns the manifest
 /// row the merged manifest must carry back.
 fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
