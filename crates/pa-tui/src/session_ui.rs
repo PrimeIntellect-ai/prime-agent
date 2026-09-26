@@ -3873,6 +3873,13 @@ impl SessionUi {
                 if let Some(pending) = parked {
                     self.finish_model_sign_in(pending, view).await;
                 }
+                // A landed login or logout may change the auth scope the
+                // daemon's catalog refreshes under: re-fetch now so the
+                // next open serves the new account's view. The parked
+                // sign-in arm already fires one (both are harmless: the
+                // daemon's AuthChange detector forces the same gated,
+                // idempotent refresh).
+                self.spawn_model_catalog_refresh();
             }
             // The failed and cancelled flows drop the park above (the
             // `take`); their own rows render as usual.
@@ -8533,6 +8540,15 @@ impl SessionUi {
             // (another client's pause/resume reaches the dock at once).
             DaemonClientEvent::HeartbeatsChanged => {
                 self.spawn_heartbeat_refresh();
+            }
+            // A background daemon-side catalog refresh changed the served
+            // snapshot (the Rust-only no-stall picker-open extension):
+            // every client re-fetches instantly — the daemon answers from
+            // the warm caches, no stall — and an open `/model` picker
+            // folds the fresh catalog through its stable update path
+            // (`apply_model_catalog` keeps the selection), no flicker.
+            DaemonClientEvent::ModelCatalogChanged => {
+                self.spawn_model_catalog_refresh();
             }
             // A worker replacement superseded the id this client holds:
             // the interactive loop re-attaches to the session's current id
