@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
-use crate::keybindings::{format_key_text, KeybindingsManager};
+use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{
     hint_row, login_field_row, menu_row, no_match_row, scroll_row, scrub_controls,
     search_field_lines, search_field_plain_row, MenuSegment,
@@ -418,7 +418,7 @@ const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser
 /// The outcome of copying the sign-in URL (TS `getAuthActionsText`'s
 /// status: `Copied sign-in link` / `Failed to copy sign-in link`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CopyStatus {
+pub(crate) enum CopyStatus {
     Copied,
     Failed,
 }
