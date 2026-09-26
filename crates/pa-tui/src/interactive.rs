@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;
 use crate::daemon_client::DaemonClientEvent;
+use crate::daemon_reconnect::RecoveryKind;
 use crate::exit_guard::ExitGuard;
 use crate::keybindings::KeybindingsManager;
 use crate::session_ui::SessionUi;
@@ -1270,6 +1271,16 @@ const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
 /// The reconnect backoff cap.
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
+/// TS #2458 `DAEMON_RECONNECT_TIMEOUT_MS`: the announced non-update
+/// closing's recovery window — an explicit stop stays stopped, so the
+/// pane waits for the daemon to come back bounded instead of retrying
+/// through the §10.2 resume window.
+const DAEMON_SHUTDOWN_RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+
+/// TS #2458 `SHUTDOWN_RECONNECT_RETRY_MS`: the shutdown recovery's poll
+/// cadence (fixed, unlike the doubling hiccup backoff).
+const SHUTDOWN_RECONNECT_RETRY: Duration = Duration::from_millis(100);
+
 /// TS `DAEMON_RECONNECT_TIMEOUT_MS`: the bounded session-plane reconnect
 /// window after the direct worker link dies.
 const SESSION_RECONNECT_WINDOW: Duration = Duration::from_mins(1);
@@ -1312,21 +1323,23 @@ impl SessionReconnect {
     }
 }
 
-/// The interactive loop's reconnect driver (spec §10.2): attempts with
-/// doubling backoff inside the 10-minute window; the user can leave with
-/// Ctrl+C at any point (UI input keeps flowing through the same loop).
-/// The same driver also serves an UNEXPECTED connection loss (the
-/// supervisor connection died mid-run with no update in flight — a daemon
-/// hiccup at load, 2026-09-24: the one-shot path exited the operator's
-/// TUI with "the daemon connection closed"): the pane keeps its
-/// transcript and editor and retries instead of dying.
+/// The interactive loop's full reconnect driver (spec §10.2): attempts
+/// with backoff inside the window; the user can leave with Ctrl+C at any
+/// point (UI input keeps flowing through the same loop). Three closings arm
+/// it — an update restart's resume contract, an UNEXPECTED connection loss
+/// (the supervisor connection died mid-run with no update in flight — a
+/// daemon hiccup at load, 2026-09-24: the one-shot path exited the
+/// operator's TUI with "the daemon connection closed"), and an ANNOUNCED
+/// non-update closing (TS #2458: the operator's own shutdown used to kill
+/// every attached window) — the pane keeps its transcript and editor and
+/// retries instead of dying.
 struct ReconnectLoop {
     deadline: tokio::time::Instant,
     next_attempt: tokio::time::Instant,
     delay: Duration,
-    /// Whether this driver serves an unexpected loss (the expiry and
-    /// failure notes name it, not an update restart).
-    lost: bool,
+    /// The closing that armed this driver: the reattach banner and the
+    /// expiry row follow it.
+    kind: RecoveryKind,
 }
 
 impl ReconnectLoop {
@@ -1336,28 +1349,74 @@ impl ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: false,
+            kind: RecoveryKind::Update,
         }
     }
 
     /// The unexpected-loss variant: same window, same backoff, its own
-    /// expiry note.
+    /// expiry row.
     fn start_lost() -> Self {
         let delay = Duration::from_secs(1);
         ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: true,
+            kind: RecoveryKind::Lost,
         }
     }
 
-    /// The next attempt with doubling backoff (capped).
+    /// TS #2458 `reconnectAfterShutdown`: the announced non-update
+    /// closing. The window is the TS reconnect timeout (not the §10.2
+    /// resume window — an explicit stop stays stopped), the cadence is
+    /// the TS fixed poll, and the expiry is the saved-transcript close.
+    fn start_shutdown() -> Self {
+        ReconnectLoop {
+            deadline: tokio::time::Instant::now() + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            next_attempt: tokio::time::Instant::now() + SHUTDOWN_RECONNECT_RETRY,
+            delay: SHUTDOWN_RECONNECT_RETRY,
+            kind: RecoveryKind::Shutdown,
+        }
+    }
+
+    /// The next attempt: doubling backoff (capped) for the resume and
+    /// hiccup windows; the shutdown recovery keeps the TS fixed poll.
     fn next_attempt(mut self) -> Self {
-        self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        if !matches!(self.kind, RecoveryKind::Shutdown) {
+            self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        }
         self.next_attempt = tokio::time::Instant::now() + self.delay;
         self
     }
+}
+
+/// TS #2458 `reconnectAfterShutdown`'s arming: an announced non-update
+/// closing (`daemon_closing` with no update) keeps the pane mounted while
+/// it waits bounded for the daemon to come back on the same socket path
+/// (the recovery never relaunches the daemon — an explicit stop stays
+/// stopped). No-op when the notice is absent (a bare session stop stays
+/// stopped) or a driver already owns the recovery; `true` when it armed.
+fn arm_shutdown_recovery(
+    session: &mut SessionUi,
+    view: &mut AgentView,
+    reconnect: &mut Option<ReconnectLoop>,
+    session_reconnect: &mut Option<SessionReconnect>,
+) -> bool {
+    if reconnect.is_some() || session.daemon_closing_notice.as_deref() != Some("shutdown") {
+        return false;
+    }
+    session.note_as(
+        "the Prime Agent daemon shut down; waiting for it to come back…",
+        crate::chat::StatusKind::Warning,
+        view,
+    );
+    // TS #2458's yield rule: the shutdown recovery owns the run — a
+    // session-plane retry armed by an earlier direct-link loss would race
+    // it through a dying supervisor, and its expiry would block submits
+    // after a later reconnect lands.
+    *session_reconnect = None;
+    *reconnect = Some(ReconnectLoop::start_shutdown());
+    session.dirty = true;
+    true
 }
 
 /// Run the interactive UI until the user exits (terminal) or the plan
@@ -2256,19 +2315,29 @@ async fn run_interactive_surface(
                     // gone, but the client struct retains an event
                     // sender, so the channel itself never closes - the
                     // frame, not the EOF, is the trigger (spec §10.2).
-                    if reconnect.is_none() {
-                        if let Some(update) = session.reconnect.take() {
-                            session.note(
-                                &format!(
-                                    "the daemon is restarting for an update (about {}s) — reconnecting…",
-                                    update.est_seconds.max(1)
-                                ),
-                                &mut view,
-                            );
-                            reconnect = Some(ReconnectLoop::start(&update));
-                            session.dirty = true;
-                        }
+                    // An update closing outranks a shutdown recovery in
+                    // flight (TS #2458): the §10.2 resume contract replaces
+                    // it.
+                    if let Some(update) = session.reconnect.take() {
+                        session.note(
+                            &format!(
+                                "the daemon is restarting for an update (about {}s) — reconnecting…",
+                                update.est_seconds.max(1)
+                            ),
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start(&update));
+                        session.dirty = true;
                     }
+                    // An announced non-update closing arms the bounded
+                    // shutdown recovery instead (TS #2458): no-op unless
+                    // the notice says the daemon itself is going down.
+                    arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    );
                     // A dead direct worker link arms the session
                     // re-attach driver (TS `connection_status:
                     // "reconnecting"`): the warning row rides the chat
@@ -2288,6 +2357,13 @@ async fn run_interactive_surface(
                                 );
                                 reconnect = Some(ReconnectLoop::start_lost());
                                 supervisor_lost = false;
+                            } else if reconnect.is_some() {
+                                // TS #2458: a full reconnect driver (an
+                                // update restart, or the announced
+                                // shutdown's recovery) owns the run — the
+                                // dead direct link joins it instead of
+                                // racing a session-plane retry through a
+                                // supervisor it cannot reach.
                             } else {
                                 session.note_as(
                                     "Daemon connection lost; reconnecting…",
@@ -2313,6 +2389,14 @@ async fn run_interactive_surface(
                         );
                         reconnect = Some(ReconnectLoop::start(&update));
                         session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // TS #2458: the announced non-update closing owns
+                        // the recovery, not the hiccup loop.
                     } else if reconnect.is_some() {
                         // Already reconnecting: the dead channel's
                         // terminal None frames are expected.
@@ -2357,6 +2441,16 @@ async fn run_interactive_surface(
                     }
                     if session.reconnect.is_some() {
                         session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // The announced non-update closing owns the
+                        // recovery (TS #2458): the supervisor socket's
+                        // death joins its driver — the direct link below
+                        // must not retain the loss behind it.
                     } else if session.client.direct_session_id().is_some() {
                         // A supervisor socket loss while a live direct link
                         // still serves the session is not a pane-level loss
@@ -2470,23 +2564,36 @@ async fn run_interactive_surface(
                 if reconnect_connect.is_some() {
                     continue;
                 }
-                let (deadline, lost) = match reconnect.as_ref() {
-                    Some(state) => (state.deadline, state.lost),
+                let (deadline, kind) = match reconnect.as_ref() {
+                    Some(state) => (state.deadline, state.kind),
                     None => continue,
                 };
                 if tokio::time::Instant::now() > deadline {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -2501,6 +2608,13 @@ async fn run_interactive_surface(
                 let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
                 reconnect_connect = Some(attempt_rx);
                 reconnect_attempt_in_flight = true;
+                // TS #2458: the shutdown recovery's discovery waits no
+                // longer than the bound — one bounded connect+hello per
+                // poll (the fixed 100ms cadence re-arms faster than the
+                // retry helper's own backoff, and a single leg bounds the
+                // window's over-run; the resume/hiccup windows keep the
+                // retrying helper).
+                let shutdown = matches!(kind, RecoveryKind::Shutdown);
                 tokio::spawn(async move {
                     // No outer timeout: dropping the future mid-attempt
                     // would cancel an in-flight handshake without its
@@ -2508,7 +2622,11 @@ async fn run_interactive_surface(
                     // an accepting-but-silent daemon). The leg self-bounds
                     // — every attempt's connect and hello carry their own
                     // budgets and abort their own reader on failure.
-                    let attempt = DaemonClient::connect_with_retry(&socket_path).await;
+                    let attempt = if shutdown {
+                        DaemonClient::connect(&socket_path).await
+                    } else {
+                        DaemonClient::connect_with_retry(&socket_path).await
+                    };
                     let _ = attempt_tx.send(attempt);
                 });
             }
@@ -2532,23 +2650,36 @@ async fn run_interactive_surface(
                     Some(state) => tokio::time::Instant::now() > state.deadline,
                     None => continue,
                 };
-                let lost = match reconnect.as_ref() {
-                    Some(state) => state.lost,
+                let kind = match reconnect.as_ref() {
+                    Some(state) => state.kind,
                     None => continue,
                 };
                 if expired {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -2563,7 +2694,7 @@ async fn run_interactive_surface(
                         // is a RETRY outcome, never a fatal one (§10.4: a
                         // queued attach can legitimately wait out a slow
                         // restore).
-                        match session.reattach_after_update(client, &mut view, lost).await {
+                        match session.reattach_after_recovery(client, &mut view, kind).await {
                             Ok(crate::session_ui::ReattachOutcome::Attached) => {
                                 events = fresh_events;
                                 events_closed = false;
@@ -2582,13 +2713,6 @@ async fn run_interactive_surface(
                                 reader_loss_handled = false;
                                 session.reconnect = None;
                                 reconnect = None;
-                                if lost {
-                                    session.note_as(
-                                        "reconnected to the daemon",
-                                        crate::chat::StatusKind::Info,
-                                        &mut view,
-                                    );
-                                }
                                 session.dirty = true;
                             }
                             Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
@@ -2608,12 +2732,14 @@ async fn run_interactive_surface(
                             Err(error) => {
                                 // An unexpected-loss reattach failure is a
                                 // hiccup like any other (the worker still
-                                // respawning): keep retrying through the
-                                // window instead of exiting — the pane never
-                                // dies to it (the operator's kicked-out
-                                // class). The update path keeps its exit
-                                // semantics.
-                                if lost {
+                                // respawning), and a shutdown recovery
+                                // retries until its own bound lands the
+                                // saved-transcript close (TS #2458): keep
+                                // retrying through the window instead of
+                                // exiting — the pane never dies to it (the
+                                // operator's kicked-out class). The update
+                                // path keeps its exit semantics.
+                                if matches!(kind, RecoveryKind::Lost | RecoveryKind::Shutdown) {
                                     session.note_as(
                                         &format!("reattach failed: {error:#} — retrying…"),
                                         crate::chat::StatusKind::Warning,
@@ -3573,6 +3699,41 @@ mod tests {
             before,
             "the headless error return did not attempt a restore"
         );
+    }
+
+    /// TS #2458's shutdown recovery constants: the announced non-update
+    /// closing waits the TS reconnect timeout (60s) on the TS fixed poll
+    /// (100ms, never doubling) — not the §10.2 resume window or the
+    /// hiccup loop's doubling backoff.
+    #[test]
+    fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
+        let before = tokio::time::Instant::now();
+        let state = ReconnectLoop::start_shutdown();
+        let after = tokio::time::Instant::now();
+        assert_eq!(state.kind, RecoveryKind::Shutdown);
+        // The window is 60s off the arming instant: the deadline sits
+        // inside [before + 60s, after + 60s] (the arming ran between the
+        // two clock reads — a single `now + 60s` bound can miss by the
+        // nanoseconds between the reads).
+        assert!(
+            state.deadline >= before + DAEMON_SHUTDOWN_RECONNECT_WINDOW
+                && state.deadline <= after + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            "the window is TS #2458's 60s reconnect timeout"
+        );
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The first poll is the TS 100ms cadence off the same arming
+        // instant, inside the same two clock reads.
+        assert!(
+            state.next_attempt >= before + SHUTDOWN_RECONNECT_RETRY
+                && state.next_attempt <= after + SHUTDOWN_RECONNECT_RETRY,
+            "the first poll is the TS 100ms cadence"
+        );
+        // The fixed poll never doubles.
+        let state = state.next_attempt();
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The hiccup loop doubles: 1s -> 2s.
+        let lost = ReconnectLoop::start_lost().next_attempt();
+        assert_eq!(lost.delay, Duration::from_secs(2));
     }
 
     #[test]
