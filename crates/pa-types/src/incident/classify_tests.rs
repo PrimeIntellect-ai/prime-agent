@@ -151,11 +151,15 @@ fn classifies_worker_events_for_windows_named_pipe_sockets() {
     let socket_path = r"\\.\pipe\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee";
     let entries = vec![
         worker_start_line("2026-09-10T20:00:00.000Z", socket_path, 53615),
-        supervisor_line(
-            "2026-09-10T20:23:24.945Z",
-            "uncaught exception: Error: write EPIPE",
-            &[],
-        ),
+        // The worker's own crash line (TS `daemonLine`): the daemon
+        // component with the named-pipe socket path.
+        log_line(&[
+            ("ts", serde_json::json!("2026-09-10T20:23:24.945Z")),
+            ("component", serde_json::json!("coding-agent.daemon")),
+            ("socketPath", serde_json::json!(socket_path)),
+            ("pid", serde_json::json!(53615)),
+            ("msg", serde_json::json!("uncaught exception: Error: write EPIPE")),
+        ]),
     ];
     let events = collect_incident_events(&entries, &collect_worker_pid_map(&entries));
     let classes: Vec<&str> = events

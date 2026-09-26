@@ -88,7 +88,9 @@ fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
         .expect("write newest log");
         // A future-dated DIRECTORY matching the log pattern: it must not be
         // picked as the fallback (TS `statSync().isFile` filter), or it
-        // would hide both valid daemon logs behind a failed read.
+        // would hide both valid daemon logs behind a failed read. The
+        // newest log's mtime is pinned ahead of the older one (and behind
+        // the decoy) so the pick never rides write-order timing.
         let decoy_dir = agent_dir.join("logs/daemon.sock.deadbeef.log");
         std::fs::create_dir(&decoy_dir).expect("decoy dir");
         let decoy = std::fs::File::open(&decoy_dir).expect("open decoy");
@@ -96,6 +98,14 @@ fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
         decoy
             .set_times(std::fs::FileTimes::new().set_modified(future))
             .expect("future mtime");
+        let newest =
+            std::fs::File::open(agent_dir.join("logs/daemon.sock.98ed5cb2.log"))
+                .expect("open newest log");
+        newest
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+            ))
+            .expect("newest mtime");
         let text = report_text("2026-09-10T20:00", "2026-09-10T20:30");
         assert!(text.contains("daemon.sock.98ed5cb2.log"), "{text}");
         assert!(text.contains("supervisor startup blocked: another daemon holds the lock"));

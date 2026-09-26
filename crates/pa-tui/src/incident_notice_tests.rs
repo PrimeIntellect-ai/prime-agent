@@ -72,25 +72,6 @@ fn failed_start_line(base_ms: i64, minutes_ago: i64) -> IncidentLogEntry {
     ])
 }
 
-fn worker_crash_line(base_ms: i64, worker_id: &str, seconds_ago: i64) -> IncidentLogEntry {
-    log_line(&[
-        (
-            "ts",
-            serde_json::json!(ts_ago(base_ms, seconds_ago * 1_000)),
-        ),
-        (
-            "component",
-            serde_json::json!("coding-agent.daemon-supervisor"),
-        ),
-        (
-            "msg",
-            serde_json::json!(format!(
-                "Session worker {worker_id} stderr: uncaught exception: Error: write EPIPE"
-            )),
-        ),
-    ])
-}
-
 fn command_timeout_line(base_ms: i64, minutes_ago: i64, socket_path: &str) -> IncidentLogEntry {
     log_line(&[
         ("ts", serde_json::json!(ts_ago(base_ms, minutes_ago * 60_000))),
@@ -380,9 +361,10 @@ fn a_missing_log_keeps_the_offsets_and_ages_the_notice_out() {
     ));
     assert_eq!(state.log_offset, offset);
     assert_eq!(state.log_file_id, file_id);
-    // The notice expires with its window (entries older than 24h drop).
+    // The notice expires with its window (entries older than 24h drop) —
+    // Some -> None IS a changed line, so the poll reports it for re-render.
     let later = BASE_MS + INCIDENT_NOTICE_WINDOW_MS + 1_000;
-    assert!(!refresh_incident_notice_state(&mut state, &log_path, later));
+    assert!(refresh_incident_notice_state(&mut state, &log_path, later));
     assert!(state.notice.is_none());
 }
 

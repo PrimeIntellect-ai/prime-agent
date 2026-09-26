@@ -247,7 +247,7 @@ mod tests {
             Some(1_789_070_400_000)
         );
         // Date-only is UTC midnight.
-        assert_eq!(timestamp_to_ms("2026-09-10"), Some(1_789_070_400_000));
+        assert_eq!(timestamp_to_ms("2026-09-10"), Some(1_788_998_400_000));
         // Fractional seconds scale.
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00.7Z"),

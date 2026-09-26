@@ -438,7 +438,13 @@ pub fn classify_incident_entry(
     }
     if let Some(captures) = STARTUP_FAILED.captures(msg) {
         let err = captures.get(1).map_or("", |m| m.as_str());
-        if err.contains("lock file is already being held") {
+        // TS tests the message case-insensitively
+        // (/lock file is already being held/i): real log lines carry
+        // "Lock file is already being held".
+        if err
+            .to_ascii_lowercase()
+            .contains("lock file is already being held")
+        {
             return Some(event(
                 entry,
                 IncidentSeverity::Warn,

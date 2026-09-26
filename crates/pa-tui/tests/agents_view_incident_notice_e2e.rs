@@ -100,7 +100,12 @@ impl MockSupervisor {
                         respond(&mut writer, id, "roster_unsubscribe", json!({}));
                     }
                     _ => {
-                        respond_failure(&mut writer, id, "unknown command");
+                        respond_failure(
+                            &mut writer,
+                            id,
+                            "unknown command",
+                            "the mock supervisor does not serve it",
+                        );
                     }
                 }
             }

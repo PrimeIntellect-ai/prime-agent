@@ -75,7 +75,9 @@ impl IncidentSeverity {
 
 impl std::fmt::Display for IncidentSeverity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        // `f.pad` (not `write_str`): the report pads the severity label to
+        // 8 columns via `{:8}`, which a `write_str` impl ignores.
+        f.pad(self.as_str())
     }
 }
 

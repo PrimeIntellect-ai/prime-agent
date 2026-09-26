@@ -251,7 +251,9 @@ mod tests {
         assert_eq!(format_incident_duration(120_000), "2m");
         assert_eq!(format_incident_duration(1_158_000), "19m18s");
         assert_eq!(format_incident_duration(607_000), "10m7s");
-        assert_eq!(format_incident_duration(3_700_000), "1h1m40s");
+        // TS keeps only hours+minutes once hours overflow (the seconds
+        // arm is the minutes-only branch's).
+        assert_eq!(format_incident_duration(3_700_000), "1h1m");
         assert_eq!(format_incident_duration(86_400_000), "24h");
     }
 
