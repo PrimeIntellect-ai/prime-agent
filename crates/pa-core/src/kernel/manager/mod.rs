@@ -276,6 +276,29 @@ struct StderrLog {
     budget: u64,
 }
 
+impl Inner {
+    /// Fire the embedding's background-work settlement notice (TS
+    /// `ReplKernelManager`'s `onBackgroundWorkSettled`): the settlement is
+    /// already recorded on the activity map, so a host-callback panic
+    /// neither breaks the kernel event path nor aborts the teardown — it
+    /// lands in the diagnostics tail.
+    fn notify_background_work_settled(&self) {
+        let Some(callback) = self.options.on_background_work_settled.clone() else {
+            return;
+        };
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            let reason = panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            self.append_diagnostic(&format!(
+                "background work settled callback failed: {reason}"
+            ));
+        }
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
         // Synchronous best-effort cleanup, mirroring disposeSync().

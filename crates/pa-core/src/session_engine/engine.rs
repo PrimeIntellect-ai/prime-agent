@@ -102,6 +102,11 @@ pub struct SessionEngineConfig {
     /// surface on the next `ensure()`), and the lazy first-call start
     /// stays intact.
     pub prewarm_ipython_kernel: Option<bool>,
+    /// Fires when the session kernel's last live background `bash()`
+    /// handle settles (its activity track empties or the kernel tears
+    /// down): TS `AgentSession` wires its owed-continuation resume pair
+    /// here. `None` (embeddings without continuations) installs nothing.
+    pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     /// An externally owned MCP manager (the daemon worker's session store):
     /// the engine adopts it instead of building its own, so ACP-admitted
     /// servers reach the prompt's MCP gating through the same store the
@@ -447,6 +452,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         session_artifact_dir,
         on_restore,
+        config.on_background_work_settled.clone(),
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
@@ -777,6 +783,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 }
 
 impl SessionEngine {
+    /// The session's kernel provisioner as a weak reference (TS
+    /// `AgentSession._ipythonKernelProvisioner`): embeddings mirror it for
+    /// lock-free kernel liveness probes (TS `hasBackgroundWork`) without
+    /// joining the strong ownership graph — the same weak discipline the
+    /// `ipython` tool and the compaction kernel-state probe follow.
+    pub fn kernel_provisioner_weak(
+        &self,
+    ) -> std::sync::Weak<crate::kernel::provisioner::IpythonKernelProvisioner> {
+        std::sync::Arc::downgrade(&self.provisioner)
+    }
+
     /// Expand a `/skill:<name>` submission into its `<skill>` block for
     /// the accepted-turn row (TS `_expandSkillCommand`; the row the daemon
     /// emits before admission must match the text the model turn
@@ -927,6 +944,7 @@ mod tests {
             model_info: None,
             cli_extension_sources: vec![],
             extension_tool_allow_list: None,
+            on_background_work_settled: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         })
@@ -1030,6 +1048,7 @@ mod tests {
             model_info: None,
             cli_extension_sources: vec![],
             extension_tool_allow_list: None,
+            on_background_work_settled: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         })
@@ -1096,6 +1115,7 @@ mod tests {
                 model_info: None,
                 cli_extension_sources: vec![],
                 extension_tool_allow_list: None,
+                on_background_work_settled: None,
                 prewarm_ipython_kernel: None,
                 queued_goal_context_purge: None,
             }
