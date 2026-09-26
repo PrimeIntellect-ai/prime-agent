@@ -240,12 +240,14 @@ mod tests {
             (ModelThinkingLevel::Xhigh, None),
             (ModelThinkingLevel::Max, None),
         ]);
+        let non_thinking = model(false, Some(all_null.clone()));
         assert_eq!(
-            get_supported_thinking_levels(&model(false, Some(all_null.clone()))),
+            get_supported_thinking_levels(&non_thinking),
             vec![ModelThinkingLevel::Off]
         );
-        assert!(!supports_thinking(&model(false, Some(all_null))));
-        assert!(get_supported_thinking_levels(&model(true, Some(all_null))).is_empty());
+        assert!(!supports_thinking(&non_thinking));
+        let reasoning = model(true, Some(all_null));
+        assert!(get_supported_thinking_levels(&reasoning).is_empty());
     }
 
     #[test]
