@@ -291,7 +291,7 @@ impl RpcSession {
         // orphaned — and the exiting process owns nothing further.
         let mut handle = tokio::select! {
             guard = self.handle.write() => guard,
-            _ = self.signal_shutdown.cancelled() => {
+            () = self.signal_shutdown.cancelled() => {
                 return Err("A signal exit is in progress".to_string());
             }
         };
@@ -308,8 +308,8 @@ impl RpcSession {
         let shutdown_during_settle = {
             let agent = handle.engine.session.agent();
             tokio::select! {
-                _ = agent.wait_for_idle() => false,
-                _ = self.signal_shutdown.cancelled() => true,
+                () = agent.wait_for_idle() => false,
+                () = self.signal_shutdown.cancelled() => true,
             }
         };
         if shutdown_during_settle {
