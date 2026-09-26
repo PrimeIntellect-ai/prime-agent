@@ -13,7 +13,7 @@ pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
 /// (a failed frame write, or a request still queued when the writer pump
 /// ended) with the not-connected failure: `route_command` surfaces it as
 /// the unambiguous retryable error, never as an ambiguous timeout.
-async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
+pub(super) async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
     if let Some(reply) = resident.pending.lock().await.remove(request_id) {
         let _ = reply.send(response_failure(
             Some(request_id),
@@ -24,7 +24,6 @@ async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
     }
 }
 pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
-
 
 impl Supervisor {
     pub(crate) async fn route_command(
@@ -672,5 +671,4 @@ impl Supervisor {
             }
         }
     }
-
 }

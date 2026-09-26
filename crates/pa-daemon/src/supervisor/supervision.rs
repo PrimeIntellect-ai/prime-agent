@@ -1,5 +1,6 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
+use super::routing::fail_unsent_request;
 use super::*;
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
