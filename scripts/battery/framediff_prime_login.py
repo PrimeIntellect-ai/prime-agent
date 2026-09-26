@@ -324,6 +324,14 @@ def main() -> int:
     # Fail fast before any launch: a non-TS ts binary plays a Rust build as
     # the "ts" side and reports false divergences.
     ts_identity.assert_ts_side_is_the_ts_product(args.ts_bin, args.rust_bin)
+    # Fail fast on a stale rust build: a binary older than the checkout's
+    # newest product commit reports false frame divergences against the
+    # TS ground truth (batterylib's 20260920 lesson).
+    repo = Path(__file__).parent.parent.parent
+    stale = B.rust_binary_staleness(Path(args.rust_bin), repo)
+    if stale:
+        print(f"STALE RUST BINARY: {stale}", file=sys.stderr)
+        return 2
 
     prime_port, prime_thread, prime_server = start_prime_api()
     base = Path(tempfile.mkdtemp(prefix="plframediff-"))
