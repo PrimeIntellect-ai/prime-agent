@@ -152,6 +152,17 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_tree_filter_mode(&self, mode: &str) -> Result<()>;
+    /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
+    /// `details`): the conversation-detail level the chat starts at.
+    fn chat_detail(&self) -> String;
+    /// Persists `chatDetail` to the global scope (TS #2709: the Ctrl+O
+    /// cycle saves the level; every later chat re-reads it).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when opening or persisting the settings
+    /// store fails.
+    fn set_chat_detail(&self, detail: &str) -> Result<()>;
     /// `warnings.anthropicExtraUsage` (TS default true).
     fn warnings_anthropic_extra_usage(&self) -> bool;
     /// Persists `warnings.anthropicExtraUsage` to the global scope.

@@ -1852,3 +1852,47 @@ today."
   and `abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups`;
   `abort_and_send_queued_with_an_empty_queue_is_a_plain_abort` keeps
   the abort-only park.
+
+## Agents-view search maps the SESSION column (operator-directed divergence, 2026-09-26)
+
+Operator bug report (2026-09-26, the reported shape): "Agents View
+search does not accurately match against the SESSION column — a session
+named (or whose first-prompt-derived name is) 'hey' is not surfaced by
+searching 'hey', while other searches over-match, returning unrelated
+sessions because they match against the entire first prompt (long,
+truncated in agents view, containing lots of text)."
+
+- **Root cause**: the SESSION column renders `session_title`'s ladder
+  (`sessionName` → `firstMessage` → cwd basename → `sessionId` → `id`),
+  but the #2656 picker corpus indexed only `sessionName` (saved `name`)
+  plus the id and cwd: an unnamed session displayed its first prompt
+  ("hey") while its corpus name sat empty — a query for the displayed
+  title could not match. The TS corpus (agents-view-state.ts
+  `createUnifiedSearchableText`) joins the first message AND the 64 KiB
+  capped transcript (`allMessagesText`, session-manager.ts
+  `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`), which is the over-match side:
+  queries match prompt and transcript text the clipped column never
+  shows.
+- **The fix — the operator-directed divergence**: the picker's name
+  target is the SESSION column's own title — `session_title` over the
+  SAME merged summary the row renders, clipped by the column's own
+  truncation rule (`truncate_text`, display-width, no ellipsis) at the
+  column's own cap (`SESSION_NAME_COLUMN_MAX_CELLS` = 28, TS
+  `buildCompactAgentsViewLayout`'s `Math.min(28, ...)`, minus the two
+  cells the row icon takes). The id and cwd targets and the ranked
+  tiers (identity paste > name exact > prefix > substring > fuzzy > id
+  > cwd) are unchanged; the transcript corpus stays excluded, and the
+  full first prompt never enters — only the visible head.
+- **Unchanged invariants**: named sessions keep their explicit name as
+  the corpus name (the ladder's first rung — the first prompt stays
+  out); the daemon-wins/saved-fills merge for the id and cwd; ancestor
+  retention under a query; the regex corpus; the e2e picker contract
+  (names/ids/cwd match, transcripts never).
+- Verifiers (corpus tests in `crates/pa-tui/src/agents_view_state.rs`):
+  `an_unnamed_sessions_prompt_derived_title_matches` (the "hey" case
+  plus case variants), `long_first_prompts_enter_only_the_visible_title_head`
+  (deep prompt text never matches, the visible head does),
+  `the_corpus_name_is_the_sessions_column_title` (the corpus equals the
+  displayed title across named, prompt-derived, cwd-basename, and
+  archived rows), and `a_named_sessions_first_message_stays_out_of_the_corpus`
+  (the over-match guard).
