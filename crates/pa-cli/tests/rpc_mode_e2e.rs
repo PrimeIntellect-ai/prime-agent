@@ -342,6 +342,10 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         ],
     });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
+    // Arm the stderr drain up front: the Drop prints the child's stderr
+    // when the test fails (a runtime-side panic or error line would
+    // otherwise vanish with the pipe).
+    client.drain_stderr();
     // One-at-a-time steering (the settings default is "all": a steer
     // mid-turn folds into the RUNNING request instead of queueing, so
     // the queue projections this test observes need the deterministic
@@ -413,12 +417,31 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     );
     // The next prompt resumes the pump: the queued steer delivers as a
     // turn on the second response step, the queued follow-up on the
-    // third, after the prompt's own turn.
+    // third, after the prompt's own turn. Collect the three terminal
+    // frames with the settle poll's diagnostic drain — a missing turn
+    // dumps the live state and every frame seen, so the stalled phase
+    // (the prompt's turn, the steer's, or the follow-up's) is readable
+    // from the round.
     let second = client.request(&json!({ "type": "prompt", "message": "continue" }));
     assert_eq!(second["success"], true);
-    client.wait_event("agent_end", TIMEOUT);
-    client.wait_event("agent_end", TIMEOUT);
-    client.wait_event("agent_end", TIMEOUT);
+    let mut pump_frames: Vec<Value> = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        pump_frames.extend(client.drain_frames());
+        let ends = pump_frames
+            .iter()
+            .filter(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
+            .count();
+        if ends >= 3 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pump turns never settled ({ends} of 3 agent_ends); state: {}; frames: {pump_frames:?}",
+            client.request(&json!({ "type": "get_state" }))
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let text = client.request(&json!({ "type": "get_last_assistant_text" }));
     assert_eq!(
         text["data"]["text"], "follow-up answer",
