@@ -1252,28 +1252,29 @@ mod tests {
     #[test]
     fn wrap_stress_megabyte_monoword_candidate_only() {
         // The rewrite must wrap a 1MiB unbroken token in one linear pass:
-        // content round-trips exactly (hard breaks never trim), the ASCII
-        // row count is exact, and the whole wrap stays far under the
-        // tripwire bound — the legacy loop needed ~30s at width 80 for
-        // this input (the first-frame transcript blow-up), the rewrite
-        // is sub-second even in debug.
+        // content round-trips exactly (hard breaks never trim) and the
+        // ASCII row count is exact. This test finishes only because the
+        // rewrite is linear — the legacy loop needed ~30s for this input
+        // (the first-frame transcript blow-up) — but the speed evidence
+        // belongs to the recorded benchmark pair, not a wall-clock assert
+        // in a deterministic unit test.
         let token = "x".repeat(1 << 20);
         let spans = vec![Span::styled(token.clone(), Style::default())];
         let width = 80usize;
-        let started = std::time::Instant::now();
         let mut current: Vec<Line> = Vec::new();
         wrap_spans(&spans, width, Style::default(), &mut current);
-        let elapsed = started.elapsed();
-        assert_eq!(current.len(), (1 << 20) / width, "exact ASCII row count");
+        // 1048576 chars at 80 columns: CEIL rows (a floor here fails the
+        // 16-char remainder)
+        assert_eq!(
+            current.len(),
+            token.len().div_ceil(width),
+            "exact ASCII row count"
+        );
         let joined: String = current
             .iter()
             .flat_map(|line| line.iter().map(|span| span.content.as_str()))
             .collect();
         assert_eq!(joined, token, "hard-broken rows round-trip");
-        assert!(
-            elapsed.as_secs() < 2,
-            "1MiB monoword wrap took {elapsed:?} — the quadratic path is back"
-        );
     }
 
     #[test]
