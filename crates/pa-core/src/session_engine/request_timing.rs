@@ -141,7 +141,10 @@ impl RequestTimingLog {
         use std::io::Write;
         let append = || -> std::io::Result<()> {
             std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
-            self.rotate_if_needed()?;
+            // Best-effort rotation: TS keeps appending rather than dropping
+            // the log when the rotate fails (the rename above is the only
+            // fallible half of its try/catch).
+            let _ = self.rotate_if_needed();
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

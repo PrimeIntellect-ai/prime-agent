@@ -668,14 +668,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             }),
             super::request_timing::RequestTimingLog::new(&config.agent_dir),
         ));
-    // The dispatch-marking transform seam exists only while timing is on:
-    // TS always wires `transformContext` (the extension context
-    // transform); the Rust engine has no transform yet, so wiring a
-    // pass-through seam unconditionally would spend a boxed closure per
-    // turn on every session, timing or not. Off = the loop's seam stays
-    // unset, bit-identical to before this port.
-    let request_timing_on =
-        super::request_timing::is_request_timing_enabled(request_timing_settings);
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
@@ -695,12 +687,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             std::sync::Arc::clone(&request_timing_wiring),
             super::messages::engine_convert_to_llm(),
         )),
-        transform_context: request_timing_on.then(|| {
-            super::request_timing::instrument_transform_context(
-                std::sync::Arc::clone(&request_timing_wiring),
-                super::request_timing::pass_through_transform(),
-            )
-        }),
+        // TS wires the instrumented `transformContext` seam over the
+        // extension context transform; the Rust engine has no transform
+        // yet, so the instrumented seam wraps a pass-through that exists
+        // to mark the turn's dispatch moment. Always wired like TS — the
+        // wrapper's own per-request check keeps the disabled path free of
+        // timestamps and entries, and a flag flipped on mid-session still
+        // gets its dispatch timestamp.
+        transform_context: Some(super::request_timing::instrument_transform_context(
+            std::sync::Arc::clone(&request_timing_wiring),
+            super::request_timing::pass_through_transform(),
+        )),
         // TS `_steeringStopPending`: both the after-turn and the
         // before-turn hooks consult the same probe (a queued steer stops
         // the run at the boundary; the pump delivers it next).

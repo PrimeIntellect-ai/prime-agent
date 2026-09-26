@@ -93,14 +93,13 @@ branch-summary, refinement) call the provider directly and are not logged.
 | `settings-manager` `requestTiming` + `getRequestTiming()` | `crates/pa-core/src/settings`: the `requestTiming` key + `get_request_timing()` |
 | vitest suite (`test/request-timing.test.ts`, 5 tests) | in-module tests in `request_timing.rs` (timeline shape: phase order, sequence identity, summary accounting, omission rules, flag-off silence, engine wiring) |
 
-Deviations, both deliberate:
+Deviations, deliberate:
 
-- The dispatch-marking `transform_context` seam exists only while timing
-  is on. TS always wires `transformContext` (the extension context
-  transform); the Rust engine has no transform seam yet, and wiring a
-  pass-through one unconditionally would add a boxed closure to every
-  turn of every session, flag or not. Off leaves the seam unset —
-  bit-identical to before the port.
+- The instrumented `transformContext` seam wraps a pass-through (the Rust
+  engine has no extension context transform yet); it is always wired like
+  TS, so the wrapper's per-request check keeps the disabled path free of
+  timestamps and entries, and a flag flipped on mid-session still gets
+  its dispatch timestamp.
 - Entry `sessionId` appears once the loop carries a session id. The Rust
   engine currently leaves the loop-level session id unset (a pre-existing
   gap — `pa-ai`'s session-affinity/prompt-cache-key path stays inert);
