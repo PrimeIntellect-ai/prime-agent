@@ -49,17 +49,21 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
             if let Some(after_seconds) = rest.strip_prefix('.') {
                 rest = after_seconds;
                 // Any fraction length parses, scaled to milliseconds
-                // (`.7` is 700ms like `new Date`).
-                let mut digits = String::new();
-                while rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                    digits.push(rest.chars().next().unwrap_or_default());
-                    rest = &rest[1..];
-                }
+                // like `Date.parse` (`.7` is 700ms, `.7654` truncates to
+                // 765ms): keep the first three digits, pad the rest to
+                // the right.
+                let fraction_digits = rest.chars().take_while(char::is_ascii_digit).count();
+                let mut digits: String = rest.chars().take(fraction_digits.min(3)).collect();
                 if digits.is_empty() {
                     return None;
                 }
-                let scaled: String = std::iter::once('0').chain(digits.chars().take(3)).collect();
-                millis = scaled.parse::<i64>().ok()?;
+                // The digits are ASCII, so the char count is the byte
+                // length: advance past the whole fraction.
+                rest = &rest[fraction_digits..];
+                while digits.len() < 3 {
+                    digits.push('0');
+                }
+                millis = digits.parse::<i64>().ok()?;
             }
         }
         if rest.is_empty() {

@@ -169,10 +169,10 @@ fn incident_fixture_lines() -> Vec<String> {
     ));
     // Recovery: worker replaced, backlogged uncertain operations held.
     let operations = [
-        std::iter::repeat("tool_execution_start").take(408),
-        std::iter::repeat("auto_retry_end").take(62),
-        std::iter::repeat("agent_end").take(47),
-        std::iter::repeat("message_start").take(16),
+        std::iter::repeat_n("tool_execution_start", 408),
+        std::iter::repeat_n("auto_retry_end", 62),
+        std::iter::repeat_n("agent_end", 47),
+        std::iter::repeat_n("message_start", 16),
     ]
     .into_iter()
     .flatten()

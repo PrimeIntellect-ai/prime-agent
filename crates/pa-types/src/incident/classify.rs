@@ -219,7 +219,7 @@ fn classify_command_failure(command: &str, error: &str) -> CommandFailure {
         event_class: "command-failure",
         summary: format!(
             "command {command} failed: {}",
-            truncate_text(&error_message(first_line(err)), 100)
+            truncate_text(error_message(first_line(err)), 100)
         ),
         tokens: quoted_names,
     }

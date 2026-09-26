@@ -304,11 +304,10 @@ fn command_failures_classify_by_their_error_body() {
 fn recovery_breakdown_ranks_and_caps_the_operations() {
     // The motivating incident's held backlog: 533 uncertain operations
     // across four kinds (TS `incident.test.ts`'s fixture).
-    let operations = std::iter::repeat("tool_execution_start")
-        .take(408)
-        .chain(std::iter::repeat("auto_retry_end").take(62))
-        .chain(std::iter::repeat("agent_end").take(47))
-        .chain(std::iter::repeat("message_start").take(16))
+    let operations = std::iter::repeat_n("tool_execution_start", 408)
+        .chain(std::iter::repeat_n("auto_retry_end", 62))
+        .chain(std::iter::repeat_n("agent_end", 47))
+        .chain(std::iter::repeat_n("message_start", 16))
         .collect::<Vec<_>>()
         .join(", ");
     let entry = supervisor_line(
