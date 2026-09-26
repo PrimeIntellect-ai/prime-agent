@@ -1306,14 +1306,19 @@ impl AgentView {
     /// The autocomplete dropdown, mounted just above the editor surface (TS
     /// anchors the overlay immediately above the cursor row; the editor's
     /// first content row carries the cursor in the common single-line
-    /// case). Each row pads to the input width and floats on the popup
-    /// background between the editor's left padding and prompt prefix.
+    /// case). The panel opens with the one full-width muted rule every
+    /// inline menu panel opens with (the operator's 2026-09-26 top-border
+    /// directive), its rows pad to the input width and float on the popup
+    /// background between the editor's left padding and prompt prefix, and
+    /// the selected row's wash spans the panel's full width like the
+    /// `/model` picker's selected row.
     fn render_autocomplete_overlay(&mut self, width: usize) -> Vec<Line> {
         let Some(state) = self.editor.autocomplete_state() else {
             return Vec::new();
         };
         let theme = &self.theme;
         let bg = self.theme.bg_style(ThemeBg::ToolPanelBg);
+        let selection = self.theme.soft_selection_style();
         let padding_x = 2usize;
         // The overlay anchors against the live prompt prefix (TS
         // `getRenderMetrics`'s `promptPrefixWidth`, the `!`/`!!` prompts
@@ -1321,30 +1326,37 @@ impl AgentView {
         let prompt_width = str_width(self.editor.bash_prompt_prefix().unwrap_or("> "));
         let content_width = width.saturating_sub(padding_x * 2).max(1);
         let input_width = content_width.saturating_sub(prompt_width).max(1);
-        let mut rows: Vec<Line> = Vec::new();
+        // The panel's top border: the muted `─` rule that separates an
+        // inline menu panel from the rows above it, drawn on the panel
+        // surface.
+        let border = theme.fg_style(ThemeColor::BorderMuted).patch(bg);
+        let mut rows: Vec<Line> = vec![vec![Span::styled("\u{2500}".repeat(width.max(1)), border)]];
         let mut overlay = Vec::new();
-        overlay.push(Vec::new());
         overlay.extend(state.render(theme, input_width));
         overlay.push(Vec::new());
         for mut line in overlay {
             // The shared menu rows pad to the full input width with
             // unstyled spans, so the remaining-width fill below never
             // lands: the popup background must ride on every span the
-            // row left unstyled (the selected row's selection band
-            // carries its own background and is kept).
+            // row left unstyled. The selected row is the one whose spans
+            // carry the selection band: its edge padding washes with the
+            // selection too, so the band spans the panel's full width
+            // instead of stopping at the input's edges.
+            let selected = line.iter().any(|span| span.style.bg.is_some());
             for span in &mut line {
                 if span.style.bg.is_none() {
                     span.style = span.style.patch(bg);
                 }
             }
             let used: usize = line.iter().map(|s| str_width(&s.content)).sum();
-            let mut row: Line = vec![Span::styled(" ".repeat(padding_x + prompt_width), bg)];
+            let edge = if selected { bg.patch(selection) } else { bg };
+            let mut row: Line = vec![Span::styled(" ".repeat(padding_x + prompt_width), edge)];
             row.extend(line);
             row.push(Span::styled(
                 " ".repeat(input_width.saturating_sub(used)),
-                bg,
+                edge,
             ));
-            row.push(Span::styled(" ".repeat(padding_x), bg));
+            row.push(Span::styled(" ".repeat(padding_x), edge));
             rows.push(pad_row(row, width));
         }
         rows
@@ -2091,6 +2103,79 @@ mod tests {
         assert!(
             marker_row.iter().all(|span| span.style.bg.is_some()),
             "dropdown row spans the popup background: {marker_row:?}"
+        );
+    }
+
+    /// The dropdown opens with its top border (the operator's 2026-09-26
+    /// directive): the panel's first row is the full-width muted `─`
+    /// rule — the one every inline menu panel opens with — drawn on the
+    /// popup surface directly above the menu rows, so an open slash menu
+    /// reads as a panel instead of loose transcript rows.
+    #[test]
+    fn autocomplete_panel_opens_with_the_top_border_rule() {
+        let mut v = view();
+        v.editor.handle_input("/");
+        v.editor.materialize_autocomplete();
+        assert!(v.editor.is_showing_autocomplete(), "the dropdown opens");
+        let frame = v.render_dock(80);
+        let marker_row = frame
+            .iter()
+            .position(|line| text_of(line).trim_start().starts_with('\u{203a}'))
+            .expect("the dropdown renders its selected marker row");
+        let rule = frame
+            .get(marker_row.checked_sub(1).expect("a row above the menu"))
+            .expect("the top border row");
+        assert_eq!(
+            text_of(rule),
+            "\u{2500}".repeat(80),
+            "the panel opens with the full-width rule:\n{}",
+            frame.iter().map(text_of).collect::<Vec<_>>().join("\n")
+        );
+        let rule_style = v
+            .theme
+            .fg_style(ThemeColor::BorderMuted)
+            .patch(v.theme.bg_style(ThemeBg::ToolPanelBg));
+        assert!(
+            rule.iter().all(|span| span.style == rule_style),
+            "the rule draws in the muted border color on the popup background: {rule:?}"
+        );
+    }
+
+    /// The selected row's wash spans the panel's full width (the
+    /// operator's 2026-09-26 directive): the leading padding, the menu
+    /// content, and the trailing padding all carry the soft selection
+    /// background, so the band reaches both edges like the `/model`
+    /// picker's selected row, while an unselected row keeps the plain
+    /// popup background.
+    #[test]
+    fn autocomplete_selected_row_washes_the_full_panel_width() {
+        let mut v = view();
+        v.editor.handle_input("/");
+        v.editor.materialize_autocomplete();
+        assert!(v.editor.is_showing_autocomplete(), "the dropdown opens");
+        let frame = v.render_dock(80);
+        let selection_bg = v.theme.soft_selection_style().bg;
+        let marker_row = frame
+            .iter()
+            .position(|line| text_of(line).trim_start().starts_with('\u{203a}'))
+            .expect("the dropdown renders its selected marker row");
+        let selected = &frame[marker_row];
+        assert_eq!(
+            str_width(&text_of(selected)),
+            80,
+            "the selected row spans the full panel width"
+        );
+        assert!(
+            selected.iter().all(|span| span.style.bg == selection_bg),
+            "the selection wash covers every span, both edges included: {selected:?}"
+        );
+        let unselected = frame
+            .get(marker_row + 1)
+            .expect("an unselected menu row follows");
+        let panel_bg = v.theme.bg_style(ThemeBg::ToolPanelBg).bg;
+        assert!(
+            unselected.iter().all(|span| span.style.bg == panel_bg),
+            "an unselected menu row keeps the popup background: {unselected:?}"
         );
     }
 
