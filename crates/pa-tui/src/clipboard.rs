@@ -85,9 +85,14 @@ impl Env {
     }
 }
 
-/// Run `program` with `text` on its stdin (TS `execSyncHidden` with the 5s
-/// timeout; the pipe write plus process wait are quick enough that a
-/// synchronous call matches the TS behavior).
+/// TS `execSyncHidden`'s helper deadline: a tool that wedges — `wl-copy`
+/// waiting on a compositor that never focuses — dies at the deadline
+/// instead of hanging the input loop that copied.
+const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5_000);
+
+/// Run `program` with `text` on its stdin (the pipe write plus process
+/// wait are quick enough that a synchronous call matches the TS
+/// behavior).
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     let Ok(mut child) = Command::new(program)
         .args(args)
@@ -102,9 +107,18 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    match child.wait() {
-        Ok(status) => status.success() && wrote,
-        Err(_) => false,
+    let deadline = std::time::Instant::now() + HELPER_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success() && wrote,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 

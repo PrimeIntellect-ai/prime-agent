@@ -415,17 +415,17 @@ output, prompt, or goal content is collected.
 ### `tui menu opened`
 
 A menu surface opened (adoption of the unified menu panel): `source` is
-`command` (the bare slash submission — `/model`, `/mcp`) or `tab` (a typed
-partial + Tab in the command's argument context, opening the menu filtered
-to the match). The read-only info panel commands report their own `menu`
-names (the operator's 2026-09-26 inline-panel directive: `/context`,
-`/session`, `/system-prompt`, `/logs`, `/changelog`, `/hotkeys`, the
-`/traces` status and preview blocks, and `/list`). Never carries prompt or
-search content.
+`command` (the bare slash submission — `/model`, `/mcp`, `/settings`) or
+`tab` (a typed partial + Tab in the command's argument context, opening the
+menu filtered to the match). The read-only info panel commands report
+their own `menu` names (the operator's 2026-09-26 inline-panel directive:
+`/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
+`/hotkeys`, the `/traces` status and preview blocks, and `/list`). Never
+carries prompt or search content.
 
 | property | type | notes |
 |---|---|---|
-| `menu` | string | `model` / `mcp` / `context` / `session` / `system-prompt` / `logs` / `changelog` / `hotkeys` / `traces` / `list` |
+| `menu` | string | `model` / `mcp` / `settings` / `context` / `session` / `system-prompt` / `logs` / `changelog` / `hotkeys` / `traces` / `list` |
 | `source` | string | `command` / `tab` |
 
 ### `tui prompt stash`

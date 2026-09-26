@@ -155,7 +155,15 @@ impl AgentView {
             crate::chat::Detail::Details => 1,
             crate::chat::Detail::All => 2,
         };
-        let splash = render_splash(&self.chrome, &self.theme, width);
+        // A splash suppressed at the rebuild boundary (a chat that opened
+        // directly into content) contributes no rows: the offsets start
+        // at the first entry and every scroll/geometry consumer sees the
+        // same layout with or without it.
+        let splash = if self.splash_suppressed {
+            Vec::new()
+        } else {
+            render_splash(&self.chrome, &self.theme, width)
+        };
         let mut offsets = Vec::with_capacity(self.chat.len() + 1);
         offsets.push(splash.len());
         let mut first = true;
