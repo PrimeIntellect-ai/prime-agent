@@ -720,3 +720,145 @@ fn sequential_appends_keep_reopens_amortized() {
         parent = id;
     }
 }
+
+/// One-copy adoption oracle: after `adopt_window`, the manager's
+/// `active_context` must be byte-identical to an un-adopted window's
+/// `context()` over the same file (cold walk and sidecar-warm alike) —
+/// the detach changes WHO holds the retained rows, never WHAT the
+/// served context is.
+#[test]
+fn adopted_context_matches_unadopted_window_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("adopt-parity.jsonl");
+    let mut rows: Vec<serde_json::Value> = fixture()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.push(json!({"type":"model_change","id":"model","parentId":"leaf","provider":"openai","modelId":"gpt-5"}));
+    rows.push(json!({"type":"message","id":"leaf2","parentId":"model","message":{"role":"user","content":"after the switch","timestamp":0}}));
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+    for phase in ["cold", "warm"] {
+        let adopted = WindowedSessionStore::open(&path).unwrap().unwrap();
+        let mut manager = super::super::manager::SessionManager::in_memory(dir.path());
+        manager.adopt_window(adopted);
+        let reference = WindowedSessionStore::open(&path).unwrap().unwrap();
+        assert_eq!(reference.read_stats().cache_hit, phase == "warm");
+        assert!(!reference.entries().is_empty());
+        assert!(!reference.raw_entries().is_empty());
+        let expected = reference.context();
+        let actual = manager.active_context();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "{phase} adopted context diverged from the un-adopted window"
+        );
+    }
+}
+
+/// The detached window keeps its snapshot/settings/metadata surfaces,
+/// and its transcript context moves to the owning manager — `context()`
+/// on a detached window is a programming error, caught loudly.
+#[test]
+#[should_panic(expected = "detached window's transcript context")]
+fn detached_window_serves_lookups_but_not_its_own_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("detached.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+    let mut window = WindowedSessionStore::open(&path).unwrap().unwrap();
+    let (bodies, raw) = window.take_retained();
+    assert!(!bodies.is_empty());
+    assert!(!raw.is_empty());
+    assert!(window.retained_detached());
+    assert!(window.entries().is_empty());
+    assert!(window.raw_entries().is_empty());
+    assert_eq!(window.message_count(), 221);
+    assert!(window.has_non_bootstrap_entries());
+    assert!(window.has_thinking_level());
+    assert_eq!(window.settings().thinking_level, "high");
+    assert_eq!(window.compaction_count(), 1);
+    assert_eq!(window.leaf_id(), "leaf");
+    // The compile-checked no-op: the detached context is the manager's.
+    let _ = window.context();
+}
+
+/// Post-adoption mutations keep the served context equal to a full
+/// reader's: live appends (including a child-usage attribution whose
+/// target is a RETAINED assistant — the manager's own fold is the
+/// one-copy authority once the window's bodies are detached) must match
+/// what a cold reopen of the same file serves.
+#[tokio::test]
+async fn adopted_manager_live_appends_match_full_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("adopt-append.jsonl");
+    let mut rows: Vec<serde_json::Value> = vec![
+        json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        json!({"type":"thinking_level_change","id":"settings","parentId":null,"thinkingLevel":"high"}),
+    ];
+    let mut parent = "settings".to_owned();
+    for i in 0..220 {
+        let id = format!("u{i}");
+        rows.push(json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+        parent = id;
+    }
+    rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
+    rows.push(json!({"type":"message","id":"a1","parentId":"compact","message":{"role":"assistant","provider":"p","model":"m",
+        "content":[{"type":"text","text":"in-window assistant"}],"timestamp":0,
+        "usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,
+        "cost":{"input":0.01,"output":0.002,"cacheRead":0.0,"cacheWrite":0.0,"total":0.012}}}}));
+    rows.push(json!({"type":"message","id":"leaf","parentId":"a1","message":{"role":"user","content":"latest","timestamp":0}}));
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+
+    let mut manager =
+        super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+    manager.append_model_change("live", "m2").unwrap();
+    manager
+        .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("live prompt".to_owned()),
+            timestamp: 5,
+            rest: Default::default(),
+        }))
+        .unwrap();
+    // A live attribution whose target sits INSIDE the retained window:
+    // the manager folds its own copy (the detached window has none).
+    manager
+        .append_child_usage_attribution(
+            "a1",
+            pa_types::ai::Usage {
+                input: 5,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 6,
+                cost: pa_types::ai::UsageCost::default(),
+            },
+            pa_types::ai::Usage {
+                input: 15,
+                output: 3,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 18,
+                cost: pa_types::ai::UsageCost::default(),
+            },
+            None,
+        )
+        .unwrap();
+    let live = manager.active_context();
+    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
+    let reopened_ctx = reopened.active_context();
+    assert_eq!(
+        serde_json::to_vec(&live).unwrap(),
+        serde_json::to_vec(&reopened_ctx).unwrap(),
+        "post-adopt live appends diverged from the full reader's reopen"
+    );
+    // The folded aggregate is visible in both (assignment, not merge).
+    assert!(
+        live.messages.iter().any(|m| matches!(m,
+            AgentMessage::Assistant(a)
+                if a.usage.input == 15 && a.usage.output == 3)),
+        "the live attribution fold did not reach the served context"
+    );
+}

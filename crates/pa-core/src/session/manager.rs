@@ -613,22 +613,33 @@ impl SessionManager {
             manager.session_file = Some(path);
             manager.persist = true;
             manager.session_dir_backed = true;
-            manager.flushed = true;
-            manager.file_entries = window.entries().to_vec();
-            manager.has_assistant_entry = true;
-            manager.build_index();
-            manager.window = Some(window);
+            // The production adoption path: one-copy move (the test
+            // constructor rides the same detach semantics the daemon's
+            // engine uses).
+            manager.adopt_window(window);
             Ok(manager)
         })
         .await?
     }
 
     /// The active compacted context without hydrating old message bodies.
+    ///
+    /// An attached window contributes only its walk-resolved settings
+    /// overlay: the transcript comes from `file_entries` (the one-copy
+    /// authority since `adopt_window` moves the walk's trees in). The
+    /// window's own trees are detached at adoption, so asking the window
+    /// for a context would walk an empty window.
     pub fn active_context(&self) -> super::SessionContext {
-        match &self.window {
-            Some(window) => window.context(),
-            None => super::build_session_context(&self.file_entries, self.get_leaf_id()),
+        let mut context = super::build_session_context(&self.file_entries, self.get_leaf_id());
+        if let Some(window) = &self.window {
+            if !window.full_history() {
+                let settings = window.settings();
+                context.thinking_level.clone_from(&settings.thinking_level);
+                context.service_tier = settings.service_tier;
+                context.model.clone_from(&settings.model);
+            }
         }
+        context
     }
 
     /// Adopt a verified read-only window into an externally persisted manager.
@@ -639,7 +650,16 @@ impl SessionManager {
     /// `flushed = false` would later send `flush_now` into the
     /// window-failing rewrite path.
     pub fn adopt_window(&mut self, window: super::window::WindowedSessionStore) {
-        self.file_entries = window.entries().to_vec();
+        // One-copy adoption: the walk's parsed trees move in (no `to_vec`
+        // clone), and the raw JSONL lines drop here — the file itself is the
+        // durable raw copy, and a second resident typed copy plus the raw
+        // lines measured ~29.5MiB of wire-equivalent duplication on the
+        // 10MiB canonical fixture (worker-rss census, 2026-09-26). The
+        // window stays attached for its snapshot/settings/metadata state;
+        // `active_context` walks `file_entries` with the window's settings
+        // overlay, so the served context is unchanged.
+        let (entries, _raw_entries) = window.take_retained();
+        self.file_entries = entries;
         self.build_index();
         self.leaf_id = Some(window.leaf_id().to_owned());
         self.has_assistant_entry = true;
