@@ -1399,6 +1399,7 @@ fn arm_shutdown_recovery(
     session: &mut SessionUi,
     view: &mut AgentView,
     reconnect: &mut Option<ReconnectLoop>,
+    session_reconnect: &mut Option<SessionReconnect>,
 ) -> bool {
     if reconnect.is_some() || session.daemon_closing_notice.as_deref() != Some("shutdown") {
         return false;
@@ -1408,6 +1409,11 @@ fn arm_shutdown_recovery(
         crate::chat::StatusKind::Warning,
         view,
     );
+    // TS #2458's yield rule: the shutdown recovery owns the run — a
+    // session-plane retry armed by an earlier direct-link loss would race
+    // it through a dying supervisor, and its expiry would block submits
+    // after a later reconnect lands.
+    *session_reconnect = None;
     *reconnect = Some(ReconnectLoop::start_shutdown());
     session.dirty = true;
     true
@@ -2310,7 +2316,12 @@ async fn run_interactive_surface(
                     // An announced non-update closing arms the bounded
                     // shutdown recovery instead (TS #2458): no-op unless
                     // the notice says the daemon itself is going down.
-                    arm_shutdown_recovery(&mut session, &mut view, &mut reconnect);
+                    arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    );
                     // A dead direct worker link arms the session
                     // re-attach driver (TS `connection_status:
                     // "reconnecting"`): the warning row rides the chat
@@ -2362,7 +2373,12 @@ async fn run_interactive_surface(
                         );
                         reconnect = Some(ReconnectLoop::start(&update));
                         session.dirty = true;
-                    } else if arm_shutdown_recovery(&mut session, &mut view, &mut reconnect) {
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
                         // TS #2458: the announced non-update closing owns
                         // the recovery, not the hiccup loop.
                     } else if reconnect.is_some() {
@@ -2409,7 +2425,12 @@ async fn run_interactive_surface(
                     }
                     if session.reconnect.is_some() {
                         session.dirty = true;
-                    } else if arm_shutdown_recovery(&mut session, &mut view, &mut reconnect) {
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
                         // The announced non-update closing owns the
                         // recovery (TS #2458): the supervisor socket's
                         // death joins its driver — the direct link below
@@ -2563,6 +2584,13 @@ async fn run_interactive_surface(
                 let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
                 reconnect_connect = Some(attempt_rx);
                 reconnect_attempt_in_flight = true;
+                // TS #2458: the shutdown recovery's discovery waits no
+                // longer than the bound — one bounded connect+hello per
+                // poll (the fixed 100ms cadence re-arms faster than the
+                // retry helper's own backoff, and a single leg bounds the
+                // window's over-run; the resume/hiccup windows keep the
+                // retrying helper).
+                let shutdown = matches!(kind, RecoveryKind::Shutdown);
                 tokio::spawn(async move {
                     // No outer timeout: dropping the future mid-attempt
                     // would cancel an in-flight handshake without its
@@ -2570,7 +2598,11 @@ async fn run_interactive_surface(
                     // an accepting-but-silent daemon). The leg self-bounds
                     // — every attempt's connect and hello carry their own
                     // budgets and abort their own reader on failure.
-                    let attempt = DaemonClient::connect_with_retry(&socket_path).await;
+                    let attempt = if shutdown {
+                        DaemonClient::connect(&socket_path).await
+                    } else {
+                        DaemonClient::connect_with_retry(&socket_path).await
+                    };
                     let _ = attempt_tx.send(attempt);
                 });
             }
