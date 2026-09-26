@@ -935,3 +935,97 @@ impl Supervisor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// broadcast's defined backpressure), but never silently anymore
+    /// (finding 4a): the loss becomes a durable daemon-log line naming the
+    /// client and the dropped count. Drives a real connection loop
+    /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lagged_client_event_stream_is_logged() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        // The test's client only reads; its write half stays held so the
+        // connection's writes fail only when the test ends.
+        let (client_read, _client_write) = client_side.into_split();
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The handshake greeting arrives before the loop's first poll.
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        // The greeting is written BEFORE the loop subscribes to the
+        // event ring, so the flood must wait for the subscription to
+        // exist — sends into a receiver-less ring are dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while supervisor.events.receiver_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the connection loop never subscribed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Flood the ring well past its capacity with frames too big for
+        // the client's socket buffer: the connection loop parks in its
+        // event write, its receiver falls out of the ring's live window,
+        // and the parked write only completes once the drain frees the
+        // buffer again.
+        let capacity = crate::backpressure::EVENT_RING_CAPACITY;
+        let padding = "x".repeat(2048);
+        let flood = capacity + 2048;
+        for index in 0..flood {
+            let _ = supervisor.events.send((
+                ClientRouting::Broadcast,
+                json!({ "type": "session_event", "index": index, "padding": padding }),
+            ));
+        }
+        // Drain the parked connection while watching for the log line: the
+        // loop unparks as the reader frees the socket buffer, its next
+        // event read reports the dropped span, and the loss lands in the
+        // daemon log. The quiet counter only bounds an idle connection,
+        // never a live one (a slow runner may pace the backlog, so the
+        // drain continues as long as the log line has not landed).
+        let mut buffer = vec![0u8; 64 * 1024];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("lagged on the event ring") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lagged drain was never logged; log: {log}"
+            );
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(_) | Err(_)) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        };
+        let line = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("lagged on the event ring"))
+            .expect("the lag line");
+        assert!(
+            line.contains("events dropped"),
+            "the log names the dropped count: {line}"
+        );
+        connection.abort();
+    }
+}
