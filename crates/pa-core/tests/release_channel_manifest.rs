@@ -16,7 +16,6 @@
 //! exist with the digests it claims.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -492,9 +491,55 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     std::fs::create_dir_all(repo.join("docs")).expect("docs dir");
     std::fs::write(repo.join("LICENSE"), "fixture license\n").expect("LICENSE");
     std::fs::write(repo.join("README.md"), "fixture readme\n").expect("README.md");
-    let binary = repo.join("prime-agent");
-    std::fs::write(&binary, "#!/bin/sh\necho 1.2.3\n").expect("fixture binary");
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("exec bit");
+    // The fail-closed Linux assembler accepts only a paired shipped ELF +
+    // decoder from split_debug.py, so the fixture compiles a tiny real ELF
+    // and splits it — the artifact shape the channel actually ships.
+    let split = tempfile::tempdir().expect("split fixture dir");
+    let source = split.path().join("prime-agent.c");
+    std::fs::write(&source, "int main(void) { return 0; }\n").expect("fixture source");
+    let raw = split.path().join("cargo-prime-agent");
+    let compiled = Command::new("gcc")
+        .arg("-g")
+        .arg("-Wl,--build-id")
+        .arg("-o")
+        .arg(&raw)
+        .arg(&source)
+        .output()
+        .expect("compile the fixture");
+    assert_eq!(
+        compiled.status.code(),
+        Some(0),
+        "fixture gcc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let binary = split.path().join("prime-agent");
+    let split_run = python(
+        &workspace_root()
+            .join("scripts")
+            .join("release")
+            .join("split_debug.py"),
+        &[
+            "--binary".as_ref(),
+            raw.as_os_str(),
+            "--shipped".as_ref(),
+            binary.as_os_str(),
+            "--out".as_ref(),
+            split.path().as_os_str(),
+            "--version".as_ref(),
+            "1.2.3".as_ref(),
+            "--target".as_ref(),
+            "x86_64-unknown-linux-gnu".as_ref(),
+        ],
+    );
+    assert_eq!(
+        split_run.status.code(),
+        Some(0),
+        "fixture split failed: {}",
+        String::from_utf8_lossy(&split_run.stderr)
+    );
+    let decoder = split.path().join("prime-agent-1.2.3-linux-x64.debug.gz");
+    assert!(binary.is_file(), "shipped fixture missing");
+    assert!(decoder.is_file(), "decoder fixture missing");
 
     let scripts = workspace_root().join("scripts/release");
     let catalog = fixture.path().join("catalog-assets");
@@ -525,6 +570,8 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
             "x86_64-unknown-linux-gnu".as_ref(),
             "--binary".as_ref(),
             binary.as_os_str(),
+            "--decoder".as_ref(),
+            decoder.as_os_str(),
             "--catalog-assets".as_ref(),
             catalog.as_os_str(),
             "--out-dir".as_ref(),
