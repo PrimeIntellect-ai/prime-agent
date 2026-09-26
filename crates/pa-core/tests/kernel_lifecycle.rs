@@ -397,12 +397,14 @@ async fn background_bash_settlement_fires_the_callback_once() {
     let settled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = std::sync::Arc::clone(&settled);
     // The callback itself is the observable event: the test awaits its
-    // notice (a later settlement sends into the consumed channel, so the
-    // counter stays the witness for the exactly-once assertions).
-    let (settled_tx, settled_rx) = tokio::sync::oneshot::channel::<()>();
+    // notice (a stored permit wakes the wait even if the callback fired
+    // first, and the counter stays the witness for the exactly-once
+    // assertions).
+    let settled_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = std::sync::Arc::clone(&settled_notify);
     options.on_background_work_settled = Some(std::sync::Arc::new(move || {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _ = settled_tx.send(());
+        notify.notify_one();
     }));
     let manager = started_manager(options).await;
 
@@ -417,7 +419,8 @@ async fn background_bash_settlement_fires_the_callback_once() {
     // The handle finishes: the settlement callback is the wake-up, so the
     // test waits for it directly (the timeout only bounds failure).
     execute(&manager, "live.kill()").await;
-    tokio::time::timeout(Duration::from_secs(10), settled_rx)
+    let notified = settled_notify.notified();
+    tokio::time::timeout(Duration::from_secs(10), notified)
         .await
         .expect("the settlement callback must fire");
     assert!(
