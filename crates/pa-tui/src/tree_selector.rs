@@ -268,9 +268,10 @@ impl TreeSelector {
             let keys: Vec<String> = ids.iter().filter_map(|id| first(id)).collect();
             (!keys.is_empty()).then(|| keys.join("/"))
         };
-        let mut hint = "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch.".to_string();
+        let mut parts =
+            vec!["  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch.".to_string()];
         if let Some(label) = first("app.tree.editLabel") {
-            hint.push_str(&format!(" {label}: label."));
+            parts.push(format!("{label}: label."));
         }
         if let Some(filters) = bound(&[
             "app.tree.filter.default",
@@ -283,16 +284,16 @@ impl TreeSelector {
                 "app.tree.filter.cycleForward",
                 "app.tree.filter.cycleBackward",
             ]) {
-                Some(cycle) => hint.push_str(&format!(" {filters}: filters ({cycle} cycle).")),
-                None => hint.push_str(&format!(" {filters}: filters.")),
+                Some(cycle) => parts.push(format!("{filters}: filters ({cycle} cycle).")),
+                None => parts.push(format!("{filters}: filters.")),
             }
         }
         if let Some(time) = first("app.tree.toggleLabelTimestamp") {
-            hint.push_str(&format!(" {time}: label time"));
+            parts.push(format!("{time}: label time"));
         }
         // `TruncatedText` cuts the colored string and appends a plain
         // `...` after the color reset.
-        let hints_line = vec![theme.fg_span(ThemeColor::Muted, hint)];
+        let hints_line = vec![theme.fg_span(ThemeColor::Muted, parts.join(" "))];
         if line_width(&hints_line) > width {
             let mut hints = truncate_line(&hints_line, width.saturating_sub(3), "");
             hints.push(crate::Span::raw("..."));
