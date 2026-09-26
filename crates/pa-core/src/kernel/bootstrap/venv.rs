@@ -1184,7 +1184,7 @@ mod tests {
         // false because the probe cannot even run.
         std::fs::remove_file(&python).unwrap();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 12, "a deleted interpreter misses on stat and fails runtime probe");
+        assert_eq!(probe_count(), 11, "a deleted interpreter misses on stat without running");
     }
 
     /// The Windows venv layout (`<venv>/Lib/site-packages/rlm`, no
