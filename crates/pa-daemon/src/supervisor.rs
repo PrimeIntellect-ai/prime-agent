@@ -4570,6 +4570,7 @@ impl Supervisor {
             );
         };
         let selector = selector.to_string();
+        eprintln!("[dbg-supervisor] routing {type_name} for {selector}");
         // The rebind target when the selector addresses a superseded id: a
         // binding whose session has a live resident again (a new worker took
         // the session file over). The routed command is rewritten to the

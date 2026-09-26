@@ -2542,6 +2542,7 @@ impl Worker {
     }
 
     async fn handle_prompt(&self, payload: &Value, wait: bool) -> DaemonResponse {
+        eprintln!("[dbg-worker] handle_prompt entered");
         if let Err(response) = self.require_created("prompt") {
             return response;
         }
