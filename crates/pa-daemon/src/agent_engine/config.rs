@@ -1,8 +1,6 @@
 //! Agent engine configuration: the create-command contract and the
 //! private handle/sink types (moved with their concerns).
 
-use super::*;
-
 /// Configuration for the real engine.
 #[derive(Clone)]
 pub struct AgentEngineConfig {
