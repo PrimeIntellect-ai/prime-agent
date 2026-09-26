@@ -194,6 +194,12 @@ fn session_cost_split(store: &SessionFile) -> SessionCostSplit {
         }
         None => (0.0, 0.0),
     };
+    // The prefix's own half clamps at zero: attribution drift (or a
+    // malformed batch) can push the child sums past the rows the walk
+    // counted, and the full reader's own fold clamps per field the
+    // same way — `ownCost` never goes negative, the aggregate never
+    // exceeds the counted bill, and the pair still sums to `totalCost`.
+    let prefix_subagents = prefix_subagents.min(prefix);
     SessionCostSplit {
         own: retained_own + (prefix - prefix_subagents),
         subagents: retained_subagents + prefix_subagents,
@@ -971,6 +977,71 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// The split's halves never invert on attribution drift: a prefix
+    /// attribution whose child batch exceeds the rows the walk counted
+    /// (here the aggregate lags its own child batch) clamps — the own
+    /// half stays non-negative and the aggregate never exceeds the
+    /// counted bill, mirroring the full reader's per-field own clamp.
+    /// Drifted files may split differently across the full and windowed
+    /// readers; the totals still agree, and both halves stay sane on
+    /// every open. Every fixture cost is a dyadic rational, so the
+    /// folds are exact.
+    #[test]
+    fn cost_split_clamps_the_prefix_at_zero() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("windowed-drift.jsonl");
+        let usage = |cost: f64| {
+            json!({
+                "input": 100, "output": 50, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": 150,
+                "cost": { "input": 0, "output": cost, "cacheRead": 0, "cacheWrite": 0, "total": cost },
+            })
+        };
+        let row = |value: Value| value.to_string();
+        let lines = [
+            row(json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"})),
+            row(json!({"type": "message", "id": "u1", "parentId": null, "timestamp": "t", "message": {"role": "user", "content": "hi"}})),
+            row(json!({"type": "message", "id": "a1", "parentId": "u1", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.125)}})),
+            // A drifted attribution: the child batch ($0.5) exceeds the
+            // aggregate its own row reports ($0.1875 - raw $0.125).
+            row(json!({
+                "type": "child_usage_attributed", "id": "cu1", "parentId": "a1",
+                "timestamp": "t", "targetId": "a1",
+                "childUsage": usage(0.5), "aggregateUsage": usage(0.1875),
+            })),
+            row(json!({"type": "message", "id": "u2", "parentId": "cu1", "timestamp": "t", "message": {"role": "user", "content": "go"}})),
+            row(json!({"type": "message", "id": "a2", "parentId": "u2", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.25)}})),
+            row(json!({
+                "type": "compaction", "id": "c1", "parentId": "a2",
+                "timestamp": "t", "summary": "s", "firstKeptEntryId": "u2", "tokensBefore": 100,
+                "usage": usage(0.03125),
+            })),
+            row(json!({
+                "type": "child_usage_attributed", "id": "cu2", "parentId": "c1",
+                "timestamp": "t", "targetId": "a2",
+                "childUsage": usage(0.0625), "aggregateUsage": usage(0.3125),
+            })),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let windowed = SessionFile::open_windowed(&path).unwrap();
+        assert!(
+            windowed.window.is_some(),
+            "the fixture must serve a real window"
+        );
+        let stats = session_stats(&windowed, None);
+        // Retained ($0.34375: the kept turn's aggregate plus the
+        // summarizer) + prefix ($0.1875): the drift clamps the prefix's
+        // subagent half to its counted bill, so the own half keeps the
+        // retained region's own spend.
+        assert_eq!(stats["totalCost"].as_f64(), Some(0.53125));
+        assert_eq!(stats["ownCost"].as_f64(), Some(0.28125));
+        assert_eq!(stats["subagentsCost"].as_f64(), Some(0.25));
+        assert_eq!(
+            stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap(),
+            stats["totalCost"].as_f64().unwrap()
+        );
     }
 
     /// The windowed reader must not drop the discarded prefix's

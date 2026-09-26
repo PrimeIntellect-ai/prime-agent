@@ -355,26 +355,28 @@ impl WindowedSessionStore {
                 // last in file order — the cumulative aggregate the TS fold
                 // ends with.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                    // A malformed aggregate (null, a scalar) must not
-                    // replace a valid row usage with zeros — the session
-                    // store fold skips non-objects the same way.
-                    if let (Some(target), Some(aggregate)) = (
-                        value.get("targetId").and_then(serde_json::Value::as_str),
-                        value
-                            .get("aggregateUsage")
-                            .filter(|aggregate| aggregate.is_object()),
-                    ) {
-                        older_aggregates
-                            .entry(target.to_owned())
-                            .or_insert_with(|| OlderPathUsage::from_usage(aggregate));
+                    if let Some(target) =
+                        value.get("targetId").and_then(serde_json::Value::as_str)
+                    {
+                        // A malformed aggregate (null, a scalar) must not
+                        // replace a valid row usage with zeros — the session
+                        // store fold skips non-objects the same way.
+                        if let Some(aggregate) =
+                            value.get("aggregateUsage").filter(|aggregate| aggregate.is_object())
+                        {
+                            older_aggregates
+                                .entry(target.to_owned())
+                                .or_insert_with(|| OlderPathUsage::from_usage(aggregate));
+                        }
                         // The batch's child spend sums across every
                         // attribution row of the target (each aggregate
                         // is cumulative, so the sum is the folded row's
-                        // attributed portion). A malformed `childUsage`
-                        // block adds nothing — the own/total split then
-                        // bills that spend to the session's own cost,
-                        // the same tolerance the retained walk's
-                        // subtraction has.
+                        // attributed portion). The gate is independent
+                        // of the aggregate's: the whole-file own/subagents
+                        // split subtracts every well-formed child block —
+                        // exactly like the retained walk's own fold — so
+                        // a malformed aggregate must not move its child
+                        // batch into the session's own cost.
                         if let Some(child) =
                             value.get("childUsage").filter(|child| child.is_object())
                         {
@@ -582,12 +584,13 @@ impl WindowedSessionStore {
             older_path_stats.cache_read += folded.cache_read;
             older_path_stats.cache_write += folded.cache_write;
             older_path_stats.cost += folded.cost;
-            // The folded row bills own + attributed spend: the
+            // The counted row bills own + attributed spend: the
             // captured child sums carry the attributed half separately,
             // so the whole-file own/subagents split bills the prefix's
-            // subagent spend to the aggregate it belongs to (only
-            // folded rows carry a child sum — the capture rides the
-            // same validity gate as the aggregate).
+            // subagent spend to the aggregate it belongs to. A target
+            // with a well-formed child block counts its sum whether or
+            // not the aggregate folded — the full reader's own fold
+            // subtracts the same block either way.
             if let Some(child_cost) = child_cost_by_target.get(id) {
                 older_path_stats.attributed_child_cost += *child_cost;
             }

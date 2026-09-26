@@ -127,6 +127,49 @@ fn older_path_stats_sum_every_child_batch_of_a_target() {
     assert!((stats.cost - stats.attributed_child_cost - 0.11).abs() < 1e-9);
 }
 
+/// A well-formed child batch with a MALFORMED aggregate still counts as
+/// the prefix's subagent spend: the retained walk's own fold subtracts
+/// every well-formed `childUsage` block regardless of its row's
+/// aggregate, so the windowed capture must gate on the same validity —
+/// nesting it inside the aggregate gate would bill the batch to the
+/// session's own cost on the windowed open while the full open
+/// subtracts it.
+#[test]
+fn older_path_stats_count_child_batches_with_malformed_aggregates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older-attribution-malformed.jsonl");
+    let mut rows = vec![
+        json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        json!({"type":"message","id":"old-a","parentId":null,"message":{"role":"assistant","provider":"p","model":"m",
+            "content":[{"type":"text","text":"old"}],"timestamp":0,
+            "usage":{"input":100,"output":10,"cacheRead":5,"cacheWrite":0,"totalTokens":115,
+            "cost":{"input":0.1,"output":0.01,"cacheRead":0.0,"cacheWrite":0.0,"total":0.125}}}}),
+    ];
+    let mut parent = "old-a".to_owned();
+    for i in 0..220 {
+        let id = format!("u{i}");
+        rows.push(json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+        parent = id;
+    }
+    rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
+    rows.push(json!({"type":"child_usage_attributed","id":"attr","parentId":"compact","targetId":"old-a","origin":"spawn_task",
+        "childUsage":{"input":50,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":55,
+        "cost":{"input":0.05,"output":0.005,"cacheRead":0,"cacheWrite":0,"total":0.0625}},
+        "aggregateUsage":null}));
+    rows.push(json!({"type":"message","id":"leaf","parentId":"attr","message":{"role":"user","content":"latest","timestamp":0}}));
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    let stats = store.older_path_stats();
+    // The malformed aggregate never folds (the raw row's $0.125 stays the
+    // counted bill), but the child batch still splits out as the
+    // subagent half — exactly what the full reader's own fold
+    // subtracts.
+    assert!((stats.cost - 0.125).abs() < 1e-9);
+    assert!((stats.attributed_child_cost - 0.0625).abs() < 1e-9);
+    assert!((stats.cost - stats.attributed_child_cost - 0.0625).abs() < 1e-9);
+}
+
 /// The boundary model the per-model usage fold seeds its timeline with:
 /// the newest `model_change` in the discarded prefix — NOT the leaf's
 /// model. A post-compaction switch inside the retained window must not
