@@ -875,17 +875,21 @@ impl HeartbeatsPicker {
     }
 
     /// The list's bottom hint line: every shortcut in one line (the close
-    /// key never repeats).
+    /// key never repeats). The open and close segments carry both of
+    /// their keys — the confirm/openSelected pair opens the detail
+    /// drill-in, the back/cancel pair closes from the list.
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {} close",
+            "{}/{} move \u{b7} {}/{} open \u{b7} {}/{} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
             key("tui.select.confirm", "Enter"),
+            key("app.heartbeats.openSelected", "\u{2192}"),
+            key("app.modal.back", "\u{2190}"),
             key("tui.select.cancel", "Esc"),
         )
     }
@@ -1393,7 +1397,7 @@ mod tests {
         );
         assert!(text
             .iter()
-            .any(|row| row.contains("↑/↓ move · Enter open · Esc close")));
+            .any(|row| row.contains("↑/↓ move · Enter/→ open · ←/Esc close")));
         for line in &frame {
             assert!(
                 crate::width::spans_width(line) <= 70,

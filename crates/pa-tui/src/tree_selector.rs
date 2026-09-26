@@ -239,7 +239,7 @@ impl TreeSelector {
 
     /// The full pane (TS `TreeSelectorComponent.render`): spacers, borders,
     /// title, hints, search line, the tree, and any active input.
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());
@@ -249,15 +249,36 @@ impl TreeSelector {
         lines.push(vec![crate::Span::raw("   Session Tree")]);
         // TS composes the hints from `keyText` lookups: every key part is
         // capitalized (`Shift+L`, `Ctrl+D`), and `TruncatedText` appends
-        // `...` when the line exceeds the pane width.
-        let filter_keys = "Ctrl+D/Ctrl+T/Ctrl+U/Ctrl+L/Ctrl+A";
-        let cycle_keys = "Ctrl+O/Shift+Ctrl+O";
+        // `...` when the line exceeds the pane width. The label, filter,
+        // cycle, and time keys render from the effective bindings, so a
+        // user `keybindings.json` override moves the hint with the
+        // handler; the move/page/fold arrows stay the literal glyphs TS
+        // renders (`^←/^→ or Alt+←/Alt+→`).
+        let key_text = |id: &str| crate::keybindings::format_key_text(&kb.get_keys(id).join("/"));
+        let filter_keys = [
+            "app.tree.filter.default",
+            "app.tree.filter.noTools",
+            "app.tree.filter.userOnly",
+            "app.tree.filter.labeledOnly",
+            "app.tree.filter.all",
+        ]
+        .iter()
+        .map(|id| key_text(id))
+        .collect::<Vec<_>>()
+        .join("/");
+        let cycle_keys = format!(
+            "{}/{}",
+            key_text("app.tree.filter.cycleForward"),
+            key_text("app.tree.filter.cycleBackward")
+        );
+        let label_key = key_text("app.tree.editLabel");
+        let time_key = key_text("app.tree.toggleLabelTimestamp");
         // `TruncatedText` cuts the colored string and appends a plain
         // `...` after the color reset.
         let hints_line = vec![theme.fg_span(
             ThemeColor::Muted,
             format!(
-                "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch. Shift+L: label. {filter_keys}: filters ({cycle_keys} cycle). Shift+T: label time"
+                "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch. {label_key}: label. {filter_keys}: filters ({cycle_keys} cycle). {time_key}: label time"
             ),
         )];
         if line_width(&hints_line) > width {
@@ -291,7 +312,7 @@ impl TreeSelector {
                 match &self.mode {
                     Mode::Summarize { selected, .. } => {
                         lines.push(Vec::new());
-                        lines.extend(render_choice(theme, width, selected));
+                        lines.extend(render_choice(theme, width, kb, selected));
                     }
                     Mode::CustomPrompt { input, .. } => {
                         lines.push(Vec::new());
@@ -310,10 +331,8 @@ impl TreeSelector {
                         };
                         lines.push(truncate_line(&row, width, ""));
                         lines.push(truncate_line(
-                            &vec![theme.fg_span(
-                                ThemeColor::Muted,
-                                "  enter save  escape cancel".to_string(),
-                            )],
+                            &vec![theme
+                                .fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
                             width,
                             "",
                         ));
@@ -336,9 +355,7 @@ impl TreeSelector {
                 };
                 lines.push(truncate_line(&row, width, ""));
                 lines.push(truncate_line(
-                    &vec![
-                        theme.fg_span(ThemeColor::Muted, "  enter save  escape cancel".to_string())
-                    ],
+                    &vec![theme.fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
                     width,
                     "",
                 ));
@@ -352,7 +369,23 @@ impl TreeSelector {
 
 /// Render the summarize choice list (the three TS options; row one is
 /// "No summary").
-fn render_choice(theme: &Theme, width: usize, selected: &usize) -> Vec<Line> {
+/// The key pair every inner pane's bottom hint renders (TS
+/// `ExtensionSelectorComponent`'s `keyHint` pair): the confirm and cancel
+/// keys from the effective bindings, so a user `keybindings.json`
+/// override moves the hint with the handler. The action words name what
+/// the keys do on that pane.
+fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action: &str) -> String {
+    let confirm = crate::keybindings::format_key_text(&kb.get_keys("tui.select.confirm").join("/"));
+    let cancel = crate::keybindings::format_key_text(&kb.get_keys("tui.select.cancel").join("/"));
+    format!("  {confirm} {confirm_action}  {cancel} {cancel_action}")
+}
+
+fn render_choice(
+    theme: &Theme,
+    width: usize,
+    kb: &KeybindingsManager,
+    selected: &usize,
+) -> Vec<Line> {
     let mut lines = vec![truncate_line(
         &vec![theme.fg_span(ThemeColor::Muted, "  Summarize branch?".to_string())],
         width,
@@ -370,7 +403,7 @@ fn render_choice(theme: &Theme, width: usize, selected: &usize) -> Vec<Line> {
         lines.push(truncate_line(&row, width, ""));
     }
     lines.push(truncate_line(
-        &vec![theme.fg_span(ThemeColor::Muted, "  enter select  escape back".to_string())],
+        &vec![theme.fg_span(ThemeColor::Muted, input_pane_hint(kb, "select", "back"))],
         width,
         "",
     ));
@@ -382,4 +415,93 @@ fn printable(id: &str) -> Option<char> {
     let mut chars = id.chars();
     let c = chars.next()?;
     (chars.next().is_none() && !c.is_control()).then_some(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ColorMode;
+
+    fn selector_data() -> serde_json::Value {
+        serde_json::json!({
+            "flatNodes": [{
+                "entry": {
+                    "type": "custom",
+                    "id": "c1",
+                    "parentId": null,
+                    "timestamp": "2024-01-01T00:00:00.000Z",
+                    "customType": "x"
+                }
+            }],
+            "leafId": "c1"
+        })
+    }
+
+    fn selector() -> TreeSelector {
+        TreeSelector::new(&selector_data(), 40, false, FilterMode::Default)
+            .expect("a selector over one node")
+    }
+
+    fn frame_text(frame: &[Line]) -> String {
+        frame
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The tree hint's label, filter, cycle, and time keys render from
+    /// the effective bindings (TS composes them from `keyText`): the
+    /// defaults match TS's stock string byte for byte, and a user
+    /// override moves the hint with the handler instead of leaving the
+    /// stale default behind.
+    #[test]
+    fn tree_hint_renders_the_effective_bindings() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let text = frame_text(&selector().render(&theme, 200, &kb));
+        assert!(
+            text.contains(
+                "  \u{2191}/\u{2193}: move. \u{2190}/\u{2192}: page. ^\u{2190}/^\u{2192} or Alt+\u{2190}/Alt+\u{2192}: fold/branch. Shift+L: label. Ctrl+D/Ctrl+T/Ctrl+U/Ctrl+L/Ctrl+A: filters (Ctrl+O/Shift+Ctrl+O cycle). Shift+T: label time"
+            ),
+            "{text}"
+        );
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.tree.editLabel".to_string(), vec!["ctrl+b".to_string()]);
+        cfg.insert(
+            "app.tree.filter.noTools".to_string(),
+            vec!["ctrl+y".to_string()],
+        );
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let text = frame_text(&selector().render(&theme, 200, &kb));
+        assert!(text.contains("Ctrl+B: label"), "{text}");
+        assert!(
+            text.contains("Ctrl+D/Ctrl+Y/Ctrl+U/Ctrl+L/Ctrl+A: filters"),
+            "{text}"
+        );
+        assert!(!text.contains("Shift+L: label"), "{text}");
+    }
+
+    /// The summarize pane's select/back pair and the input panes'
+    /// save/cancel pair render from the effective bindings.
+    #[test]
+    fn inner_pane_hints_render_the_effective_bindings() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("  Enter select  Esc back"), "{text}");
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.confirm".to_string(), vec!["ctrl+m".to_string()]);
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let mut sel = selector();
+        sel.handle_key(&kb, "ctrl+m");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("  Ctrl+M select  Esc back"), "{text}");
+    }
 }

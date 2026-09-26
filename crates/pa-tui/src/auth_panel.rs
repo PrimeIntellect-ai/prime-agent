@@ -31,7 +31,8 @@ use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{
-    hint_row, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines, MenuSegment,
+    hint_row, key_hint, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines,
+    MenuSegment,
 };
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
@@ -625,8 +626,9 @@ impl AuthPanel {
 
     /// The panel's rendered rows (the provider selector's panel chrome:
     /// the top rule, the title, the subtitle, the content, the hint, the
-    /// bottom rule).
-    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<Line> {
+    /// bottom rule). The hint row renders the effective bindings, so a
+    /// user `keybindings.json` override moves the hint with the handler.
+    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());
         lines.push(vec![
@@ -705,7 +707,15 @@ impl AuthPanel {
                         theme.fg_span(ThemeColor::Warning, format!("  {notice}"))
                     ]);
                 }
-                lines.push(hint_row(theme, width, "enter submit  escape cancel"));
+                let hints = [
+                    key_hint(kb, &["tui.select.confirm"], "submit"),
+                    key_hint(kb, &["tui.select.cancel"], "cancel"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>()
+                .join("  ");
+                lines.push(hint_row(theme, width, &hints));
             }
             PanelInput::Teams { picker, .. } => {
                 let mut search = search_field_lines(
@@ -751,11 +761,16 @@ impl AuthPanel {
                 if count == 0 {
                     lines.push(no_match_row(theme, width, "No matching teams"));
                 }
-                lines.push(hint_row(
-                    theme,
-                    width,
-                    "\u{2191}\u{2193} navigate  enter select  escape cancel",
-                ));
+                let hints = [
+                    key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
+                    key_hint(kb, &["tui.select.confirm"], "select"),
+                    key_hint(kb, &["tui.select.cancel"], "cancel"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>()
+                .join("  ");
+                lines.push(hint_row(theme, width, &hints));
             }
         }
         lines.push(vec![
@@ -881,7 +896,7 @@ mod tests {
 
     fn frame_text(panel: &mut AuthPanel) -> Vec<String> {
         panel
-            .render(&theme(), 90)
+            .render(&theme(), 90, &kb())
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect()
@@ -981,7 +996,7 @@ mod tests {
             .iter()
             .any(|row| row.contains("Paste a Prime API key below:")));
         assert!(rows.iter().any(|row| row.contains("Paste value")));
-        assert!(rows.iter().any(|row| row.contains("enter submit")));
+        assert!(rows.iter().any(|row| row.contains("Enter submit")));
         for character in "  sk-live  ".chars() {
             panel.handle_key(character.to_string().as_str(), &kb());
         }

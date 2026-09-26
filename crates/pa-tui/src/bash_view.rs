@@ -769,17 +769,19 @@ impl BashView {
         self.detail_region_rows.set(rendered);
         lines
     }
-    /// The list's bottom hint line.
+    /// The list's bottom hint line: the back and cancel keys both close
+    /// from the list, so the close segment carries both.
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {} close",
+            "{}/{} move \u{b7} {} open \u{b7} {}/{} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
             key("tui.select.confirm", "Enter"),
+            key("app.modal.back", "\u{2190}"),
             key("tui.select.cancel", "Esc"),
         )
     }
@@ -1243,9 +1245,8 @@ mod tests {
             1,
             "the close hint appears once: {text:?}"
         );
-        assert!(text
-            .iter()
-            .any(|row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")));
+        assert!(text.iter().any(|row| row
+            .contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} \u{2190}/Esc close")));
         for line in &frame {
             assert!(crate::width::spans_width(line) <= 70);
         }

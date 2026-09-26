@@ -2166,40 +2166,54 @@ impl AgentsViewMode {
         let key_text = |id: &str| {
             crate::keybindings::format_key_text(&self.keybindings.get_keys(id).join("/"))
         };
+        // The bar lists every effective action key of the view, so a
+        // merged binding can never ship without its slot (the
+        // operator's completeness directive). Each segment renders its
+        // effective binding; an unbound action drops its segment, never
+        // a default key.
+        let mut segments = vec![format!(
+            "{}/{} navigate",
+            key_text("tui.select.up"),
+            key_text("tui.select.down")
+        )];
         // The jump slot shows the first effective key of each edge
         // binding (the full key sets would overflow the one-line hint);
         // an override that empties either binding drops the slot.
-        let jump_hint = match (
+        if let (Some(top), Some(bottom)) = (
             self.keybindings.first_key("tui.select.top"),
             self.keybindings.first_key("tui.select.bottom"),
         ) {
-            (Some(top), Some(bottom)) => format!(
-                "   {}/{} first/last",
+            segments.push(format!(
+                "{}/{} first/last",
                 crate::keybindings::format_key_text(&top),
                 crate::keybindings::format_key_text(&bottom)
-            ),
-            _ => String::new(),
-        };
-        let hints = if self.scope_active {
-            format!(
-                "{}/{} navigate{jump_hint}   {}/{} {right_action}   {} parent   {} new",
-                key_text("tui.select.up"),
-                key_text("tui.select.down"),
-                key_text("tui.select.confirm"),
-                key_text("app.agents.open"),
-                key_text("app.agents.back"),
-                key_text("app.agents.new"),
-            )
-        } else {
-            format!(
-                "{}/{} navigate{jump_hint}   {}/{} {right_action}   {} new",
-                key_text("tui.select.up"),
-                key_text("tui.select.down"),
-                key_text("tui.select.confirm"),
-                key_text("app.agents.open"),
-                key_text("app.agents.new"),
-            )
-        };
+            ));
+        }
+        segments.push(format!(
+            "{}/{} {right_action}",
+            key_text("tui.select.confirm"),
+            key_text("app.agents.open")
+        ));
+        // The stop-or-delete slot rides the selected row's arming target
+        // (the same gate the handler takes): the word matches what the
+        // second press would do, and a row with no target — a summary
+        // row, or no selection — drops the slot instead of advertising
+        // a no-op.
+        if let (Some(pending), Some(key)) = (
+            self.delete_arm_target(),
+            self.keybindings.first_key("app.agents.delete"),
+        ) {
+            let word = if pending.stop { "stop" } else { "delete" };
+            segments.push(format!(
+                "{} {word}",
+                crate::keybindings::format_key_text(&key)
+            ));
+        }
+        if self.scope_active {
+            segments.push(format!("{} parent", key_text("app.agents.back")));
+        }
+        segments.push(format!("{} new", key_text("app.agents.new")));
+        let hints = segments.join("   ");
         truncate_line(vec![theme.fg(ThemeColor::Muted, hints)], width)
     }
 }
@@ -4592,20 +4606,80 @@ the holder exits.";
 
     #[test]
     fn hints_render_the_effective_bindings() {
-        // Defaults: TS `renderHints` with the stock keys.
+        // Defaults: TS `renderHints` with the stock keys, plus the
+        // stop-or-delete slot the selected live row arms.
         let mode = mode_with_parent_and_child();
         assert_eq!(
             flat(&mode.render_hints(120, None)),
-            "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+N new"
+            "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+X stop   Ctrl+N new"
         );
         // A user override moves the hint with the handler.
         let mode = mode_with_user_bindings(&[("app.agents.new", "ctrl+t")]);
         let hints = flat(&mode.render_hints(120, None));
         assert_eq!(
             hints,
-            "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+T new"
+            "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+X stop   Ctrl+T new"
         );
         assert!(!hints.contains("Ctrl+N"), "the default new hint is gone");
+        // An override on the delete binding moves its slot too.
+        let mode = mode_with_user_bindings(&[("app.agents.delete", "ctrl+k")]);
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(hints.contains("Ctrl+K stop"), "{hints}");
+        assert!(!hints.contains("Ctrl+X"), "{hints}");
+    }
+
+    /// The stop-or-delete slot rides the selected row: a live row stops,
+    /// a saved-only row deletes, and a row with no arming target (a
+    /// summary row) drops the slot instead of advertising a no-op. An
+    /// empty override drops it everywhere.
+    #[test]
+    fn hints_delete_slot_rides_the_selected_row() {
+        // The live parent (an idle-but-live session) stops.
+        let mode = mode_with_parent_and_child();
+        assert!(flat(&mode.render_hints(120, None)).contains("Ctrl+X stop"));
+        // A saved-only row (no live session) deletes: the Inactive
+        // section's saved row, selected like the saved-arms test.
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![saved_catalog_row("/x/a.jsonl", "a", "a saved session")];
+        mode.rebuild_rows();
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.identity.contains("a.jsonl"))
+            .expect("the saved row");
+        assert!(
+            flat(&mode.render_hints(120, None)).contains("Ctrl+X delete"),
+            "the saved-only row deletes"
+        );
+        // A summary row has no target: no slot, and the confirm never
+        // arms there either.
+        let mut mode = mode_with_parent_and_child();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.kind == RowKind::SubagentSummary)
+            .expect("the summary row");
+        assert!(
+            !flat(&mode.render_hints(120, None)).contains("Ctrl+X"),
+            "the summary row carries no delete slot"
+        );
+        // An override that empties the binding drops the slot (an
+        // unbound action is never advertised).
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.agents.delete".to_string(), Vec::new());
+        let mut mode = mode_with_parent_and_child();
+        mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
+        assert!(
+            !flat(&mode.render_hints(120, None)).contains("Ctrl+X"),
+            "an unbound delete never advertises"
+        );
     }
 
     #[test]
