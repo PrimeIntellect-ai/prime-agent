@@ -221,6 +221,16 @@ pub struct AgentSessionEngine {
     /// turn the loop drives mid-run).
     pub(crate) autonomous_boundary:
         std::sync::Mutex<Option<crate::autonomous_continuation::AutonomousBoundaryMirror>>,
+    /// The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
+    /// reads the session's kernel provisioner): `true` while the session's
+    /// kernel still runs background `bash()` handles, so the goal and
+    /// autonomous continuation gates can hold their timer-driven turns
+    /// without ever taking the session mutex (the consult can run inside
+    /// a compaction turn, which holds it). Adopted onto every built
+    /// session (a weak provisioner reference) and cleared with the
+    /// runtime's retirement or close; an unwired probe answers `false`.
+    pub(crate) background_bash_probe:
+        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// The worker-owned session file (conversation-log path), set at create.
     session_file: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// The authoritative model selection. Starts from the process fallback
@@ -556,6 +566,7 @@ impl AgentSessionEngine {
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
+            background_bash_probe: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
             restored_model: std::sync::Mutex::new(None),
@@ -719,6 +730,22 @@ impl AgentSessionEngine {
                 agent: std::sync::Arc::clone(built.session.agent()),
                 compaction: *built.session.compaction_settings(),
             });
+        // The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
+        // reads the provisioner's kernel manager): the same deadlock-free
+        // read discipline as the mirror, over the build's own provisioner —
+        // the kernel's bash-activity tracking (the state behind the
+        // bash-done completion follow-ups) is the liveness surface a held
+        // continuation waits on.
+        let provisioner = built.kernel_provisioner_weak();
+        *self
+            .background_bash_probe
+            .lock()
+            .expect("background bash probe lock") = Some(std::sync::Arc::new(move || {
+            provisioner
+                .upgrade()
+                .and_then(|provisioner| provisioner.manager())
+                .is_some_and(|manager| manager.has_background_work())
+        }));
         // The in-run autonomous continuation hook (the natural mint rides
         // the agent loop; the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
@@ -862,6 +889,10 @@ impl AgentSessionEngine {
             .autonomous_boundary
             .lock()
             .expect("autonomous boundary lock") = None;
+        *self
+            .background_bash_probe
+            .lock()
+            .expect("background bash probe lock") = None;
         *self.published_goal.lock().expect("published goal lock") = None;
         // The retired session's provider target goes with it: a demand
         // seam before the replacement build (an immediate `/compact`)
@@ -928,6 +959,10 @@ impl AgentSessionEngine {
             .autonomous_boundary
             .lock()
             .expect("autonomous boundary lock") = None;
+        *self
+            .background_bash_probe
+            .lock()
+            .expect("background bash probe lock") = None;
     }
 
     /// The create path's live reset: a fresh (or replaced) session starts
@@ -1532,6 +1567,26 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal queue purge lock")
             .clone();
+        // TS `AgentSession` wires `onBackgroundWorkSettled` onto the kernel
+        // provisioner (agent-session.ts): the kernel's last live background
+        // `bash()` handle settling — or the kernel tearing down while one
+        // runs — retries the owed continuations, the same resume pair the
+        // RLM child settlement sites fire. An engine without a registered
+        // arc (direct-construction harnesses) wires nothing, exactly like
+        // the in-run autonomous hook.
+        let on_background_work_settled = self
+            .self_weak
+            .lock()
+            .expect("engine self weak lock")
+            .clone()
+            .map(|weak| {
+                std::sync::Arc::new(move || {
+                    if let Some(engine) = weak.upgrade() {
+                        engine.retry_owed_goal_continuation();
+                        engine.retry_owed_autonomous_continuation();
+                    }
+                }) as pa_core::kernel::shared::BackgroundWorkSettledCallback
+            });
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             telemetry,
             cwd,
@@ -1569,6 +1624,7 @@ impl AgentSessionEngine {
             // the lazy first-call start, exactly like the TS session's
             // `rlmDepth === 0` check.
             prewarm_ipython_kernel: Some(true),
+            on_background_work_settled,
             // TS `_clearQueuedGoalContexts` (the session-command sites and
             // the kernel's `goal.complete`): the worker-installed queue
             // purge, so the session engine's surfaces withdraw queued
@@ -1926,9 +1982,10 @@ impl SessionEngine for AgentSessionEngine {
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // TS `resumeQueuedWork()`'s quiescence arm: unsettled RLM
-            // descendant work defers the mint (the continuation is owed,
-            // not consumed; the settle sites deliver it).
-            if self.has_unsettled_rlm_work().await {
+            // descendant work or a live background bash handle defers the
+            // mint (the continuation is owed, not consumed; the settle
+            // sites deliver it).
+            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
                 driver.mark_continuation_owed();
                 return None;
             }
@@ -5242,6 +5299,37 @@ pub(crate) mod tests {
         let goal_update = minted.goal_update.expect("the mint moved the state");
         assert_eq!(goal_update["status"], "active");
         assert_eq!(goal_update["continuationsUsed"], 2);
+        // TS #2465: a live background bash handle holds the post-compaction
+        // mint the same way (the TS resume site's gate): the mint defers
+        // (owed, not consumed) until the handle settles.
+        let live_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+            std::sync::Arc::new(|| true);
+        *engine.background_bash_probe.lock().unwrap() = Some(live_probe);
+        assert!(
+            engine.mint_post_compaction_goal_continuation().is_none(),
+            "a live handle minted the post-compaction continuation"
+        );
+        {
+            let handles = engine
+                .goal_runtime
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("goal runtime");
+            assert!(
+                engine
+                    .runtime
+                    .block_on(async { handles.driver.lock().await.owes_continuation() }),
+                "the deferred mint must be owed"
+            );
+        }
+        let settled_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+            std::sync::Arc::new(|| false);
+        *engine.background_bash_probe.lock().unwrap() = Some(settled_probe);
+        assert!(
+            engine.mint_post_compaction_goal_continuation().is_some(),
+            "the settled handle releases the post-compaction mint"
+        );
         // A mint over a paused goal produces nothing (TS checks the
         // active status at the resume site).
         let mut pause_events: Vec<EngineEvent> = Vec::new();
