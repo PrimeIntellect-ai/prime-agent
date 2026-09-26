@@ -1001,9 +1001,15 @@ mod tests {
         };
         let row = |value: Value| value.to_string();
         let lines = [
-            row(json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"})),
-            row(json!({"type": "message", "id": "u1", "parentId": null, "timestamp": "t", "message": {"role": "user", "content": "hi"}})),
-            row(json!({"type": "message", "id": "a1", "parentId": "u1", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.125)}})),
+            row(
+                json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"}),
+            ),
+            row(
+                json!({"type": "message", "id": "u1", "parentId": null, "timestamp": "t", "message": {"role": "user", "content": "hi"}}),
+            ),
+            row(
+                json!({"type": "message", "id": "a1", "parentId": "u1", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.125)}}),
+            ),
             // A drifted attribution: the child batch ($0.5) exceeds the
             // aggregate its own row reports ($0.1875 - raw $0.125).
             row(json!({
@@ -1011,8 +1017,12 @@ mod tests {
                 "timestamp": "t", "targetId": "a1",
                 "childUsage": usage(0.5), "aggregateUsage": usage(0.1875),
             })),
-            row(json!({"type": "message", "id": "u2", "parentId": "cu1", "timestamp": "t", "message": {"role": "user", "content": "go"}})),
-            row(json!({"type": "message", "id": "a2", "parentId": "u2", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.25)}})),
+            row(
+                json!({"type": "message", "id": "u2", "parentId": "cu1", "timestamp": "t", "message": {"role": "user", "content": "go"}}),
+            ),
+            row(
+                json!({"type": "message", "id": "a2", "parentId": "u2", "timestamp": "t", "message": {"role": "assistant", "provider": "prime-inference", "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop", "usage": usage(0.25)}}),
+            ),
             row(json!({
                 "type": "compaction", "id": "c1", "parentId": "a2",
                 "timestamp": "t", "summary": "s", "firstKeptEntryId": "u2", "tokensBefore": 100,

@@ -355,14 +355,14 @@ impl WindowedSessionStore {
                 // last in file order — the cumulative aggregate the TS fold
                 // ends with.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                    if let Some(target) =
-                        value.get("targetId").and_then(serde_json::Value::as_str)
+                    if let Some(target) = value.get("targetId").and_then(serde_json::Value::as_str)
                     {
                         // A malformed aggregate (null, a scalar) must not
                         // replace a valid row usage with zeros — the session
                         // store fold skips non-objects the same way.
-                        if let Some(aggregate) =
-                            value.get("aggregateUsage").filter(|aggregate| aggregate.is_object())
+                        if let Some(aggregate) = value
+                            .get("aggregateUsage")
+                            .filter(|aggregate| aggregate.is_object())
                         {
                             older_aggregates
                                 .entry(target.to_owned())
