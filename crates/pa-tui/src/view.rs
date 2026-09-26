@@ -810,7 +810,7 @@ impl AgentView {
                         match self.run_map.slot(index) {
                             Some(
                                 crate::tool_runs::RunSlot::Start(_)
-                                    | crate::tool_runs::RunSlot::Member,
+                                | crate::tool_runs::RunSlot::Member,
                             ) => start,
                             _ => index,
                         }
