@@ -37,6 +37,7 @@ pub mod runtime_wiring;
 pub mod session_commands;
 pub mod session_events;
 pub mod side_question;
+pub mod skills_unavailable_notice;
 pub mod slash_commands;
 pub mod state_restore_notice;
 pub mod telemetry;

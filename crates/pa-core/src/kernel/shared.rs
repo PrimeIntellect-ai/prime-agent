@@ -77,6 +77,11 @@ pub enum StreamName {
 /// Callback receiving streamed output chunks as they arrive.
 pub type StreamCallback = Arc<dyn Fn(&str, StreamName) + Send + Sync>;
 
+/// Fires when the kernel's last live background `bash()` handle settles
+/// (its activity track empties or the kernel tears down), so owed
+/// continuations can resume (TS `KernelManagerOptions.onBackgroundWorkSettled`).
+pub type BackgroundWorkSettledCallback = Arc<dyn Fn() + Send + Sync>;
+
 /// Callback receiving an agent message sent late by the kernel.
 pub type LateSentAgentMessageCallback = Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>;
 
@@ -295,6 +300,10 @@ pub struct KernelManagerOptions {
     pub session_id: Option<String>,
     pub host_handlers: HostRequestHandlers,
     pub python_skills: Vec<KernelPythonSkill>,
+    /// Fires when the last live background `bash()` handle settles (its
+    /// activity track empties or the kernel tears down), so owed
+    /// continuations can resume.
+    pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
     /// Persist/revive the user namespace across kernel restarts and session resume.
     pub snapshot: Option<KernelSnapshotConfig>,
     /// Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again.

@@ -537,6 +537,7 @@ async fn build_headless_engine_with(
             // true), so the kernel boots in the background at creation;
             // the engine's depth-0 gate matches the TS session's.
             prewarm_ipython_kernel: Some(true),
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
@@ -1313,6 +1314,7 @@ async fn build_faux_engine_with(
             // The faux engine is a Rust-only verification harness, not a
             // product surface: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
