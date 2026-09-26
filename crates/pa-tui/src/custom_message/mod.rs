@@ -43,6 +43,7 @@ pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
 pub const IPYTHON_STATE_RESTORED_CUSTOM_TYPE: &str = "ipython_state_restored";
+pub const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE: &str = "python_skills_unavailable";
 pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
@@ -217,6 +218,7 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
         | IPYTHON_STATE_RESTORED_CUSTOM_TYPE
+        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE
         | RLM_CHILD_FAILURE_CUSTOM_TYPE
         | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
             vec![ChatEntry::InjectedPrompt(Box::new(injected_prompt_row(
@@ -646,6 +648,23 @@ mod tests {
         assert!(matches!(
             restored.as_slice(),
             [ChatEntry::InjectedPrompt(boxed)] if boxed.body.is_none()
+        ));
+        // The unavailable-skills row decodes the failed names and keeps
+        // the full report as its expandable body.
+        let unavailable = decoded(json!({
+            "role": "custom",
+            "customType": PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+            "content": "[python-skills-unavailable]\n\n- websearch: No module named 'websearch'",
+            "display": true,
+            "details": { "skills": ["websearch", "edit"] },
+        }));
+        assert!(matches!(
+            unavailable.as_slice(),
+            [ChatEntry::InjectedPrompt(boxed)]
+                if matches!(&boxed.kind,
+                    InjectedPromptKind::PythonSkillsUnavailable { skills }
+                        if skills == &vec!["websearch".to_string(), "edit".to_string()])
+                    && boxed.body.as_deref() == Some("[python-skills-unavailable]\n\n- websearch: No module named 'websearch'")
         ));
     }
 
