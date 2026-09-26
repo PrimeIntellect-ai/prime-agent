@@ -1122,10 +1122,10 @@ mod tests {
 
         invalidate_runtime_probe_cache();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 1, "cold call runs the real probe");
+        assert_eq!(probe_count(), 2, "cold call probes runtime and dill");
 
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 1, "unchanged venv hits the memo");
+        assert_eq!(probe_count(), 2, "unchanged venv hits the memo");
 
         // Out-of-band mutation of the installed rlm: the memo must miss and
         // the probe must re-run (the detection the parity review demands).
@@ -1133,8 +1133,8 @@ mod tests {
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(
             probe_count(),
-            2,
-            "installed-rlm mutation re-probes instead of masking"
+            4,
+            "installed-rlm mutation probes runtime and dill instead of masking"
         );
 
         // Out-of-band interpreter replacement: same detection.
@@ -1148,7 +1148,7 @@ mod tests {
         )
         .unwrap();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 3, "interpreter replacement re-probes");
+        assert_eq!(probe_count(), 6, "interpreter replacement probes runtime and dill");
 
         // Fingerprint-invisible damage (the fake's verdict file, standing in
         // for interpreter-internal breakage the witnesses cannot see): the
@@ -1157,34 +1157,34 @@ mod tests {
         // the provisioner retry re-probes).
         std::fs::write(&control, "broken\n").unwrap();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 3, "invisible damage alone does not re-probe");
+        assert_eq!(probe_count(), 6, "invisible damage alone does not re-probe");
 
         // After a failed start (the invalidation it performs), the next
         // readiness check re-probes and DETECTS the damage.
         invalidate_runtime_probe_cache();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 4, "a failing probe is never memoized");
+        assert_eq!(probe_count(), 7, "a failing probe is never memoized");
 
         // Healing plus another invalidation restores readiness through a
         // real probe, never a stale memo.
         std::fs::remove_file(&control).unwrap();
         invalidate_runtime_probe_cache();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 5, "invalidation drops the memo");
+        assert_eq!(probe_count(), 9, "invalidation probes runtime and dill");
 
         // An uninstalled runtime (the out-of-band uninstall class) must
         // re-probe rather than mask: the installed-rlm witness disappears,
         // so the real probe runs again (this fake one still passes).
         std::fs::remove_dir_all(&rlm).unwrap();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 6, "an uninstalled rlm re-probes");
+        assert_eq!(probe_count(), 11, "an uninstalled rlm probes runtime and dill");
 
         // A deleted interpreter must miss the memo without a probe
         // invocation (the interpreter stat witness fails): readiness flips
         // false because the probe cannot even run.
         std::fs::remove_file(&python).unwrap();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 6, "a deleted interpreter misses on stat");
+        assert_eq!(probe_count(), 12, "a deleted interpreter misses on stat and fails runtime probe");
     }
 
     /// The Windows venv layout (`<venv>/Lib/site-packages/rlm`, no
