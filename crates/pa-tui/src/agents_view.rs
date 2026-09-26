@@ -1712,15 +1712,19 @@ impl AgentsViewMode {
     }
 
     /// One mouse report (the session surface's click grammar, scoped to
-    /// the view's rows): a left press remembers the row under it, a
-    /// drag kills the pending click, and a plain release on the same
-    /// row selects and opens that row — the Enter action, so the
-    /// selection's own feedback (the band moves, the session opens)
-    /// is the click's. The clicked row is an explicit user choice, a
-    /// direction key's peer: it ends the entry anchor's wait, so the
-    /// open targets the clicked row, never the loading hint. Wheel
-    /// turns and other buttons are consumed without a dispatch: the
-    /// view's window is selection-centered, not scroll-driven.
+    /// the view's rows): a plain left press always re-records the row
+    /// under it (a release lost to a focus change or a touch cancel
+    /// never pins the next tap to the old row), a drag kills the
+    /// pending click, and a plain release on the same row selects and
+    /// opens that row — the Enter action with its own preamble (a
+    /// showing notice panel consumes the click, the exit hint and the
+    /// stop-or-delete confirm clear with it), so the selection's own
+    /// feedback (the band moves, the session opens) is the click's.
+    /// The clicked row is an explicit user choice, a direction key's
+    /// peer: it ends the entry anchor's wait, so the open targets the
+    /// clicked row, never the loading hint. Wheel turns and other
+    /// buttons are consumed without a dispatch: the view's window is
+    /// selection-centered, not scroll-driven.
     fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
         if !crate::mouse_tracking::active() {
             return;
@@ -1737,12 +1741,19 @@ impl AgentsViewMode {
         }
         let row = event.y.saturating_sub(1) as usize;
         if event.press {
-            if let Some(pressed) = self.pressed_click.as_mut() {
-                pressed.dragged |= event.motion;
+            // A fresh plain press always re-records its row (the session
+            // surface's `fullscreenPressedClick` always assigns): a
+            // release lost to a focus change or a touch cancel must
+            // never pin the next tap to the old row. A motion report
+            // while pressed only marks the drag.
+            if event.motion {
+                if let Some(pressed) = self.pressed_click.as_mut() {
+                    pressed.dragged = true;
+                }
             } else {
                 self.pressed_click = Some(PressedMouseClick {
                     row,
-                    dragged: event.motion,
+                    dragged: false,
                 });
             }
             return;
@@ -1756,6 +1767,18 @@ impl AgentsViewMode {
         let Some((_, index)) = self.click_rows.iter().find(|(r, _)| *r == row) else {
             return;
         };
+        // The click is an input like any key, so the open runs the Enter
+        // action's own preamble (`handle_key`'s): a showing notice panel
+        // consumes the click — the close is its whole action — and the
+        // exit hint and the stop-or-delete confirm clear with it, so a
+        // later ctrl+x re-arms over the clicked row instead of executing
+        // a stale arm.
+        if self.notice.is_some() {
+            self.notice = None;
+            return;
+        }
+        self.exit_armed = false;
+        self.pending_delete = None;
         self.selected = *index;
         // A click is an explicit user choice like a direction key: it
         // ends the entry anchor's wait, so the open below targets the
@@ -3474,6 +3497,140 @@ mod tests {
         // The release lands one row below the pressed one.
         mode.handle_mouse(&mouse_report(row + 1, false, false));
         assert!(mode.opened.is_none(), "the press row gates the open");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// A fresh plain press always re-records its row (the session
+    /// surface's `fullscreenPressedClick` always assigns): a release
+    /// lost to a focus change or a touch cancel must never pin the next
+    /// tap to the old row (Cursor Bugbot: a new press kept the stale
+    /// row, so the next tap on a different row did nothing).
+    #[test]
+    fn a_fresh_press_re_records_the_click_row_after_a_lost_release() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("re-record me", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "re-record me",
+            "activeSessionId": "s-re-record",
+        });
+        mode.render_frame(120, 24);
+        let row_of = |mode: &AgentsViewMode, wanted: usize| {
+            mode.click_rows
+                .iter()
+                .find(|(_, row_index)| *row_index == wanted)
+                .map(|(row, _)| *row)
+                .expect("the row renders")
+        };
+        let other = row_of(&mode, 0);
+        let clicked = row_of(&mode, index);
+        // Press the first row, "lose" the release, then tap the second:
+        // the new press owns the row, so the release on it opens it.
+        mode.handle_mouse(&mouse_report(other, true, false));
+        mode.handle_mouse(&mouse_report(clicked, true, false));
+        mode.handle_mouse(&mouse_report(clicked, false, false));
+        let opened = mode.opened.expect("the fresh press re-recorded its row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s-re-record".to_string()),
+            "the tapped row opened, not the lost press's"
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// The click is an input like any key: a showing notice panel
+    /// consumes it — the close is the click's whole action, exactly like
+    /// the key that dismisses it (Cursor Bugbot: the click opened
+    /// through the refusal notice that any key would only close).
+    #[test]
+    fn a_click_consumes_the_notice_panel_like_any_key() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("click through", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "click through",
+            "activeSessionId": "s-through",
+        });
+        mode.notice = Some("The refusal block.\n\n- a second line".to_string());
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(mode.notice.is_none(), "the click closed the panel");
+        assert!(
+            mode.opened.is_none(),
+            "the panel consumed the click - no open behind it"
+        );
+        assert!(mode.running, "the view keeps running behind the panel");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// The open's Enter preamble clears with the click: the exit hint
+    /// drops and the armed stop-or-delete confirm is taken, so a later
+    /// ctrl+x re-arms over the clicked row instead of executing a stale
+    /// arm (Cursor Bugbot: the click leaked both).
+    #[test]
+    fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("click clears arms", "mock-1");
+        // Both rows must be armable (a live session arms the stop word)
+        // and openable.
+        mode.rows[0].summary = serde_json::json!({
+            "sessionName": "holder",
+            "activeSessionId": "s-holder",
+        });
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "click clears arms",
+            "activeSessionId": "s-clears",
+        });
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_key("ctrl+c");
+        assert!(mode.exit_armed, "the first ctrl+c armed the exit hint");
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete.is_some(),
+            "the ctrl+x armed the stop-or-delete confirm"
+        );
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        let opened = mode.opened.expect("the click opened the row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s-clears".to_string())
+        );
+        assert!(!mode.exit_armed, "the click dropped the exit hint");
+        assert!(
+            mode.pending_delete.is_none(),
+            "the click took the armed confirm"
+        );
+        // The next ctrl+x re-arms instead of executing the stale one.
+        mode.handle_key("ctrl+x");
+        assert!(mode.pending_delete.is_some(), "the confirm re-arms");
+        assert!(
+            mode.pending_delete_action.is_none(),
+            "no execution rode the re-arm"
+        );
         crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 
