@@ -635,15 +635,12 @@ pub(crate) struct SessionUi {
     selection_auto_scroll: Option<SelectionAutoScroll>,
     /// Whether this run already reported its first selection copy.
     selection_adoption_emitted: bool,
-    /// Whether this run already reported its first click-driven
-    /// interaction.
-    click_adoption_emitted: bool,
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
     /// TS `fullscreenPressedHyperlink`: the link under the last plain left
     /// press; a release without a drag opens it.
-    pressed_hyperlink: Option<String>,
+    pub(crate) pressed_hyperlink: Option<String>,
     /// TS `fullscreenLeftMouseDragged`: the left press turned into a drag,
     /// so its release ends the selection instead of opening the link or
     /// firing the pressed click.
@@ -885,7 +882,6 @@ impl SessionUi {
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
-            click_adoption_emitted: false,
             copies: Vec::new(),
             pressed_hyperlink: None,
             left_mouse_dragged: false,
