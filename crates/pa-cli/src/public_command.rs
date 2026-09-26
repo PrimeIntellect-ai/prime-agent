@@ -153,6 +153,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
             exit_code: None,
         },
         "list" => run_internal_agent_command("list", &rest),
+        "sessions" => run_internal_agent_command("sessions", &rest),
         "attach" => run_attach(&rest),
         "stop" => {
             if !require_operand_count(&rest, 1, Some(1), "stop") {
