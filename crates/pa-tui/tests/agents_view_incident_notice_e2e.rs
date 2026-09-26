@@ -157,14 +157,6 @@ fn read_line(reader: &mut impl BufRead) -> Option<String> {
     }
 }
 
-/// The env-mutating tests serialize on one lock (the pa-cli
-/// `config::env_lock` convention).
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// Milliseconds since the Unix epoch (the notice window rides the real
 /// clock; the fixture entries must be relative to it).
 fn now_ms() -> i64 {
