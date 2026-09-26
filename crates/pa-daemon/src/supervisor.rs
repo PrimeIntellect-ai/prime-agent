@@ -1393,10 +1393,9 @@ impl Supervisor {
         // reads nothing stalls only its own dispatch tasks once the queue
         // fills — memory stays bounded per connection — while every other
         // client and worker is unaffected.
-        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(
-            Vec<Outbound>,
-            bool,
-        )>(crate::backpressure::CLIENT_OUTBOUND_CAPACITY);
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Outbound>, bool)>(
+            crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
+        );
         // One dispatch slot per concurrent command. The read arm is armed
         // only while a slot is free — at the bound the loop stops reading
         // the client's socket (the client's own send buffer carries its
@@ -4995,9 +4994,7 @@ mod tests {
                 .remove(&request.request_id)
                 .expect("the routed shutdown holds a reply slot");
             let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
-                None,
-                "shutdown",
-                None,
+                None, "shutdown", None,
             )));
         });
         supervisor.registry.insert(Arc::clone(&resident)).await;
