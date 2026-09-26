@@ -7,12 +7,15 @@
 //! control-socket acceptor (`run_control_socket_acceptor` in
 //! `app-server-transport/src/transport/unix_socket.rs`): recoverable
 //! transport noise warns and retries immediately, and every other error
-//! logs and retries after a backoff. Codex retries forever; here the
-//! retries are bounded by [`GIVE_UP_AFTER`] consecutive failures,
-//! because this supervisor owns the socket-path singleton: a listener
-//! that failed every accept for a solid minute is permanently broken,
-//! and exiting with the error (the pre-fix path) releases the bind for
-//! a fresh supervisor instead of spinning deaf forever.
+//! logs and retries after a backoff. Two deliberate divergences from
+//! Codex bound the loop: a streak of recoverable errors takes the same
+//! backoff (an immediately-ready error source cannot spin the loop
+//! hot), and the retries are bounded by [`GIVE_UP_AFTER`] consecutive
+//! failures, because this supervisor owns the socket-path singleton:
+//! a listener that failed every accept for a solid minute is
+//! permanently broken, and exiting with the error (the pre-fix path)
+//! releases the bind for a fresh supervisor instead of spinning deaf
+//! forever.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -38,6 +41,14 @@ pub(super) const BACKOFF: Duration = Duration::from_secs(1);
 /// resets it.
 pub(super) const GIVE_UP_AFTER: u32 = 60;
 
+/// Consecutive recoverable accept errors after which the loop takes the
+/// same backoff. Scattered transport noise retries immediately (Codex
+/// parity), but a stream of immediately-ready recoverable errors must
+/// not spin the loop hot or flood the log: after this many, one
+/// [`BACKOFF`] sleep bounds the loop to a handful of retries and log
+/// lines per second (the log's rotation bounds the disk side).
+pub(super) const RECOVERABLE_STORM_AFTER: u32 = 8;
+
 /// Serve clients until `begin_shutdown` completes its stop pass and
 /// sets the accept-loop exit flag.
 ///
@@ -51,6 +62,7 @@ pub(super) async fn serve(
     listener: &dyn TransportListener,
 ) -> Result<()> {
     let mut consecutive_failures = 0u32;
+    let mut recoverable_streak = 0u32;
     while !supervisor.accept_exit.load(Ordering::SeqCst) {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -68,8 +80,16 @@ pub(super) async fn serve(
                         supervisor.log_line(&format!(
                             "supervisor accept error (recoverable), retrying: {error}"
                         ));
+                        recoverable_streak += 1;
+                        if recoverable_streak >= RECOVERABLE_STORM_AFTER {
+                            tokio::time::sleep(BACKOFF).await;
+                            recoverable_streak = 0;
+                        }
                         continue;
                     }
+                    // The hard error's own backoff cools the storm
+                    // streak too, like any other wait.
+                    recoverable_streak = 0;
                     consecutive_failures += 1;
                     if consecutive_failures >= GIVE_UP_AFTER {
                         supervisor.log_line(&format!(
@@ -88,6 +108,7 @@ pub(super) async fn serve(
             () = supervisor.shutdown_notify.notified() => continue,
         };
         consecutive_failures = 0;
+        recoverable_streak = 0;
         let supervisor = Arc::clone(supervisor);
         tokio::spawn(async move {
             if let Err(error) = supervisor.handle_client(stream).await {
@@ -165,9 +186,10 @@ mod tests {
 
     /// A recoverable transport error must not exit the accept loop (the
     /// pre-fix behavior killed the supervisor - and every hosted
-    /// session's supervision - on the first one), and it must not burn
-    /// the backoff: the loop retries immediately, like Codex's
-    /// control-socket acceptor.
+    /// session's supervision - on the first one), and scattered noise
+    /// below [`RECOVERABLE_STORM_AFTER`] must not burn the backoff:
+    /// the loop retries immediately, like Codex's control-socket
+    /// acceptor.
     #[tokio::test(start_paused = true)]
     async fn recoverable_accept_errors_do_not_exit_the_loop() {
         let dir = TempDir::new().unwrap();
@@ -196,6 +218,44 @@ mod tests {
         assert!(
             scripted.results.lock().unwrap().is_empty(),
             "the loop kept accepting past every error and served a client"
+        );
+    }
+
+    /// A storm of immediately-ready recoverable errors must not spin the
+    /// loop hot or flood the log (Macroscope review): every
+    /// [`RECOVERABLE_STORM_AFTER`] consecutive errors take one backoff,
+    /// and the storm never spends the give-up budget - twice the budget
+    /// of recoverable errors still serves the client behind them.
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_error_storms_back_off_but_never_escalate() {
+        let dir = TempDir::new().unwrap();
+        let supervisor = test_supervisor(&dir);
+        let mut results = VecDeque::new();
+        for _ in 0..(2 * GIVE_UP_AFTER) {
+            results.push_back(accept_error(ErrorKind::ConnectionAborted, "storm"));
+        }
+        results.push_back(Ok(accepted_stream().await));
+        let scripted = ScriptedAccepts {
+            results: Mutex::new(results),
+            supervisor: Arc::clone(&supervisor),
+        };
+        let started = tokio::time::Instant::now();
+        serve(&supervisor, &scripted)
+            .await
+            .expect("a recoverable storm must never exit the loop");
+        let elapsed = started.elapsed();
+        let storms = (2 * GIVE_UP_AFTER) / RECOVERABLE_STORM_AFTER;
+        assert!(
+            elapsed >= storms * BACKOFF,
+            "every {RECOVERABLE_STORM_AFTER} consecutive recoverable errors back off (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < (storms + 1) * BACKOFF,
+            "exactly one backoff per storm (elapsed {elapsed:?})"
+        );
+        assert!(
+            scripted.results.lock().unwrap().is_empty(),
+            "the client behind the storm was served"
         );
     }
 
