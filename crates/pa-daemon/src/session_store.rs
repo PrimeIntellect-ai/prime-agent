@@ -1652,11 +1652,13 @@ impl SessionScanState {
     }
 }
 
-/// The listing fold only needs message metadata after the search corpus is full.
-/// Unknown fields (especially large assistant content) are skipped by serde.
+/// The listing fold only needs message metadata after the search corpus is
+/// full. Unknown fields are skipped by serde; the one field the text fold
+/// still needs — `content` — rides as a borrowed raw span, so a guarded row
+/// re-parses its content alone instead of the whole entry.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoMessage {
+struct SessionInfoMessage<'a> {
     #[serde(default)]
     role: Option<Value>,
     #[serde(default)]
@@ -1669,11 +1671,16 @@ struct SessionInfoMessage {
     /// a partial persisted block must not reject the row.
     #[serde(default)]
     usage: Option<crate::session_usage::ScanUsage>,
+    /// The message's `content`, borrowed from the scanned line (zero
+    /// copy, no materialization): the corpus and first-message text read
+    /// it only when the fold's guard passes.
+    #[serde(default, borrow)]
+    content: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoEntry {
+struct SessionInfoEntry<'a> {
     #[serde(rename = "type")]
     type_: String,
     #[serde(rename = "id")]
@@ -1692,8 +1699,8 @@ struct SessionInfoEntry {
     model_id: Option<Value>,
     #[serde(default)]
     thinking_level: Option<Value>,
-    #[serde(default)]
-    message: Option<SessionInfoMessage>,
+    #[serde(default, borrow)]
+    message: Option<SessionInfoMessage<'a>>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
     #[serde(default)]
     target_id: Option<String>,
@@ -1885,6 +1892,22 @@ impl SessionScanState {
     }
 }
 
+/// The text fold of one message's `content`, from the raw span the typed
+/// parse borrowed: parsing the span back yields the identical `Value`
+/// [`message_text`] read from a fully re-parsed entry, without walking the
+/// whole line a second time. `None` content and an unparsable span both
+/// read as empty text — exactly what [`message_text`] returns for a
+/// message without content.
+fn message_content_text(content: Option<&serde_json::value::RawValue>) -> String {
+    content
+        .map(|raw| {
+            crate::types::content_to_text(
+                &serde_json::from_str::<Value>(raw.get()).unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Fold one complete line into the scan state (the old scan-loop body).
 /// `None` = the abort arm (a `model_change` without its model identity).
 fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
@@ -1971,22 +1994,20 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                     || (matches!(role, Some("user" | "assistant"))
                         && acc.search_text_chars < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
                 {
-                    if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
-                        if let Some(message) = full.fields.get("message") {
-                            if role == Some("user") && acc.first_message.is_empty() {
-                                let text = message_text(message);
-                                if !text.is_empty() {
-                                    acc.first_message = text;
-                                }
-                            }
-                            if matches!(role, Some("user" | "assistant")) {
-                                acc.search_text_chars = append_capped_search_text(
-                                    &mut acc.all_messages_text,
-                                    &message_text(message),
-                                    acc.search_text_chars,
-                                );
-                            }
-                        }
+                    // The text reads the `content` span the typed parse
+                    // borrowed; re-parsing the whole entry (a second full
+                    // `Value` walk plus every string it materializes) paid
+                    // for one field the fold never otherwise touches.
+                    let text = message_content_text(message.content);
+                    if role == Some("user") && acc.first_message.is_empty() && !text.is_empty() {
+                        acc.first_message.clone_from(&text);
+                    }
+                    if matches!(role, Some("user" | "assistant")) {
+                        acc.search_text_chars = append_capped_search_text(
+                            &mut acc.all_messages_text,
+                            &text,
+                            acc.search_text_chars,
+                        );
                     }
                 }
             }
