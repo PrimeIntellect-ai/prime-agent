@@ -101,11 +101,10 @@ impl FirstGeneration {
                     // The turn stays mid-flight when the daemon announces
                     // its non-update closing and exits — the operator's
                     // shutdown does not wait for turns (and the live-turn
-                    // shape also keeps the pane's post-turn stats refresh
-                    // off the dying socket: a turn-end batched with the
-                    // closing would hang the loop's inline refresh the
-                    // full request budget before the recovery could
-                    // poll).
+                    // shape keeps this test's recovery subject isolated
+                    // from the turn-settling stats refresh, whose
+                    // dead-socket send is pinned separately by
+                    // daemon_shutdown_turn_end_headless.rs).
                     write_json(&mut writer, &success_response(id, "prompt"));
                     let question = command
                         .get("message")
