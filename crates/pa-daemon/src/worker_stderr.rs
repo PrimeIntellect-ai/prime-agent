@@ -178,8 +178,10 @@ mod tests {
     use anyhow::anyhow;
 
     fn write_log(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        std::fs::create_dir_all(dir).expect("logs dir");
         let path = dir.join(name);
+        // The name may carry a subpath (the truncation test writes into
+        // <agent>/logs/): the parent is created, not just the base dir.
+        std::fs::create_dir_all(path.parent().expect("log path parent")).expect("create log dir");
         std::fs::write(&path, contents).expect("write log");
         path
     }
