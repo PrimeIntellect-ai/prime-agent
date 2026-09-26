@@ -517,8 +517,8 @@ fn login_blocking_on_panel(
         };
     }
     // TS `loginProvider`'s prime-inference dispatch: the API-key flow
-    // (the paste prompt, the whoami check, the team selection; the
-    // browser challenge stays unported) rendered through the panel.
+    // (the browser challenge raced against the paste prompt, the whoami
+    // check, the team selection) rendered through the panel.
     if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -541,6 +541,7 @@ fn login_blocking_on_panel(
                                 crate::prime_inference_login::prime_cli_config_path(&agent_dir)
                                     .as_deref(),
                             prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                            poll_interval_ms: None,
                         },
                         &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
                     ))
