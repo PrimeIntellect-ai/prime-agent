@@ -7,6 +7,7 @@
 //! restarted supervisor can adopt or relaunch live sessions, and routes
 //! commands and events between clients and workers (private-framed channel).
 
+mod accept_loop;
 mod adoption;
 mod launch_budget;
 mod options;
@@ -469,7 +470,8 @@ impl Supervisor {
     ///
     /// Returns an error when the socket path cannot be prepared (already
     /// in use), the supervisor socket cannot be bound, or the accept
-    /// loop fails while not shutting down.
+    /// loop exhausts its give-up budget on a permanently broken
+    /// listener (transient accept errors are retried; see `accept_loop`).
     ///
     /// # Panics
     ///
@@ -611,27 +613,7 @@ impl Supervisor {
             });
         }
 
-        while !self.accept_exit.load(Ordering::SeqCst) {
-            let stream = tokio::select! {
-                accepted = listener.accept() => match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        if self.shutting_down.load(Ordering::SeqCst) {
-                            continue;
-                        }
-                        return Err(anyhow!("supervisor accept: {error}"));
-                    }
-                },
-                // begin_shutdown fired: loop back and fall out of the loop.
-                () = self.shutdown_notify.notified() => continue,
-            };
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                if let Err(error) = supervisor.handle_client(stream).await {
-                    eprintln!("pa-daemon client connection error: {error:#}");
-                }
-            });
-        }
+        accept_loop::serve(&self, &*listener).await?;
         socket::cleanup_socket_path(
             &self.options.socket_path,
             socket::socket_identity(&self.options.socket_path),

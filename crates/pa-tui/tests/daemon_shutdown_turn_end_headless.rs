@@ -1,17 +1,22 @@
-//! Headless e2e for the announced non-update daemon closing (TS #2458):
-//! the operator's own daemon shutdown used to drop every attached window —
-//! `daemon_closing` without an update only painted a note and the pane
-//! rode the daemon down. The pane must arm the bounded shutdown recovery
-//! at the notice and reconnect when the daemon comes back on the same
-//! socket path: the waiting row, the version-honest reconnected banner
-//! (the restarted daemon's `appVersion`), and the successor's durable-id
-//! reattach are all pinned — and the hiccup loop's rows must never fire.
+//! Headless e2e for the post-turn stats refresh across a daemon death
+//! (the follow-up the #2827 shutdown e2e documented): a turn that settles
+//! in the same batch as the closing used to stall the interactive loop
+//! for the whole UI request budget — the refresh registered a
+//! `get_session_stats` on a socket whose reader (and its close-time
+//! failure pass) had already died, so nothing resolved the request until
+//! the 10s timeout, and the shutdown recovery never got to poll. The
+//! daemon client now refuses the send on a dead supervisor reader (TS
+//! `requestWire` refuses a destroyed socket), so the loop arms the
+//! recovery at once and the successor's reattach lands on the first
+//! fixed poll.
 //!
-//! TS parity anchor: `reconnectAfterShutdown` reconnects to the same socket
-//! path and re-attaches the same session by durable identity
-//! (packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts),
-//! with the interactive mode's `formatDaemonReconnectBanner` reporting the
-//! restart honestly.
+//! The turn settling inside the closing batch is the exact shape the
+//! sibling `daemon_shutdown_reconnect_headless.rs` avoids by announcing
+//! mid-turn: there it stalled the loop the full budget (its round-3 CI
+//! run, a 10.02s test). This test pins that the stall is gone.
+//!
+//! TS parity anchor: `requestWire`'s destroyed-socket guard
+//! (`packages/coding-agent/src/modes/daemon/daemon-client.ts`).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -27,15 +32,18 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The wait for the recovered banner: the shutdown recovery's fixed poll
-/// finds the successor well inside this bound.
+/// The wait for the recovered banner: the recovery's fixed poll finds the
+/// successor well inside this bound.
 const BANNER_WAIT_MS: u64 = 10_000;
-/// One mock generation's accept window.
-const ACCEPT_WAIT_MS: u64 = 10_000;
+/// One mock generation's accept window — also the stall pin: the
+/// recovery's first poll lands within a few of its 100ms ticks, while a
+/// stalled loop spends the whole 10s request budget inside the inline
+/// refresh and the successor never sees its client in time.
+const ACCEPT_WAIT_MS: u64 = 5_000;
 
-/// The first daemon generation: serve the startup create/attach, then
-/// announce the non-update closing and exit — the operator's `shutdown`
-/// as every attached window reads it.
+/// The first daemon generation: serve the startup create/attach and one
+/// turn whose settle rides the closing batch, then exit — the operator's
+/// `shutdown` landing as the turn finishes.
 struct FirstGeneration {
     listener: UnixListener,
 }
@@ -50,15 +58,17 @@ impl FirstGeneration {
         FirstGeneration { listener }
     }
 
-    /// Serve until the announced closing, then free the socket path for
-    /// the successor.
+    /// Serve until the closing batch, then free the socket path for the
+    /// successor.
     fn serve(self, socket: &Path) {
         let stream = accept(&self.listener, "the first daemon never saw the client");
         let mut writer = stream.try_clone().expect("clone first daemon socket");
         let mut reader = BufReader::new(stream);
         write_json(&mut writer, &daemon_hello(None));
         // Answer the startup create + attach and the one mounted turn,
-        // then announce and die — the operator's shutdown mid-chat.
+        // then announce and die — the turn settles inside the closing
+        // batch, so the loop's inline post-turn stats refresh runs with
+        // the socket's reader already gone.
         let mut line = String::new();
         loop {
             line.clear();
@@ -98,13 +108,6 @@ impl FirstGeneration {
                     write_json(&mut writer, &attach_data(id));
                 }
                 "prompt" => {
-                    // The turn stays mid-flight when the daemon announces
-                    // its non-update closing and exits — the operator's
-                    // shutdown does not wait for turns (and the live-turn
-                    // shape keeps this test's recovery subject isolated
-                    // from the turn-settling stats refresh, whose
-                    // dead-socket send is pinned separately by
-                    // daemon_shutdown_turn_end_headless.rs).
                     write_json(&mut writer, &success_response(id, "prompt"));
                     let question = command
                         .get("message")
@@ -146,6 +149,25 @@ impl FirstGeneration {
                             },
                         }),
                     );
+                    // The turn settles BEFORE the closing in the same
+                    // write burst: the loop drains the batch and its
+                    // post-turn refresh faces a dead reader (the
+                    // registration-after-failure-pass race this test
+                    // pins).
+                    write_session_event(
+                        &mut writer,
+                        &json!({
+                            "type": "message_end",
+                            "message": {
+                                "role": "assistant",
+                                "stopReason": "stop",
+                                "content": [
+                                    { "type": "text", "text": "the streamed answer" },
+                                ],
+                            },
+                        }),
+                    );
+                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
                     write_json(
                         &mut writer,
                         &json!({ "type": "daemon_closing", "reason": "shutdown" }),
@@ -191,7 +213,10 @@ impl SuccessorDaemon {
 
     /// Serve the reattached run until it disconnects.
     fn serve(self) {
-        let stream = accept(&self.listener, "the successor never saw the client");
+        let stream = accept(
+            &self.listener,
+            "the successor never saw the client — the loop stalled inside the post-turn refresh past the accept bound",
+        );
         let mut writer = stream.try_clone().expect("clone successor socket");
         let mut reader = BufReader::new(stream);
         write_json(&mut writer, &daemon_hello(Some(&self.app_version)));
@@ -363,16 +388,15 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
     }
 }
 
-/// The operator's daemon restart recovers an attached window (TS #2458):
-/// the announced non-update closing arms the bounded shutdown recovery,
-/// the pane stays mounted while it waits, and the restarted daemon's
-/// reattach lands — the version-honest banner is the visible end state.
-/// Without the recovery the pane rode the hiccup loop instead: its rows
-/// ("the daemon connection closed — reconnecting…", "reconnected to the
-/// daemon") and their 10-minute window, never the announced-closing
-/// semantics this test pins.
+/// A turn settling as the daemon dies must not stall the recovery (the
+/// post-turn refresh on the dead socket): the announced shutdown arms the
+/// bounded recovery and the restarted daemon's reattach lands on the
+/// first fixed poll — the version-honest banner is the visible end state.
+/// Without the dead-reader refusal the loop spent the whole UI request
+/// budget inside the inline refresh (the sibling e2e's round-3 CI run:
+/// the successor never saw a poll and both 10s windows expired).
 #[test]
-fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
+fn a_turn_settling_with_the_shutdown_does_not_stall_the_recovery() {
     // The ambient TMUX variable adds a startup notice to the transcript;
     // scrub it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
@@ -399,10 +423,10 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         steps: vec![
             HeadlessStep::Type("hello".to_string()),
             HeadlessStep::Key(enter()),
-            // The barrier arms before the shutdown can even fire (the
-            // daemon answers the submitted turn with the closing), so the
-            // recovery banner - which cannot render before the 100ms poll
-            // - is always a post-barrier frame.
+            // The barrier arms before the closing can even fire (the
+            // daemon answers the submitted turn with the settle batch and
+            // the closing), so the recovery banner - which cannot render
+            // before the 100ms poll - is always a post-barrier frame.
             HeadlessStep::WaitRender {
                 needle: "Daemon restarted (v".to_string(),
                 timeout_ms: BANNER_WAIT_MS,
@@ -414,7 +438,9 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
     };
     let options = options_with_session(socket, SessionSelection::New);
     let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)));
-    let _ = handle.join();
+    handle
+        .join()
+        .expect("the mock daemon thread serves the stop-and-restart");
     let outcome = outcome.expect("the recovered run returns normally");
     let all = outcome.frames.join("\n");
 
