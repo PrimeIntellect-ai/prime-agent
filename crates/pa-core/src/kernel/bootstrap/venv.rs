@@ -807,10 +807,16 @@ fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// The installed `rlm` package under the venv's site-packages
-/// (`<venv>/lib/python*/site-packages/rlm`).
+/// The installed `rlm` package under the venv's site-packages: the
+/// Windows layout `<venv>/Lib/site-packages/rlm` (no python-version
+/// layer) or the Unix layout `<venv>/lib/python*/site-packages/rlm`.
 fn installed_rlm_dir(venv: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(venv.join("lib")).ok()?;
+    let lib = venv.join("lib");
+    let windows_layout = lib.join("site-packages").join("rlm");
+    if windows_layout.is_dir() {
+        return Some(windows_layout);
+    }
+    let entries = std::fs::read_dir(&lib).ok()?;
     for entry in entries.flatten() {
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
@@ -1134,14 +1140,23 @@ mod tests {
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(probe_count(), 3, "interpreter replacement re-probes");
 
-        // A damaged runtime must be DETECTED, not masked: the probe verdict
-        // now fails, so readiness flips false (the rebuild path follows).
+        // Fingerprint-invisible damage (the fake's verdict file, standing in
+        // for interpreter-internal breakage the witnesses cannot see): the
+        // memo still hits — the masked class, whose detection happens at
+        // kernel-START failure time (the manager invalidates the memo and
+        // the provisioner retry re-probes).
         std::fs::write(&control, "broken\n").unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 3, "invisible damage alone does not re-probe");
+
+        // After a failed start (the invalidation it performs), the next
+        // readiness check re-probes and DETECTS the damage.
+        invalidate_runtime_probe_cache();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(probe_count(), 4, "a failing probe is never memoized");
 
-        // Invalidation (a failed kernel start) forces the next call to
-        // re-probe even with an unchanged venv.
+        // Healing plus another invalidation restores readiness through a
+        // real probe, never a stale memo.
         std::fs::remove_file(&control).unwrap();
         invalidate_runtime_probe_cache();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
@@ -1160,6 +1175,34 @@ mod tests {
         std::fs::remove_file(&python).unwrap();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(probe_count(), 6, "a deleted interpreter misses on stat");
+    }
+
+    /// The Windows venv layout (`<venv>/Lib/site-packages/rlm`, no
+    /// python-version layer) is a fingerprint input: mutations under it
+    /// change the memo key, and removal drops to the missing marker.
+    #[test]
+    fn windows_layout_venv_rlm_is_witnessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("venv");
+        let rlm = venv.join("lib/site-packages/rlm");
+        std::fs::create_dir_all(&rlm).unwrap();
+        std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
+
+        assert_eq!(installed_rlm_dir(&venv), Some(rlm.clone()));
+        let python = dir.path().join("python");
+        let id_before = installed_runtime_identity(&python, &venv);
+        std::fs::write(rlm.join("__init__.py"), "x = 2\n").unwrap();
+        let id_after_mutation = installed_runtime_identity(&python, &venv);
+        assert_ne!(
+            id_before, id_after_mutation,
+            "a mutation under the Windows layout changes the fingerprint"
+        );
+        std::fs::remove_dir_all(&rlm).unwrap();
+        let id_after_removal = installed_runtime_identity(&python, &venv);
+        assert_ne!(
+            id_after_removal, id_before,
+            "the out-of-band uninstall changes the fingerprint"
+        );
     }
 
     /// Live (ignored by default; run with `--ignored` on a machine with a
@@ -1223,15 +1266,30 @@ mod tests {
         };
 
         invalidate_runtime_probe_cache();
-        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
         assert_eq!(probe_count(), 1, "cold call runs the real probe");
 
-        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
         assert_eq!(probe_count(), 1, "unchanged venv hits the memo");
 
         std::fs::remove_dir_all(&rlm).unwrap();
         assert!(
-            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
+            !kernel_ready(
+                &python.to_string_lossy(),
+                &fake,
+                &identity,
+                &[]
+            ),
             "an uninstalled rlm must be detected, not masked"
         );
         assert_eq!(probe_count(), 2, "the out-of-band uninstall re-probed");
