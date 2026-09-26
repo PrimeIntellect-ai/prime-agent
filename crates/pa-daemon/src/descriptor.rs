@@ -231,11 +231,13 @@ pub fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<()> {
     }
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     let result = (|| -> Result<()> {
-        let file =
-            std::fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
-        let mut writer = std::io::BufWriter::new(file);
-        writer.write_all(content.as_bytes())?;
-        writer.flush()?;
+        {
+            let file = std::fs::File::create(&temp)
+                .with_context(|| format!("create {}", temp.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writer.write_all(content.as_bytes())?;
+            writer.flush()?;
+        } // Close before rename, as in the durable writer and TS atomic-file.ts.
         let _ = pa_core::platform::perms::restrict_file(&temp);
         pa_core::platform::rename_onto(&temp, path)
             .with_context(|| format!("persist {}", path.display()))?;
