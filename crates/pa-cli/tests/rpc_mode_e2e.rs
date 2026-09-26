@@ -444,7 +444,13 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         .collect::<Vec<_>>();
     assert_eq!(
         texts,
-        vec!["continue", "steer this", "continue reply", "fu this", "steer answer"],
+        vec![
+            "continue",
+            "steer this",
+            "continue reply",
+            "fu this",
+            "steer answer"
+        ],
         "the folded run carries the parked rows in TS order: {end}"
     );
     let text = client.request(&json!({ "type": "get_last_assistant_text" }));
