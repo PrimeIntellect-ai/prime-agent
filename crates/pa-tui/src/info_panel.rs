@@ -161,7 +161,7 @@ impl InfoPanel {
         let max = self.content_rows().saturating_sub(self.visible_rows.max(1));
         self.scroll = (self.scroll as isize)
             .saturating_add(delta)
-            .clamp(0, max as usize) as usize;
+            .clamp(0, max as isize) as usize;
     }
 
     /// One key press on the read-only surface: the close keys dismiss,
