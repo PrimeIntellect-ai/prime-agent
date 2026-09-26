@@ -260,7 +260,7 @@ mod tests {
         assert!(names.contains(&"beta"));
         // The user-scope skill wins; the project copy reports a collision.
         let beta = result.skills.iter().find(|s| s.name == "beta").unwrap();
-        assert!(beta.source_info.scope == SourceScope::User);
+        assert_eq!(beta.source_info.scope, SourceScope::User);
         assert!(result
             .diagnostics
             .iter()

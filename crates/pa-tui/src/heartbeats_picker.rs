@@ -839,7 +839,7 @@ impl HeartbeatsPicker {
                 shown -= 1;
                 clipped = true;
             }
-            for line in wrapped[..shown].iter() {
+            for line in &wrapped[..shown] {
                 let mut row = vec![Span::raw("  ")];
                 row.extend(line.iter().cloned());
                 lines.push(truncate_line(&row, width, ""));

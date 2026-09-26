@@ -310,7 +310,7 @@ pub fn word_wrap_line(
             // chunk instead of recursing forever.
             let sub_chunks = if graphemes(grapheme).len() == 1 {
                 vec![TextChunk {
-                    text: grapheme.to_string(),
+                    text: grapheme.clone(),
                     start_index: 0,
                     end_index: grapheme.chars().count(),
                 }]
@@ -367,11 +367,7 @@ mod tests {
         for c in &chunks {
             assert!(str_width(&c.text) <= 10, "chunk too wide: {:?}", c.text);
         }
-        let joined: String = chunks
-            .iter()
-            .map(|c| c.text.clone())
-            .collect::<Vec<_>>()
-            .join("");
+        let joined: String = chunks.iter().map(|c| c.text.clone()).collect::<String>();
         assert_eq!(joined, "hello world this wraps");
     }
 

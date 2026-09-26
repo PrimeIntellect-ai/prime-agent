@@ -665,7 +665,7 @@ impl BashView {
                 // the command's tail is what a clip drops.
                 shown = command_rows.saturating_sub(1);
             }
-            for line in command_wrapped[..shown].iter() {
+            for line in &command_wrapped[..shown] {
                 let mut row = vec![Span::raw("  ")];
                 row.extend(line.iter().cloned());
                 lines.push(truncate_line(&row, width, ""));
@@ -1493,7 +1493,7 @@ mod tests {
             "the output rides under the command"
         );
         assert!(joined.contains("red"));
-        assert!(!joined.contains("\x1b"));
+        assert!(!joined.contains('\x1b'));
         // The cancel action and the scroll hint.
         assert!(text.iter().any(|row| row.contains("Cancel command")));
         assert!(text.iter().any(|row| row.contains(

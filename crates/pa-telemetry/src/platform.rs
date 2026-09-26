@@ -95,13 +95,12 @@ fn detect_libc_version() -> String {
 fn detect_cpu_baseline() -> &'static str {
     if cfg!(target_arch = "x86_64") {
         if cfg!(target_os = "linux") {
-            let cpuinfo = match read_text_prefix("/proc/cpuinfo", 16_384) {
-                Some(text) => text,
-                None => return UNKNOWN,
+            let Some(cpuinfo) = read_text_prefix("/proc/cpuinfo", 16_384) else {
+                return UNKNOWN;
             };
-            let flags_line = match cpuinfo.split('\n').find(|line| line.starts_with("flags")) {
-                Some(line) => line,
-                None => return UNKNOWN,
+            let Some(flags_line) = cpuinfo.split('\n').find(|line| line.starts_with("flags"))
+            else {
+                return UNKNOWN;
             };
             let flags = flags_line.split_once(':').map(|(_, rest)| rest);
             match flags {
@@ -129,11 +128,11 @@ fn detect_os_release() -> String {
 /// macOS product version from SystemVersion.plist; `unknown` elsewhere.
 fn detect_os_product_version() -> String {
     if cfg!(target_os = "macos") {
-        let plist =
-            match read_text_prefix("/System/Library/CoreServices/SystemVersion.plist", 4_096) {
-                Some(text) => text,
-                None => return UNKNOWN.into(),
-            };
+        let Some(plist) =
+            read_text_prefix("/System/Library/CoreServices/SystemVersion.plist", 4_096)
+        else {
+            return UNKNOWN.into();
+        };
         plist
             .split("<key>ProductVersion</key>")
             .nth(1)

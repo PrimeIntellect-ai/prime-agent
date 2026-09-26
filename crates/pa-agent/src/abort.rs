@@ -150,7 +150,7 @@ where
     }
     tokio::select! {
         value = operation => Ok(value),
-        _ = signal.aborted() => Err(aborted_error()),
+        () = signal.aborted() => Err(aborted_error()),
     }
 }
 

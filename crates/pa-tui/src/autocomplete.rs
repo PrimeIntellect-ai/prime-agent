@@ -3,6 +3,8 @@
 //! `components/select-list.ts` (the subset the interactive agent view uses:
 //! slash-command and file/path completion with a select list).
 
+use std::collections::HashSet;
+
 use crate::fuzzy::fuzzy_filter;
 use crate::width::str_width;
 use crate::{Line, Span};
@@ -755,7 +757,7 @@ impl CombinedAutocompleteProvider {
         Self {
             commands,
             skill_commands: Vec::new(),
-            hidden: Default::default(),
+            hidden: HashSet::default(),
             paths: PathCompletionProvider { base },
         }
     }

@@ -855,8 +855,7 @@ fn fraction_pad(fraction: &str) -> Option<i64> {
     while padded.len() < 3 {
         padded.push('0');
     }
-    let mut value = padded[..3].parse::<i64>().ok()?;
-    let _ = &mut value;
+    let value = padded[..3].parse::<i64>().ok()?;
     Some(value)
 }
 
@@ -880,11 +879,6 @@ pub fn is_due_job(job: &AgentCronJob, now_millis: u64) -> bool {
         .as_deref()
         .and_then(parse_iso_millis)
         .is_some_and(|next| next <= now_millis)
-}
-
-#[allow(unused)]
-fn unused(chr_value: char) -> char {
-    chr_value
 }
 
 #[cfg(test)]
