@@ -410,7 +410,7 @@ fn spawn_delete_dispatch(
                 id: None,
                 active_session_id: active_session_id.clone(),
                 child_id: child_id.clone(),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             DeleteAction::DeleteSubagent {
                 active_session_id,
@@ -420,21 +420,21 @@ fn spawn_delete_dispatch(
                 id: None,
                 active_session_id: active_session_id.clone(),
                 child_id: child_id.clone(),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             DeleteAction::StopAgent {
                 active_session_id, ..
             } => DaemonCommand::Kill {
                 id: None,
                 active_session_id: active_session_id.clone(),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             DeleteAction::DeleteSavedSession { session_path, .. } => {
                 DaemonCommand::DeleteSavedSession {
                     id: None,
                     active_session_id: None,
                     session_path: session_path.clone(),
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }
             }
         };
@@ -628,12 +628,12 @@ impl AgentsViewMode {
             notice,
             pending_delete: None,
             pending_delete_action: None,
-            deleted_saved_paths: Default::default(),
+            deleted_saved_paths: std::collections::HashSet::default(),
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
-            expanded_parents: Default::default(),
-            expanded_inactive_parents: Default::default(),
+            expanded_parents: std::collections::HashSet::default(),
+            expanded_inactive_parents: std::collections::HashSet::default(),
             pending_ancestors,
             selected_identity,
             selected_key,
@@ -2491,7 +2491,7 @@ async fn open_roster_link(
         };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     let mut snapshot = client.request(roster_subscribe()).await;
     if snapshot.is_err() {
@@ -2559,7 +2559,7 @@ fn spawn_saved_catalog_fetch(
                     session_dir: session_dir.map(|dir| dir.to_string_lossy().to_string()),
                     active_session_id: None,
                     scope: Value::Null,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
                 &request_id,
                 saved_catalog_timeout_ms(),
@@ -2896,12 +2896,12 @@ async fn run_agents_view_surface(
                 }
                 // Only a running row needs a periodic frame. The timer
                 // stays tied to the last pulse across unrelated inputs.
-                _ = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
+                () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
                     if mode.rows.iter().any(|row| row.section == Section::Running) => {}
                 // The streamed-catalog batch window: the buffered rows
                 // flush as one rebuild. A closed window pends forever
                 // (the copied deadline is None) instead of unwrapping.
-                _ = async {
+                () = async {
                     match flush_at {
                         Some(at) => tokio::time::sleep_until(at).await,
                         None => std::future::pending().await,
@@ -2939,7 +2939,7 @@ async fn run_agents_view_surface(
             let _ = client
                 .request(DaemonCommand::RosterUnsubscribe {
                     id: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })
                 .await;
         });
@@ -3322,7 +3322,7 @@ mod tests {
             .expect("the child row");
         mode.selected = child_index;
         let child_identity = mode.rows[mode.selected].identity.clone();
-        assert!(child_identity.contains("c"));
+        assert!(child_identity.contains('c'));
         // First press: armed, no dispatch.
         mode.handle_key("ctrl+x");
         assert!(

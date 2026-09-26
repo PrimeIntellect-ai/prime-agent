@@ -209,7 +209,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -220,7 +221,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live family e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live family e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -1009,11 +1013,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     // host error, and the recorded traceback carries the TS error text
     // (the send resolves no sibling — the other family's session is not
     // addressable by name from this family).
-    let crossed = if let Ok(content) =
-        std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error"))
-    {
-        content
-    } else {
+    let Ok(crossed) = std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) else {
         let transcript = client.messages("gm-kid-debug", kid_a_active);
         eprintln!("KEEP-DIR {}", dir.path().display());
         if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
@@ -1186,9 +1186,9 @@ async fn family_edges_never_cross_families_end_to_end() {
                 .expect("receipt target")
         })
         .collect();
-    parent_targets.sort();
+    parent_targets.sort_unstable();
     let mut expected = vec![parent_b_active.as_str(), kid_a_active.as_str()];
-    expected.sort();
+    expected.sort_unstable();
     assert_eq!(
         parent_targets, expected,
         "the parent's broadcast stays inside its nuclear family: {parent_broadcast}"

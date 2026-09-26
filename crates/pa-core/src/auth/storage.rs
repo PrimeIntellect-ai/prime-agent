@@ -101,7 +101,7 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
         let current = fs::read_to_string(&self.auth_path).ok();
-        let (_, next) = update(current)?;
+        let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write(&self.auth_path, &next)?;
         }
@@ -121,7 +121,7 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()> {
         let mut guard = self.value.lock().unwrap();
-        let (_, next) = update(guard.clone())?;
+        let ((), next) = update(guard.clone())?;
         if let Some(next) = next {
             *guard = Some(next);
         }

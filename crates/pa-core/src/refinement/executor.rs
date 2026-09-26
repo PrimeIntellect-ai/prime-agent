@@ -396,7 +396,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -404,12 +404,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -509,9 +509,9 @@ mod tests {
                     content: "builds are   green".to_string(),
                     path: "/m/m1".to_string(),
                     scope: Some(HarnessScope::Local),
-                    reference: Default::default(),
-                    arguments: Default::default(),
-                    metadata: Default::default(),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
                     source: "test".to_string(),
                     created_at: String::new(),
                     updated_at: String::new(),

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use serde_json::Map;
+
 use super::*;
 use crate::event_stream::AssistantMessageEventExt;
 use crate::registry::get_api_provider;
@@ -12,7 +14,7 @@ fn user_text(text: &str) -> Message {
     Message::User(UserMessage {
         content: UserMessageContent::Text(text.to_string()),
         timestamp: 0,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -382,16 +384,16 @@ async fn estimates_prompt_and_output_tokens_from_serialized_context() {
                     UserOrToolContent::Text(TextContent {
                         text: "hello".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                     UserOrToolContent::Image(ImageContent {
                         mime_type: "image/png".into(),
                         data: "abcd".into(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                 ]),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             Message::Assistant(faux_assistant_message(
                 vec![faux_text("prior")],
@@ -403,12 +405,12 @@ async fn estimates_prompt_and_output_tokens_from_serialized_context() {
                 content: vec![UserOrToolContent::Text(TextContent {
                     text: "tool out".into(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })],
                 details: None,
                 is_error: false,
                 timestamp: 2,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
         ],
         tools: Some(vec![tool]),
@@ -974,7 +976,7 @@ async fn supports_aborting_mid_toolcall_stream_when_paced() {
             .cloned()
             .unwrap(),
         thought_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })];
     message.stop_reason = StopReason::ToolUse;
     registration.set_responses(vec![FauxResponseStep::Message(message)]);

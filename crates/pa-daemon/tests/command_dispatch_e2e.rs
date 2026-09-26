@@ -13,6 +13,7 @@
 //! streamed but the run not settled).
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -121,10 +122,12 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<usize>>) -> std::io::Result<
     // First chunk goes out immediately so the assistant `message_start`
     // streams; the sleep holds the turn open mid-stream.
     let mut payload = String::new();
-    payload.push_str(&format!(
+    write!(
+        payload,
         "data: {}\n\n",
         chunk(json!({"role": "assistant", "content": "streaming"}), None)
-    ));
+    )
+    .expect("write to String");
     stream.write_all(
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
@@ -133,7 +136,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<usize>>) -> std::io::Result<
     )?;
     std::thread::sleep(Duration::from_millis(TURN_HOLD_MS));
     let mut tail = String::new();
-    tail.push_str(&format!("data: {}\n\n", chunk(json!({}), Some("stop"))));
+    write!(tail, "data: {}\n\n", chunk(json!({}), Some("stop"))).expect("write to String");
     tail.push_str("data: [DONE]\n\n");
     stream.write_all(tail.as_bytes())
 }

@@ -56,9 +56,8 @@ impl AgentSessionEngine {
         // Bedrock" in a prime-inference session), so the arm follows the
         // target. A session without a resolvable model never crosses a
         // threshold.
-        let model = match self.session_model() {
-            Ok(model) => model,
-            Err(_) => return AutoCompactionRun::NotDue,
+        let Ok(model) = self.session_model() else {
+            return AutoCompactionRun::NotDue;
         };
         let due = {
             let guard = self.session.blocking_lock();

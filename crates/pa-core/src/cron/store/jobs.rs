@@ -444,7 +444,8 @@ mod tests {
         assert_eq!(job.source.as_deref(), Some("cron"));
         assert_eq!(job.schedule.kind, ScheduleKind::Interval);
         assert_eq!(store.list().len(), 1);
-        assert!(store.due(now + 600_000).iter().any(|job| job.id == job.id) || true);
+        let due = store.due(now + 600_000);
+        assert!(due.iter().any(|found| found.id == job.id));
         // Cancel.
         let cancelled = store.cancel(&job.id, now + 1).unwrap();
         assert_eq!(cancelled.status, JobStatus::Cancelled);
