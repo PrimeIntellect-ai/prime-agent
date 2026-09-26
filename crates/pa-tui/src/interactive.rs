@@ -1849,7 +1849,7 @@ async fn run_interactive_surface(
     // so the respawned worker serves the session again.
     let mut session_reconnect: Option<SessionReconnect> = None;
 
-    while running {
+    'run: while running {
         // The enhanced-key modes settle once per run: the kitty probe
         // answered, or the modifyOtherKeys fallback fired. One adoption
         // event reports the established combination.
@@ -2186,8 +2186,24 @@ async fn run_interactive_surface(
                 // `/resume`, `/exit`): in terminal mode the teardown below must
                 // run this iteration, not after the select's 50ms idle tick
                 // parks the loop — that park reads directly as switch latency
-                // (TS's event loop leaves on the key). Headless runs keep the
-                // tail pass so captured frames stay identical.
+                // (TS's event loop leaves on the key). A HANDOFF takes the
+                // leave now: the bare `break` below only leaves the
+                // input-drain loop, and the select after it parks the exit
+                // for the tick — measured as ~50ms of chat->agents switch
+                // latency on every handoff. The handoff's next surface owns
+                // the pane (its mount clears the alt screen), so nothing the
+                // tail pass paints can reach the user. A non-handoff exit
+                // (`/exit`, `/quit`) keeps the tail pass: its frame gate
+                // paints the final chat frame the exit's main-screen flush
+                // shows. Headless runs keep the tail pass so captured
+                // frames stay identical.
+                if renderer.is_terminal()
+                    && session.exit_requested
+                    && (session.open_agents_view || session.pending_selection.is_some())
+                {
+                    session.exit_reason = "session_request";
+                    break 'run;
+                }
                 if session.exit_requested && renderer.is_terminal() {
                     session.exit_reason = "session_request";
                     break;
