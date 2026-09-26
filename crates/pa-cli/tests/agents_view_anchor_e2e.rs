@@ -174,6 +174,7 @@ async fn entry_anchor_selects_the_left_session() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
@@ -262,6 +263,7 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
         status_message: Some(notice.clone()),
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
