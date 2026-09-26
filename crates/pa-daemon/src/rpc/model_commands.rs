@@ -226,12 +226,12 @@ async fn apply_thinking_level(
                 .append_thinking_level_change(wire_level.as_str().unwrap_or("off"))
                 .map_err(|error| format!("{error:#}"))?;
             // TS persists the default when the model can think or the
-            // level is a real reasoning request.
+            // level is a real reasoning request. The cwd comes off the
+            // held manager (this scope holds the write and persistence
+            // guards — re-acquiring either deadlocks).
             if model.reasoning || clamped != ModelThinkingLevel::Off {
-                let mut settings = pa_core::settings::SettingsManager::create(
-                    &state.settings_cwd().await,
-                    &state.agent_dir,
-                );
+                let mut settings =
+                    pa_core::settings::SettingsManager::create(manager.get_cwd(), &state.agent_dir);
                 settings
                     .set_default_thinking_level(
                         pa_core::settings::ThinkingLevelSetting::from_model_level(clamped),
