@@ -62,6 +62,7 @@ pub mod rlm_ledger;
 pub(crate) mod rlm_roster;
 pub mod rlm_surface;
 pub(crate) mod roster_activity;
+pub mod rpc;
 pub(crate) mod saved_session_commands;
 pub(crate) mod scheduled_jobs;
 pub(crate) mod scheduling_catalog;

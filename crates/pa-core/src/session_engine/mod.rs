@@ -35,6 +35,7 @@ pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod session_commands;
+pub mod session_events;
 pub mod side_question;
 pub mod skills_unavailable_notice;
 pub mod slash_commands;
@@ -87,6 +88,13 @@ pub struct PromptOptions {
     /// steering batch). Each row rides the turn after the primary, with
     /// its own text and images, like the primary.
     pub batch: Vec<PromptBatchRow>,
+    /// TS `returnAfterAccepted: true`: the admitted model turn runs
+    /// detached and the admission returns once its run registers (the TS
+    /// in-process connection's prompt shape: `preflightResult` fires at
+    /// the delivered ticket, the run settles on its own and its events
+    /// follow on the session stream) instead of awaiting the run's
+    /// completion.
+    pub return_after_accepted: bool,
 }
 
 /// One co-delivered user row of a batched prompt admission.
@@ -132,7 +140,7 @@ pub struct AgentSession {
     /// `_performCompaction` reads `getCompactionSettings()` on every
     /// compaction path, `/compact` included); defaults until the engine
     /// wiring resolves them.
-    compaction: compaction::CompactionSettings,
+    compaction: std::sync::RwLock<compaction::CompactionSettings>,
     /// The auxiliary-model routing context (TS `_resolveAuxiliaryModel`'s
     /// settings/registry access): compaction summaries resolve their model
     /// through the `auxiliaryModel` setting, falling back to the session
@@ -237,7 +245,7 @@ impl AgentSession {
             slash_commands: SlashCommandRegistry::builtin(),
             harness_digest,
             digest_pending: std::sync::atomic::AtomicBool::new(false),
-            compaction: compaction::CompactionSettings::default(),
+            compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
             auxiliary_model: None,
             auto_refine_allowed: false,
             auto_refine: refine::AutoRefineGates::default(),
@@ -256,8 +264,22 @@ impl AgentSession {
     /// settings (TS `getCompactionSettings`); the engine wiring calls this
     /// so `/compact` honors `compaction.keepRecentTokens`/`reserveTokens`
     /// like the TS product instead of the defaults.
-    pub fn set_compaction_settings(&mut self, settings: compaction::CompactionSettings) {
-        self.compaction = settings;
+    pub fn set_compaction_settings(&self, settings: compaction::CompactionSettings) {
+        *self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+    }
+
+    /// Toggle automatic compaction for this session (TS
+    /// `setAutoCompactionEnabled`): the live settings the auto-compaction
+    /// arms and `/compact` read.
+    pub fn set_auto_compaction_enabled(&self, enabled: bool) {
+        let mut settings = self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        settings.enabled = enabled;
     }
 
     /// Install the auxiliary-model routing context (TS #2411's
@@ -338,15 +360,21 @@ impl AgentSession {
     /// `getCompactionSettings().enabled` gate the automatic arms check
     /// before any trigger).
     pub fn auto_compaction_enabled(&self) -> bool {
-        self.compaction.enabled
+        self.compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled
     }
 
     /// The resolved compaction settings (TS `getCompactionSettings`): the
     /// in-run continuation consult reads the threshold headroom without
     /// owning the session (a compaction in flight owns it across its
     /// model turn).
-    pub fn compaction_settings(&self) -> &compaction::CompactionSettings {
-        &self.compaction
+    pub fn compaction_settings(&self) -> compaction::CompactionSettings {
+        *self
+            .compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The latest compaction boundary in the live loop context, if any
@@ -392,7 +420,7 @@ impl AgentSession {
                 model,
                 provider_adapter::model_thinking_level(state.thinking_level),
             ),
-            &self.compaction,
+            &self.compaction_settings(),
         )
     }
 
@@ -486,7 +514,7 @@ impl AgentSession {
                     model: model.clone(),
                     api_key,
                     custom_instructions,
-                    settings: self.compaction,
+                    settings: self.compaction_settings(),
                     abort,
                     harness_digest: digest_inputs,
                     auxiliary: self.auxiliary_model.as_ref(),
@@ -773,7 +801,9 @@ impl AgentSession {
     /// # Errors
     ///
     /// Returns an error when the prompt fails validation, the session is
-    /// busy under its admission rule, or the agent rejects the turn.
+    /// busy under its admission rule, or the agent rejects the turn (with
+    /// [`PromptOptions::return_after_accepted`], a rejection after the run
+    /// registers rides the events instead of this result).
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -867,9 +897,19 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+            if options.return_after_accepted {
+                // TS `returnAfterAccepted: true` — the connection's prompt
+                // returns once the admitted turn delivers.
+                self.agent
+                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
+                        prompt_messages,
+                    ))
+                    .await?;
+            } else {
+                self.agent
+                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                    .await?;
+            }
         }
         Ok(PromptOutcome::Prompt)
     }

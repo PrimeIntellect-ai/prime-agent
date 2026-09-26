@@ -196,6 +196,34 @@ impl PendingMessageQueue {
     }
 }
 
+/// One queued batch's text preview: the text of the batch's user
+/// messages (text parts concatenated), the TS action-preview shape.
+fn batch_preview(batch: &[AgentMessage]) -> String {
+    batch
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Standard(crate::types::Message::User(user)) => {
+                let text = match &user.content {
+                    crate::types::UserContent::Text(text) => Some(text.clone()),
+                    crate::types::UserContent::Parts(parts) => {
+                        let text: Vec<&str> = parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                crate::types::UserPart::Text(text) => Some(text.text.as_str()),
+                                crate::types::UserPart::Image(_) => None,
+                            })
+                            .collect();
+                        (!text.is_empty()).then(|| text.join(" "))
+                    }
+                };
+                text
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// One or a batch of messages queued through `steer`/`followUp`.
 // The `Single` variant mirrors the TS union member shape; boxing both arms
 // would complicate every call site for no memory benefit in queue paths.
@@ -564,8 +592,24 @@ impl AgentInner {
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
     ) -> anyhow::Result<()> {
+        self.run_prompt_messages_with_start_signal(messages, skip_initial_steering_poll, None)
+            .await
+    }
+
+    /// The same run, firing `started` once the run registers (the
+    /// [`Agent::prompt_until_accepted`] admission seam: the caller returns
+    /// while this run settles on its own).
+    async fn run_prompt_messages_with_start_signal(
+        self: &Arc<Self>,
+        messages: Vec<AgentMessage>,
+        skip_initial_steering_poll: bool,
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
         self.run_with_lifecycle(|signal| async move {
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
@@ -901,6 +945,44 @@ impl Agent {
         self.clear_follow_up_queue();
     }
 
+    /// Previews of the queued steering batches (TS
+    /// `getSteeringMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn steering_previews(&self) -> Vec<String> {
+        self.inner
+            .steering_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
+    }
+
+    /// Previews of the queued follow-up batches (TS
+    /// `getFollowUpMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn follow_up_previews(&self) -> Vec<String> {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
+    }
+
     /// Remove queued messages matching a predicate (TS `removeQueuedMessages`).
     ///
     /// # Panics
@@ -1021,6 +1103,60 @@ impl Agent {
         }
         let messages = AgentInner::normalize_prompt_input(input.into());
         self.inner.run_prompt_messages(messages, false).await
+    }
+
+    /// Port of `promptUntilAccepted` (TS `_prompt` with
+    /// `returnAfterAccepted: true`): admit the prompt, return once its
+    /// run registers, and let the run settle on its own — the turn's
+    /// events follow through the subscriptions and later run failures
+    /// ride them (the admission has already returned).
+    ///
+    /// # Errors
+    ///
+    /// Errors with the TS message when a run is already active (use
+    /// `steer()` or `follow_up()` to queue messages instead), or when the
+    /// run refuses to start after admission; a failure AFTER the run
+    /// registers rides the events, not this result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another task panicked while
+    /// holding it).
+    pub async fn prompt_until_accepted(
+        &self,
+        input: impl Into<AgentPromptInput>,
+    ) -> anyhow::Result<()> {
+        if self.inner.run.lock().unwrap().is_some() {
+            anyhow::bail!(
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            );
+        }
+        let messages = AgentInner::normalize_prompt_input(input.into());
+        let inner = Arc::clone(&self.inner);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (failed_tx, failed_rx) = tokio::sync::oneshot::channel::<anyhow::Error>();
+        tokio::spawn(async move {
+            let result = inner
+                .run_prompt_messages_with_start_signal(messages, false, Some(started_tx))
+                .await;
+            if let Err(error) = result {
+                // After the start signal this is a post-admission failure
+                // (it rides the events); before it, it is the refusal the
+                // waiting admission returns.
+                let _ = failed_tx.send(error);
+            }
+        });
+        // The start signal fires inside the run's executor (after the run
+        // registers); a dropped signal means the run refused to start
+        // before its executor ran, and the failure channel carries the
+        // refusal. A failure AFTER the start signal is post-admission
+        // (it rides the events); the started outcome wins.
+        if started_rx.await.is_ok() {
+            return Ok(());
+        }
+        Err(failed_rx
+            .await
+            .expect("a dropped start signal answers with the refusal"))
     }
 
     /// Continue from the current context (TS `continue`).

@@ -728,7 +728,7 @@ impl AgentSessionEngine {
             Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
                 turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
                 agent: std::sync::Arc::clone(built.session.agent()),
-                compaction: *built.session.compaction_settings(),
+                compaction: built.session.compaction_settings(),
             });
         // The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
         // reads the provisioner's kernel manager): the same deadlock-free
@@ -1423,6 +1423,28 @@ impl AgentSessionEngine {
             .api_key
     }
 
+    /// The request-time api key AND its resolved provider headers (the
+    /// selection's own headers lead; the registry resolves the model's
+    /// configured ones otherwise): the provider target carries both, so
+    /// models needing custom or auth headers send them on every
+    /// request — the same resolution `set_model`'s swap applies.
+    pub(crate) fn resolve_request_key_and_headers(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+    ) {
+        if let Some(api_key) = &self.current_selection().api_key {
+            return (Some(api_key.clone()), model.headers.clone());
+        }
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        (resolved.api_key, resolved.headers)
+    }
+
     /// Kernel host-request handlers for agent messaging and observation,
     /// routed through the worker's supervisor link. `None` outside a daemon
     /// worker: without a supervisor there is nobody to reach.
@@ -1502,10 +1524,12 @@ impl AgentSessionEngine {
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
             let mut target = self.provider_target.write().expect("provider target lock");
+            let (api_key, headers) = self.resolve_request_key_and_headers(model);
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(model),
+                api_key,
                 model: model.clone(),
+                headers,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {
@@ -2281,6 +2305,7 @@ impl SessionEngine for AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key: self.resolve_request_api_key(&model),
                 model: model.clone(),
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -3598,9 +3623,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -3631,9 +3657,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
