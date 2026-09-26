@@ -10,7 +10,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use pa_tui::agents_view::{
@@ -20,10 +19,11 @@ use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
 /// Mouse tracking is process-global state, so the headless runs
-/// serialize through one lock (the click dispatch gates on it).
-static RUN_LOCK: Mutex<()> = Mutex::new(());
+/// serialize through one lock (the click dispatch gates on it). The
+/// lock is tokio's so the guard can ride the run's awaits.
+static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// One roster row's wire summary (the mock roster_subscribe snapshot).
+/// One roster row's wire summary (the mock `roster_subscribe` snapshot).
 fn roster_row(id: &str, name: &str) -> Value {
     json!({
         "agentId": id,
@@ -204,10 +204,7 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
 /// outcome. Holds the run lock: the click dispatch gates on the
 /// process-global tracking state the headless setup arms.
 async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutcome {
-    let _guard = match RUN_LOCK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let _guard = RUN_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
     let mock = MockSupervisor::bind(&socket);
