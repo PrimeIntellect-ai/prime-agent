@@ -1071,6 +1071,12 @@ mod tests {
             pyproject_hash: hash.to_string(),
         }
     }
+    /// The probe-memo state (in-process map + the shared disk files) is
+    /// process-global: every test that touches it serializes on this lock
+    /// so a concurrent test's invalidation cannot clear another test's
+    /// verdicts mid-run.
+    static MEMO_STATE_LOCK: Mutex<()> = Mutex::new(());
+
     /// Collect every `.runtime-probe-memo.json` under `root` (the override
     /// boundary pin: the override path must create none).
     fn collect_memo_files(root: &Path, found: &mut Vec<std::path::PathBuf>) {
@@ -1105,6 +1111,9 @@ mod tests {
 
     #[test]
     fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed");
         assert_eq!(
             key,
@@ -1148,6 +1157,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_memo_misses_on_out_of_band_venv_mutation() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let venv = dir.path().join("venv");
         let rlm = venv.join("lib/python3.11/site-packages/rlm");
@@ -1269,6 +1281,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disk_memo_hits_across_a_fresh_process_with_zero_probes() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let venv = dir.path().join("venv");
         let rlm = venv.join("lib/python3.11/site-packages/rlm");
@@ -1330,6 +1345,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disk_memo_damage_across_processes_misses_and_reprobes() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let venv = dir.path().join("venv");
         let rlm = venv.join("lib/python3.11/site-packages/rlm");
@@ -1424,6 +1442,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disk_memo_masked_class_hits_across_processes_until_invalidation() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let venv = dir.path().join("venv");
         let rlm = venv.join("lib/python3.11/site-packages/rlm");
@@ -1498,6 +1519,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disk_memo_late_write_after_invalidate_is_benign() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let venv = dir.path().join("venv");
         let rlm = venv.join("lib/python3.11/site-packages/rlm");
@@ -1648,6 +1672,9 @@ mod tests {
     #[test]
     #[ignore = "live: needs a real kernel venv under HOME (bench VMs)"]
     fn live_probe_memo_reprobes_when_installed_rlm_is_removed() {
+        let _memo_state = MEMO_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let real_venv = kernel_venv_dir();
         let real_python = kernel_venv_python(&real_venv);
         if !real_python.is_file() {

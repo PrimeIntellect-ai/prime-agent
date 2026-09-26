@@ -252,32 +252,29 @@ mod tests {
         assert!(!path.exists(), "plain delete removed the file");
         // Missing file: still true (nothing to serve).
         assert!(disk_memo_invalidate(&path));
-        // Undeletable-but-writable: the fallback overwrites with the
-        // empty map, which serves no hits. (Deterministic across
-        // privileges: the fallback is pinned directly here; the
-        // both-fail equivalence is the next test.)
+        // The fallback's empty map serves no hits by construction.
         disk_memo_write(&path, "k1");
         write_map(&path, &[]);
-        assert!(disk_memo_invalidate(&path));
-        assert!(path.exists());
         assert!(!disk_memo_hit(&path, "k1"), "the empty map serves no hits");
+        assert!(disk_memo_invalidate(&path));
+        assert!(!path.exists(), "plain delete removed the file again");
         // Both fail (a directory occupies the memo path): documented
         // equivalence — a read-only venv admits no rebuild-based heal in
         // any design.
-        std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(!disk_memo_invalidate(&path));
         std::fs::remove_dir(&path).unwrap();
     }
 
     #[test]
-    fn unwritable_dir_is_fail_open_on_write() {
+    fn missing_dir_is_fail_open_on_write() {
         let dir = tempfile::tempdir().unwrap();
-        let unwritable = dir.path().join("unwritable");
-        std::fs::create_dir(&unwritable).unwrap();
-        let path = disk_memo_path(&unwritable);
+        let missing = dir.path().join("missing-venv");
+        let path = disk_memo_path(&missing);
         // A missing venv dir: the write skips persistence silently.
         disk_memo_write(&path, "k1");
         assert!(!path.exists());
+        // The read side misses too, never panics.
+        assert!(!disk_memo_hit(&path, "k1"));
     }
 }
