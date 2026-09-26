@@ -56,6 +56,16 @@ pub(crate) const EVENT_RING_CAPACITY: usize = 4096;
 pub(crate) const CLIENT_OUTBOUND_CAPACITY: usize = 32 * 1024;
 const _: () = assert!(CLIENT_OUTBOUND_CAPACITY > WORKER_INFLIGHT_CAPACITY);
 
+/// Concurrent dispatch tasks one client connection may run. The
+/// connection loop acquires a permit per inbound command BEFORE spawning
+/// its dispatch task: once this bound is reached the loop stops reading
+/// the client's socket, and the client's own send buffer carries any
+/// further input — transport-level flow control instead of unbounded
+/// daemon-side task spawn. A healthy connection runs a handful of
+/// concurrent commands (a turn, a poll, a streaming list); the bound is
+/// generous headroom for one client with many sessions.
+pub(crate) const CLIENT_DISPATCH_CONCURRENCY: usize = 64;
+
 /// What a route does when its worker is at the in-flight bound. Codex's
 /// split: a request answers the explicit overload error immediately
 /// (`mod.rs:228-259`), a notification awaits capacity (`mod.rs:265`).

@@ -136,7 +136,7 @@ impl Supervisor {
                         command_type,
                         payload,
                         CATALOG_FORWARD_TIMEOUT_MS,
-                        RouteAdmission::SupervisorInternal,
+                        RouteAdmission::ClientRequest,
                     )
                     .await
                 {

@@ -1631,10 +1631,22 @@ impl Supervisor {
         let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
             crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
         );
+        // One dispatch slot per concurrent command. The read arm is armed
+        // only while a slot is free — at the bound the loop stops reading
+        // the client's socket (the client's own send buffer carries its
+        // input: transport-level flow control instead of unbounded task
+        // spawn), while the dispatch and event arms keep draining, so the
+        // running tasks free their slots and the loop always re-arms the
+        // reader. A spawned task holds its slot until its response bundle
+        // has been handed to the queue, so a task parked on a full
+        // outbound queue still counts against this connection's bound.
+        let dispatch_slots = Arc::new(tokio::sync::Semaphore::new(
+            crate::backpressure::CLIENT_DISPATCH_CONCURRENCY,
+        ));
         loop {
             line.clear();
             tokio::select! {
-                read = reader.read_line(&mut line) => {
+                read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break };
                     if read == 0 {
                         break;
@@ -1643,6 +1655,13 @@ impl Supervisor {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // The arm's guard proved a slot free (this loop is
+                    // the only slot acquirer, and slots only free while
+                    // the loop is between iterations), so the non-blocking
+                    // take always succeeds.
+                    let dispatch_slot = Arc::clone(&dispatch_slots)
+                        .try_acquire_owned()
+                        .expect("the read arm's guard held a dispatch slot");
                     let supervisor = Arc::clone(&self);
                     let effective_client_id = Arc::clone(&effective_client_id);
                     let attached = Arc::clone(&attached);
@@ -1685,6 +1704,10 @@ impl Supervisor {
                                 supervisor.ensure_shutdown_started().await;
                             }
                         }
+                        // The slot frees only once the bundle is in the
+                        // queue: a task parked on a full outbound queue
+                        // still counts against this connection's bound.
+                        drop(dispatch_slot);
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
@@ -3313,13 +3336,16 @@ impl Supervisor {
                 // A failed send is the connection loop's death notice (its
                 // receiver is gone): the remaining folds serve nobody, so
                 // the callback stops the scan (the response travels the
-                // same dead channel and drops with it). The bounded queue
-                // blocks the scan thread until the client drains — the
-                // scan paces itself to its reader instead of buffering the
-                // whole catalog in memory.
-                stream_rows
-                    .blocking_send((vec![item, progress], false))
-                    .is_ok()
+                // same dead channel and drops with it). A FULL queue only
+                // skips the progress frame: the scan runs on the blocking
+                // pool, so it must never wait on client I/O — the frame is
+                // a UI hint, the terminal response carries the
+                // authoritative rows, and the fold still has to visit
+                // every file for the data itself.
+                match stream_rows.try_send((vec![item, progress], false)) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
             });
             (infos, file_total)
         });
@@ -4196,15 +4222,18 @@ impl Supervisor {
         // inside the command's own budget: a command aimed at a worker that
         // crashed and is being relaunched (crash backoff, relaunch, create
         // replay) must not be lost to the dead window, and must never
-        // overtake the replayed session into existence.
+        // overtake the replayed session into existence. `Kill` is the one
+        // client command with a durable pre-route side effect — its stop
+        // tombstone persists before the route — so it rides the
+        // never-refused control admission: a saturation refusal ("nothing
+        // happened, retry") would contradict the landed tombstone, while
+        // the budget-bounded wait keeps the route's honest timeout shape.
+        let admission = match command {
+            DaemonCommand::Kill { .. } => RouteAdmission::SupervisorInternal,
+            _ => RouteAdmission::ClientRequest,
+        };
         let response = self
-            .route_command_ready(
-                &resident,
-                worker_command,
-                payload,
-                timeout,
-                RouteAdmission::ClientRequest,
-            )
+            .route_command_ready(&resident, worker_command, payload, timeout, admission)
             .await;
         match response {
             Ok(mut response) => {
@@ -5252,6 +5281,17 @@ mod tests {
             hello.contains("\"type\":\"daemon_hello\""),
             "the greeting: {hello}"
         );
+        // The greeting is written BEFORE the loop subscribes to the
+        // event ring, so the flood must wait for the subscription to
+        // exist — sends into a receiver-less ring are dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while supervisor.events.receiver_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the connection loop never subscribed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         // Flood the ring well past its capacity with frames too big for
         // the client's socket buffer: the connection loop parks in its
         // event write, its receiver falls out of the ring's live window,

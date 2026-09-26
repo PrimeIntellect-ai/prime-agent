@@ -74,7 +74,7 @@ impl Supervisor {
                         command_type,
                         payload,
                         ROUTE_TIMEOUT_MS,
-                        RouteAdmission::SupervisorInternal,
+                        RouteAdmission::ClientRequest,
                     )
                     .await
                 {

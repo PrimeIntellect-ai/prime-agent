@@ -201,7 +201,7 @@ impl Supervisor {
                 "acquire_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
-                RouteAdmission::SupervisorInternal,
+                RouteAdmission::ClientRequest,
             )
             .await
         {
@@ -314,7 +314,7 @@ impl Supervisor {
                 "release_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
-                RouteAdmission::SupervisorInternal,
+                RouteAdmission::ClientRequest,
             )
             .await;
         let mut response = match response {
