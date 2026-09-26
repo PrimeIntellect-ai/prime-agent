@@ -40,6 +40,9 @@ mod create;
 mod turn;
 
 use create::{active_session_id_of, worker_server_capabilities};
+// session_summary in this re-export serves the in-crate test modules only (the lib target
+// does not use it), so the unused-import lint is allowed deliberately here.
+#[allow(unused_imports)]
 pub(crate) use summary::{
     compact_action_label, emit_worker_event_with, push_roster_delta, session_snapshot,
     session_summary, RosterPushContext,
@@ -97,7 +100,7 @@ use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
 
 use crate::setting_switches::{effective_service_tier, supports_fast_mode};
-use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
+use crate::types::{AgentConnectionState, SessionActionSnapshot};
 
 pub struct Worker {
     pub(crate) config: WorkerConfig,

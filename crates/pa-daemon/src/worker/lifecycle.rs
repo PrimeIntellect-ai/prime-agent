@@ -638,7 +638,7 @@ pub(crate) async fn handle_wait_for_headless_completion(&self) -> DaemonResponse
 /// summary from the runtime's in-memory messages, which hold the prompt
 /// the moment the turn starts, so the busy-flip roster delta a mid-turn
 /// view reads must never classify the running session as a draft.
-fn active_lifecycle(runtime_kind: &str, messageless: bool, busy: bool) -> &'static str {
+pub(super) fn active_lifecycle(runtime_kind: &str, messageless: bool, busy: bool) -> &'static str {
     if runtime_kind == "subagent" || !messageless || busy {
         "live"
     } else {

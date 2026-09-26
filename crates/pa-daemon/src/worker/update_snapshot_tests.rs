@@ -42,10 +42,7 @@ async fn queue_action_rows_serve_the_labeled_preview() {
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
             message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
-            preview: Some(
-                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
-                    .to_string(),
-            ),
+            preview: Some("Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission".to_string()),
             custom_message: None,
             agent_message: None,
             queue_key: None,
@@ -238,8 +235,7 @@ async fn the_action_snapshot_flags_parked_child_status_notices() {
 #[tokio::test]
 async fn a_follow_up_notice_parks_with_typed_provenance() {
     let (worker, _) = snapshot_after_create().await;
-    let content =
-        "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+    let content = "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
     let nonce = crate::child_status_notices::mint();
     let notice = worker
         .dispatch(
@@ -430,8 +426,7 @@ fn the_rider_serializes_only_when_a_notice_is_parked() {
 #[tokio::test]
 async fn restored_lane_rows_keep_the_child_status_provenance() {
     let (worker, _) = snapshot_after_create().await;
-    let content =
-        "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+    let content = "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
     worker.persist_queue_snapshot(
         "target-session",
         &QueueLanes {

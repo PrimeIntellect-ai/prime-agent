@@ -1470,8 +1470,7 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
     let archived_at = entries
         .iter()
         .position(|entry| {
-            entry.type_ == "session_state"
-                && entry.fields["state"]["status"] == json!("archived")
+            entry.type_ == "session_state" && entry.fields["state"]["status"] == json!("archived")
         })
         .expect("the session archived on kill");
     let aborted_at = entries
@@ -1615,8 +1614,7 @@ async fn goal_pause_withdraws_the_queued_continuation() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir =
-        std::env::temp_dir().join(format!("pa-worker-goal-pause-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("pa-worker-goal-pause-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
@@ -2002,8 +2000,7 @@ async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
         ("steer", "human via steer", None),
         ("prompt", "human via prompt", None),
     ] {
-        let mut payload =
-            json!({ "activeSessionId": "suspension-session", "message": message });
+        let mut payload = json!({ "activeSessionId": "suspension-session", "message": message });
         if let Some(row) = row {
             payload["customMessage"] = row;
         }
