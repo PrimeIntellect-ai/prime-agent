@@ -357,6 +357,17 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             let _ = client.shutdown().await;
         })
     }
+    fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("surface", serde_json::Value::from(surface));
+            client.track("tui click used", properties);
+            let _ = client.shutdown().await;
+        })
+    }
     fn client_exit(
         &self,
         reason: &'static str,

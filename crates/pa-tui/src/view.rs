@@ -22,12 +22,17 @@ use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
 use ratatui::style::{Modifier, Style};
 
+pub(crate) mod click;
 mod geometry;
 mod layout;
 pub(crate) mod lazy;
 mod restyle;
 mod runs;
 
+use click::{
+    EditorClickSurface, PickerClickSurface, PickerKind, EFFORT_PICKER_CHROME_ROWS,
+    MODEL_PICKER_CHROME_ROWS,
+};
 use layout::EntryLayout;
 
 /// Minimum transcript rows when the dock would crowd them out
@@ -282,6 +287,12 @@ pub struct AgentView {
     /// frame; the window re-styles only the rows the selection change
     /// touched): walked base rows, their styled copies, and the spans.
     pub(crate) selection_restyle: restyle::SelectionRestyle,
+    /// The last composed frame's clickable geometry (view/click.rs):
+    /// the transcript window's visible entry spans, the dock's screen
+    /// origin, the editor content rows, and the picker panes' item rows.
+    /// Recorded during the fullscreen frame composition that already
+    /// computes the geometry; cleared by the inline compose.
+    pub(crate) click: click::ClickSurface,
     /// The ephemeral action toasts (the top-right auto-dismiss overlay;
     /// a sanctioned divergence from TS — see `toast`).
     pub toasts: crate::toast::Toasts,
@@ -402,6 +413,7 @@ impl AgentView {
             runs_prepare: None,
             runs_shape: None,
             run_map: crate::tool_runs::ToolRuns::default(),
+            click: click::ClickSurface::default(),
         }
     }
 
@@ -1297,8 +1309,8 @@ impl AgentView {
         let context_rows = lines.len();
         let overlay_rows = self.render_autocomplete_overlay(width);
         lines.extend(overlay_rows);
-        let (editor_rows, cursor) = self.render_editor_surface(width);
         let overlay_count = lines.len() - context_rows;
+        let (editor_rows, cursor) = self.render_editor_surface(width, context_rows + overlay_count);
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
         lines.extend(editor_rows);
         lines.push(render_tray(&self.chrome, &self.theme, width));
@@ -1381,7 +1393,11 @@ impl AgentView {
     /// The editor surface (TS `Editor.render` with a background): a blank
     /// bg row, content rows with the `> ` prompt and a reverse-video cursor,
     /// and a trailing bg row. Scroll indicators replace the blank rows.
-    fn render_editor_surface(&mut self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
+    fn render_editor_surface(
+        &mut self,
+        width: usize,
+        dock_row: usize,
+    ) -> (Vec<Line>, Option<(usize, usize)>) {
         let bg = crate::chrome::editor_background(&self.theme);
         let border = self.theme.fg_style(ThemeColor::BorderMuted);
         let padding_x = 2usize;
@@ -1397,6 +1413,16 @@ impl AgentView {
         let layout_width = input_width;
         let (visible, scroll_offset, _hidden_above, hidden_below) =
             self.editor.visible_window(layout_width, self.terminal_rows);
+        // The content rows' click surface (view/click.rs): the TS editor
+        // registers one region over its visible content rows, shifted by
+        // the queue-selection header's rows (TS `getContentLineOffset`).
+        self.click.record_editor(EditorClickSurface {
+            dock_row,
+            rows: visible.len(),
+            queue_header_rows: usize::from(self.queue_selected.is_some()) * 2,
+            prompt_width,
+            content_width: layout_width,
+        });
         let mut rows: Vec<Line> = Vec::new();
         if scroll_offset > 0 {
             let indicator = format!(" \u{2191} {scroll_offset} more");
@@ -1541,6 +1567,10 @@ impl AgentView {
     }
 
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
+        // The click surface records this frame's clickable geometry as
+        // the compose computes it (the onboarding pane that returns early
+        // leaves none of it).
+        self.click.clear();
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
         // no top bar, transcript, or prompt dock behind it. The pane is a
         // frame surface like the TS overlay (its rows select; TS's
@@ -1558,13 +1588,28 @@ impl AgentView {
         // tree and fork selectors: the prompt context (the detail hint)
         // stays above the pane and the transcript stays mounted above it.
         let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
+        let pane_row = prompt_context.len();
         let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
+            // The pane's item rows are clickable (view/click.rs): the
+            // recorded span covers the filtered window the render drew.
+            self.click.record_picker(PickerClickSurface {
+                dock_row: pane_row,
+                chrome_rows: MODEL_PICKER_CHROME_ROWS,
+                items: picker.filtered_window(),
+                kind: PickerKind::Model,
+            });
             Some(dock)
         } else if let Some(picker) = &self.effort_picker {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
+            self.click.record_picker(PickerClickSurface {
+                dock_row: pane_row,
+                chrome_rows: EFFORT_PICKER_CHROME_ROWS,
+                items: picker.visible_window(),
+                kind: PickerKind::Effort,
+            });
             Some(dock)
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
             let mut dock = prompt_context;
@@ -1683,6 +1728,10 @@ impl AgentView {
         while frame.len() < height.saturating_sub(dock.len()) {
             frame.push(vec![Span::raw(" ".repeat(width))]);
         }
+        // The click surface's frame scalars: the window starts at the
+        // top bar's rows, the dock starts at the frame's next row, and a
+        // click's dock row indexes the un-cropped dock.
+        self.click.note_frame(top_rows, frame.len(), cropped);
         for line in dock {
             frame.push(pad_row(line, width));
         }
@@ -1697,6 +1746,8 @@ impl AgentView {
                     .unwrap_or_else(|| "ctrl+shift+down".to_string());
                 let label = format!(" {key} to follow ");
                 *row = composite_follow_hint(row, &label, width);
+                // The hint's row never reads as the content beneath it.
+                self.click.mask_rows(window_height, window_height + 1);
             }
         }
         self.frame_rows = frame.len();
@@ -1738,6 +1789,11 @@ impl AgentView {
                 width,
                 style,
             );
+            // The covered rows no longer read as the transcript content
+            // beneath them: a click on the transient pill must not fire
+            // the hidden row's target.
+            let covered = toasts.len().min(window_height);
+            self.click.mask_rows(top_rows, top_rows + covered);
         }
         frame
     }
@@ -1827,6 +1883,9 @@ impl AgentView {
     pub fn render_inline_frame(&mut self, width: usize) -> Vec<Line> {
         let mut rows = self.render_transcript(width);
         rows.extend(self.render_dock(width));
+        // The inline layout has no fullscreen window on screen: a click
+        // must never resolve against a dock the terminal does not show.
+        self.click.clear();
         rows
     }
 

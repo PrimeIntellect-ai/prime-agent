@@ -270,6 +270,10 @@ impl AgentView {
         width: usize,
         height: usize,
     ) -> (Vec<Line>, usize) {
+        // The window build restarts the click surface's section recording
+        // (view/click.rs): a fresh window's spans replace the last
+        // frame's, ahead of the two paths below.
+        self.click.window_sections.clear();
         // A paused width change preserves the reference's absolute row
         // offset; a paused detail change keeps the walked cursor (the
         // window re-renders its entries under the new detail without
@@ -424,7 +428,14 @@ impl AgentView {
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
+            let before = rows.len();
             rows.extend_from_slice(&source[from..to]);
+            // The entry's visible span feeds the click surface's window
+            // map (view/click.rs) — bounded by the rows on screen.
+            if before < rows.len() && section >= 1 && section < last {
+                self.click
+                    .record_window_section(section - 1, before, rows.len());
+            }
             section += 1;
             row = 0;
         }
