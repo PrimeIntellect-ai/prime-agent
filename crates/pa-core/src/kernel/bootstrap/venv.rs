@@ -1148,7 +1148,11 @@ mod tests {
         )
         .unwrap();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 6, "interpreter replacement probes runtime and dill");
+        assert_eq!(
+            probe_count(),
+            6,
+            "interpreter replacement probes runtime and dill"
+        );
 
         // Fingerprint-invisible damage (the fake's verdict file, standing in
         // for interpreter-internal breakage the witnesses cannot see): the
@@ -1177,14 +1181,22 @@ mod tests {
         // so the real probe runs again (this fake one still passes).
         std::fs::remove_dir_all(&rlm).unwrap();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 11, "an uninstalled rlm probes runtime and dill");
+        assert_eq!(
+            probe_count(),
+            11,
+            "an uninstalled rlm probes runtime and dill"
+        );
 
         // A deleted interpreter must miss the memo without a probe
         // invocation (the interpreter stat witness fails): readiness flips
         // false because the probe cannot even run.
         std::fs::remove_file(&python).unwrap();
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 11, "a deleted interpreter misses on stat without running");
+        assert_eq!(
+            probe_count(),
+            11,
+            "a deleted interpreter misses on stat without running"
+        );
     }
 
     /// The Windows venv layout (`<venv>/Lib/site-packages/rlm`, no
