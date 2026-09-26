@@ -677,7 +677,7 @@ mod tests {
         // TS `showWaiting` for the Copilot device flow.
         let waiting = rx.recv().await.expect("the waiting line sends");
         match waiting {
-            pa_tui::auth_panel::AuthPanelRequest::Progress { message } => {
+            pa_tui::auth_panel::AuthPanelRequest::Progress { message, .. } => {
                 assert_eq!(message, "Waiting for browser authentication...");
             }
             _ => panic!("expected the waiting line request"),
