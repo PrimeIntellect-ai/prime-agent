@@ -188,6 +188,16 @@ pub struct AgentView {
     /// a visible cursor across the pane (`positionHardwareCursor` and the
     /// paint tail move it while hidden).
     pub show_hardware_cursor: bool,
+    /// The brand splash never renders while set (the operator's
+    /// 2026-09-26 zero-layout-shift ruling): a chat that opens or rebinds
+    /// directly into a non-empty transcript suppresses it — TS mounts the
+    /// chat over an already-attached connection (its first visible frame
+    /// is the content, and the tail-anchored fullscreen viewport scrolls
+    /// the splash out of reach), so the splash never dwells or shifts a
+    /// row under the pinned title bar. Every empty chat keeps it (TS
+    /// `BrandSplashHeader` is the new chat's header, `quietStartup` and
+    /// the onboarding `getHidden` are TS's own suppression gates).
+    pub splash_suppressed: bool,
     pub(crate) scroll_top: usize,
     following: bool,
     /// The transcript-tail offset of the last composed frame (TS
@@ -362,6 +372,7 @@ impl AgentView {
             show_images: true,
             fullscreen: true,
             show_hardware_cursor: false,
+            splash_suppressed: false,
             scroll_top: 0,
             following: true,
             last_max_scroll: 0,
