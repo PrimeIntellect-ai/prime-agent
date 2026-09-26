@@ -34,6 +34,7 @@ use anyhow::{anyhow, bail, Result};
 use pa_types::daemon::{DaemonCommand, DaemonSessionLifecycle};
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::registry::ResidentWorker;
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
 
@@ -330,7 +331,13 @@ impl Supervisor {
         session_path: &str,
     ) -> Result<ReuseAnswer> {
         match self
-            .route_command_ready(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command_ready(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => {

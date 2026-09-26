@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 use pa_types::daemon::DaemonWorkerLifecycle;
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{
     command_type_name, response_failure, response_line, response_success, DaemonResponse,
 };
@@ -68,7 +69,13 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(resident, command_type, payload, ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        resident,
+                        command_type,
+                        payload,
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await
                 {
                     Ok(response) => response,

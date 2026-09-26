@@ -44,6 +44,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
     PersistedSupervisorConfig, SUPERVISOR_CONFIG_FILE_NAME,
@@ -782,7 +783,13 @@ impl Supervisor {
             {
                 let command = if kill_stop { "kill" } else { "shutdown" };
                 let _ = self
-                    .route_command(resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        resident,
+                        command,
+                        json!({}),
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -1001,10 +1008,44 @@ impl Supervisor {
         command_type: &str,
         payload: Value,
         timeout_ms: u64,
+        admission: RouteAdmission,
     ) -> Result<DaemonResponse> {
         let cmd_tx = {
             let guard = resident.cmd_tx.lock().await;
             guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
+        };
+        // Bounded admission (the Codex request/await split): a client's
+        // request-shaped command answers the explicit overload refusal
+        // the moment the worker's in-flight bound is full — nothing is
+        // queued and nothing is dropped, so the caller's retry cannot
+        // duplicate the command; supervisor-internal traffic waits for a
+        // slot inside the route's own budget, so control-plane routes are
+        // never refused. The whole route — admission, enqueue, and reply
+        // waits — never exceeds the caller's budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        // The semaphore methods take their Arc by value (the permit owns
+        // it for its lifetime), so the route hands them a strong reference
+        // of their own.
+        let inflight = Arc::clone(&resident.inflight);
+        let _permit = match admission {
+            RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return Ok(crate::backpressure::overloaded_response(
+                        command_type,
+                        &resident.worker_id,
+                    ))
+                }
+            },
+            RouteAdmission::SupervisorInternal => {
+                match tokio::time::timeout_at(deadline, inflight.acquire_owned()).await {
+                    Ok(Ok(permit)) => permit,
+                    // A saturated worker never frees a slot inside the
+                    // caller's budget: the budget error, the same one a
+                    // wedged worker's silent route produces.
+                    _ => return Err(anyhow!("Session worker timed out")),
+                }
+            }
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1013,14 +1054,53 @@ impl Supervisor {
             .lock()
             .await
             .insert(request_id.clone(), reply_tx);
-        cmd_tx
-            .send(WorkerRequest {
-                request_id: request_id.clone(),
-                command_type: command_type.to_string(),
-                payload,
-            })
-            .map_err(|_| anyhow!(WORKER_NOT_CONNECTED))?;
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
+        // The enqueue seam of the bounded queue (the Codex full-queue
+        // answer, `mod.rs:228-259`): a full channel means the writer pump
+        // is wedged — parked frames whose routes already timed out freed
+        // their permits, so a slot can be free while the queue is not. A
+        // client command answers the same explicit overload refusal there;
+        // supervisor-internal traffic instead waits out the remaining
+        // budget (never refused, never silently dropped — the cancelled
+        // send enqueues nothing, so the refused request provably never
+        // left the supervisor and a retry cannot duplicate it).
+        let request = WorkerRequest {
+            request_id: request_id.clone(),
+            command_type: command_type.to_string(),
+            payload,
+        };
+        let unsent = match cmd_tx.try_send(request) {
+            Ok(()) => None,
+            Err(mpsc::error::TrySendError::Full(unsent)) => Some(unsent),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                resident.pending.lock().await.remove(&request_id);
+                return Err(anyhow!(WORKER_NOT_CONNECTED));
+            }
+        };
+        if let Some(unsent) = unsent {
+            match admission {
+                RouteAdmission::ClientRequest => {
+                    resident.pending.lock().await.remove(&request_id);
+                    return Ok(crate::backpressure::overloaded_response(
+                        command_type,
+                        &resident.worker_id,
+                    ));
+                }
+                RouteAdmission::SupervisorInternal => {
+                    match tokio::time::timeout_at(deadline, cmd_tx.send(unsent)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => {
+                            resident.pending.lock().await.remove(&request_id);
+                            return Err(anyhow!(WORKER_NOT_CONNECTED));
+                        }
+                        Err(_) => {
+                            resident.pending.lock().await.remove(&request_id);
+                            return Err(anyhow!("Session worker timed out"));
+                        }
+                    }
+                }
+            }
+        }
+        match tokio::time::timeout_at(deadline, reply_rx).await {
             // The writer pump resolves provably-unsent requests with the
             // not-connected failure: surface it as the retryable route
             // error instead of a worker response.
@@ -1053,13 +1133,17 @@ impl Supervisor {
     /// error (the request never left the supervisor) is retried against the
     /// next connection, while ambiguous failures (timeouts, dropped
     /// replies) are returned as-is so a possibly-processed command is
-    /// never duplicated.
+    /// never duplicated. The [`RouteAdmission`] overload refusal passes
+    /// through untouched: the request never left the supervisor, and the
+    /// caller — not this loop — owns the retry (a saturated worker stays
+    /// saturated for the remainder of the budget).
     pub(crate) async fn route_command_ready(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         command_type: &str,
         payload: Value,
         timeout_ms: u64,
+        admission: RouteAdmission,
     ) -> Result<DaemonResponse> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
@@ -1068,7 +1152,13 @@ impl Supervisor {
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
             match self
-                .route_command(resident, command_type, payload.clone(), remaining_ms)
+                .route_command(
+                    resident,
+                    command_type,
+                    payload.clone(),
+                    remaining_ms,
+                    admission,
+                )
                 .await
             {
                 // The socket died between the liveness check and the send
@@ -1341,7 +1431,13 @@ impl Supervisor {
         };
         let mut child = child;
         let response = match self
-            .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "create",
+                create_payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -1524,9 +1620,14 @@ impl Supervisor {
         // Completed dispatches flow back through this channel so the loop
         // keeps writing: a long command (a turn, a compaction) must not
         // block this client's events or its other commands, like the TS
-        // daemon's async command handlers.
-        let (dispatch_tx, mut dispatch_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Vec<Value>, bool)>();
+        // daemon's async command handlers. Bounded at
+        // [`crate::backpressure::CLIENT_OUTBOUND_CAPACITY`]: a client that
+        // reads nothing stalls only its own dispatch tasks once the queue
+        // fills — memory stays bounded per connection — while every other
+        // client and worker is unaffected.
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+            crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
+        );
         loop {
             line.clear();
             tokio::select! {
@@ -1563,7 +1664,7 @@ impl Supervisor {
                                 &stream_tx,
                             )
                             .await;
-                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                        if dispatch_tx.send((lines, stop)).await.is_err() && stop {
                             // The initiating connection left before its response
                             // was selected. Only a terminal shutdown owns the
                             // descriptor-deleting stop pass; an update restart
@@ -1641,7 +1742,17 @@ impl Supervisor {
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // A lagged receiver means the shared event ring
+                        // (capacity 4096) dropped this many events for
+                        // THIS connection: the loss itself is the
+                        // broadcast's defined backpressure, but it must
+                        // never stay invisible (finding 4a) — the daemon
+                        // log records which client lost how much.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            self.log_line(&format!(
+                                "client {connection_id} lagged on the event ring: {skipped} events dropped"
+                            ));
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -1668,7 +1779,13 @@ impl Supervisor {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(&resident, "detach", payload, ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        &resident,
+                        "detach",
+                        payload,
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -1696,7 +1813,7 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -1838,7 +1955,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2470,7 +2587,13 @@ impl Supervisor {
             let resident = Arc::clone(resident);
             async move {
                 let response = self
-                    .route_command(&resident, "update_snapshot", json!({}), rpc_timeout)
+                    .route_command(
+                        &resident,
+                        "update_snapshot",
+                        json!({}),
+                        rpc_timeout,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await?;
                 if !response.success {
                     anyhow::bail!(
@@ -3073,7 +3196,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3186,8 +3309,13 @@ impl Supervisor {
                 // A failed send is the connection loop's death notice (its
                 // receiver is gone): the remaining folds serve nobody, so
                 // the callback stops the scan (the response travels the
-                // same dead channel and drops with it).
-                stream_rows.send((vec![item, progress], false)).is_ok()
+                // same dead channel and drops with it). The bounded queue
+                // blocks the scan thread until the client drains — the
+                // scan paces itself to its reader instead of buffering the
+                // whole catalog in memory.
+                stream_rows
+                    .blocking_send((vec![item, progress], false))
+                    .is_ok()
             });
             (infos, file_total)
         });
@@ -3268,7 +3396,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 item["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![item], false));
+            let _ = stream.send((vec![item], false)).await;
         }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
@@ -3310,7 +3438,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 completion["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![completion], false));
+            let _ = stream.send((vec![completion], false)).await;
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the
@@ -3535,7 +3663,13 @@ impl Supervisor {
     /// fallback for an unreachable worker.
     async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
         let response = self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         match response {
             Ok(response) if response.success => response
@@ -3628,7 +3762,13 @@ impl Supervisor {
         // authoritative create summary instead of failing the spawn (the
         // session is durable at this point; the child is healthy).
         let summary = match self
-            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) if response.success => {
@@ -3783,7 +3923,13 @@ impl Supervisor {
         }
         for resident in self.registry.list().await {
             let response = self
-                .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             if let Ok(response) = response {
                 if let Some(data) = &response.data {
@@ -4048,7 +4194,13 @@ impl Supervisor {
         // replay) must not be lost to the dead window, and must never
         // overtake the replayed session into existence.
         let response = self
-            .route_command_ready(&resident, worker_command, payload, timeout)
+            .route_command_ready(
+                &resident,
+                worker_command,
+                payload,
+                timeout,
+                RouteAdmission::ClientRequest,
+            )
             .await;
         match response {
             Ok(mut response) => {
@@ -4248,7 +4400,13 @@ impl Supervisor {
         // fail fast instead of parking on this worker.
         resident.note_retired();
         let _ = self
-            .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         // The per-session stop shares the terminal-stop contract: the
         // descriptor dies only with a provably-gone process, so a worker
@@ -4353,7 +4511,13 @@ impl Supervisor {
                 continue;
             }
             let _ = self
-                .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             self.retire_worker_after_stop(&resident).await;
         }
@@ -4648,7 +4812,13 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
     ) -> Result<()> {
         resident.intentional_stop.store(true, Ordering::SeqCst);
         let response = self
-            .route_command(resident, "shutdown", json!({}), timeout.as_millis() as u64)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                timeout.as_millis() as u64,
+                RouteAdmission::SupervisorInternal,
+            )
             .await?;
         if !response.success {
             anyhow::bail!(
@@ -5043,5 +5213,87 @@ mod tests {
             supervisor.accept_exit.load(Ordering::SeqCst),
             "the completed stop pass must exit the accept loop"
         );
+    }
+
+    /// A client that falls behind the shared event ring loses events (the
+    /// broadcast's defined backpressure), but never silently anymore
+    /// (finding 4a): the loss becomes a durable daemon-log line naming the
+    /// client and the dropped count. Drives a real connection loop
+    /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lagged_client_event_stream_is_logged() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        // The test's client only reads; its write half stays held so the
+        // connection's writes fail only when the test ends.
+        let (client_read, _client_write) = client_side.into_split();
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The handshake greeting arrives before the loop's first poll.
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        // Flood the ring well past its capacity with frames too big for
+        // the client's socket buffer: the connection loop parks in its
+        // event write, its receiver falls out of the ring's live window,
+        // and the parked write only completes once the drain frees the
+        // buffer again.
+        let capacity = supervisor.events.capacity();
+        let padding = "x".repeat(2048);
+        let flood = capacity + 2048;
+        for index in 0..flood {
+            let _ = supervisor.events.send((
+                ClientRouting::Broadcast,
+                json!({ "type": "session_event", "index": index, "padding": padding }),
+            ));
+        }
+        // Drain the parked connection to EOF-quiet: the loop unparks,
+        // its next event read reports the dropped span, and the loss
+        // lands in the daemon log.
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut quiet = 0;
+        while quiet < 3 {
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => quiet += 1,
+                Ok(Ok(_)) => quiet = 0,
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("lagged on the event ring") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lagged drain was never logged; log: {log}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let line = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("lagged on the event ring"))
+            .expect("the lag line");
+        assert!(
+            line.contains("events dropped"),
+            "the log names the dropped count: {line}"
+        );
+        connection.abort();
     }
 }
