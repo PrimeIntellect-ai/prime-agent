@@ -65,14 +65,17 @@ pub enum InfoPanelAction {
 /// The read-only info panel: a scrollable document in the editor dock.
 /// The title is `None` for content that carries its own header row (the
 /// `/context`, `/session`, `/system-prompt`, and `/logs` builders all
-/// open with their heading — the panel never duplicates it).
+/// open with their heading — the panel never duplicates it). The row
+/// budget is the RENDER's parameter, not open-time state: a terminal
+/// resized while the panel is open re-budgets the very next frame
+/// (a stale larger budget would front-crop the frame's rule and title
+/// away, the rows the panel exists to show).
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfoPanel {
     title: Option<String>,
     content: InfoContent,
     /// The content window's first row (0 = the top of the document).
     scroll: usize,
-    viewport_rows: usize,
     /// The content window's height from the last paint: the key loop's
     /// scroll math walks the same window the panel rendered (a render
     /// always precedes a key press).
@@ -81,12 +84,11 @@ pub struct InfoPanel {
 }
 
 impl InfoPanel {
-    pub fn new(title: Option<String>, content: InfoContent, viewport_rows: usize) -> Self {
+    pub fn new(title: Option<String>, content: InfoContent) -> Self {
         Self {
             title,
             content,
             scroll: 0,
-            viewport_rows,
             visible_rows: 0,
             layout: InfoLayout {
                 width: 0,
@@ -134,14 +136,14 @@ impl InfoPanel {
     /// fixed rows (one fewer without a title) plus the scroll indicator
     /// (when the window is partial) are reserved first, exactly like the
     /// pickers' list layout.
-    fn window_height(&self, total: usize) -> usize {
+    fn window_height(&self, viewport_rows: usize, total: usize) -> usize {
         let fixed = match self.title {
             Some(_) => FIXED_FRAME_ROWS_WITH_TITLE,
             None => FIXED_FRAME_ROWS,
         };
         menu_list_layout(
-            Some(self.viewport_rows),
-            self.viewport_rows,
+            Some(viewport_rows),
+            viewport_rows,
             total,
             fixed,
             SCROLL_INDICATOR_ROWS,
@@ -204,21 +206,23 @@ impl InfoPanel {
         InfoPanelAction::None
     }
 
-    /// Render the panel's frame: the rule, the title, the content
-    /// window, the scroll indicator when the window is partial, the key
-    /// hint, and one blank under it. The frame never exceeds the row
-    /// budget it was opened with (a too-short terminal degrades by
-    /// truncation, like the docked pickers).
+    /// Render the panel's frame at the CURRENT row budget: the rule,
+    /// the title, the content window, the scroll indicator when the
+    /// window is partial, the key hint, and one blank under it. The
+    /// frame never exceeds the budget (a too-short terminal degrades by
+    /// truncation, like the docked pickers) — and a resized terminal
+    /// re-budgets here, never from a stale open-time snapshot.
     pub fn render(
         &mut self,
         theme: &Theme,
         width: usize,
         kb: &KeybindingsManager,
         code_block_indent: &str,
+        viewport_rows: usize,
     ) -> Vec<Line> {
         self.ensure_layout(theme, width, code_block_indent);
         let total = self.content_rows();
-        let visible = self.window_height(total);
+        let visible = self.window_height(viewport_rows, total);
         self.visible_rows = visible;
         self.clamp_scroll();
         let end = (self.scroll + visible).min(total);
@@ -240,18 +244,21 @@ impl InfoPanel {
         }
         lines.push(hint_row(theme, width, &hint_text(kb)));
         lines.push(Vec::new());
-        lines.truncate(self.viewport_rows.max(1));
+        lines.truncate(viewport_rows.max(1));
         lines
     }
 }
 
 /// The key-hint text: the scroll keys and the close key, the same
 /// vocabulary as the pickers' hints. An unbound action is omitted — the
-/// hint never advertises a key the surface does not handle.
+/// hint never advertises a key the surface does not handle. A user who
+/// unbinds `tui.select.cancel` loses the Esc close (the picker grammar
+/// keys close through their bindings); the hint then names the one
+/// close key that always works: Ctrl+C (hardwired in `handle_key`).
 fn hint_text(kb: &KeybindingsManager) -> String {
     let scroll = crate::menu_panel::key_hint(kb, &["tui.select.up", "tui.select.down"], "scroll");
     let close = kb.first_key("tui.select.cancel").map_or_else(
-        || "Esc".to_string(),
+        || "Ctrl+C".to_string(),
         |key| crate::keybindings::format_key_text(&key),
     );
     match scroll {
@@ -302,8 +309,8 @@ mod tests {
 
     #[test]
     fn frame_grammar_is_the_panel_shape() {
-        let mut panel = InfoPanel::new(Some("Context".to_string()), InfoContent::Rows(rows(2)), 20);
-        let frame = panel.render(&theme(), 40, &kb(), "  ");
+        let mut panel = InfoPanel::new(Some("Context".to_string()), InfoContent::Rows(rows(2)));
+        let frame = panel.render(&theme(), 40, &kb(), "  ", 20);
         let text = plain(&frame);
         // Rule, title, blank, content, hint, blank — the docked-panel
         // grammar, and no rule below the shortcuts hint.
@@ -330,8 +337,8 @@ mod tests {
                 color: None,
             }],
         );
-        let mut panel = InfoPanel::new(None, InfoContent::Rows(rows), 20);
-        let frame = panel.render(&theme(), 40, &kb(), "  ");
+        let mut panel = InfoPanel::new(None, InfoContent::Rows(rows));
+        let frame = panel.render(&theme(), 40, &kb(), "  ", 20);
         let text = plain(&frame);
         assert_eq!(text[0], "\u{2500}".repeat(40));
         assert_eq!(text[1], "");
@@ -344,8 +351,8 @@ mod tests {
 
     #[test]
     fn long_content_windows_with_a_scroll_indicator() {
-        let mut panel = InfoPanel::new(Some("Logs".to_string()), InfoContent::Rows(rows(50)), 20);
-        let frame = panel.render(&theme(), 40, &kb(), "  ");
+        let mut panel = InfoPanel::new(Some("Logs".to_string()), InfoContent::Rows(rows(50)));
+        let frame = panel.render(&theme(), 40, &kb(), "  ", 20);
         let text = plain(&frame);
         // The window holds viewport - fixed - indicator rows and the
         // indicator rides under the content.
@@ -370,8 +377,8 @@ mod tests {
             (None, 4),
             (None, 12),
         ] {
-            let mut panel = InfoPanel::new(title, InfoContent::Rows(rows(200)), budget);
-            let frame = panel.render(&theme(), 40, &kb(), "  ");
+            let mut panel = InfoPanel::new(title, InfoContent::Rows(rows(200)));
+            let frame = panel.render(&theme(), 40, &kb(), "  ", budget);
             assert!(
                 frame.len() <= budget.max(1),
                 "budget {budget}: frame {} rows",
@@ -383,8 +390,8 @@ mod tests {
     #[test]
     fn arrows_page_keys_and_close_keys_drive_the_window() {
         let kb = kb();
-        let mut panel = InfoPanel::new(None, InfoContent::Rows(rows(100)), 20);
-        panel.render(&theme(), 40, &kb, "  ");
+        let mut panel = InfoPanel::new(None, InfoContent::Rows(rows(100)));
+        panel.render(&theme(), 40, &kb, "  ", 20);
         assert_eq!(panel.handle_key("down", &kb), InfoPanelAction::None);
         assert_eq!(panel.scroll, 1);
         assert_eq!(panel.handle_key("up", &kb), InfoPanelAction::None);
@@ -398,7 +405,7 @@ mod tests {
         assert_eq!(panel.scroll, 0);
         // Down past the end clamps; up from the top stays.
         panel.scroll_by(10_000);
-        panel.render(&theme(), 40, &kb, "  ");
+        panel.render(&theme(), 40, &kb, "  ", 20);
         let max_scroll = panel.scroll;
         assert_eq!(panel.handle_key("down", &kb), InfoPanelAction::None);
         assert_eq!(panel.scroll, max_scroll);
@@ -425,16 +432,40 @@ mod tests {
             text: "word ".repeat(20),
             color: None,
         }]];
-        let mut panel = InfoPanel::new(None, InfoContent::Rows(long), 20);
-        let narrow = panel.render(&theme(), 10, &kb(), "  ");
+        let mut panel = InfoPanel::new(None, InfoContent::Rows(long));
+        let narrow = panel.render(&theme(), 10, &kb(), "  ", 20);
         let narrow_rows = narrow.len();
-        let wide = panel.render(&theme(), 60, &kb(), "  ");
+        let wide = panel.render(&theme(), 60, &kb(), "  ", 20);
         assert!(wide.len() < narrow_rows, "the wider frame wraps tighter");
         // A scroll held at the narrow layout's end clamps into the new
         // document bounds.
         panel.scroll_by(1000);
-        panel.render(&theme(), 60, &kb(), "  ");
+        panel.render(&theme(), 60, &kb(), "  ", 20);
         assert!(panel.scroll <= panel.content_rows());
+    }
+
+    /// A terminal resized while the panel is open re-budgets the next
+    /// frame (Macroscope's finding: a stale open-time budget would
+    /// front-crop the rule and title away on a shrunk terminal).
+    #[test]
+    fn a_resized_terminal_re_budgets_the_open_panel() {
+        let mut panel = InfoPanel::new(Some("Context".to_string()), InfoContent::Rows(rows(50)));
+        let tall = panel.render(&theme(), 40, &kb(), "  ", 20);
+        assert!(tall.len() <= 20, "the open frame fits its budget");
+        let short = panel.render(&theme(), 40, &kb(), "  ", 8);
+        assert!(
+            short.len() <= 8,
+            "the shrunk budget re-budgets the frame: {}",
+            short.len()
+        );
+        // The rule and title survive the shrink (no front-crop).
+        let text = plain(&short);
+        assert_eq!(
+            text[0],
+            "\u{2500}".repeat(40),
+            "the rule heads the shrunk frame"
+        );
+        assert_eq!(text[1], "  Context", "the title stays under the rule");
     }
 
     #[test]
@@ -442,9 +473,8 @@ mod tests {
         let mut panel = InfoPanel::new(
             Some("What's New".to_string()),
             InfoContent::Markdown("# Title\n\nbody words".to_string()),
-            20,
         );
-        let frame = panel.render(&theme(), 40, &kb(), "  ");
+        let frame = panel.render(&theme(), 40, &kb(), "  ", 20);
         let text = plain(&frame);
         assert!(
             text.iter().any(|row| row.contains("Title")),

@@ -1562,6 +1562,7 @@ impl AgentView {
                 width,
                 self.editor.keybindings(),
                 &self.code_block_indent,
+                crate::session_ui::picker_viewport_rows(self.terminal_rows()),
             ));
             Some(dock)
         } else {

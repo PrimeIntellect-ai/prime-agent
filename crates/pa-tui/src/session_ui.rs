@@ -1410,6 +1410,10 @@ impl SessionUi {
             // the new session's own `goal_update` lands it would keep
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
+            // The read-only info panel dies the same death: it holds the
+            // previous session's fetched document, and a stale panel
+            // would keep consuming keys over the new session.
+            view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -6813,11 +6817,7 @@ impl SessionUi {
         title: Option<String>,
         content: InfoContent,
     ) {
-        view.info_panel = Some(crate::info_panel::InfoPanel::new(
-            title,
-            content,
-            picker_viewport_rows(view.terminal_rows()),
-        ));
+        view.info_panel = Some(crate::info_panel::InfoPanel::new(title, content));
         self.dirty = true;
     }
 
@@ -9961,7 +9961,7 @@ fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
         .count()
 }
 
-fn picker_viewport_rows(terminal_rows: u16) -> usize {
+pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
     menu_rows.saturating_sub(1).max(1)
