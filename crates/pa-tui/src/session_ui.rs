@@ -3210,13 +3210,21 @@ impl SessionUi {
             // `/context` and its `/usage` alias (TS
             // `handleContextCommand` over `formatContextTree`): the agent
             // tree with own token/cost columns and context utilization.
+            // The optional `all` argument is a deliberate TS delta (TS
+            // takes none): over the row budget the default view collapses
+            // to the highest-usage agents plus a summary row and the
+            // expand hint, and `all` renders the whole tree.
             "context" => {
                 self.track_command_used("context");
-                if !resolved.args.is_empty() {
-                    view.editor.set_text(text);
-                    self.error_row("Usage: /context", view);
-                    return Ok(());
-                }
+                let scope = match resolved.args.as_str() {
+                    "" => info_commands::ContextTreeScope::Collapsed,
+                    "all" => info_commands::ContextTreeScope::EveryAgent,
+                    _ => {
+                        view.editor.set_text(text);
+                        self.error_row("Usage: /context [all]", view);
+                        return Ok(());
+                    }
+                };
                 view.push_entry(ChatEntry::User {
                     text: text.to_string(),
                 });
@@ -3235,7 +3243,7 @@ impl SessionUi {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
                         view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::context_tree_rows(&tree, width),
+                            rows: info_commands::context_tree_rows(&tree, width, scope),
                         });
                         self.dirty = true;
                     }
