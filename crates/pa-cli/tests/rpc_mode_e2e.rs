@@ -53,7 +53,7 @@ impl RpcChild {
         let mut child = Command::new(bin)
             .args(args)
             .env("HOME", home.path())
-            .env("PRIME_AGENT_AGENT_DIR", home.path().join("agent"))
+            .env("PRIME_AGENT_CODING_AGENT_DIR", home.path().join("agent"))
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
             .current_dir(home.path())
             .stdin(Stdio::piped())
@@ -255,13 +255,13 @@ fn rpc_prompt_streams_events_after_the_response() {
     // be the digest row's: the reply's start is the first ASSISTANT
     // one.
     let deadline = Instant::now() + TIMEOUT;
-    let start = loop {
+    loop {
         let frame = client.wait_event("message_start", TIMEOUT);
         if frame["message"]["role"] == "assistant" {
-            break frame;
+            break;
         }
         assert!(Instant::now() < deadline, "the assistant start never came");
-    };
+    }
     let end = client.wait_event("agent_end", TIMEOUT);
     assert!(
         end["messages"]
@@ -338,13 +338,15 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     assert_eq!(mode["success"], true, "the mode is set: {mode}");
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
-    // Queue while the delayed turn is still open (admission returns
-    // before the turn settles; the delayMs keeps it running).
+    // Queue while the delayed turn is still mid-LLM-call (admission
+    // returns before the turn settles; the faux delayMs holds the call
+    // open). Observe the queues IMMEDIATELY: waiting for the turn's
+    // first event would outlast the delay, and the post-turn queue
+    // polls would deliver the queued rows as their own (fast) turns.
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
     assert_eq!(steer["success"], true, "steer queues: {steer}");
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));
     assert_eq!(follow_up["success"], true);
-    client.wait_event("message_start", TIMEOUT);
     let state = client.request(&json!({ "type": "get_state" }));
     assert_eq!(state["data"]["isStreaming"], true);
     assert_eq!(state["data"]["sessionActions"]["queuedCount"], 2);
