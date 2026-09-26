@@ -1055,102 +1055,102 @@ mod tests {
     /// stays O(token_len^2), so differential corpora are bounded (~4KiB
     /// tokens); the linear rewrite gets its own unbounded stress test.
     fn legacy_wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<'_>) {
-            if width == 0 {
-                for span in spans {
-                    out.push(&span.content, span.style);
-                }
-                out.finish_row(/*trim*/ false);
-                return;
-            }
-            // TS `wrapSingleLine` returns a fitting line UNCHANGED (`visibleLength
-            // <= width`), so its spacing never re-tokenizes.
-            let joined_width: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            if joined_width <= width {
-                for span in spans {
-                    out.push(&span.content, span.style);
-                }
-                out.finish_row(/*trim*/ false);
-                return;
-            }
-            // tokens: (text, style); alternating words and whitespace-run gaps. TS
-            // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a
-            // span boundary joins the previous gap token), never collapsing it to a
-            // single space.
-            let mut tokens: Vec<(String, Style)> = Vec::new();
+        if width == 0 {
             for span in spans {
-                let mut word = String::new();
-                for ch in span.content.chars() {
-                    if ch == ' ' {
-                        if !word.is_empty() {
-                            tokens.push((std::mem::take(&mut word), span.style));
-                        }
-                        match tokens.last_mut() {
-                            Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
-                            _ => tokens.push((" ".to_string(), span.style)),
-                        }
-                    } else {
-                        word.push(ch);
-                    }
-                }
-                if !word.is_empty() {
-                    tokens.push((word, span.style));
-                }
-            }
-
-            let mut col = 0usize;
-            let mut i = 0usize;
-            while i < tokens.len() {
-                let (text, style) = &tokens[i];
-                let w = str_width(text);
-                if col + w > width && out.has_content {
-                    // A wrapped row never carries its trailing gap: TS
-                    // wrapTextWithAnsi drops the boundary space, so the styled
-                    // content ends at the last word and the plain padding follows.
-                    out.finish_row(/*trim*/ true);
-                    col = 0;
-                    // drop leading whitespace at the new line start
-                    if text.trim().is_empty() {
-                        i += 1;
-                        continue;
-                    }
-                }
-                // break overlong words; escape sequences copy through atomically
-                // at zero width (OSC 8 sequences must never split mid-sequence)
-                let mut rest = text.clone();
-                let style = *style;
-                while str_width(&rest) + col > width {
-                    let mut take = String::new();
-                    let mut tw = 0usize;
-                    let mut taken = 0usize;
-                    while taken < rest.len() {
-                        if let Some(len) = crate::width::escape_len(&rest[taken..]) {
-                            take.push_str(&rest[taken..taken + len]);
-                            taken += len;
-                            continue;
-                        }
-                        let c = rest[taken..].chars().next().expect("char at boundary");
-                        let cw = crate::width::char_width(c);
-                        if tw + cw + col > width {
-                            break;
-                        }
-                        take.push(c);
-                        tw += cw;
-                        taken += c.len_utf8();
-                    }
-                    if take.is_empty() {
-                        break;
-                    }
-                    out.push(&take, style);
-                    out.finish_row(/*trim*/ false);
-                    col = 0;
-                    rest = rest[taken..].to_string();
-                }
-                col += str_width(&rest);
-                out.push(&rest, style);
-                i += 1;
+                out.push(&span.content, span.style);
             }
             out.finish_row(/*trim*/ false);
+            return;
         }
+        // TS `wrapSingleLine` returns a fitting line UNCHANGED (`visibleLength
+        // <= width`), so its spacing never re-tokenizes.
+        let joined_width: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        if joined_width <= width {
+            for span in spans {
+                out.push(&span.content, span.style);
+            }
+            out.finish_row(/*trim*/ false);
+            return;
+        }
+        // tokens: (text, style); alternating words and whitespace-run gaps. TS
+        // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a
+        // span boundary joins the previous gap token), never collapsing it to a
+        // single space.
+        let mut tokens: Vec<(String, Style)> = Vec::new();
+        for span in spans {
+            let mut word = String::new();
+            for ch in span.content.chars() {
+                if ch == ' ' {
+                    if !word.is_empty() {
+                        tokens.push((std::mem::take(&mut word), span.style));
+                    }
+                    match tokens.last_mut() {
+                        Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
+                        _ => tokens.push((" ".to_string(), span.style)),
+                    }
+                } else {
+                    word.push(ch);
+                }
+            }
+            if !word.is_empty() {
+                tokens.push((word, span.style));
+            }
+        }
+
+        let mut col = 0usize;
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let (text, style) = &tokens[i];
+            let w = str_width(text);
+            if col + w > width && out.has_content {
+                // A wrapped row never carries its trailing gap: TS
+                // wrapTextWithAnsi drops the boundary space, so the styled
+                // content ends at the last word and the plain padding follows.
+                out.finish_row(/*trim*/ true);
+                col = 0;
+                // drop leading whitespace at the new line start
+                if text.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+            }
+            // break overlong words; escape sequences copy through atomically
+            // at zero width (OSC 8 sequences must never split mid-sequence)
+            let mut rest = text.clone();
+            let style = *style;
+            while str_width(&rest) + col > width {
+                let mut take = String::new();
+                let mut tw = 0usize;
+                let mut taken = 0usize;
+                while taken < rest.len() {
+                    if let Some(len) = crate::width::escape_len(&rest[taken..]) {
+                        take.push_str(&rest[taken..taken + len]);
+                        taken += len;
+                        continue;
+                    }
+                    let c = rest[taken..].chars().next().expect("char at boundary");
+                    let cw = crate::width::char_width(c);
+                    if tw + cw + col > width {
+                        break;
+                    }
+                    take.push(c);
+                    tw += cw;
+                    taken += c.len_utf8();
+                }
+                if take.is_empty() {
+                    break;
+                }
+                out.push(&take, style);
+                out.finish_row(/*trim*/ false);
+                col = 0;
+                rest = rest[taken..].to_string();
+            }
+            col += str_width(&rest);
+            out.push(&rest, style);
+            i += 1;
+        }
+        out.finish_row(/*trim*/ false);
+    }
 
     fn legacy_wrap_spans(spans: &[Span], width: usize, out: &mut Vec<Line>) {
         legacy_wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
@@ -1172,7 +1172,8 @@ mod tests {
             let mut counter = geometry::WrapOutput::count();
             wrap_spans_into(spans, width, &mut counter);
             assert_eq!(
-                counter.rows, current.len(),
+                counter.rows,
+                current.len(),
                 "row count vs render broke at width {width}: spans={spans:?}"
             );
         }
@@ -1186,7 +1187,10 @@ mod tests {
             assert_wrap_parity(&spans, &[1, 2, 3, 7, 79, 80, 81, 200]);
         }
         // a monoword behind an ordinary word (a mid-row break: col > 0)
-        let spans = vec![Span::styled(format!("lead {}", "b".repeat(4000)), Style::default())];
+        let spans = vec![Span::styled(
+            format!("lead {}", "b".repeat(4000)),
+            Style::default(),
+        )];
         assert_wrap_parity(&spans, &[3, 7, 20, 80, 81]);
     }
 
@@ -1225,7 +1229,10 @@ mod tests {
             "a\tb c\t\td ".repeat(64),
             format!("\u{1b} lone {}", "y".repeat(300)),
             format!("\u{1b}[31 unterminated {}", "m".repeat(300)),
-            format!("\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ {}", "z".repeat(300)),
+            format!(
+                "\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ {}",
+                "z".repeat(300)
+            ),
         ];
         for body in bodies {
             let spans = vec![Span::styled(body, Style::default())];
@@ -1233,8 +1240,14 @@ mod tests {
         }
         // multispan: distinct styles and a monoword at a span boundary
         let spans = vec![
-            Span::styled("intro ".to_string(), Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled("q".repeat(2000), Style::default().add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "intro ".to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "q".repeat(2000),
+                Style::default().add_modifier(Modifier::ITALIC),
+            ),
             Span::styled(" tail words here".to_string(), Style::default()),
         ];
         assert_wrap_parity(&spans, &[1, 2, 4, 9, 17, 60, 80]);
