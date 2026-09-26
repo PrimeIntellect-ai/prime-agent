@@ -633,8 +633,8 @@ mod tests {
     #[test]
     fn wire_cross_keeps_colliding_rest_keys_like_the_value_crossing() {
         use pa_types::ai::{
-            AssistantMessage, Message, TextContent, ToolResultMessage, Usage, UsageCost,
-            UserContent, UserContentBlock, UserMessage,
+            AssistantMessage, Message, TextContent, ToolResultMessage, Usage, UserContent,
+            UserContentBlock, UserMessage,
         };
         use serde_json::Map;
         use pa_types::JsonMap;
@@ -750,6 +750,7 @@ mod tests {
     #[test]
     fn wire_cross_matches_value_crossing_for_session_rows() {
         use pa_types::session::AgentMessage as SessionMessage;
+        use serde_json::Map;
 
         let session_rows = vec![
             SessionMessage::User(pa_types::ai::UserMessage {
