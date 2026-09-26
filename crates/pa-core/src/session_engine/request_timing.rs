@@ -26,9 +26,12 @@
 //! Correlation mapping: TS keys the dispatch timestamp by the context array
 //! and the prompt-build timing by the fresh per-turn LLM messages array
 //! (`WeakMap`s, identity-keyed). The Rust loop moves those arrays by value,
-//! so the same data threads through one slot per session wiring — one
-//! request at a time per loop, the latest turn overwrites, and concurrent
-//! sessions own distinct wirings and cannot collide.
+//! so the prompt-build entry carries the built array's buffer address and
+//! the stream seam consumes it only on an identity match — the loop's
+//! move preserves the address, a cloned stream seam without the paired
+//! convert (the side-question runs) matches nothing, and each turn's
+//! convert overwrites the slot. The dispatch mark is consumed on read;
+//! concurrent sessions own distinct wirings and cannot collide.
 //!
 //! One-shot completion calls outside the agent loop (compaction,
 //! branch-summary, refinement) call the provider directly and are not
@@ -182,9 +185,17 @@ impl RequestTimingLog {
 
 /// Correlation state recorded while the loop builds the request (TS
 /// `PromptBuildTiming`); `request_seq` carries the per-request sequence
-/// number the TS `WeakMap` stored beside it.
+/// number the TS `WeakMap` stored beside it, and `messages_ptr` carries
+/// the WeakMap's key semantics: the built LLM message array's identity.
+/// The loop moves that array by value into the stream call, so its buffer
+/// address is the identity the stream seam matches on — a cloned stream
+/// seam without the paired convert (the side-question runs) sees no match
+/// and correlates nothing, exactly like the TS WeakMap lookup on a
+/// never-marked array.
 #[derive(Debug, Clone, Copy)]
 struct PromptBuildTiming {
+    /// Identity of the built LLM message array (its buffer address).
+    messages_ptr: usize,
     /// Turn dispatch: the instrumented transform seam's entry (first seam
     /// of the turn).
     dispatched_at: Instant,
@@ -238,21 +249,32 @@ impl RequestTimingWiring {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at);
     }
 
-    /// TS `takeRequestTimingDispatch` (get without delete; the next turn's
-    /// mark overwrites).
+    /// TS `takeRequestTimingDispatch`, with the WeakMap's per-key lifetime:
+    /// the mark is consumed by the first convert that reads it, so a later
+    /// prompt build after a flag toggle never reuses a dead request's
+    /// timestamp (a fresh array in TS holds no mark).
     fn take_dispatch(&self) -> Option<Instant> {
-        *self
-            .dispatch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// TS `takePromptBuild`: the stream seam takes the fresh per-turn entry.
-    fn take_prompt_build(&self) -> Option<PromptBuildTiming> {
-        self.prompt_build
+        self.dispatch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+    }
+
+    /// TS `takePromptBuild` with the WeakMap's key identity: the entry is
+    /// consumed only when the stream's LLM message array is the very array
+    /// the convert built (moved by value through the loop, so the buffer
+    /// address matches). A cloned stream seam without the paired convert —
+    /// the side-question runs — sees no match, correlates nothing, and
+    /// leaves the parent request's entry in place.
+    fn take_prompt_build(&self, messages_ptr: usize) -> Option<PromptBuildTiming> {
+        let mut slot = self
+            .prompt_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *slot {
+            Some(timing) if timing.messages_ptr == messages_ptr => slot.take(),
+            _ => None,
+        }
     }
 
     fn set_prompt_build(&self, timing: PromptBuildTiming) {
@@ -322,6 +344,7 @@ pub fn instrument_convert_to_llm(
             let built = Instant::now();
             let phase_ms = round_ms(elapsed_ms(started_at, built));
             let timing = PromptBuildTiming {
+                messages_ptr: output.as_ptr() as usize,
                 dispatched_at: started_at,
                 prompt_built_at: built,
                 context_entries: output.len(),
@@ -755,9 +778,14 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
         let stream_fn = Arc::clone(&stream_fn);
         Box::pin(async move {
             if !wiring.enabled() {
+                // Consume this request's own entry (TS: the array key dies
+                // with the request) so a re-enabled later request can never
+                // inherit it; a non-matching entry (another loop's pending
+                // state) stays put.
+                wiring.take_prompt_build(context.messages.as_ptr() as usize);
                 return stream_fn(model, context, options).await;
             }
-            let prompt_build = wiring.take_prompt_build();
+            let prompt_build = wiring.take_prompt_build(context.messages.as_ptr() as usize);
             let request_seq = match prompt_build {
                 Some(timing) => timing.request_seq,
                 None => wiring.next_request_seq(),
@@ -1344,6 +1372,106 @@ mod tests {
             summary.get("requestBytes"),
             Some(&json!(serde_json::to_vec(&payload()).unwrap().len() as u64)),
             "the inner hook's returned payload is what gets measured: {summary}"
+        );
+    }
+
+    /// A cloned stream seam without the paired convert (the side-question
+    /// runs) must not consume the parent request's correlation: the TS
+    /// WeakMap lookup on its never-marked array returns nothing, so the
+    /// port's identity-matched slot leaves the parent's entry in place and
+    /// the side question correlates on a fresh sequence.
+    #[tokio::test]
+    async fn a_cloned_stream_seam_never_steals_the_parent_correlation() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("agent.jsonl");
+        let wiring = timing_on(&log_path);
+        let provider: StreamFn = Arc::new(|_model, _context, _options| {
+            Box::pin(async move {
+                let (handle, consumer) = event_stream();
+                handle.end(None);
+                Ok(Box::new(consumer) as Box<dyn ModelStream>)
+            })
+        });
+
+        // The parent turn: convert stores the prompt-build entry keyed by
+        // the identity of the messages it built.
+        let convert = instrument_convert_to_llm(
+            Arc::clone(&wiring),
+            Arc::new(|_messages: Vec<AgentMessage>| {
+                Box::pin(async move {
+                    Ok(vec![Message::User(UserMessage {
+                        content: UserContent::Text("hello".to_string()),
+                        timestamp: 0,
+                    })])
+                })
+            }),
+        );
+        let parent_messages = convert(vec![AgentMessage::user("hello")]).await.unwrap();
+
+        // The side question: its own (never-marked) context through the
+        // same wrapped stream seam.
+        let side_context = LlmContext {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage {
+                content: UserContent::Text("meanwhile".to_string()),
+                timestamp: 0,
+            })],
+            tools: Vec::new(),
+        };
+        drain(
+            instrument_stream_fn(Arc::clone(&wiring), Arc::clone(&provider))(
+                test_model(),
+                side_context,
+                StreamRequestOptions::default(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+
+        let entries = timing_entries(&log_path);
+        let summary = entries.last().expect("the side question's summary");
+        assert_eq!(summary.get("outcome"), Some(&json!("aborted")));
+        assert_ne!(
+            summary.get("requestSeq"),
+            Some(&json!(1)),
+            "the side question gets a fresh sequence, not the parent's"
+        );
+        assert!(
+            summary.get("contextEntries").is_none(),
+            "nothing correlates to the side question's context: {summary}"
+        );
+
+        // The parent's own stream call still finds its entry (the same
+        // array, moved by value into the request).
+        drain(
+            instrument_stream_fn(Arc::clone(&wiring), Arc::clone(&provider))(
+                test_model(),
+                LlmContext {
+                    system_prompt: None,
+                    messages: parent_messages,
+                    tools: Vec::new(),
+                },
+                StreamRequestOptions::default(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let entries = timing_entries(&log_path);
+        let summary = entries.last().expect("the parent's summary");
+        assert_eq!(
+            summary.get("requestSeq"),
+            Some(&json!(1)),
+            "the parent's correlation survived the side question: {summary}"
+        );
+        assert_eq!(summary.get("contextEntries"), Some(&json!(1)));
+        assert!(
+            summary
+                .get("phases")
+                .and_then(|phases| phases.get("dispatchToPromptBuiltMs"))
+                .is_some(),
+            "the parent's prompt-build phases ride along: {summary}"
         );
     }
 

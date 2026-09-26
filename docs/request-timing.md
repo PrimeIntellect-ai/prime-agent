@@ -28,7 +28,7 @@ agent waiting for" directly.
 ## Enabling it
 
 ```bash
-PI_REQUEST_TIMING=1 prime   # env (restart the daemon so worker processes inherit it)
+PI_REQUEST_TIMING=1 prime-agent   # env (restart the daemon so worker processes inherit it)
 ```
 
 or `"requestTiming": true` in `~/.prime/agent/settings.json` (applies to
@@ -87,7 +87,7 @@ branch-summary, refinement) call the provider directly and are not logged.
 |---|---|
 | `core/request-timing.ts` | `crates/pa-core/src/session_engine/request_timing.rs` |
 | `instrumentTransformContext` / `instrumentConvertToLlm` / `instrumentStreamFn` | same names, wrapping the pa-agent loop's `transform_context` / `convert_to_llm` / `stream_fn` seams at `engine.rs` `create_session` (TS `createAgentSession`) |
-| WeakMap correlation by the context / LLM messages arrays | one per-session slot (the loop moves the arrays by value; one request at a time per loop) |
+| WeakMap correlation by the context / LLM messages arrays | a per-session slot carrying the built array's buffer identity; the stream seam consumes it only on an identity match, so side-question runs (a cloned stream seam without the paired convert) correlate nothing — the TS never-marked-array lookup |
 | `getLogger` + process sink → `logs/agent.jsonl` | `RequestTimingLog` writes `<agentDir>/logs/agent.jsonl` (same `ts`/`level`/`component`/`msg`/`pid` entry shape, 20 MiB rotation) |
 | `SimpleStreamOptions.onPayload`/`onResponse` (loop options into the provider client) | `pa-agent` `StreamRequestOptions.on_payload`/`on_response`, bridged into `pa-ai` `StreamOptions` in `provider_adapter` |
 | `settings-manager` `requestTiming` + `getRequestTiming()` | `crates/pa-core/src/settings`: the `requestTiming` key + `get_request_timing()` + the lenient-load known-field registry entry (a wrong-typed value reads as unset) |
