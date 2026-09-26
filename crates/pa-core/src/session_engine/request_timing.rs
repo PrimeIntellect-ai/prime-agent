@@ -186,11 +186,11 @@ impl RequestTimingLog {
 /// Correlation state recorded while the loop builds the request (TS
 /// `PromptBuildTiming`); `request_seq` carries the per-request sequence
 /// number the TS `WeakMap` stored beside it, and `messages_ptr` carries
-/// the WeakMap's key semantics: the built LLM message array's identity.
+/// the `WeakMap`'s key semantics: the built LLM message array's identity.
 /// The loop moves that array by value into the stream call, so its buffer
 /// address is the identity the stream seam matches on — a cloned stream
 /// seam without the paired convert (the side-question runs) sees no match
-/// and correlates nothing, exactly like the TS WeakMap lookup on a
+/// and correlates nothing, exactly like the TS `WeakMap` lookup on a
 /// never-marked array.
 #[derive(Debug, Clone, Copy)]
 struct PromptBuildTiming {
@@ -249,7 +249,7 @@ impl RequestTimingWiring {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at);
     }
 
-    /// TS `takeRequestTimingDispatch`, with the WeakMap's per-key lifetime:
+    /// TS `takeRequestTimingDispatch`, with the `WeakMap`'s per-key lifetime:
     /// the mark is consumed by the first convert that reads it, so a later
     /// prompt build after a flag toggle never reuses a dead request's
     /// timestamp (a fresh array in TS holds no mark).
@@ -260,7 +260,7 @@ impl RequestTimingWiring {
             .take()
     }
 
-    /// TS `takePromptBuild` with the WeakMap's key identity: the entry is
+    /// TS `takePromptBuild` with the `WeakMap`'s key identity: the entry is
     /// consumed only when the stream's LLM message array is the very array
     /// the convert built (moved by value through the loop, so the buffer
     /// address matches). A cloned stream seam without the paired convert —
@@ -1377,7 +1377,7 @@ mod tests {
 
     /// A cloned stream seam without the paired convert (the side-question
     /// runs) must not consume the parent request's correlation: the TS
-    /// WeakMap lookup on its never-marked array returns nothing, so the
+    /// `WeakMap` lookup on its never-marked array returns nothing, so the
     /// port's identity-matched slot leaves the parent's entry in place and
     /// the side question correlates on a fresh sequence.
     #[tokio::test]
