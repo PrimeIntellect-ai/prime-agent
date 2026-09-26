@@ -763,13 +763,14 @@ pub(crate) async fn sync_python_skills(
 /// full interpreter start (the `import rlm` chain), and re-running it
 /// before every kernel start re-pays a cost the kernel spawn itself is
 /// about to pay. Memoized on success only: the key carries every input the
-/// probe observes (interpreter path, runtime identity, the venv's
-/// recorded bootstrap state), so a venv rebuilt by anyone — a newer
-/// concurrent daemon rewrites `.bootstrap-version` — misses the memo and
+/// probe observes (interpreter identity, runtime identity, the venv's
+/// recorded bootstrap state, and the installed runtime's content), so a
+/// venv rebuilt by anyone — a newer concurrent daemon rewrites
+/// `.bootstrap-version` — or damaged out of band — an uninstalled or
+/// overwritten `rlm`, a replaced interpreter — misses the memo and
 /// revalidates. A failed kernel start drops the memo
 /// ([`invalidate_runtime_probe_cache`]), so the startup retry re-probes
-/// and rebuilds exactly like the uncached flow: a venv broken out of band
-/// self-heals one retry later instead of one probe earlier.
+/// and rebuilds exactly like the uncached flow.
 static RUNTIME_PROBE_MEMO: Mutex<Option<HashMap<String, ()>>> = Mutex::new(None);
 
 fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, ()>>> {
@@ -778,22 +779,97 @@ fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, ()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Identity of the runtime as installed in the venv — the state the probe
+/// observes beyond its key inputs: the interpreter binary's stat plus a
+/// content hash of the installed `rlm` package tree under the venv's
+/// site-packages. Out-of-band damage (a package uninstall or overwrite, a
+/// replaced or deleted interpreter) changes this identity, so a memoized
+/// probe result can never mask a mutated install: the next
+/// [`kernel_ready`] re-probes and rebuilds like the uncached flow.
+fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
+    let mut hasher = sha2::Sha256::new();
+    match std::fs::metadata(python) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .map(|time| format!("{time:?}"))
+                .unwrap_or_else(|_| "no-mtime".to_string());
+            hasher.update(
+                format!("py:{}:{}:{modified}", python.display(), meta.len()).as_bytes(),
+            );
+        }
+        Err(error) => hasher.update(format!("py-error:{python}:{error}").as_bytes()),
+    }
+    match installed_rlm_dir(venv) {
+        Some(rlm) => match hash_python_tree(&rlm) {
+            Ok(hash) => hasher.update(format!("rlm:{hash}").as_bytes()),
+            Err(error) => hasher.update(format!("rlm-error:{error}").as_bytes()),
+        },
+        None => hasher.update(b"rlm-missing"),
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// The installed `rlm` package under the venv's site-packages
+/// (`<venv>/lib/python*/site-packages/rlm`).
+fn installed_rlm_dir(venv: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(venv.join("lib")).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().starts_with("python") {
+            continue;
+        }
+        let rlm = entry.path().join("site-packages").join("rlm");
+        if rlm.is_dir() {
+            return Some(rlm);
+        }
+    }
+    None
+}
+
+/// Content hash of a python tree: every `.py` file's relative path and
+/// bytes, in sorted order (same witness shape as [`hash_runtime_source`]).
+fn hash_python_tree(dir: &Path) -> anyhow::Result<String> {
+    let mut files = Vec::new();
+    collect_python_files(dir, &mut files)?;
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for file in &files {
+        let relative = file.strip_prefix(dir)?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(&std::fs::read(file)?);
+        hasher.update([0]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// The memo key: every input the runtime-ready probe observes.
-fn runtime_probe_key(python: &str, runtime_identity: &str, version_raw: &str) -> String {
+fn runtime_probe_key(
+    python: &str,
+    runtime_identity: &str,
+    version_raw: &str,
+    installed_identity: &str,
+) -> String {
     format!(
-        "{python}\u{0}{runtime_identity}\u{0}sha256:{:x}",
+        "{python}\u{0}{runtime_identity}\u{0}{installed_identity}\u{0}sha256:{:x}",
         sha2::Sha256::digest(version_raw.as_bytes())
     )
 }
 
 /// The runtime-ready check, memoized on success. `version_raw` is the raw
-/// `.bootstrap-version` text the caller already read.
+/// `.bootstrap-version` text the caller already read; `installed_identity`
+/// is the installed-runtime identity from
+/// [`installed_runtime_identity`].
 fn has_prime_agent_runtime_memoized(
     python: &str,
     runtime_identity: &str,
     version_raw: &str,
+    installed_identity: &str,
 ) -> bool {
-    let key = runtime_probe_key(python, runtime_identity, version_raw);
+    let key = runtime_probe_key(python, runtime_identity, version_raw, installed_identity);
     if lock_probe_memo()
         .as_ref()
         .is_some_and(|memo| memo.contains_key(&key))
@@ -826,7 +902,12 @@ fn read_bootstrap_version_raw(venv: &Path) -> (Option<BootstrapVersion>, String)
 pub(crate) fn kernel_base_ready(python: &str, venv: &Path, runtime_identity: &str) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
     bootstrap_base_version_current(version, runtime_identity)
-        && has_prime_agent_runtime_memoized(python, runtime_identity, &raw)
+        && has_prime_agent_runtime_memoized(
+            python,
+            runtime_identity,
+            &raw,
+            &installed_runtime_identity(Path::new(python), venv),
+        )
 }
 
 pub(crate) fn kernel_ready(
@@ -837,7 +918,12 @@ pub(crate) fn kernel_ready(
 ) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
     bootstrap_version_current(version, runtime_identity, python_skills)
-        && has_prime_agent_runtime_memoized(python, runtime_identity, &raw)
+        && has_prime_agent_runtime_memoized(
+            python,
+            runtime_identity,
+            &raw,
+            &installed_runtime_identity(Path::new(python), venv),
+        )
 }
 
 #[cfg(test)]
@@ -944,11 +1030,27 @@ mod tests {
 
     #[test]
     fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
-        let key = runtime_probe_key("/py", "sha256:runtime", "raw");
-        assert_eq!(key, runtime_probe_key("/py", "sha256:runtime", "raw"));
-        assert_ne!(key, runtime_probe_key("/other-py", "sha256:runtime", "raw"));
-        assert_ne!(key, runtime_probe_key("/py", "sha256:other", "raw"));
-        assert_ne!(key, runtime_probe_key("/py", "sha256:runtime", "raw2"));
+        let key = runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed");
+        assert_eq!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/other-py", "sha256:runtime", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:other", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw2", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed2")
+        );
 
         lock_probe_memo()
             .get_or_insert_with(HashMap::new)
@@ -960,6 +1062,93 @@ mod tests {
         assert!(lock_probe_memo()
             .as_ref()
             .is_none_or(|memo| !memo.contains_key(&key)));
+    }
+
+    /// The out-of-band-detection trio, on a fake venv whose interpreter is
+    /// a shell script that counts its own invocations: the memo must hit on
+    /// an unchanged venv (the perf point), miss when the installed `rlm`
+    /// tree is mutated or the interpreter is replaced (the parity point:
+    /// the probe re-runs and detects the damage), and miss after
+    /// invalidation.
+    #[cfg(unix)]
+    #[test]
+    fn probe_memo_misses_on_out_of_band_venv_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("venv");
+        let rlm = venv.join("lib/python3.11/site-packages/rlm");
+        std::fs::create_dir_all(&rlm).unwrap();
+        std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
+
+        // The fake interpreter: records each invocation, then runs the probe
+        // verdict the control file asks for (empty = success).
+        let control = dir.path().join("verdict");
+        let counter = dir.path().join("count");
+        let python = dir.path().join("python");
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> {}\nif [ -s {} ]; then exit 1; fi\nexit 0\n",
+                counter.display(),
+                control.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        write_bootstrap_version(&venv, "sha256:runtime", &[]).unwrap();
+        let python_str = python.to_string_lossy().to_string();
+        let probe_count = || {
+            std::fs::read_to_string(&counter)
+                .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0)
+        };
+
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 1, "cold call runs the real probe");
+
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 1, "unchanged venv hits the memo");
+
+        // Out-of-band mutation of the installed rlm: the memo must miss and
+        // the probe must re-run (the detection the parity review demands).
+        std::fs::write(rlm.join("core.py"), "y = 2\n").unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(
+            probe_count(),
+            2,
+            "installed-rlm mutation re-probes instead of masking"
+        );
+
+        // Out-of-band interpreter replacement: same detection.
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> {}\nif [ -s {} ]; then exit 1; fi\nexit 0\n# replaced\n",
+                counter.display(),
+                control.display()
+            ),
+        )
+        .unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 3, "interpreter replacement re-probes");
+
+        // A damaged runtime must be DETECTED, not masked: the probe verdict
+        // now fails, so readiness flips false (the rebuild path follows).
+        std::fs::write(&control, "broken\n").unwrap();
+        assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 4, "a failing probe is never memoized");
+
+        // Invalidation (a failed kernel start) forces the next call to
+        // re-probe even with an unchanged venv.
+        std::fs::remove_file(&control).unwrap();
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 5, "invalidation drops the memo");
     }
 
     #[test]
