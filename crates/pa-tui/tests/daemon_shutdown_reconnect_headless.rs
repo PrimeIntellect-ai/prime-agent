@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
@@ -275,6 +276,19 @@ fn success_response(id: &str, command: &str) -> Value {
         "success": true,
         "data": {},
     })
+}
+
+/// One streamed session event, routed like the daemon's event pump routes
+/// it (the `session_event` envelope keyed by the active session).
+fn write_session_event(writer: &mut UnixStream, event: &Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": event,
+        }),
+    );
 }
 
 fn write_json(writer: &mut UnixStream, value: &Value) {
