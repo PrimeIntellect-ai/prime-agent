@@ -326,11 +326,53 @@ pub(crate) fn drain_for_exit(out: &mut Stdout) {
     drain_bounded(out, EXIT_DRAIN_MAX);
 }
 
+/// The in-process handoff variant (an exit that hands the pane to another
+/// surface of this process — the agents view, a `/resume` chain). The
+/// idle window's guarded leak is a release that lands AFTER raw mode is
+/// off; a handoff keeps raw mode on (the adopting surface's reader takes
+/// over the same tty), and every surface's dispatch drops key-release
+/// events (`input::filter_enhanced_key_events`, TS tui.ts), so a release
+/// that outruns the drain is consumed-and-ignored by the next reader, not
+/// leaked anywhere. The fixed idle window buys nothing observable on
+/// this path, so the drain consumes what the terminal has already
+/// written — zero-timeout polls, no wait — and returns as soon as the
+/// buffer is observed empty. Only when input IS flowing (the observed
+/// case) does it fall through to the bounded drain, so a burst around a
+/// handoff is coalesced exactly like the exit drain's idle window
+/// ([`DRAIN_IDLE`] silence, [`DRAIN_MAX`] cap).
+pub(crate) fn drain_for_handoff(out: &mut Stdout) {
+    disable_keyboard_modes(out);
+    if !enhanced_keys_active() {
+        return;
+    }
+    let start = std::time::Instant::now();
+    let mut observed_input = false;
+    while start.elapsed() < DRAIN_MAX {
+        match crossterm::event::poll(Duration::ZERO) {
+            Ok(true) => {
+                let _ = crossterm::event::read();
+                observed_input = true;
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+    if observed_input {
+        drain_until_idle(DRAIN_MAX);
+    }
+}
+
 fn drain_bounded(out: &mut Stdout, max: Duration) {
     disable_keyboard_modes(out);
     if !enhanced_keys_active() {
         return;
     }
+    drain_until_idle(max);
+}
+
+/// The consume loop both bounded drains share: eat input until the idle
+/// window (`DRAIN_IDLE` of silence after the last event) closes or the
+/// hard cap lapses.
+fn drain_until_idle(max: Duration) {
     let start = std::time::Instant::now();
     let mut last_input = start;
     while start.elapsed() < max && last_input.elapsed() < DRAIN_IDLE {

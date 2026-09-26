@@ -3674,8 +3674,15 @@ impl Renderer {
         // after raw mode is off would leak its escape sequence into the
         // parent shell over slow SSH. Runs on every exit — the agents-view
         // handoff drains too (TS `teardownSessionUi`); headless runs hold
-        // plain pipes and skip it inside the drain.
-        crate::enhanced_keys::drain(&mut std::io::stdout());
+        // plain pipes and skip it inside the drain. A handoff (preserve)
+        // keeps raw mode on — the adopting surface's dispatch drops
+        // releases (TS tui.ts), so the handoff drain consumes only what
+        // is already buffered instead of parking on the idle window.
+        if preserve_alt_screen {
+            crate::enhanced_keys::drain_for_handoff(&mut std::io::stdout());
+        } else {
+            crate::enhanced_keys::drain(&mut std::io::stdout());
+        }
         // Tracking releases with the surface (TS `TUI.stop` writes the
         // disable before leaving the alt screen).
         let _ = crate::mouse_tracking::disable(&mut std::io::stdout());
