@@ -74,11 +74,18 @@ const TAB_LAYOUT: &[TabLayout] = &[
 ];
 
 /// Resolve the layout against the menu's rows: each tab keeps the
-/// indices of its rows, in the layout's order. An id the rows do not
-/// carry is a programming error — the layout and the row builder ship
-/// together in this module tree.
+/// indices of its rows, in the layout's order. The layout is the single
+/// source of the grouping, so a non-empty row set must be covered
+/// exactly once both ways — a layout id the rows do not carry, or a row
+/// that rides no tab, is a programming error that panics here rather
+/// than silently hiding a setting; an empty row set carries no tabs, so
+/// the menu keeps its "No settings available" empty state.
 pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<usize>)> {
-    TAB_LAYOUT
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut covered = vec![false; rows.len()];
+    let tabs = TAB_LAYOUT
         .iter()
         .map(|tab| {
             (
@@ -86,16 +93,23 @@ pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<us
                 tab.ids
                     .iter()
                     .map(|id| {
-                        rows.iter()
+                        let index = rows
+                            .iter()
                             .position(|row| row.id == *id)
                             .unwrap_or_else(|| {
                                 panic!("the settings tab layout names {id}, which no settings row provides")
-                            })
+                            });
+                        covered[index] = true;
+                        index
                     })
                     .collect(),
             )
         })
-        .collect()
+        .collect();
+    if let Some((index, row)) = rows.iter().enumerate().find(|(index, _)| !covered[*index]) {
+        panic!("the settings row {} rides no tab", row.id);
+    }
+    tabs
 }
 
 /// The tab strip (one row directly under the search field's bottom

@@ -385,34 +385,40 @@ impl SettingsMenu {
             }
             return action;
         }
+        // An empty row set carries no tabs (the menu renders its empty
+        // state): only the close keys act.
+        if self.tabs.is_empty() {
+            if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
+                return SettingsMenuAction::Cancel;
+            }
+            return SettingsMenuAction::None;
+        }
         // Tab switching (Claude Code's /config switches its tabs with Tab
         // and the arrows): the arrows and Tab keys always switch; digits
         // jump straight to their tab while the search field is empty (an
         // active query takes digits as search text, so type-to-search is
         // never blocked).
-        if !self.tabs.is_empty() {
-            match key {
-                "left" | "shift+tab" => {
-                    self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len());
-                    return SettingsMenuAction::None;
-                }
-                "right" | "tab" => {
-                    self.switch_tab((self.tab + 1) % self.tabs.len());
-                    return SettingsMenuAction::None;
-                }
-                _ => {}
+        match key {
+            "left" | "shift+tab" => {
+                self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len());
+                return SettingsMenuAction::None;
             }
-            if self.tabs[self.tab].search.value().is_empty() {
-                if let [character] = key.chars().collect::<Vec<char>>()[..] {
-                    if let Some(tab) = character
-                        .to_digit(10)
-                        .filter(|digit| *digit > 0)
-                        .map(|digit| digit as usize - 1)
-                        .filter(|tab| *tab < self.tabs.len())
-                    {
-                        self.switch_tab(tab);
-                        return SettingsMenuAction::None;
-                    }
+            "right" | "tab" => {
+                self.switch_tab((self.tab + 1) % self.tabs.len());
+                return SettingsMenuAction::None;
+            }
+            _ => {}
+        }
+        if self.tabs[self.tab].search.value().is_empty() {
+            if let [character] = key.chars().collect::<Vec<char>>()[..] {
+                if let Some(tab) = character
+                    .to_digit(10)
+                    .filter(|digit| *digit > 0)
+                    .map(|digit| digit as usize - 1)
+                    .filter(|tab| *tab < self.tabs.len())
+                {
+                    self.switch_tab(tab);
+                    return SettingsMenuAction::None;
                 }
             }
         }
@@ -913,6 +919,21 @@ mod menu_tests {
         // The tabs carry every settings row exactly once.
         let grouped: usize = menu.tabs.iter().map(|tab| tab.rows.len()).sum();
         assert_eq!(grouped, menu.rows.len());
+    }
+
+    #[test]
+    fn an_empty_row_set_keeps_the_empty_state_and_closes() {
+        let mut menu = SettingsMenu::new(Vec::new());
+        // No tab state exists: the navigation keys no-op (never panic)
+        // and the empty state renders with the tab-less hint.
+        assert_eq!(menu.handle_key("down", &kb()), SettingsMenuAction::None);
+        assert_eq!(menu.handle_key("2", &kb()), SettingsMenuAction::None);
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("No settings available")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+        assert_eq!(menu.handle_key("esc", &kb()), SettingsMenuAction::Cancel);
     }
 
     #[test]
