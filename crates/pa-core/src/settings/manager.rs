@@ -1011,7 +1011,7 @@ mod tests {
             "all",
             "the saved level survives a reload (a later chat re-reads it)"
         );
-        manager.global.chat_detail = Some("verbose".to_string());
+        manager.set_chat_detail("verbose").unwrap();
         assert_eq!(
             manager.get_chat_detail(),
             "details",
