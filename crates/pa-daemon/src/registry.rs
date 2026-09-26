@@ -475,6 +475,7 @@ pub(crate) fn selector_matches(candidate: &str, suffix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn resident(worker_id: &str) -> Arc<ResidentWorker> {
         ResidentWorker::new(
@@ -502,14 +503,14 @@ mod tests {
                 create_command: pa_types::daemon::DurableDaemonCreateCommand {
                     session_path: None,
                     no_session: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 consecutive_failures: 0,
                 stop_requested_at: None,
                 archive_on_stop: None,
                 last_failure_at: None,
                 last_error: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             PathBuf::from("/d.json"),
         )
@@ -566,8 +567,8 @@ mod tests {
     async fn forget_drops_registration_and_adoption_gate() {
         let registry = SessionRegistry::new();
         registry.insert(resident("abc123def456")).await;
-        let _guard = registry.adoption_guard("abc123def456").await;
-        drop(_guard);
+        let guard = registry.adoption_guard("abc123def456").await;
+        drop(guard);
         registry
             .record_registration(registration("abc123def456"))
             .await;

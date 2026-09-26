@@ -514,13 +514,9 @@ pub(crate) fn preview_heredoc(lines: &[String]) -> Option<CodePreview> {
             .as_ref()
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
-        let delimiter = match delimiter {
-            Some(d) => d,
-            None => continue,
-        };
-        let body = match heredoc_body(lines, i, &delimiter) {
-            Some(b) => b,
-            None => continue,
+        let Some(delimiter) = delimiter else { continue };
+        let Some(body) = heredoc_body(lines, i, &delimiter) else {
+            continue;
         };
         if re_once!(format!(r"\b(?:uv{S}+run{S}+)?python3?\b")).is_match(&line) {
             let preview = preview_python_code(&body);

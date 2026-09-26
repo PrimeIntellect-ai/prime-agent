@@ -112,7 +112,7 @@ pub fn session_command_echo_row(command: &SessionSlashCommand) -> CustomMessage 
         display: true,
         details: Some(command_details(command)),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -162,7 +162,7 @@ fn slash_command_result(
         display,
         details: Some(details),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -433,7 +433,7 @@ fn execute_autonomous(
         display: true,
         details: serde_json::to_value(&status).ok(),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     });
     Ok(())
 }

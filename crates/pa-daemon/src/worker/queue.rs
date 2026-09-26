@@ -643,7 +643,7 @@ pub(crate) fn admit_bash_completion_notice(
     );
     let content = match &row.content {
         pa_types::ai::UserContent::Text(text) => text.clone(),
-        _ => String::new(),
+        pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
     // TS `queueVisible: visibleQueued` + the schedule's execution policy:
     // busy sessions queue a visible row, idle sessions wake on an

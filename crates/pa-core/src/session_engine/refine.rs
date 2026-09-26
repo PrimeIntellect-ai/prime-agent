@@ -135,7 +135,7 @@ pub fn create_refinement_outcome_message(result: &RefinementResult) -> CustomMes
         display: true,
         details: Some(details),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -164,7 +164,7 @@ pub fn create_refinement_notice_message(
         display: false,
         details: Some(details),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -548,7 +548,7 @@ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::execu
                 messages: vec![pa_types::ai::Message::User(UserMessage {
                     content: UserContent::Text(prompt),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })],
                 tools: None,
             };
@@ -574,7 +574,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -582,12 +582,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -635,7 +635,7 @@ mod tests {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 

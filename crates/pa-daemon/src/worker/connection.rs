@@ -121,11 +121,11 @@ impl ConnectionSink {
         writer: Arc<tokio::sync::Mutex<Box<dyn pa_types::platform::transport::AsyncWriteHalf>>>,
         entry_seq: u64,
     ) -> Self {
-        let (flushed, _flushed_anchor) = tokio::sync::watch::channel(0);
+        let (flushed, flushed_anchor) = tokio::sync::watch::channel(0);
         ConnectionSink {
             writer,
             flushed,
-            _flushed_anchor,
+            _flushed_anchor: flushed_anchor,
             entry_seq,
         }
     }
@@ -262,7 +262,7 @@ impl Worker {
             update_resume: None,
             client_id: crate::util::new_display_id(),
             server_capabilities: worker_server_capabilities(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let hello_bytes = serde_json::to_vec(&hello)?;
         // A supervisor liveness probe may connect and drop immediately; that

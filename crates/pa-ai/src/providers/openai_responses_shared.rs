@@ -420,7 +420,7 @@ mod tests {
         Message::User(UserMessage {
             content: UserMessageContent::Text(text.into()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -438,7 +438,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -448,7 +448,7 @@ mod tests {
             name: "bash".into(),
             arguments: [("cmd".to_string(), json!("ls"))].into_iter().collect(),
             thought_signature: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -456,7 +456,7 @@ mod tests {
         AssistantContent::Text(TextContent {
             text: text.into(),
             text_signature: signature.map(str::to_string),
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -467,12 +467,12 @@ mod tests {
             content: vec![UserOrToolContent::Text(TextContent {
                 text: "ok".into(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             details: None,
             is_error: false,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
