@@ -1410,9 +1410,9 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_uv(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let uv = dir.join("uv");
         std::fs::write(&uv, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
         uv
     }
@@ -1435,7 +1435,7 @@ mod tests {
         let uv = fake_uv(
             dir.path(),
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
                 dir.path().join("uv.log").display()
             ),
         );
@@ -1504,7 +1504,7 @@ mod tests {
         let uv = fake_uv(
             dir.path(),
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\ncase \"$*\" in *broken*) exit 1;; esac\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in *broken*) exit 1;; esac\nexit 0\n",
                 dir.path().join("uv.log").display()
             ),
         );
@@ -1518,7 +1518,7 @@ mod tests {
         let mut options = EnsureKernelPythonOptions::default();
         let sink = warnings.clone();
         options.on_progress = Some(std::sync::Arc::new(move |message: &str| {
-            sink.lock().unwrap().push(message.to_string())
+            sink.lock().unwrap().push(message.to_string());
         }));
         sync_python_skills(
             uv.to_str().unwrap(),
