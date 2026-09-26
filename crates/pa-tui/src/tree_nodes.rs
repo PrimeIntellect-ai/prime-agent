@@ -145,7 +145,7 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
     // root list), so the walk terminates on any input, parent cycles
     // included (cycle members are never roots and never enter the
     // worklist).
-    let mut built: Vec<Option<TreeNode>> = vec![None; slots.len()];
+    let mut built: Vec<Option<TreeNode>> = (0..slots.len()).map(|_| None).collect();
     let mut work: Vec<BuildStep> = roots.iter().rev().copied().map(BuildStep::Enter).collect();
     while let Some(step) = work.pop() {
         match step {
