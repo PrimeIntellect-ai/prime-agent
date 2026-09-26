@@ -770,11 +770,13 @@ impl AuthPanel {
             return;
         };
         let mut sink = crate::clipboard::OscSink::Stdout;
-        self.copy_state = if crate::clipboard::copy_to_clipboard(&url, &mut sink).is_ok() {
-            CopyState::Copied
-        } else {
-            CopyState::Failed
-        };
+        self.copy_state = Some(
+            if crate::clipboard::copy_to_clipboard(&url, &mut sink).is_ok() {
+                CopyState::Copied
+            } else {
+                CopyState::Failed
+            },
+        );
     }
 
     /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over
@@ -1123,7 +1125,8 @@ fn verification_code(instructions: &str) -> Option<String> {
 /// part is the space key or a single character — the keys a paste field
 /// consumes as input, so they copy nothing while the field is visible.
 fn is_text_entry_key(key: &str) -> bool {
-    let parts: Vec<&str> = key.to_lowercase().split('+').collect();
+    let lowered = key.to_lowercase();
+    let parts: Vec<&str> = lowered.split('+').collect();
     let last = parts.last().copied().unwrap_or_default();
     !parts
         .iter()

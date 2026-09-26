@@ -458,7 +458,7 @@ impl OnboardingPanel {
                 }
                 if kb.matches(key, "tui.select.confirm") {
                     if let Some(reply) = reply.take() {
-                        let _ = reply.send(Self::choice_pick(*choice.selected(), teams));
+                        let _ = reply.send(Self::choice_pick(choice.selected(), teams));
                     }
                 }
                 None
