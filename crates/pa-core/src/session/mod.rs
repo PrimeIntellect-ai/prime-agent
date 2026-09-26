@@ -673,7 +673,6 @@ mod context_tests {
     }
 }
 
-
 #[cfg(test)]
 mod context_refs_tests {
     use super::*;

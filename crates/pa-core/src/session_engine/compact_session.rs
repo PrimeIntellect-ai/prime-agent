@@ -717,8 +717,8 @@ pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPoi
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::compaction::estimate_context_tokens;
+    use super::*;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
     use serde_json::Map;
@@ -2824,11 +2824,13 @@ mod tests {
     fn borrowed_context_estimate_matches_the_owned_estimate() {
         let mut messages = vec![user_message("first user turn")];
         messages.push(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
-            content: vec![pa_types::ai::AssistantContentBlock::Text(pa_types::ai::TextContent {
-                text: "answer".to_string(),
-                text_signature: None,
-                rest: serde_json::Map::default(),
-            })],
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: "answer".to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
             api: String::default(),
             provider: "test".to_string(),
             model: "m".to_string(),
@@ -2856,7 +2858,6 @@ mod tests {
             super::super::compaction::estimate_context_tokens_refs(&borrowed)
         );
     }
-
 
     fn user_message(text: &str) -> AgentMessage {
         AgentMessage::User(pa_types::ai::UserMessage {

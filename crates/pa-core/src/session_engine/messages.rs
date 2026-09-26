@@ -503,7 +503,6 @@ pub fn engine_convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
 mod tests {
     use super::*;
 
-
     /// The buffered wire cross ([`cross_wire`]) is interchangeable with the
     /// `to_value`/`from_value` crossing it replaces, message for message,
     /// over every shape the context rebuilds produce: plain text users,
@@ -518,8 +517,8 @@ mod tests {
             ToolCall, ToolResultMessage, Usage, UsageCost, UserContent, UserContentBlock,
             UserMessage,
         };
-        use serde_json::Map;
         use pa_types::JsonMap;
+        use serde_json::Map;
 
         fn rest(pairs: &[(&str, serde_json::Value)]) -> JsonMap {
             pairs
@@ -621,7 +620,6 @@ mod tests {
         }
     }
 
-
     /// Degenerate wire input, kept exactly like the old crossing: a
     /// flattened `rest` key colliding with a typed field (one per
     /// message shape) serializes the wire key twice — the buffered byte
@@ -636,8 +634,8 @@ mod tests {
             AssistantMessage, Message, TextContent, ToolResultMessage, Usage, UserContent,
             UserContentBlock, UserMessage,
         };
-        use serde_json::Map;
         use pa_types::JsonMap;
+        use serde_json::Map;
 
         fn rest(value: serde_json::Value) -> JsonMap {
             match value {
@@ -728,7 +726,7 @@ mod tests {
                 UserContentBlock::Text(TextContent {
                     text: text.to_string(),
                     text_signature: None,
-                    rest: Map::default(),
+                    rest: JsonMap::default(),
                 }),
                 UserContentBlock::Raw(serde_json::json!({"type": "mystery", "keep": [1]})),
             ]),
