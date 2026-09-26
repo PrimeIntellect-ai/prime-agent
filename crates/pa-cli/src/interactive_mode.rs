@@ -19,6 +19,13 @@ use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, 
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
+/// Pause between daemon-startup probes (TS `ensureDaemonRunning` polls at
+/// 25ms). This port tightens the poll to 5ms: a cold supervisor binds its
+/// socket ~39ms after the spawn and the 25ms grid quantized every cold
+/// launch by 0-25ms (mean ~12.5ms) of pure wait (boot-floor lane record
+/// 20260926-194800 at 7064d039a). Timing-only: the probe itself, the
+/// 30s startup budget, and the timeout error are unchanged.
+const DAEMON_PROBE_INTERVAL_MS: u64 = 5;
 
 /// The startup-model resolution inputs (TS `findInitialModel`'s chain),
 /// captured at task construction: the onboarding flow re-resolves the
@@ -1208,7 +1215,7 @@ pub async fn ensure_daemon_running_with(
                 socket_path.display()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(DAEMON_PROBE_INTERVAL_MS)).await;
     }
 }
 

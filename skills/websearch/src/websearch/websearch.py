@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
 
-import httpx
+# httpx is imported inside `_fetch_serper` on first call: importing it at
+# module level would put its full import cost on every kernel bootstrap, in
+# every session, even when no search is ever run. `find_spec` keeps the
+# import-time contract — importing this module still fails with the same
+# "No module named 'httpx'" when httpx is absent, so a kernel without httpx
+# reports the same unavailable-skill error as before.
+if importlib.util.find_spec("httpx") is None:
+    raise ModuleNotFoundError("No module named 'httpx'")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -108,6 +116,8 @@ def _format_serper_results(data: dict, query: str, num_results: int = 5) -> str:
 
 async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results: int = 5) -> str:
     """Execute a single Serper API search."""
+    import httpx
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
