@@ -124,6 +124,93 @@ pub fn roster_agent_id_for_summary(summary: &Value) -> String {
     roster_agent_id(session_id, runtime_kind, child_id, parent_key)
 }
 
+/// View-specific labels for the shared activity branch table below (TS
+/// `SessionActivityOptions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionActivityOptions {
+    /// Label for a row with an armed heartbeat (the agents view adds a
+    /// live countdown; a static table has no next-run timer).
+    pub heartbeat_label: String,
+    /// Fallback when no branch fires (the agents view says "needs input";
+    /// the sessions table leaves the cell empty because its status column
+    /// already says idle).
+    pub idle_label: String,
+}
+
+/// The one activity branch table (TS `sessionActivityDetail`): what a
+/// session is doing right now, read from the wire summary's runtime flags.
+/// The agents view status label and the CLI sessions table activity column
+/// both derive from it, so a state added here serves every surface. The
+/// TS action branch (agents-view-only labels over `sessionActions`) rides
+/// with that view's port; the roster rows this table reads carry an empty
+/// action snapshot, so no branch is missing.
+///
+/// `statusLabel` and `lastHeardFromAt` stay with the caller: the agents
+/// view returns them before delegating, the sessions table gives them
+/// their own columns.
+pub fn session_activity_detail(summary: &Value, options: &SessionActivityOptions) -> String {
+    let str_field = |name: &str| summary.get(name).and_then(Value::as_str);
+    let active = |name: &str| summary.get(name).and_then(Value::as_bool) == Some(true);
+    // A non-ready worker cannot report fresh runtime flags; its state is
+    // the row's story. A row already carrying the ledger mark keeps that
+    // mark out of the activity (its surface shows it as the status).
+    if let Some(worker_state) = str_field("workerState") {
+        if str_field("statusLabel").is_none() && worker_state != "ready" {
+            return worker_state.to_string();
+        }
+    }
+    if summary
+        .get("isCompacting")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return "compacting".to_string();
+    }
+    if summary
+        .get("isStreaming")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return if active("isRunningTools") {
+            "running tools"
+        } else {
+            "thinking"
+        }
+        .to_string();
+    }
+    // Tool/bash activity classifies the session as running; the label must
+    // agree with that classification instead of claiming it needs input.
+    if active("isRunningTools") {
+        return "running tools".to_string();
+    }
+    if active("isBashRunning") {
+        return "running bash".to_string();
+    }
+    if str_field("lifecycle") == Some("archived") {
+        return "archived".to_string();
+    }
+    if summary
+        .get("hasActiveHeartbeat")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return options.heartbeat_label.clone();
+    }
+    if str_field("runtimeKind") == Some("subagent") && active("repliedSinceTask") {
+        return "replied".to_string();
+    }
+    if str_field("activity") == Some("working") {
+        return "classifying".to_string();
+    }
+    if str_field("taskState") == Some("error") {
+        return "error".to_string();
+    }
+    if str_field("taskState") == Some("completed") {
+        return "completed".to_string();
+    }
+    options.idle_label.clone()
+}
+
 /// One roster entry (TS `AgentRosterEntry`): the agent's slim session
 /// summary with the supervisor's classification. `statusLabel` and
 /// `lastHeardFromAt` are set only for exceptional states; viewers key label
@@ -250,6 +337,136 @@ mod tests {
             "parentActiveSessionId": "a1",
         });
         assert_eq!(roster_agent_id_for_summary(&summary), "/x/sess.jsonl#7");
+    }
+
+    /// The minimal wire summary the branch table reads; tests merge field
+    /// overrides into it.
+    fn activity_summary(overrides: Value) -> Value {
+        let mut summary = json!({
+            "id": "s",
+            "lifecycle": "live",
+            "activity": "idle",
+            "isStreaming": false,
+            "isCompacting": false,
+        });
+        match (&mut summary, overrides) {
+            (Value::Object(base), Value::Object(over)) => {
+                for (key, value) in over {
+                    base.insert(key, value);
+                }
+            }
+            _ => panic!("summary fixtures must be objects"),
+        }
+        summary
+    }
+
+    #[test]
+    fn activity_detail_branches_match_the_shared_wording() {
+        let options = SessionActivityOptions {
+            heartbeat_label: "heartbeat".to_string(),
+            idle_label: String::new(),
+        };
+        let detail =
+            |overrides: Value| session_activity_detail(&activity_summary(overrides), &options);
+        assert_eq!(
+            detail(json!({ "activity": "working", "isStreaming": true, "isRunningTools": true })),
+            "running tools"
+        );
+        assert_eq!(
+            detail(json!({ "activity": "working", "isStreaming": true })),
+            "thinking"
+        );
+        assert_eq!(
+            detail(json!({ "activity": "working", "isBashRunning": true })),
+            "running bash"
+        );
+        assert_eq!(
+            detail(json!({ "activity": "working", "isCompacting": true })),
+            "compacting"
+        );
+        assert_eq!(
+            detail(json!({ "activity": "working", "workerState": "starting" })),
+            "starting"
+        );
+        assert_eq!(detail(json!({ "lifecycle": "archived" })), "archived");
+        assert_eq!(
+            detail(json!({ "runtimeKind": "subagent", "repliedSinceTask": true })),
+            "replied"
+        );
+        assert_eq!(detail(json!({ "activity": "working" })), "classifying");
+        assert_eq!(detail(json!({ "taskState": "error" })), "error");
+        assert_eq!(detail(json!({ "taskState": "completed" })), "completed");
+        // No branch fires: the surface's idle fallback.
+        assert_eq!(detail(json!({})), "");
+    }
+
+    #[test]
+    fn activity_detail_labels_carry_the_surface_options() {
+        let view = SessionActivityOptions {
+            heartbeat_label: "heartbeat \u{b7} next 3m".to_string(),
+            idle_label: "needs input".to_string(),
+        };
+        assert_eq!(
+            session_activity_detail(
+                &activity_summary(json!({ "hasActiveHeartbeat": true })),
+                &view
+            ),
+            "heartbeat \u{b7} next 3m"
+        );
+        assert_eq!(
+            session_activity_detail(&activity_summary(json!({})), &view),
+            "needs input"
+        );
+        let table = SessionActivityOptions {
+            heartbeat_label: "heartbeat".to_string(),
+            idle_label: String::new(),
+        };
+        assert_eq!(
+            session_activity_detail(
+                &activity_summary(json!({ "hasActiveHeartbeat": true })),
+                &table
+            ),
+            "heartbeat"
+        );
+        assert_eq!(
+            session_activity_detail(&activity_summary(json!({})), &table),
+            ""
+        );
+    }
+
+    #[test]
+    fn activity_detail_worker_state_waits_for_no_ledger_mark() {
+        let options = SessionActivityOptions {
+            heartbeat_label: "heartbeat".to_string(),
+            idle_label: String::new(),
+        };
+        // A ready worker is not the row's story: the runtime flags are.
+        assert_eq!(
+            session_activity_detail(
+                &activity_summary(json!({ "workerState": "ready" })),
+                &options
+            ),
+            ""
+        );
+        // A row already carrying the ledger mark keeps the worker state
+        // out of the activity: its surface shows the mark as the status.
+        assert_eq!(
+            session_activity_detail(
+                &activity_summary(
+                    json!({ "statusLabel": "queued", "workerState": "starting", "activity": "working" })
+                ),
+                &options,
+            ),
+            "classifying"
+        );
+        // Without the mark, a non-ready worker is the story.
+        assert_eq!(
+            session_activity_detail(
+                &activity_summary(json!({ "workerState": "recovering" })),
+                &options
+            ),
+            "recovering"
+        );
     }
 
     #[test]
