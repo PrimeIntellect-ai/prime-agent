@@ -73,7 +73,7 @@ fn manager_options(
     KernelManagerOptions {
         python: Some(python),
         cwd: Some(std::env::temp_dir()),
-        env: Default::default(),
+        env: std::collections::HashMap::default(),
         session_id: Some("kernel-bench".to_string()),
         host_handlers: HostRequestHandlers::new(),
         python_skills: bench_python_skills(),

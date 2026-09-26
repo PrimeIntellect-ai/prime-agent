@@ -756,7 +756,7 @@ async fn drive_onboarding_pane(
             }
             // The field animates behind the flow panels until dismissal
             // (TS ANIMATION_INTERVAL_MS).
-            _ = tokio::time::sleep(Duration::from_millis(120)) => {
+            () = tokio::time::sleep(Duration::from_millis(120)) => {
                 pane.tick();
             }
         }
@@ -2698,7 +2698,7 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+            () = tokio::time::sleep(Duration::from_millis(50)) => {
                 // The input stream went quiet for a tick: parked editor
                 // autocomplete requests materialize now (TS resolves
                 // suggestions asynchronously after the keystroke batch, so
@@ -2900,7 +2900,7 @@ async fn run_interactive_surface(
     let turn_active_at_exit = session.turn_active;
     if let Some(telemetry) = session.telemetry.clone() {
         let exit_event = async move {
-            let _ = telemetry
+            let () = telemetry
                 .client_exit(exit_reason, turn_active_at_exit)
                 .await;
         };
@@ -3387,7 +3387,7 @@ impl Renderer {
     fn headless_frames(&self) -> Option<&[String]> {
         match self {
             Renderer::Headless { frames, .. } => Some(frames),
-            _ => None,
+            Renderer::Terminal { .. } => None,
         }
     }
 
@@ -3514,6 +3514,7 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn headless_error_returns_never_touch_the_terminal() {
@@ -3583,7 +3584,7 @@ mod tests {
             script_path: None,
             model_selection: selection,
             model_catalog: Vec::new(),
-            model_configured_providers: Default::default(),
+            model_configured_providers: HashSet::default(),
             model_recent_models: Vec::new(),
             default_thinking_level: None,
             no_session: false,
@@ -3605,7 +3606,7 @@ mod tests {
             telemetry: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             session_rlm_depth: None,
-            prompt_stash: Default::default(),
+            prompt_stash: std::sync::Arc::default(),
             session_has_children: false,
             client_settings: None,
         }

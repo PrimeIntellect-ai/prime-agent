@@ -284,13 +284,12 @@ fn concurrent_creates_join_the_first_create() {
     loop {
         if worker.child.try_wait().expect("worker wait").is_some() {
             break;
-        } else {
-            assert!(
-                Instant::now() < deadline,
-                "worker did not exit after shutdown"
-            );
-            std::thread::sleep(Duration::from_millis(20));
         }
+        assert!(
+            Instant::now() < deadline,
+            "worker did not exit after shutdown"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 
     // The join contract: exactly one creation prefix. A raced double

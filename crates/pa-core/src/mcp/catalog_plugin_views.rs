@@ -112,7 +112,7 @@ fn not_connected_catalog_view(service: &McpServiceDescriptor) -> McpPluginView {
             "OAuth support has not been verified. Connect checks capabilities and asks for approval before login."
                 .to_string(),
         ),
-        _ => None,
+        SetupStatus::Ready => None,
     };
     McpPluginView {
         service_id: service.service_id.clone(),

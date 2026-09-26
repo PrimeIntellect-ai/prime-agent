@@ -70,13 +70,12 @@ fn daemon_binary() -> PathBuf {
         .expect("profile directory of the prime-agent binary")
         .to_path_buf();
     let daemon = profile_dir.join("pa-daemon");
-    if !daemon.exists() {
-        panic!(
-            "pa-daemon binary not found at {}; run `cargo build -p pa-daemon` \
-             (or the workspace gate `cargo test --workspace`) first",
-            daemon.display()
-        );
-    }
+    assert!(
+        daemon.exists(),
+        "pa-daemon binary not found at {}; run `cargo build -p pa-daemon` \
+         (or the workspace gate `cargo test --workspace`) first",
+        daemon.display()
+    );
     daemon
 }
 
@@ -758,9 +757,7 @@ fn ts_daemon_differential_cli_output() {
         if UnixStream::connect(&socket).is_ok() {
             break;
         }
-        if Instant::now() >= deadline {
-            panic!("TS daemon socket never appeared");
-        }
+        assert!(Instant::now() < deadline, "TS daemon socket never appeared");
         std::thread::sleep(Duration::from_millis(50));
     }
 

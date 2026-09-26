@@ -745,7 +745,7 @@ fn worker_pid(agent_dir: &std::path::Path) -> u32 {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("daemon-workers"))
             .expect("daemon-workers dir")
             .filter_map(std::result::Result::ok)
-            .flat_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
             .flatten()
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())

@@ -160,7 +160,7 @@ async fn create_session_from_file_via_daemon(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session from file");
@@ -228,9 +228,9 @@ fn chat_options(
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
         script_path: Some(script_path.to_path_buf()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -252,7 +252,7 @@ fn chat_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     }

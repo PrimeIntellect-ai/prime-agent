@@ -10,7 +10,7 @@ use crate::view::AgentView;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self};
-use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui::Terminal;
 use std::io::stdout;
 use std::time::Duration;
 
@@ -121,11 +121,12 @@ fn run_app_surface(
         let (_w, h) = crossterm::terminal::size()?;
         view.set_terminal_rows(h);
         draw(&mut terminal, &mut view)?;
-        if options.panic_after_frame {
-            // The verifier's panic driver: the unwind must cross the live
-            // surface's unwind guard, not the already-restored exit.
-            panic!("pa-tui-replay: --panic-exit reached");
-        }
+        // The verifier's panic driver: the unwind must cross the live
+        // surface's unwind guard, not the already-restored exit.
+        assert!(
+            !options.panic_after_frame,
+            "pa-tui-replay: --panic-exit reached"
+        );
 
         // Input.
         let timeout = Duration::from_millis(if stream_ended { 50 } else { 5 });
@@ -360,6 +361,3 @@ pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<S
         })
         .collect()
 }
-
-#[allow(dead_code)]
-fn unused(_: TerminalOptions, _: Viewport) {}
