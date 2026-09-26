@@ -815,7 +815,19 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
 fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     let steps = vec![
         HeadlessStep::Submit("run a turn".to_string()),
-        HeadlessStep::WaitMs(400),
+        // The bang must land while the client has APPLIED the turn's
+        // admission: the working loader's streaming label ("Writing") is
+        // on screen only after the backgrounded submit's outcome armed
+        // the loader (the streamed text alone can render first — the
+        // outcome and the stream are two channels, so the CI/battery
+        // load could order them apart, which a fixed WaitMs and even a
+        // text barrier raced). The loader row is the deterministic
+        // pending-regime signal; the assertions on the frames stay
+        // byte-identical.
+        HeadlessStep::WaitRender {
+            needle: "Writing".to_string(),
+            timeout_ms: 30_000,
+        },
         HeadlessStep::Submit("!echo mid".to_string()),
         HeadlessStep::WaitMs(400),
         HeadlessStep::WaitMs(1000),
