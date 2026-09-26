@@ -22,10 +22,10 @@ struct RpcChild {
     stdin: Option<std::process::ChildStdin>,
     lines: Receiver<String>,
     next_id: u64,
-    /// Held (never read) so the child's cwd directory outlives the
-    /// process; dropping the tempdir deletes it and the child's
-    /// `current_dir` fails.
-    _home: tempfile::TempDir,
+    /// Held so the child's cwd directory outlives the process; dropping
+    /// the tempdir deletes it and the child's `current_dir` fails (the
+    /// lease tests also read the agent dir off it).
+    home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
     /// Drain the child's stderr AFTER the Drop kills and reaps it (a
     /// read on a live pipe blocks until exit; the sibling ACP harness
@@ -83,7 +83,7 @@ impl RpcChild {
             stdin: Some(stdin),
             lines,
             next_id: 0,
-            _home: home,
+            home,
             spawn_stderr: Some(stderr),
             drain_stderr_on_drop: false,
         }
@@ -181,7 +181,7 @@ impl RpcChild {
     /// `PRIME_AGENT_CODING_AGENT_DIR` here): the lease owner records
     /// live under its `session-leases` tree.
     fn agent_dir(&self) -> std::path::PathBuf {
-        self._home.path().join("agent")
+        self.home.path().join("agent")
     }
 }
 
@@ -879,7 +879,7 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match client.lines.recv_timeout(Duration::from_millis(500)) {
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 assert!(
