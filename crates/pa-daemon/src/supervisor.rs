@@ -5169,11 +5169,7 @@ mod tests {
         // fails), so the stop never durably starts.
         let persist_target = sessions_dir.join("w.d");
         std::fs::create_dir(&persist_target).unwrap();
-        let resident = Arc::new(ResidentWorker::new(
-            "w-live".to_string(),
-            descriptor,
-            persist_target,
-        ));
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
         supervisor.registry.insert(resident.clone()).await;
 
         // A ledger-delete kill (delete_subagent's shape: the rest carries

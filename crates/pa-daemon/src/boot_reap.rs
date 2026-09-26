@@ -939,17 +939,29 @@ mod tests {
     /// stop's escalation: SIGTERM pends through the whole TERM grace, the
     /// SIGKILL lands inside the post-kill hard deadline, and the stop
     /// reports the kill. The `bash` ignores SIGTERM without spawning any
-    /// child (a leaked grandchild would outlive the guard's kill). LINUX
-    /// ONLY: the signals ride the pidfd, which opens only where the
-    /// kernel provides it.
+    /// child (a leaked grandchild would outlive the guard's kill); its
+    /// marker file is the readiness barrier — a TERM that lands during
+    /// the shell's own startup kills it under the default disposition
+    /// before the trap line ever runs. LINUX ONLY: the signals ride the
+    /// pidfd, which opens only where the kernel provides it.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_term_ignoring_process_dies_to_the_stop_escalation() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let trap_armed = dir.path().join("trap-armed");
         let child = std::process::Command::new("bash")
-            .args(["-c", "trap '' TERM; while :; do :; done"])
+            .arg("-c")
+            .arg("trap '' TERM; : > \"$1\"; while :; do :; done")
+            .arg("bash")
+            .arg(&trap_armed)
             .spawn()
             .expect("spawn term-ignoring bash");
         let guard = ReapOnDrop(Some(child));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !trap_armed.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(trap_armed.exists(), "the trap never armed");
         let pid = guard.0.as_ref().expect("guard holds the child").id();
         let outcome = stop_process(pid, crate::lease::get_process_start_id(pid)).await;
         drop(guard);
