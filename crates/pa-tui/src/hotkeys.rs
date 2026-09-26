@@ -74,6 +74,12 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let viewport_page_down = key_display(kb, "tui.viewport.pageDown");
     let viewport_top = key_display(kb, "tui.viewport.top");
     let viewport_follow = key_display(kb, "tui.viewport.follow");
+    let suspend = key_display(kb, "app.suspend");
+    let select_paragraph_up = key_display(kb, "tui.editor.selectParagraphUp");
+    let select_paragraph_down = key_display(kb, "tui.editor.selectParagraphDown");
+    let select_doc_start = key_display(kb, "tui.editor.selectDocStart");
+    let select_doc_end = key_display(kb, "tui.editor.selectDocEnd");
+    let browse_queue_newer = key_display(kb, "app.message.navigateNewer");
 
     let mut hotkeys = format!(
         r"
@@ -111,6 +117,8 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | Shift+arrows | Select by character / line |
 | `{select_word_left}` / `{select_word_right}` | Select by word |
 | `{select_line_start}` / `{select_line_end}` | Select to line start / end |
+| `{select_paragraph_up}` / `{select_paragraph_down}` | Select one paragraph |
+| `{select_doc_start}` / `{select_doc_end}` | Select to start / end of text |
 | `{select_all}` | Select all text |
 | `{cut_selection}` | Cut selection |
 | `{copy_selection}` | Copy selection |
@@ -132,6 +140,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let _ = writeln!(
         hotkeys,
         r"| `{exit}` | Exit (when editor is empty) |
+| `{suspend}` | Suspend to background |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |"
     );
@@ -141,7 +150,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
 | `{follow_up}` | Queue follow-up message |
-| `{browse_queue}` | Browse and edit queued messages |
+| `{browse_queue}` / `{browse_queue_newer}` | Browse and edit queued messages |
 | `{reorder_queue}` | Reorder the selected queued message |
 | `{paste_image}` | Paste image from clipboard |
 | `/` | Slash commands |
@@ -213,6 +222,24 @@ mod tests {
         assert!(guide.contains("| `?` | Show quick shortcuts |"), "{guide}");
         assert!(
             guide.contains("**Fullscreen mode (`/fullscreen`)**"),
+            "{guide}"
+        );
+        // The completeness audit's additions: the suspend binding and
+        // the paragraph/doc selection pairs gained rows, and the queue
+        // browse row names both of its keys.
+        assert!(
+            guide.contains("| `Ctrl+Z` | Suspend to background |"),
+            "{guide}"
+        );
+        assert!(
+            guide.contains(
+                "| `Shift+Ctrl+\u{2191}` / `Shift+Alt+\u{2193}` | Select one paragraph |"
+            ),
+            "{guide}"
+        );
+        assert!(guide.contains("Select to start / end of text"), "{guide}");
+        assert!(
+            guide.contains("| `Alt+\u{2191}` / `Alt+\u{2193}` | Browse and edit queued messages |"),
             "{guide}"
         );
     }

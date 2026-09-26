@@ -378,7 +378,8 @@ impl OnboardingPanel {
     }
 
     /// The panel's rows (TS `render`'s active-panel arm; the panel indents
-    /// its own content).
+    /// its own content). The auth panel's hint row renders the
+    /// effective bindings, so the keybindings manager rides along.
     pub(crate) fn render(
         &mut self,
         theme: &Theme,
