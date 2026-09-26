@@ -3,6 +3,7 @@
 //! registry's private-prime authorization cache.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
@@ -39,7 +40,10 @@ pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> 
     mac.update(b"prime-agent:private-prime-authorization:v1\0");
     mac.update(team_id.as_bytes());
     let digest = mac.finalize().into_bytes();
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    digest.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 /// Fetch the team's authorized private models; 401/403 settle to empty.

@@ -122,7 +122,7 @@ pub fn stream_openai_responses(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -356,9 +356,8 @@ async fn run_stream(
             );
         let mut decoder = SseDecoder::new();
         loop {
-            let chunk = match response.next_text().await? {
-                Some(chunk) => chunk,
-                None => break,
+            let Some(chunk) = response.next_text().await? else {
+                break;
             };
             for sse in decoder.push_text(&chunk) {
                 if sse.data.trim().is_empty() {
@@ -428,7 +427,7 @@ pub fn stream_simple_openai_responses(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
