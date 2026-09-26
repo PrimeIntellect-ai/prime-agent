@@ -338,8 +338,26 @@ mod tests {
 
     /// A side-question engine that parks until the abort lands, then settles
     /// cancelled with the partial answer still streamed (the real engine's
-    /// teardown shape: the signal races the provider stream).
-    struct AbortableEngine;
+    /// teardown shape: the signal races the provider stream). A settle gate
+    /// holds the return after the abort until the test releases it: the
+    /// regression test opens the gate only once the registry hold is taken,
+    /// so the run reaches its terminal path by synchronization, not by a
+    /// timing budget.
+    struct AbortableEngine {
+        settle_gate: Option<Arc<AtomicBool>>,
+    }
+
+    impl AbortableEngine {
+        fn parking() -> Self {
+            AbortableEngine { settle_gate: None }
+        }
+
+        fn gated(settle_gate: Arc<AtomicBool>) -> Self {
+            AbortableEngine {
+                settle_gate: Some(settle_gate),
+            }
+        }
+    }
 
     impl SessionEngine for AbortableEngine {
         fn run_prompt(
@@ -360,6 +378,11 @@ mod tests {
         ) -> SideQuestionOutcome {
             while !signal.is_aborted() {
                 std::thread::sleep(Duration::from_millis(5));
+            }
+            if let Some(settle_gate) = &self.settle_gate {
+                while !settle_gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
             SideQuestionOutcome::Aborted {
                 answer: "partial".to_string(),
@@ -403,23 +426,28 @@ mod tests {
         })
     }
 
-    /// Take the registry hold while the aborted run is still registered (the
-    /// abortable engine parks past one 5 ms poll and the caller opened the
-    /// hold right after the abort, with no await in between) and, while the
-    /// hold is taken, probe the pump for a cancelled frame: the terminal
-    /// path needs the same registry lock before it can emit, so none may
-    /// queue. Synchronous by construction — the registry guard never
+    /// Take the registry hold while the aborted run cannot settle (its
+    /// engine is gated shut, so the entry is registered by construction,
+    /// not by a timing budget), open the settle gate under the hold, and
+    /// probe the pump: the terminal path needs the same registry lock
+    /// before it can emit, so no cancelled frame may queue while the hold
+    /// is taken. Synchronous by construction — the registry guard never
     /// crosses an await.
     fn probe_no_cancelled_frame_while_registry_held(
         manager: &SideQuestionManager,
         receiver: &mut tokio::sync::broadcast::Receiver<Arc<OutboundFrame>>,
+        settle_gate: &AtomicBool,
     ) {
         let runs = manager.runs.lock().unwrap();
         assert!(
             runs.contains_key("sq-1"),
             "the aborted run is still registered when the hold opens"
         );
-        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        // The run settles only from here on: the gate opens under the
+        // hold, so the emit (old ordering: no registry lock needed) races
+        // the probe, never predates it.
+        settle_gate.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
             while let Ok(frame) = receiver.try_recv() {
                 let payload: Value = serde_json::from_slice(&frame.payload).unwrap();
@@ -449,7 +477,7 @@ mod tests {
         let pump = Arc::new(EventPump::new());
         let mut receiver = pump.subscribe();
         let manager = SideQuestionManager::new(
-            Arc::new(AbortableEngine),
+            Arc::new(AbortableEngine::parking()),
             Arc::clone(&pump),
             "sess-1".to_string(),
         );
@@ -490,7 +518,7 @@ mod tests {
     async fn start_during_the_close_is_rejected() {
         let pump = Arc::new(EventPump::new());
         let manager = SideQuestionManager::new(
-            Arc::new(AbortableEngine),
+            Arc::new(AbortableEngine::parking()),
             Arc::clone(&pump),
             "sess-1".to_string(),
         );
@@ -518,7 +546,7 @@ mod tests {
         let pump = Arc::new(EventPump::new());
         let mut receiver = pump.subscribe();
         let manager = SideQuestionManager::new(
-            Arc::new(AbortableEngine),
+            Arc::new(AbortableEngine::parking()),
             Arc::clone(&pump),
             "sess-1".to_string(),
         );
@@ -562,32 +590,36 @@ mod tests {
     /// reacts to already reflects a registry where the id is free — the
     /// abort -> immediate same-id restart window the supervisor e2e
     /// exercises (the "Side question already exists" flake). The first half
-    /// pins the ordering itself: while the registry hold is taken, the
-    /// cancelled frame cannot queue, because the emit rides the hold that
-    /// removed the entry. The hold's probe runs without awaiting (the second
-    /// worker thread settles the run), so this needs the multi-thread
-    /// flavor: a current-thread runtime would deadlock on the registry lock.
+    /// pins the ordering itself: the run's engine is gated shut, the probe
+    /// takes the registry hold, opens the gate, and no cancelled frame may
+    /// queue while the hold is taken, because the emit rides the hold that
+    /// removed the entry — the settle starts by synchronization, never by
+    /// a timing budget. The probe runs without awaiting (the second worker
+    /// thread settles the run), so this needs the multi-thread flavor: a
+    /// current-thread runtime would deadlock on the registry lock.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn same_id_restart_after_the_cancelled_event_is_admitted() {
         let pump = Arc::new(EventPump::new());
         let mut receiver = pump.subscribe();
+        let settle_gate = Arc::new(AtomicBool::new(false));
         let manager = SideQuestionManager::new(
-            Arc::new(AbortableEngine),
+            Arc::new(AbortableEngine::gated(Arc::clone(&settle_gate))),
             Arc::clone(&pump),
             "sess-1".to_string(),
         );
         let response = manager.start(&start_payload("sq-1", "client-1"));
         assert!(response.success, "{response:?}");
 
-        // The detach abort parks the run's settle behind the registry hold
-        // the probe takes immediately after, and while that hold is taken
-        // no cancelled frame may queue: under the terminal path's ordering
-        // the emit needs the same registry lock that removed the entry.
+        // The detach abort parks the run behind the registry hold the
+        // probe takes, and while that hold is taken no cancelled frame may
+        // queue: under the terminal path's ordering the emit needs the
+        // same registry lock that removed the entry.
         manager.abort_for_client("client-1");
-        probe_no_cancelled_frame_while_registry_held(&manager, &mut receiver);
+        probe_no_cancelled_frame_while_registry_held(&manager, &mut receiver, &settle_gate);
 
         // The hold released, the terminal path settles and the cancelled
-        // frame queues (bounded by the abortable engine's abort latency).
+        // frame queues (the settle gate opened under the hold; the aborted
+        // engine returns and the run settles through the registry lock).
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let cancelled = loop {
             if let Ok(frame) = receiver.try_recv() {
