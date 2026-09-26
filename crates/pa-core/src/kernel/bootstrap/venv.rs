@@ -1099,8 +1099,9 @@ mod tests {
         write_bootstrap_version(&venv, "sha256:runtime", &[]).unwrap();
         let python_str = python.to_string_lossy().to_string();
         let probe_count = || {
-            std::fs::read_to_string(&counter)
-                .map_or(0, |text| text.lines().filter(|l| !l.trim().is_empty()).count())
+            std::fs::read_to_string(&counter).map_or(0, |text| {
+                text.lines().filter(|l| !l.trim().is_empty()).count()
+            })
         };
 
         invalidate_runtime_probe_cache();
@@ -1145,6 +1146,95 @@ mod tests {
         invalidate_runtime_probe_cache();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(probe_count(), 5, "invalidation drops the memo");
+
+        // An uninstalled runtime (the out-of-band uninstall class) must
+        // re-probe rather than mask: the installed-rlm witness disappears,
+        // so the real probe runs again (this fake one still passes).
+        std::fs::remove_dir_all(&rlm).unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 6, "an uninstalled rlm re-probes");
+
+        // A deleted interpreter must miss the memo without a probe
+        // invocation (the interpreter stat witness fails): readiness flips
+        // false because the probe cannot even run.
+        std::fs::remove_file(&python).unwrap();
+        assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 6, "a deleted interpreter misses on stat");
+    }
+
+    /// Live (ignored by default; run with `--ignored` on a machine with a
+    /// kernel venv under `HOME`): the memo behavior against a REAL
+    /// interpreter and a REAL `rlm` import — the probe result on the
+    /// counting-wrapper venv must come from the memo while the installed
+    /// tree is unchanged, and must re-run (and fail) when the installed
+    /// `rlm` tree is removed out of band.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "live: needs a real kernel venv under HOME (bench VMs)"]
+    fn live_probe_memo_reprobes_when_installed_rlm_is_removed() {
+        let real_venv = kernel_venv_dir();
+        let real_python = kernel_venv_python(&real_venv);
+        if !real_python.is_file() {
+            eprintln!("kernel python {real_python:?} not found; skipping live probe test");
+            return;
+        }
+        let Some(real_rlm) = installed_rlm_dir(&real_venv) else {
+            eprintln!("installed rlm not found; skipping live probe test");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("venv");
+        let site = fake.join("lib/python3.11/site-packages");
+        let rlm = site.join("rlm");
+        std::fs::create_dir_all(&rlm).unwrap();
+        let mut files = Vec::new();
+        collect_python_files(&real_rlm, &mut files).unwrap();
+        for file in &files {
+            let target = rlm.join(file.strip_prefix(&real_rlm).unwrap());
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(file, &target).unwrap();
+        }
+
+        let counter = dir.path().join("count");
+        let python = fake.join("bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> \"{}\"\nPYTHONPATH={:?} exec \"{}\" \"\$@\"\n",
+                counter.display(),
+                site,
+                real_python.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let identity = resolve_runtime_identity();
+        write_bootstrap_version(&fake, &identity, &[]).unwrap();
+
+        let probe_count = || {
+            std::fs::read_to_string(&counter).map_or(0, |text| {
+                text.lines().filter(|l| !l.trim().is_empty()).count()
+            })
+        };
+
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert_eq!(probe_count(), 1, "cold call runs the real probe");
+
+        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert_eq!(probe_count(), 1, "unchanged venv hits the memo");
+
+        std::fs::remove_dir_all(&rlm).unwrap();
+        assert!(
+            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
+            "an uninstalled rlm must be detected, not masked"
+        );
+        assert_eq!(probe_count(), 2, "the out-of-band uninstall re-probed");
     }
 
     #[test]
