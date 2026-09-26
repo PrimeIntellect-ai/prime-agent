@@ -937,7 +937,7 @@ impl AuthPanel {
             // open), and the URI parameter always carries the full URL.
             let budget = width.saturating_sub(2);
             let display = if crate::width::str_width(&safe) > budget {
-                crate::width::truncate_line(&[Span::raw(safe.clone())], budget, "")
+                crate::width::truncate_line(&vec![Span::raw(safe.clone())], budget, "")
                     .iter()
                     .map(|span| span.content.clone())
                     .collect::<String>()
