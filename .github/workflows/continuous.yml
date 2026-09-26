@@ -113,6 +113,16 @@ jobs:
           key: ${{ matrix.target }}-glibc235
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: Split the shipped binary + split-debug decoder (Option C posture)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ -n "${version}" ]] || { echo "could not read the workspace version"; exit 1; }
+          python3 scripts/release/split_debug.py \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --out "target/${{ matrix.target }}/dist" \
+            --version "${version}" \
+            --target "${{ matrix.target }}"
       - name: "GLIBC baseline gate: no symbols above GLIBC_2.35 (Ubuntu 22.04)"
         run: |
           set -euo pipefail

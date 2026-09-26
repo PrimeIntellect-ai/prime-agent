@@ -124,6 +124,22 @@ jobs:
           key: ${{ matrix.target }}-glibc235
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: Split the shipped binary + split-debug decoder (Option C posture)
+        # Linux only: the build emits line tables and does not strip at
+        # link; this step produces the SHIPPED binary (objcopy
+        # --strip-debug, in place) and the split-debug decoder (gzipped
+        # only-keep-debug) from the SAME linked image, so the decoder's
+        # addresses match the shipped binary exactly. macOS keeps line
+        # tables in the executable (dSYM extraction is a documented
+        # follow-up); the step is skipped on the darwin matrix.
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          python3 scripts/release/split_debug.py \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --out "target/${{ matrix.target }}/dist" \
+            --version "${RELEASE_VERSION#v}" \
+            --target "${{ matrix.target }}"
       - name: "Livecheck gate: --version prints the tag version"
         run: |
           set -euo pipefail
@@ -152,6 +168,8 @@ jobs:
           python3 scripts/release/bundle_catalog.py generate --fixture \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest
+        # assemble stages the SHIPPED binary (the split step replaced it in
+        # place) and hard-fails if a decoder sidecar ever enters the payload.
         run: |
           set -euo pipefail
           python3 scripts/release/assemble_artifacts.py \
@@ -163,6 +181,9 @@ jobs:
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
       - name: Upload artifacts
+        # The glob carries the decoder alongside the payload files — it is
+        # a workflow artifact, never a tarball member: assemble never stages
+        # it and hard-fails if one appears.
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: artifacts-${{ matrix.target }}
@@ -326,6 +347,13 @@ jobs:
           for entry_dir in (p for p in incoming.iterdir() if p.is_dir()):
               for tar in sorted(entry_dir.glob("prime-agent-*.tar.gz")):
                   (out / tar.name).hardlink_to(tar)
+              # The split-debug decoders ride their build artifacts as
+              # separate files; promote them to release-out too so the
+              # attach step ships them as their own release assets. They
+              # are never in a tarball (the assembler hard-fails on that)
+              # and never in a channel manifest (asserted below).
+              for decoder in sorted(entry_dir.glob("prime-agent-*.debug.gz")):
+                  (out / decoder.name).hardlink_to(decoder)
           # Unpack each tarball so the SBOM covers the unpacked artifact tree
           # (syft does not unpack tar.gz archives itself); keyed by the target
           # triple from each build job's manifest.
@@ -376,6 +404,18 @@ jobs:
           known = {
               "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64",
           }
+          # Hard invariant (Option C posture): the update channels NEVER
+          # reference a split-debug decoder - it is a separate release
+          # asset, and a row pointing at one would make every update
+          # install download DWARF bytes. The rows come from the build
+          # manifests (which never carry decoders), so this assertion is
+          # the channel-side guard against a future manifest change.
+          for binary in merged["binaries"]:
+              if binary["file"].endswith((".debug", ".debug.gz")):
+                  sys.exit(
+                      f"channel manifest refuses to reference decoder asset {binary['file']} "
+                      "(split-debug decoders are separate release assets, never channel payloads)"
+                  )
           v1_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
           rows, seen = [], set()
           for binary in merged["binaries"]:
@@ -434,6 +474,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-out/prime-agent-*.tar.gz
+            release-out/*.debug.gz
             release-out/SHA256SUMS
             release-out/*.json
       - name: Upload the nightly refresh payload (the rolling release step consumes it)

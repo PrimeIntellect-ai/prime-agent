@@ -67,22 +67,25 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 doc_markdown = "warn"
 
-# Shipping posture, pinned: thin LTO plus 4 codegen units for cross-crate
-# inlining in the hot render path. The release strips debug sections
-# (lane/hillclimb-binary-size): install bytes drop ~74% on the Linux ELF,
-# where DWARF line tables dominate the unstripped image. TRADEOFF, stated
-# explicitly: panic backtraces keep the static symbol table (function
-# names) but LOSE file:line — strip="debuginfo" removes the .debug_* line
-# tables the old debug="line-tables-only" posture shipped for, so that
-# line is dead under this posture and is dropped (debug defaults to 0;
-# the final image is byte-identical, builds just skip emitting DWARF that
-# would be stripped). If offline symbolication is wanted later, restore
-# debug, drop strip, and ship the unstripped binary as a split-debug side
-# artifact instead (PR discussion). .dynsym survives stripping, so dynamic
-# linking and the release GLIBC baseline gate are unaffected. The macOS
-# arm64 byte effect is unmeasured: debug info there lives in dSYM
-# bundles, not the executable.
+# Shipping posture, pinned (Kevin, Option C): thin LTO plus 4 codegen
+# units for cross-crate inlining in the hot render path. Builds emit line
+# tables and do NOT strip at link: the release pipeline's split_debug step
+# produces the SHIPPED binary (objcopy --strip-debug — DWARF gone, function
+# names stay) and the split-debug decoder sidecar (objcopy
+# --only-keep-debug, gzipped) from the SAME linked image, so the decoder's
+# addresses match the shipped binary exactly. A second unstripped build
+# would NOT match: link-stage layout differs when stripping runs at link
+# (measured: .text sha256 differs between the link-strip and no-strip
+# builds of the same source). TRADEOFF, stated explicitly: the shipped
+# binary's panic backtraces keep function names but lose file:line; the
+# decoder restores file:line offline and ships as a SEPARATE release
+# asset, never install payload (assemble_artifacts.py hard-fails on
+# decoder sidecars). .dynsym survives stripping, so dynamic linking and
+# the release GLIBC baseline gate are unaffected. macOS is unchanged:
+# darwin builds keep line tables in the executable (dSYM extraction is a
+# documented follow-up); byte claims are measured on Linux x86_64 ELF
+# only.
 [profile.release]
 lto = "thin"
 codegen-units = 4
-strip = "debuginfo"
+debug = "line-tables-only"
