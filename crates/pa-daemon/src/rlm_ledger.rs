@@ -1419,6 +1419,28 @@ mod tests {
         );
     }
 
+    /// The bounded probe resolves a readable header over a corrupt tail:
+    /// the whole-file read the probe replaced failed on any invalid UTF-8
+    /// in the file; the first-line read judges the header alone (a torn
+    /// write mid-file no longer masks a live parent - display-grade
+    /// metadata either way, disclosed in the bounded probe's commit).
+    #[test]
+    fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
+        let dir = temp_dir("legacy-corrupt-tail");
+        let parent = dir.join("p.jsonl");
+        let mut bytes = json!({"type": "session", "id": "p1"}).to_string().into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0xff_u8; 4096]);
+        fs::write(&parent, bytes).unwrap();
+        let registry = legacy_registry_path(&parent).expect("registry path over a corrupt tail");
+        assert!(
+            registry
+                .to_string_lossy()
+                .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
+            "a torn-write tail no longer masks the readable header"
+        );
+    }
+
     #[test]
     fn ledger_path_hashes_the_canonical_sessions_dir() {
         let dir = temp_dir("path");
