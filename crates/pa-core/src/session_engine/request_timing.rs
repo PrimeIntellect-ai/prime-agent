@@ -68,7 +68,7 @@ const AGENT_LOG_MAX_BYTES: u64 = 20 * 1024 * 1024;
 /// is captured when the session wires its seams; the env half stays live.
 pub type RequestTimingEnabled = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Truthy follows the PI_OFFLINE/PI_TIMING convention: 1/true/yes (TS
+/// Truthy follows the `PI_OFFLINE`/`PI_TIMING` convention: 1/true/yes (TS
 /// `truthyEnvFlag`).
 fn truthy_env_flag(value: Option<&str>) -> bool {
     let Some(value) = value else {
@@ -109,6 +109,7 @@ impl RequestTimingLog {
     }
 
     /// The log at an explicit path (tests).
+    #[cfg(test)]
     fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -187,7 +188,7 @@ struct PromptBuildTiming {
     /// Turn dispatch: the instrumented transform seam's entry (first seam
     /// of the turn).
     dispatched_at: Instant,
-    /// After convert_to_llm: the LLM message array is built.
+    /// After `convert_to_llm`: the LLM message array is built.
     prompt_built_at: Instant,
     /// LLM message count of the built prompt.
     context_entries: usize,
@@ -195,9 +196,9 @@ struct PromptBuildTiming {
     request_seq: u64,
 }
 
-/// Per-session timing state: the TS module-level WeakMaps (dispatch, prompt
-/// build) and the request-sequence counter, bundled because the Rust seams
-/// share one session wiring.
+/// Per-session timing state: the TS module-level `WeakMap`s (dispatch,
+/// prompt build) and the request-sequence counter, bundled because the Rust
+/// seams share one session wiring.
 pub struct RequestTimingWiring {
     enabled: RequestTimingEnabled,
     log: RequestTimingLog,
@@ -916,7 +917,7 @@ mod tests {
     use super::*;
     use pa_agent::stream::{event_stream, LlmContext};
     use pa_agent::types::{
-        AgentMessage, AssistantContent, Message, TextContent, UserContent, UserMessage,
+        AgentMessage, AssistantContent, Message, TextContent, UsageCost, UserContent, UserMessage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -932,7 +933,7 @@ mod tests {
             provider: "bench".to_string(),
             base_url: "https://bench.test/v1".to_string(),
             reasoning: true,
-            cost: Default::default(),
+            cost: UsageCost::default(),
             context_window: 1_000_000,
             max_tokens: 128_000,
         }
@@ -960,7 +961,7 @@ mod tests {
             cache_read: 790_000,
             cache_write: 0,
             total_tokens: 800_012,
-            cost: Default::default(),
+            cost: UsageCost::default(),
         };
         message
     }
@@ -1039,17 +1040,17 @@ mod tests {
             let first_token_gate = Arc::clone(&first_token_gate);
             let done_gate = Arc::clone(&done_gate);
             Box::pin(async move {
-                let mut response_gate = response_gate
+                let response_gate = response_gate
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                     .expect("one scripted request per provider");
-                let mut first_token_gate = first_token_gate
+                let first_token_gate = first_token_gate
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                     .expect("one scripted request per provider");
-                let mut done_gate = done_gate
+                let done_gate = done_gate
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
@@ -1067,7 +1068,7 @@ mod tests {
                             on_response(
                                 pa_agent::stream::ProviderResponse {
                                     status: 200,
-                                    headers: Default::default(),
+                                    headers: std::collections::BTreeMap::default(),
                                 },
                                 &hook_model,
                             );
@@ -1125,7 +1126,7 @@ mod tests {
             messages: llm_messages,
             tools: Vec::new(),
         };
-        Ok(instrument_stream_fn(wiring, stream_fn)(test_model(), context, options).await?)
+        instrument_stream_fn(wiring, stream_fn)(test_model(), context, options).await
     }
 
     fn timing_on(log_path: &Path) -> Arc<RequestTimingWiring> {
