@@ -1564,6 +1564,10 @@ async fn run_interactive_surface(
         // value (interactive-mode.ts `new TUI(..., getShowHardwareCursor())`);
         // the settings menu's toggle updates it in place.
         view.show_hardware_cursor = settings.show_hardware_cursor();
+        // TS #2709: the interactive-mode constructor assigns the persisted
+        // `chatDetail` level (`assignChatDetail(getChatDetail())`), so a
+        // chat opens at the level the last Ctrl+O pick saved.
+        view.detail = crate::chat::Detail::from_wire_name(&settings.chat_detail());
     }
     apply_startup_chrome(&mut view, &options);
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();

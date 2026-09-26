@@ -251,6 +251,18 @@ impl SettingsManager {
         }
     }
 
+    /// `chatDetail` (TS #2709 `getChatDetail`): the conversation-detail
+    /// level the chat starts at; an unset or invalid value falls back to
+    /// `details` (the TS #2447 startup level).
+    pub fn get_chat_detail(&self) -> String {
+        match self.settings().chat_detail.as_deref() {
+            Some("overview") => "overview",
+            Some("all") => "all",
+            _ => "details",
+        }
+        .to_string()
+    }
+
     /// `branchSummary.skipPrompt` (TS `getBranchSummarySkipPrompt`).
     pub fn get_branch_summary_skip_prompt(&self) -> bool {
         self.settings()
@@ -982,6 +994,29 @@ mod tests {
         };
         let manager = SettingsManager::in_memory(settings);
         assert_eq!(manager.get_code_block_indent(), "    ");
+    }
+
+    /// TS #2709: the Ctrl+O level persists as the global `chatDetail`
+    /// setting — a later run reads it back — and anything but the three
+    /// TS levels reads as the `details` startup default.
+    #[test]
+    fn chat_detail_persists_the_chosen_level_with_ts_fallback() {
+        let mut manager = SettingsManager::in_memory(Settings::default());
+        assert_eq!(manager.get_chat_detail(), "details");
+        manager.set_chat_detail("all").unwrap();
+        assert_eq!(manager.get_chat_detail(), "all");
+        manager.reload().unwrap();
+        assert_eq!(
+            manager.get_chat_detail(),
+            "all",
+            "the saved level survives a reload (a later chat re-reads it)"
+        );
+        manager.global.chat_detail = Some("verbose".to_string());
+        assert_eq!(
+            manager.get_chat_detail(),
+            "details",
+            "an invalid value falls back to the TS startup default"
+        );
     }
 
     /// The steering default is "all" (every queued steer co-delivers as
