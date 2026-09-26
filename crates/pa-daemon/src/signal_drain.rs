@@ -17,10 +17,10 @@
 //! directly after the socket binds, before its next await) and returns the
 //! loop that serves them: a signal cannot land in a spawn-to-first-poll
 //! window with the default disposition still active. A handler that fails
-//! to register is logged and dropped while the other signal keeps draining
-//! - dropping a registered listener would strand its signal: tokio keeps
-//! the replacement disposition installed after the listener is gone, so a
-//! dropped stream swallows every later delivery of that signal.
+//! to register is logged and dropped while the other signal keeps
+//! draining; dropping a registered listener would strand its signal
+//! (tokio keeps the replacement disposition installed after the listener
+//! is gone, so a dropped stream swallows every later delivery).
 
 use std::sync::Arc;
 
@@ -58,8 +58,8 @@ pub(crate) fn install(supervisor: Arc<Supervisor>) -> impl std::future::Future<O
         }
         loop {
             tokio::select! {
-                _ = recv_opt(terminate.as_mut()) => {}
-                _ = recv_opt(interrupt.as_mut()) => {}
+                () = recv_opt(terminate.as_mut()) => {}
+                () = recv_opt(interrupt.as_mut()) => {}
             }
             if !supervisor.begin_signal_drain() {
                 supervisor
