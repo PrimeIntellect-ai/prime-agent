@@ -1936,16 +1936,6 @@ async fn run_interactive_surface(
                         inputs_pending = false;
                     }
                 }
-            } else if !renderer.is_terminal() && session.prompt_submits_in_flight() > 0 {
-                // The headless step-visibility contract (one step renders
-                // before the next applies): a backgrounded prompt submit
-                // must land before the next step observes the state it
-                // produced — the inline submit held the same order by
-                // blocking the step until its ack arrived. The terminal
-                // batch never waits: the whole point of the backgrounded
-                // submit is that keystrokes after Enter paint without
-                // gating on the daemon.
-                inputs_pending = false;
             } else if let Some(input) = pending.pop_front() {
                 session.dirty = true;
                 match input {
