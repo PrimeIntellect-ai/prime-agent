@@ -5017,7 +5017,10 @@ class Battery:
                 # reads the actual row, not an off-screen region.
                 for _ in range(12):
                     self.tui_send(tui, "PageDown", enter=False)
-                    if B.tmux_wait_text(tui, "Cycle overview", timeout=4):
+                    # tmux_wait_text returns the last frame on timeout,
+                    # so the break condition reads the pattern in the
+                    # returned frame, never the frame's mere existence.
+                    if "Cycle overview" in B.tmux_wait_text(tui, "Cycle overview", timeout=4):
                         break
                 guide = self.settle_frame(tui, quiet_s=1.0, timeout=20)
                 side.evidence(flow, "04-hotkeys-guide.txt", guide)
@@ -5035,9 +5038,11 @@ class Battery:
                         evidence=side.root / flow / "04-hotkeys-guide.txt",
                         lane=FLOW_LANES[flow],
                     )
-                # Esc closes the panel deterministically: poll until the
-                # panel's key-hint row is gone from the pane (the next
-                # step's ? must reach the EDITOR, not an open panel).
+                # Esc closes the panel deterministically: send the key,
+                # then poll until the panel's key-hint row is gone from
+                # the pane (the next step's ? must reach the EDITOR, not
+                # an open panel).
+                self.tui_send(tui, "Escape", enter=False)
                 deadline = time.time() + 20
                 closed = B.tmux_capture(tui)
                 while "Esc close" in closed and time.time() < deadline:
@@ -5096,9 +5101,10 @@ class Battery:
                         lane=FLOW_LANES[flow],
                     )
                 # Esc clears the typed `?` back to the empty editor:
-                # poll until the `?` is gone from the pane (the typed
-                # char is the only `?` on this surface), so the closing
-                # submission starts from a clean editor.
+                # send the key, then poll until the `?` is gone from the
+                # pane (the typed char is the only `?` on this surface),
+                # so the closing submission starts from a clean editor.
+                self.tui_send(tui, "Escape", enter=False)
                 deadline = time.time() + 20
                 cleared_editor = B.tmux_capture(tui)
                 while "?" in cleared_editor and time.time() < deadline:
