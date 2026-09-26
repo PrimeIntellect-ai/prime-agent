@@ -4175,5 +4175,4 @@ mod tests {
         );
     }
 
-    /// A client that falls behind the shared event ring loses events (the
 }
