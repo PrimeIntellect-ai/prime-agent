@@ -170,6 +170,16 @@ impl RpcChild {
         response
     }
 
+    /// Drain every queued frame without waiting (the settle poll: the
+    /// frames a running turn emits while the test watches the state).
+    fn drain_frames(&mut self) -> Vec<Value> {
+        let mut frames = Vec::new();
+        while let Ok(line) = self.lines.try_recv() {
+            frames.push(serde_json::from_str(&line).expect("valid JSON line"));
+        }
+        frames
+    }
+
     /// Log the child's stderr once the Drop reaps it (a live read would
     /// block until exit; the drain moves to the post-kill site like the
     /// sibling ACP harness).
@@ -373,15 +383,28 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     let (aborted, before_abort) = client.wait_response(&abort_id, TIMEOUT);
     assert_eq!(aborted["success"], true);
     // The abort settles the running turn on its own task: the settle's
-    // `agent_end` can land on the wire before or after the abort
-    // response (the TS single-threaded reference always orders the
-    // response first; the async port does not guarantee it) — accept
-    // either ordering; an `agent_end` the response read consumed counts.
-    if !before_abort
-        .iter()
-        .any(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
-    {
-        client.wait_event("agent_end", TIMEOUT);
+    // frames can land on the wire before or after the abort response
+    // (the TS single-threaded reference always orders the response
+    // first; the async port does not guarantee it). Collect every
+    // frame however it orders — the settle must deliver the terminal
+    // `agent_end` — and on failure the dump carries the live state and
+    // every frame seen, so the break is diagnosable from the round.
+    let mut settle_frames = before_abort;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        settle_frames.extend(client.drain_frames());
+        if settle_frames
+            .iter()
+            .any(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the abort settle never delivered agent_end; state: {}; frames: {settle_frames:?}",
+            client.request(&json!({ "type": "get_state" }))
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
     let parked = client.request(&json!({ "type": "get_state" }));
     assert_eq!(
