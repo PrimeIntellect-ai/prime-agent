@@ -4208,7 +4208,6 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         !rendered.contains("\u{26a0} Error"),
         "a stale succeeded submit stays silent:\n{rendered}"
     );
-    drop(supervisor);
     // The daemon still ran the outlived submit's turn for the
     // switched-away session: the submitted prompt was never lost. The
     // reply lands ~400ms in, so poll the session file for it.
