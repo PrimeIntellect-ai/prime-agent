@@ -254,6 +254,20 @@ pub(crate) fn draw(
     terminal: &mut Terminal<crate::hyperlinks::LinkBackend>,
     view: &mut AgentView,
 ) -> Result<()> {
+    // The interactive surface's mount sequences (the alt-screen
+    // adopt/enter for a fresh process, the queued clear, the cursor
+    // hide) ride THIS draw's single flush: the first paint is the mount
+    // (a direct open holds the shell or the previous surface until its
+    // first frame is ready — TS attaches before the chat mounts), and a
+    // mid-gap flush can never carry the clear out early over it.
+    if crate::altscreen::take_first_draw_mount() {
+        crate::altscreen::enter()?;
+        crossterm::queue!(
+            std::io::stdout(),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::Hide
+        )?;
+    }
     let area = terminal.size()?;
     let frame_area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
     let width = area.width as usize;

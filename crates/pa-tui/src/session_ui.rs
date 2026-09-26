@@ -658,6 +658,22 @@ pub(crate) enum RebuildKind {
     Resync,
 }
 
+/// Whether the attach folds the dock's data before returning or leaves
+/// it to the background refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockFold {
+    /// Fold the first `heartbeats_list` and `list_kernel_bash` responses
+    /// into the session before the attach returns: the dock (the panel
+    /// and its divider under the prompt bar) is first-frame geometry —
+    /// its visibility must be final when the first content frame
+    /// renders (open, switch, rebind), never a late layout shift.
+    FirstFrame,
+    /// Leave the dock to the background refreshes: a surface that is
+    /// already up cannot shift, and the §10.4 recovery budget must cover
+    /// the attach alone (a dock fetch would eat into it).
+    Background,
+}
+
 /// The attached snapshot's bash slot state, captured by `attach_session`
 /// while the client's pre-attach belief is still readable.
 #[derive(Debug, Clone, Copy)]
@@ -841,7 +857,7 @@ impl SessionUi {
             copies: Vec::new(),
         };
         session
-            .attach_session(&active_session_id)
+            .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
         Ok(session)
@@ -892,7 +908,11 @@ impl SessionUi {
             self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        let attach = tokio::time::timeout(
+            REATTACH_BUDGET,
+            self.attach_session(&durable, DockFold::Background),
+        )
+        .await;
         match attach {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -971,7 +991,11 @@ impl SessionUi {
     /// locally bound but server-detached - the previous subscription stays
     /// until the new one exists, and the next supersede notice or the
     /// submit-path retry re-attaches when a worker can serve the session.
-    pub(crate) async fn attach_session(&mut self, active_session_id: &str) -> Result<()> {
+    pub(crate) async fn attach_session(
+        &mut self,
+        active_session_id: &str,
+        dock_fold: DockFold,
+    ) -> Result<()> {
         let previous = self.active_session_id.clone();
         // A direct link is bound to one session: drop it when switching.
         if self
@@ -1078,34 +1102,43 @@ impl SessionUi {
         self.subagents_focused = false;
         self.subscribe_roster().await;
         // The heartbeat catalog is scoped to the session: the old rows
-        // drop and the fresh fetch folds BEFORE the attach returns. The
-        // dock's visibility (the panel and its divider under the prompt
-        // bar) is first-frame geometry — it must be final when the first
-        // content frame renders, never a late layout shift (the
+        // drop. A first-content-frame attach (open, switch, rebind)
+        // folds the fresh fetch BEFORE the attach returns — the dock's
+        // visibility (the panel and its divider under the prompt bar) is
+        // first-frame geometry, never a late layout shift (the
         // operator's 2026-09-26 zero-shift ruling). TS guarantees the
         // same for its dock: the counts seed from the attach snapshot
         // (`seedSubagentSummary`) and the roster subscription is awaited
         // before the first content render; TS's own heartbeat fetch stays
         // fire-and-forget only because its summary line renders no
-        // heartbeat rows. A failed fetch leaves the cleared catalog (the
-        // next `heartbeats_changed` event refills).
+        // heartbeat rows. An already-up surface (the §10.4 recovery)
+        // cannot shift and its budget must cover the attach alone: the
+        // background refresh owns the fold there.
         self.heartbeat_catalog.clear();
-        self.fetch_heartbeat_catalog().await;
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_heartbeat_catalog().await,
+            DockFold::Background => self.spawn_heartbeat_refresh(),
+        }
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
         // The bash registry is kernel-owned and session-scoped: the
-        // previous session's rows are not this one's, and the fresh list
-        // folds before the attach returns (the dock's bash rows are
-        // first-frame geometry like the heartbeat rows above). The
-        // capability gate matches the background refresh (older daemons
-        // never see the request), and a failed fetch leaves the cleared
-        // registry (the 2s poll refills).
+        // previous session's rows are not this one's, and a
+        // first-content-frame attach folds the fresh list before the
+        // attach returns (the dock's bash rows are first-frame geometry
+        // like the heartbeat rows above); an already-up surface leaves
+        // the fold to the background refresh. The capability gate
+        // matches the background refresh (older daemons never see the
+        // request), and a failed fetch leaves the cleared registry (the
+        // 2s poll refills).
         self.bash_activities = serde_json::json!({"activities": []});
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
-        self.fetch_bash_activities().await;
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_bash_activities().await,
+            DockFold::Background => self.spawn_bash_activity_refresh(),
+        }
         self.pending_model = reconstructed.model_id;
         self.last_assistant_text = reconstructed
             .chat
@@ -2539,7 +2572,11 @@ impl SessionUi {
                     {
                         rebind_available = false;
                         let durable = self.session_id.clone();
-                        if self.attach_session(&durable).await.is_ok() {
+                        if self
+                            .attach_session(&durable, DockFold::FirstFrame)
+                            .await
+                            .is_ok()
+                        {
                             // The fresh attach snapshot owns the transcript;
                             // the replayed prompt renders on top of it.
                             self.rebuild_view(view, RebuildKind::Rebind);
@@ -2851,7 +2888,7 @@ impl SessionUi {
             }
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id).await?;
+                self.attach_session(&id, DockFold::FirstFrame).await?;
                 // The title's pair is session-scoped: fetch the new
                 // session's stats before the rebuild copies them into
                 // the chrome, or the rebind would ride the session being
@@ -6068,7 +6105,7 @@ impl SessionUi {
         // so the switch lands on an empty prompt (the draft returns on a
         // switch back).
         self.stash_draft_for_switch(view);
-        match self.attach_session(&id).await {
+        match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
                 // Session-scoped stats again: the rebuilt title must show
                 // the switched-to session's pair, not the one being left.
@@ -6449,6 +6486,11 @@ impl SessionUi {
         if !self.kernel_bash_supported() {
             return;
         }
+        // Advance the epoch so a poll still in flight from before the
+        // attach (the 2s cadence's spawned list) never overwrites this
+        // fold with its older registry: the epoch check drops it at
+        // fold time.
+        self.bash_list_epoch += 1;
         let Ok(data) = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -6951,6 +6993,11 @@ impl SessionUi {
     /// same empty-open state the background refresh's failure arm
     /// produces, and the next `heartbeats_changed` event refills.
     async fn fetch_heartbeat_catalog(&mut self) {
+        // Advance the epoch so a refresh still in flight from before the
+        // attach (a `heartbeats_changed` burst's spawned fetch) never
+        // overwrites this fold with its older catalog: the epoch's
+        // staleness check drops it at fold time.
+        self.heartbeat_refresh_epoch += 1;
         let Ok(data) = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),

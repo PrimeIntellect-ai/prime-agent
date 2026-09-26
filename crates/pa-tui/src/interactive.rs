@@ -2290,7 +2290,10 @@ async fn run_interactive_surface(
                     // supersede notice or the submit-path retry
                     // re-attaches once a worker can serve the session.
                     if let Some(current) = session.pending_rebind.take() {
-                        match session.attach_session(&current).await {
+                        match session
+                            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
+                            .await
+                        {
                             Ok(()) => session.rebuild_view(
                                 &mut view,
                                 crate::session_ui::RebuildKind::Rebind,
@@ -2769,9 +2772,17 @@ async fn run_interactive_surface(
                 if state.active_session_id != session.active_session_id {
                     continue;
                 }
+                // The reconnect attempt's budget covers the attach alone:
+                // the surface is already up (its dock is established), so
+                // the dock stays with the background refreshes — the
+                // first-frame fold's bounded fetches would eat the whole
+                // 10s attempt budget on a slow daemon.
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
-                    session.attach_session(&state.active_session_id),
+                    session.attach_session(
+                        &state.active_session_id,
+                        crate::session_ui::DockFold::Background,
+                    ),
                 )
                 .await;
                 match attempt {
@@ -3182,8 +3193,13 @@ impl Renderer {
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
-                // flashes the primary screen.
-                crate::altscreen::enter()?;
+                // flashes the primary screen. The enter itself is ARMED,
+                // not written: it rides the first draw's flush (see
+                // `altscreen::arm_first_draw_mount`), so a direct open —
+                // which paints nothing until its first content frame —
+                // holds the shell (a fresh process) or the handed-off
+                // surface through the attach.
+                crate::altscreen::arm_first_draw_mount();
                 // SGR mouse tracking follows the fullscreen surface in and
                 // out (TS `enterFullscreen` enables it blind — probing is
                 // not viable under tmux and unsupporting terminals ignore
@@ -3256,22 +3272,14 @@ impl Renderer {
                 // the first draw repaints the same buffer (a fresh alt
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
-                // never reach the pane on its own: queue it with the
-                // cursor hide and let the first draw's single flush carry
-                // clear + frame together — a separate clear-and-flush
-                // here shows a blank pane for the whole render gap, a
-                // visible flicker on every surface switch (the chat's own
-                // first frame is the tail render on the first event).
-                // The cursor hides with the mount (TS `TUI.start`
-                // writes hideCursor, never a show): a shown cursor at a
-                // stale position here would be dragged across the clear
-                // and the first repaint — the cursor-glitch window
-                // between surfaces.
-                crossterm::queue!(
-                    std::io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Hide
-                )?;
+                // never reach the pane on its own: the armed mount's
+                // clear and cursor hide ride the first draw's single
+                // flush (see `altscreen::take_first_draw_mount`) — a
+                // clear queued HERE would let any mid-gap flush (the
+                // kitty probe, a mode enable) carry it out early, wiping
+                // the shell or the held surface during a direct open's
+                // attach wait. The cursor hides with the mount (TS
+                // `TUI.start` writes hideCursor, never a show).
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,
