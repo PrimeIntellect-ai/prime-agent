@@ -830,9 +830,6 @@ impl AuthPanel {
         }
     }
 
-    /// TS `copyAuthUrl`: the mounted URL to the clipboard, the actions
-    /// row carrying the outcome ("Copied sign-in link" / "Failed to copy
-
     /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over
     /// the `LoginDialogComponent` content: the session's dock opens with
     /// the borderMuted rule and the muted one-space title, the onboarding
