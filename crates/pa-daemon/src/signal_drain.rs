@@ -34,7 +34,7 @@ use crate::supervisor::Supervisor;
 /// signals keep their default disposition.
 #[cfg(unix)]
 pub(crate) fn install(supervisor: Arc<Supervisor>) -> impl std::future::Future<Output = ()> + Send {
-    let terminate = match signal(SignalKind::terminate()) {
+    let mut terminate = match signal(SignalKind::terminate()) {
         Ok(terminate) => Some(terminate),
         Err(error) => {
             supervisor.log_line(&format!(
@@ -43,7 +43,7 @@ pub(crate) fn install(supervisor: Arc<Supervisor>) -> impl std::future::Future<O
             None
         }
     };
-    let interrupt = match signal(SignalKind::interrupt()) {
+    let mut interrupt = match signal(SignalKind::interrupt()) {
         Ok(interrupt) => Some(interrupt),
         Err(error) => {
             supervisor.log_line(&format!(
@@ -77,7 +77,7 @@ pub(crate) fn install(supervisor: Arc<Supervisor>) -> impl std::future::Future<O
 async fn recv_opt(stream: Option<&mut Signal>) {
     match stream {
         Some(stream) => {
-            stream.recv().await;
+            let _ = stream.recv().await;
         }
         None => std::future::pending::<()>().await,
     }
