@@ -488,7 +488,11 @@ mod append_cache_tests {
         for _ in 0..5 {
             append(&path, "row").unwrap();
         }
-        assert_eq!(open_fds_into(dir.path()), 0, "hard-linked file stays uncached");
+        assert_eq!(
+            open_fds_into(dir.path()),
+            0,
+            "hard-linked file stays uncached"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "row\nrow\nrow\nrow\nrow\n"
