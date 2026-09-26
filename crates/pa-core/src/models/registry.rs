@@ -109,7 +109,12 @@ fn xai_subscription_model(model: &Model) -> Model {
     let mut adapted = model.clone();
     adapted.api = "openai-responses".to_string();
     adapted.base_url = "https://api.x.ai/v1".to_string();
-    adapted.thinking_level_map = Some(xai_subscription_thinking_map(&model.id));
+    // TS `getXaiSubscriptionModel` fills only an absent map: a model that
+    // already declares its levels keeps them (a blanket replacement
+    // collapsed a thinking-capable route onto the all-null default arm).
+    if adapted.thinking_level_map.is_none() {
+        adapted.thinking_level_map = Some(xai_subscription_thinking_map(&model.id));
+    }
     adapted.compat = Some(ModelCompat::from_kind(CompatKind::OpenAiResponses(
         OpenAiResponsesCompat {
             send_session_id_header: None,
@@ -1246,6 +1251,29 @@ mod tests {
         assert_eq!(
             map_43.get(&ModelThinkingLevel::Off),
             Some(&Some("none".to_string()))
+        );
+    }
+
+    /// TS `getXaiSubscriptionModel` fills only an absent `thinkingLevelMap`:
+    /// a model that already declares addressable levels keeps them under
+    /// the subscription — a blanket replacement collapsed a thinking-capable
+    /// route onto the all-null "unverified controls" default arm (the
+    /// `/effort` false refusal).
+    #[test]
+    fn a_subscription_model_keeps_its_own_thinking_level_map() {
+        let mut grok = model("grok-build-0.1", "xai");
+        grok.reasoning = true;
+        grok.thinking_level_map =
+            Some(std::iter::once((ModelThinkingLevel::Off, Some("none".to_string()))).collect());
+        let adapted = xai_subscription_model(&grok);
+        assert_eq!(adapted.thinking_level_map, grok.thinking_level_map);
+
+        let bare = model("grok-4.5", "xai");
+        assert!(bare.thinking_level_map.is_none());
+        let adapted = xai_subscription_model(&bare);
+        assert_eq!(
+            adapted.thinking_level_map,
+            Some(xai_subscription_thinking_map("grok-4.5"))
         );
     }
 

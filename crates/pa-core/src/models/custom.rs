@@ -434,7 +434,15 @@ pub fn load_custom_models(
                 provider: provider_name.clone(),
                 base_url,
                 reasoning: model_def.reasoning.unwrap_or(false),
-                thinking_level_map: None,
+                // TS `thinkingLevelMap: modelDef.thinkingLevelMap`: the
+                // definition's map is the model's, parsed from the same
+                // wire names the override merge uses.
+                thinking_level_map: model_def.thinking_level_map.as_ref().and_then(|map| {
+                    serde_json::from_value::<pa_types::ai::ThinkingLevelMap>(
+                        serde_json::to_value(map).ok()?,
+                    )
+                    .ok()
+                }),
                 input: model_inputs(model_def.input.as_ref()),
                 cost: model_def.cost.as_ref().map_or_else(
                     || cost_from_config(&ModelCostConfig::default()),
@@ -498,6 +506,38 @@ mod tests {
         assert_eq!(result.models[0].id, "llama3");
         assert_eq!(result.models[0].base_url, "http://localhost:11434");
         assert_eq!(result.models[0].context_window, 128_000);
+    }
+
+    /// TS `thinkingLevelMap: modelDef.thinkingLevelMap`: a model
+    /// definition's map is the model's, so a locally-defined route that
+    /// declares addressable thinking levels keeps them (the definition's
+    /// levels drive `/effort` through the shared thinking helpers).
+    #[test]
+    fn parses_a_custom_model_definition_thinking_level_map() {
+        let result = load_custom_models(
+            r#"{ "providers": { "battery": {
+                "baseUrl": "http://127.0.0.1:9",
+                "apiKey": "sk-local",
+                "api": "openai-completions",
+                "models": [ {
+                    "id": "chat-plus",
+                    "reasoning": false,
+                    "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }
+                } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        let map = result.models[0]
+            .thinking_level_map
+            .as_ref()
+            .expect("the definition's thinkingLevelMap is the model's");
+        assert_eq!(map.get(&pa_types::ai::ModelThinkingLevel::Off), Some(&None));
+        assert_eq!(
+            map.get(&pa_types::ai::ModelThinkingLevel::Xhigh),
+            Some(&Some("xhigh".to_string()))
+        );
     }
 
     #[test]
