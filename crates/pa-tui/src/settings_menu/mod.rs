@@ -608,12 +608,12 @@ impl SettingsMenu {
                 .iter()
                 .map(|&index| self.rows[index].clone())
                 .collect();
-            crate::fuzzy::fuzzy_filter(&candidates, query, |row| row.label.to_string())
+            crate::fuzzy::fuzzy_filter(&candidates, &query, |row| row.label.to_string())
                 .iter()
                 .map(|row| {
                     tab.rows
                         .iter()
-                        .find(|&index| &self.rows[index] == row)
+                        .find(|&index| &self.rows[*index] == row)
                         .copied()
                         .expect("fuzzy keeps row values")
                 })
@@ -791,7 +791,7 @@ fn hint(kb: &KeybindingsManager, tabs: usize) -> String {
     let mut segments = vec!["Type to search".to_string()];
     if tabs > 0 {
         segments.push(format!(
-            "{}/1-{tabs} tabs",
+            "{}/{}/1-{tabs} tabs",
             format_key_text("left"),
             format_key_text("right")
         ));
