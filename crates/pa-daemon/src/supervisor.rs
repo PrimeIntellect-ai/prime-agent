@@ -3327,15 +3327,28 @@ impl Supervisor {
                 // A failed send is the connection loop's death notice (its
                 // receiver is gone): the remaining folds serve nobody, so
                 // the callback stops the scan (the response travels the
-                // same dead channel and drops with it). A FULL queue only
-                // skips the progress frame: the scan runs on the blocking
-                // pool, so it must never wait on client I/O — the frame is
-                // a UI hint, the terminal response carries the
-                // authoritative rows, and the fold still has to visit
-                // every file for the data itself.
-                match stream_rows.try_send((vec![item, progress], false)) {
-                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
-                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                // same dead channel and drops with it). The scan runs on
+                // the blocking pool, so it must never wait on client I/O:
+                // a FULL queue skips the PROGRESS frame first and retries
+                // the row (the row is the data; the frame is a UI hint),
+                // and a still-full queue skips the row too — the terminal
+                // response carries the authoritative rows regardless,
+                // and the fold still has to visit every file for the data
+                // itself.
+                let mut bundle = (vec![item, progress], false);
+                loop {
+                    match stream_rows.try_send(bundle) {
+                        Ok(()) => break true,
+                        Err(mpsc::error::TrySendError::Full((mut unsent, stopped))) => {
+                            if unsent.len() > 1 {
+                                unsent.pop();
+                                bundle = (unsent, stopped);
+                                continue;
+                            }
+                            break true;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break false,
+                    }
                 }
             });
             (infos, file_total)
