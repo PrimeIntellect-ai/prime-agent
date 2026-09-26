@@ -84,6 +84,11 @@ pub struct RpcSession {
     /// against the replaced engine retire instead of delivering queued
     /// input to the disposed session.
     pump_epoch: Arc<AtomicU64>,
+    /// Fired when a signal exit (SIGTERM/SIGHUP) begins: an in-flight
+    /// replacement stops waiting the running turn out (it aborts and
+    /// refuses), and later replacements answer immediately, so the
+    /// 143/129 exit never queues behind a replacement's settle.
+    signal_shutdown: std::sync::Arc<tokio_util::sync::CancellationToken>,
 }
 
 impl RpcSession {
@@ -101,6 +106,7 @@ impl RpcSession {
             pending_outputs: Arc::new(tokio::sync::Mutex::new(None)),
             replacement: tokio::sync::Mutex::new(()),
             pump_epoch: Arc::new(AtomicU64::new(0)),
+            signal_shutdown: std::sync::Arc::new(tokio_util::sync::CancellationToken::new()),
         };
         session.resubscribe().await;
         session
@@ -221,6 +227,14 @@ impl RpcSession {
         self.replacement.lock().await
     }
 
+    /// Begin the signal exit (SIGTERM/SIGHUP): the shutdown broadcast
+    /// makes any in-flight replacement's settle give way (abort the turn
+    /// instead of waiting the model out) and refuses replacements that
+    /// would start after the signal.
+    pub fn fire_shutdown(&self) {
+        self.signal_shutdown.cancel();
+    }
+
     /// Whole-session replacement with the lease already held by the
     /// caller (`replacement_lease` / `replace` acquire it).
     ///
@@ -233,6 +247,11 @@ impl RpcSession {
             .factory
             .clone()
             .ok_or_else(|| "Session switching is not wired for this RPC transport".to_string())?;
+        // A signal exit has begun: never start a replacement the exit
+        // would have to wait out (the 143/129 path aborts and exits).
+        if self.signal_shutdown.is_cancelled() {
+            return Err("A signal exit is in progress".to_string());
+        }
         // Reopening the currently-owned session file: ADOPT the current
         // lease (TS `acquireReplacementLease` reuses the current lease
         // for the same path) — the lease never leaves this process, so
@@ -266,15 +285,40 @@ impl RpcSession {
         // The write guard stays held through the settle, the build, and
         // the teardown: it waits out every live reader (a
         // prompt/steer/compact handler holding the handle), so no
-        // command can admit a turn onto the old engine.
-        let mut handle = self.handle.write().await;
+        // command can admit a turn onto the old engine. A signal exit
+        // gives way instead of queuing behind the guard: the adopted
+        // lease (if any) drops with the early return — released, never
+        // orphaned — and the exiting process owns nothing further.
+        let mut handle = tokio::select! {
+            guard = self.handle.write() => guard,
+            _ = self.signal_shutdown.cancelled() => {
+                return Err("A signal exit is in progress".to_string());
+            }
+        };
         // Settle the running turn BEFORE the factory opens the file: the
         // turn's final rows land in the persisted history the
         // replacement hydrates from (an open before the settle would
         // read a stale tail), and the finishing turn's final events (its
         // `agent_end`) still reach the client — the old feed stays
-        // subscribed until after the settle.
-        handle.engine.session.agent().wait_for_idle().await;
+        // subscribed until after the settle. A signal exit aborts the
+        // turn instead of waiting the model out: the settle (and the
+        // signal's exit behind it) completes without the in-flight call,
+        // and the adopted lease returns to the still-live handle (the
+        // refusal path below never publishes a replacement).
+        let shutdown_during_settle = {
+            let agent = handle.engine.session.agent();
+            tokio::select! {
+                _ = agent.wait_for_idle() => false,
+                _ = self.signal_shutdown.cancelled() => true,
+            }
+        };
+        if shutdown_during_settle {
+            handle.engine.session.agent().abort();
+            if adopted_lease.is_some() {
+                handle.session_lease = adopted_lease;
+            }
+            return Err("A signal exit is in progress".to_string());
+        }
         // Build the replacement after the settle: a failed assembly
         // leaves the live session serving (idle, subscribed, nothing
         // disposed — only the settle ran), and the adopted lease goes

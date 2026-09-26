@@ -221,19 +221,28 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
     // `runtimeHost.newSession` over `this.cwd`), so a session adopted
     // from another project does not seed the new one back into the CLI
     // startup directory.
+    // Serialize the cwd sample with the replacement it seeds (the
+    // replacement lease, held across both): a `switch_session` landing
+    // between the sample and the replace would build the child over the
+    // retired session's stale project cwd — TS's synchronous `this.cwd`
+    // read has no such window. The sample's guards drop before
+    // `replace_locked` (the write guard is not re-entrant).
+    let lease = state.session.replacement_lease().await;
     let cwd = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
         let manager = persistence.lock().await;
         manager.get_cwd().to_path_buf()
     };
-    state
+    let outcome = state
         .session
-        .replace(RpcEngineRequest::New {
+        .replace_locked(RpcEngineRequest::New {
             parent_session: parent,
             cwd: Some(cwd),
         })
-        .await?;
+        .await;
+    drop(lease);
+    outcome?;
     resume_pump(state);
     Ok(ResponseData::Present(json!({ "cancelled": false })))
 }

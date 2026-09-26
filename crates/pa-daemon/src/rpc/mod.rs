@@ -174,6 +174,11 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
             stream.recv().await;
+            // Fire the shutdown broadcast FIRST: a replacement mid-settle
+            // aborts the turn and refuses instead of holding the lease
+            // across the model's runtime, so the exit never queues
+            // behind new_session/switch_session/fork.
+            terminate_session.fire_shutdown();
             // Serialize with any in-flight whole-session replacement:
             // the lease holds until the exit, so the handle read below
             // sees the session that is live NOW and no replacement can
@@ -196,6 +201,9 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {
             stream.recv().await;
+            // Fire the shutdown broadcast FIRST (the settle racing this
+            // exit aborts and refuses instead of holding the lease).
+            hangup_session.fire_shutdown();
             // Serialize with any in-flight whole-session replacement
             // (the lease holds until the exit): the abort and the
             // dispose target the session that is live NOW.

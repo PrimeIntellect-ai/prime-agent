@@ -719,10 +719,12 @@ fn build_session_manager_with_lease(
             | ResolvedSession::Local(path)
             | ResolvedSession::Global { path, .. } => path,
         };
-        return Ok((
-            SessionManager::fork_from(&source, &cwd, &session_dir)?,
-            None,
-        ));
+        let manager = SessionManager::fork_from(&source, &cwd, &session_dir)?;
+        // The materialized fork leases its own file before the engine
+        // writes it (the fresh-session rule): another process resuming
+        // the new file can never become a second writer while this
+        // engine appends — the source was only read, never leased.
+        return Ok(lease_fresh_manager(manager));
     }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.
@@ -773,16 +775,30 @@ fn fresh_session_with_lease(
     session_dir: &std::path::Path,
 ) -> (pa_core::session::manager::SessionManager, Option<pa_daemon::lease::SessionLease>) {
     let manager = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
-    // A fresh file's lease cannot be contended (its uuid is new); an
-    // acquire failure here is environmental (the lease directory), so
-    // the session proceeds with a warning instead of failing startup.
+    lease_fresh_manager(manager)
+}
+
+/// Lease a freshly materialized session file before the engine can write
+/// it (the fresh `create`/`continue` paths and the `--fork` copy): the
+/// UNGATED runtime acquire the resume path and the daemon's replacement
+/// `New` arm share — `acquire_session_lease` answers `Ok(None)` whenever
+/// the env gate is unset, so it would leave production fresh sessions
+/// unleased. A fresh file's lease cannot be contended (its uuid is new);
+/// an acquire failure here is environmental (the lease directory), so
+/// the session proceeds with a warning instead of failing startup.
+fn lease_fresh_manager(
+    manager: pa_core::session::manager::SessionManager,
+) -> (
+    pa_core::session::manager::SessionManager,
+    Option<pa_daemon::lease::SessionLease>,
+) {
     let lease = match manager.get_session_file() {
         Some(path) => {
-            match pa_daemon::lease::acquire_session_lease(
-                Some(path),
+            match pa_daemon::lease::acquire_runtime_session_lease(
+                path,
                 &crate::config::get_agent_dir(),
             ) {
-                Ok(lease) => lease,
+                Ok(lease) => Some(lease),
                 Err(error) => {
                     eprintln!("prime-agent: could not lease the fresh session file: {error:#}");
                     None

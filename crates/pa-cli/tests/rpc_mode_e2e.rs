@@ -176,6 +176,44 @@ impl RpcChild {
     fn drain_stderr(&mut self) {
         self.drain_stderr_on_drop = true;
     }
+
+    /// The agent dir the child runs with (the harness seeds
+    /// `PRIME_AGENT_CODING_AGENT_DIR` here): the lease owner records
+    /// live under its `session-leases` tree.
+    fn agent_dir(&self) -> std::path::PathBuf {
+        self._home.path().join("agent")
+    }
+}
+
+/// The session files holding a runtime lease right now (the owner
+/// records the fresh/fork paths acquire before the engine can write).
+fn leased_session_files(agent_dir: &std::path::Path) -> Vec<String> {
+    let mut leased = Vec::new();
+    let Ok(entries) = std::fs::read_dir(agent_dir.join("session-leases")) else {
+        return leased;
+    };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("owner.json")) else {
+            continue;
+        };
+        let Ok(owner) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if let Some(path) = owner.get("sessionPath").and_then(Value::as_str) {
+            leased.push(path.to_string());
+        }
+    }
+    leased
+}
+
+/// Canonical-path comparison (the owner record stores the canonical
+/// path; the test-side strings come from the same tree, but symlinks on
+/// the host must not mask the match).
+fn is_leased(leased: &[String], session_file: &str) -> bool {
+    let session_file = std::path::Path::new(session_file);
+    leased.iter().any(|leased| {
+        std::fs::canonicalize(leased).ok() == std::fs::canonicalize(session_file).ok()
+    })
 }
 
 impl Drop for RpcChild {
@@ -744,5 +782,114 @@ fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     drop(client.stdin.take());
     let status = client.child.wait().expect("exit");
     assert!(status.success(), "the mode serves the protocol: {status}");
+    client.spawn_stderr = None;
+}
+
+/// A fresh persisted session leases its eagerly selected file before
+/// the engine can write it (the UNGATED runtime acquire — the env-gated
+/// test helper answered `None` in production and left fresh sessions
+/// unleased): the owner record exists while the engine is live.
+#[test]
+fn rpc_fresh_sessions_lease_their_files() {
+    let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
+    assert_eq!(response["success"], true);
+    client.wait_event("agent_end", TIMEOUT);
+    let stats = client.request(&json!({ "type": "get_session_stats" }));
+    let session_file = stats["data"]["sessionFile"]
+        .as_str()
+        .expect("the persisted session reports its file")
+        .to_string();
+    let leased = leased_session_files(&client.agent_dir());
+    assert!(
+        is_leased(&leased, &session_file),
+        "the fresh session's file is runtime-leased while the engine is live (leased: {leased:?})"
+    );
+    drop(client.stdin.take());
+    let status = client.child.wait().expect("exit");
+    assert!(status.success(), "eof settles the leased session: {status}");
+    client.spawn_stderr = None;
+}
+
+/// The `--fork` copy leases its materialized file before the engine
+/// writes it: another process resuming the new file can never become a
+/// second writer while this engine appends (the source is only read).
+#[test]
+fn rpc_fork_leases_the_materialized_file() {
+    let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let response = source.request(&json!({ "type": "prompt", "message": "hi" }));
+    assert_eq!(response["success"], true);
+    source.wait_event("agent_end", TIMEOUT);
+    let stats = source.request(&json!({ "type": "get_session_stats" }));
+    let source_file = stats["data"]["sessionFile"]
+        .as_str()
+        .expect("the source session reports its file")
+        .to_string();
+    drop(source.stdin.take());
+    let status = source.child.wait().expect("the source exits cleanly");
+    assert!(status.success(), "the source session settles: {status}");
+    source.spawn_stderr = None;
+
+    let mut forked = RpcChild::spawn(
+        &["--mode", "rpc", "--fork", &source_file],
+        &turn_script(json!(["hi there"])),
+    );
+    let response = forked.request(&json!({ "type": "prompt", "message": "again" }));
+    assert_eq!(response["success"], true);
+    forked.wait_event("agent_end", TIMEOUT);
+    let stats = forked.request(&json!({ "type": "get_session_stats" }));
+    let forked_file = stats["data"]["sessionFile"]
+        .as_str()
+        .expect("the forked session reports its file")
+        .to_string();
+    assert_ne!(forked_file, source_file, "the fork materialized a new file");
+    let leased = leased_session_files(&forked.agent_dir());
+    assert!(
+        is_leased(&leased, &forked_file),
+        "the fork's materialized file is runtime-leased (leased: {leased:?})"
+    );
+    drop(forked.stdin.take());
+    let status = forked.child.wait().expect("exit");
+    assert!(status.success(), "eof settles the forked session: {status}");
+    forked.spawn_stderr = None;
+}
+
+/// A signal exit during an in-flight whole-session replacement must not
+/// queue behind the replacement's settle: the shutdown broadcast aborts
+/// the running turn, the replacement refuses, and the 143 exit fires
+/// long before the stalled model call would finish.
+#[test]
+fn rpc_sigterm_during_replacement_exits_promptly() {
+    let script = json!({ "responses": [ { "text": "slow", "delayMs": 30_000 } ] });
+    let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
+    let response = client.request(&json!({ "type": "prompt", "message": "go" }));
+    assert_eq!(response["success"], true);
+    client.wait_event("message_start", TIMEOUT);
+    // The replacement queues behind the running turn's settle; SIGTERM
+    // must cut through both.
+    client.send(json!({ "type": "new_session", "id": "t-replace" }));
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(client.child.id().to_string())
+        .status()
+        .expect("send SIGTERM");
+    assert!(status.success(), "the SIGTERM dispatch succeeded");
+    // Event-gated wait: the stdout pipe closes exactly when the child
+    // exits — well inside the faux turn's 30s hold.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match client.lines.recv_timeout(Duration::from_millis(500)) {
+            Ok(_) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the signal exit queued behind the replacement's settle"
+                );
+            }
+        }
+    }
+    let status = client.child.wait().expect("the signal exits the child");
+    assert_eq!(status.code(), Some(143), "SIGTERM exits 143");
     client.spawn_stderr = None;
 }
