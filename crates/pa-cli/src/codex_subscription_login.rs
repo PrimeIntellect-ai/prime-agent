@@ -109,6 +109,7 @@ pub(crate) async fn run_codex_subscription_login(
             client_id: None,
             resource: None,
             issuer: None,
+            enterprise_url: None,
         },
     );
     if let Some(error) = auth.drain_errors().pop() {
