@@ -265,126 +265,125 @@ async fn deliver_message_respects_the_pending_capacity() {
         Some("Target session has too many pending messages: 20 unfinished, limit is 20")
     );
 
-    /// The attach response's wire shape is the TS `createAttachResult`
-    /// key order (`serde_json` keeps insertion order), for slim and plain
-    /// clients: the slim response carries the messages exactly once
-    /// (inside the snapshot) and the non-slim duplicate is byte-identical
-    /// to the snapshot's copy.
-    #[tokio::test]
-    async fn attach_response_wire_bytes_keep_the_ts_key_order() {
-        let worker = created_worker().await;
-        {
-            let mut core = worker.core.lock().unwrap();
-            let store = core.store.as_mut().expect("the created store");
-            store.append_entry(
-                "message",
-                json!({ "message": { "role": "user", "content": "wire bytes" } }),
+/// The attach response's wire shape is the TS `createAttachResult`
+/// key order (`serde_json` keeps insertion order), for slim and plain
+/// clients: the slim response carries the messages exactly once
+/// (inside the snapshot) and the non-slim duplicate is byte-identical
+/// to the snapshot's copy.
+#[tokio::test]
+async fn attach_response_wire_bytes_keep_the_ts_key_order() {
+    let worker = created_worker().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        let store = core.store.as_mut().expect("the created store");
+        store.append_entry(
+            "message",
+            json!({ "message": { "role": "user", "content": "wire bytes" } }),
+        );
+        store.append_entry(
+            "message",
+            json!({ "message": { "role": "assistant", "content": "byte order" } }),
+        );
+    }
+    for (capabilities, slim) in [(vec!["slim_attach"], true), (Vec::<&str>::new(), false)] {
+        let response = worker
+            .dispatch(
+                "attach",
+                &json!({
+                    "clientId": "wire-client",
+                    "capabilities": capabilities,
+                }),
+            )
+            .await;
+        assert!(response.success, "attach failed: {response:?}");
+        let data = response.data.expect("attach carries data");
+        let keys = data
+            .as_object()
+            .expect("attach data is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>();
+        let expected = if slim {
+            vec![
+                "protocol".to_string(),
+                "activeSessionId".to_string(),
+                "snapshot".to_string(),
+                "replay".to_string(),
+                "lastEventSequence".to_string(),
+                "lastEventCursor".to_string(),
+                "client".to_string(),
+            ]
+        } else {
+            vec![
+                "protocol".to_string(),
+                "activeSessionId".to_string(),
+                "state".to_string(),
+                "messages".to_string(),
+                "snapshot".to_string(),
+                "replay".to_string(),
+                "lastEventSequence".to_string(),
+                "lastEventCursor".to_string(),
+                "client".to_string(),
+            ]
+        };
+        assert_eq!(
+            keys, expected,
+            "the attach top-level keys keep the TS createAttachResult order"
+        );
+        let snapshot = data.get("snapshot").expect("the attach snapshot");
+        let snapshot_keys = snapshot
+            .as_object()
+            .expect("the snapshot is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>();
+        assert_eq!(
+            snapshot_keys,
+            vec![
+                "activeSessionId".to_string(),
+                "summary".to_string(),
+                "state".to_string(),
+                "messages".to_string(),
+                "lastEventSequence".to_string(),
+                "lastEventCursor".to_string(),
+                "children".to_string(),
+            ],
+            "the snapshot keys keep the TS order"
+        );
+        let messages = snapshot.get("messages").expect("the snapshot messages");
+        let content: Vec<String> = messages
+            .as_array()
+            .expect("messages are an array")
+            .iter()
+            .map(|row| {
+                row.get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            content,
+            vec!["wire bytes".to_string(), "byte order".to_string()],
+            "the snapshot carries the store's transcript rows in order"
+        );
+        if slim {
+            assert!(
+                data.get("messages").is_none() && data.get("state").is_none(),
+                "the slim attach duplicates no message tree at the top level"
             );
-            store.append_entry(
-                "message",
-                json!({ "message": { "role": "assistant", "content": "byte order" } }),
-            );
-        }
-        for (capabilities, slim) in [(vec!["slim_attach"], true), (Vec::<&str>::new(), false)] {
-            let response = worker
-                .dispatch(
-                    "attach",
-                    &json!({
-                        "clientId": "wire-client",
-                        "capabilities": capabilities,
-                    }),
-                )
-                .await;
-            assert!(response.success, "attach failed: {response:?}");
-            let data = response.data.expect("attach carries data");
-            let keys = data
-                .as_object()
-                .expect("attach data is an object")
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-            let expected = if slim {
-                vec![
-                    "protocol".to_string(),
-                    "activeSessionId".to_string(),
-                    "snapshot".to_string(),
-                    "replay".to_string(),
-                    "lastEventSequence".to_string(),
-                    "lastEventCursor".to_string(),
-                    "client".to_string(),
-                ]
-            } else {
-                vec![
-                    "protocol".to_string(),
-                    "activeSessionId".to_string(),
-                    "state".to_string(),
-                    "messages".to_string(),
-                    "snapshot".to_string(),
-                    "replay".to_string(),
-                    "lastEventSequence".to_string(),
-                    "lastEventCursor".to_string(),
-                    "client".to_string(),
-                ]
-            };
+        } else {
+            let top_messages = data.get("messages").expect("the top-level messages");
             assert_eq!(
-                keys, expected,
-                "the attach top-level keys keep the TS createAttachResult order"
+                serde_json::to_string(top_messages).unwrap(),
+                serde_json::to_string(messages).unwrap(),
+                "the duplicated message trees serialize to identical bytes"
             );
-            let snapshot = data.get("snapshot").expect("the attach snapshot");
-            let snapshot_keys = snapshot
-                .as_object()
-                .expect("the snapshot is an object")
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
             assert_eq!(
-                snapshot_keys,
-                vec![
-                    "activeSessionId".to_string(),
-                    "summary".to_string(),
-                    "state".to_string(),
-                    "messages".to_string(),
-                    "lastEventSequence".to_string(),
-                    "lastEventCursor".to_string(),
-                    "children".to_string(),
-                ],
-                "the snapshot keys keep the TS order"
+                data.get("state"),
+                snapshot.get("summary"),
+                "the top-level state is the summary the snapshot carries"
             );
-            let messages = snapshot.get("messages").expect("the snapshot messages");
-            let content: Vec<String> = messages
-                .as_array()
-                .expect("messages are an array")
-                .iter()
-                .map(|row| {
-                    row.get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string()
-                })
-                .collect();
-            assert_eq!(
-                content,
-                vec!["wire bytes".to_string(), "byte order".to_string()],
-                "the snapshot carries the store's transcript rows in order"
-            );
-            if slim {
-                assert!(
-                    data.get("messages").is_none() && data.get("state").is_none(),
-                    "the slim attach duplicates no message tree at the top level"
-                );
-            } else {
-                let top_messages = data.get("messages").expect("the top-level messages");
-                assert_eq!(
-                    serde_json::to_string(top_messages).unwrap(),
-                    serde_json::to_string(messages).unwrap(),
-                    "the duplicated message trees serialize to identical bytes"
-                );
-                assert_eq!(
-                    data.get("state"),
-                    snapshot.get("summary"),
-                    "the top-level state is the summary the snapshot carries"
-                );
-            }
         }
     }
 }
