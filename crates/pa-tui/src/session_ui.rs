@@ -786,7 +786,7 @@ impl SessionUi {
         // task never outlives the run (the agents-view handoff and the
         // exit both drop the session).
         let (orders_tx, orders_rx) = mpsc::unbounded_channel::<PromptOrder>();
-        tokio::spawn(prompt_submit_worker(orders_rx, prompt_notes.clone()));
+        tokio::spawn(Self::prompt_submit_worker(orders_rx, prompt_notes.clone()));
         let mut session = SessionUi {
             client,
             active_session_id: String::new(),
