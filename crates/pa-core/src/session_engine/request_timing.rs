@@ -50,10 +50,10 @@ use serde_json::{json, Map, Value};
 use crate::session::manager::format_iso;
 
 /// TS `REQUEST_TIMING_ENV`: the env override (inherited by daemon workers).
-pub const REQUEST_TIMING_ENV: &str = "PI_REQUEST_TIMING";
+const REQUEST_TIMING_ENV: &str = "PI_REQUEST_TIMING";
 
 /// TS log component: `getLogger("coding-agent.request-timing")`.
-pub const LOG_COMPONENT: &str = "coding-agent.request-timing";
+const LOG_COMPONENT: &str = "coding-agent.request-timing";
 
 /// TS `AGENT_LOG_MAX_BYTES` (`logging.ts`): the shared JSONL log rotates at
 /// 20 MiB.
@@ -109,24 +109,24 @@ impl RequestTimingLog {
     }
 
     /// The log at an explicit path (tests).
-    pub fn at(path: impl Into<PathBuf>) -> Self {
+    fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             max_bytes: AGENT_LOG_MAX_BYTES,
         }
     }
 
-    /// Current log path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Info-level entry (TS `Logger.info`): caller fields first, the
     /// reserved keys (`ts`/`level`/`component`/`msg`) and the sink's `pid`
-    /// context win so an entry can never be misclassified.
+    /// context win so an entry can never be misclassified. The `ts` field
+    /// is the ISO-8601 UTC timestamp (TS `new Date().toISOString()`),
+    /// reused from the session manager's formatter.
     fn info(&self, msg: &str, fields: Map<String, Value>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let mut entry = fields;
-        entry.insert("ts".to_string(), json!(now_iso()));
+        entry.insert("ts".to_string(), json!(format_iso(now.as_millis() as i64)));
         entry.insert("level".to_string(), json!("info"));
         entry.insert("component".to_string(), json!(LOG_COMPONENT));
         entry.insert("msg".to_string(), json!(msg));
@@ -170,15 +170,6 @@ impl RequestTimingLog {
         let _ = std::fs::remove_file(&rotated);
         std::fs::rename(&self.path, &rotated)
     }
-}
-
-/// ISO-8601 UTC timestamp (TS `new Date().toISOString()`), reusing the
-/// session manager's formatter.
-fn now_iso() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format_iso(now.as_millis() as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +217,7 @@ impl RequestTimingWiring {
     }
 
     /// The JSONL log the entries go to.
-    pub fn log(&self) -> &RequestTimingLog {
+    fn log(&self) -> &RequestTimingLog {
         &self.log
     }
 
@@ -834,6 +825,11 @@ impl ModelStream for TimingStream {
                 timing.emit_summary(Outcome::Aborted);
                 return None;
             };
+            // TS `default` arm: the first streamed content block clears the
+            // Waiting state (start/done/error are never first-token events).
+            if is_request_timing_first_token_event(&event) {
+                timing.mark_first_token();
+            }
             match &event {
                 // Providers push start after response headers; used only
                 // when the response hook did not fire.
@@ -860,10 +856,17 @@ impl ModelStream for TimingStream {
                         Outcome::Failed
                     });
                 }
-                event if is_request_timing_first_token_event(event) => {
-                    timing.mark_first_token();
-                }
-                _ => {}
+                // The remaining content events carry no phase of their own:
+                // the first-token check above covers the starts and deltas.
+                AssistantMessageEvent::TextStart { .. }
+                | AssistantMessageEvent::TextDelta { .. }
+                | AssistantMessageEvent::TextEnd { .. }
+                | AssistantMessageEvent::ThinkingStart { .. }
+                | AssistantMessageEvent::ThinkingDelta { .. }
+                | AssistantMessageEvent::ThinkingEnd { .. }
+                | AssistantMessageEvent::ToolCallStart { .. }
+                | AssistantMessageEvent::ToolCallDelta { .. }
+                | AssistantMessageEvent::ToolCallEnd { .. } => {}
             }
             Some(event)
         })
