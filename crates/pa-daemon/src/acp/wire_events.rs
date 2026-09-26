@@ -267,10 +267,8 @@ fn tool_result_text(result: Option<&Value>) -> Option<String> {
 fn base64_byte_length(data: &str) -> u64 {
     let padding = if data.ends_with("==") {
         2
-    } else if data.ends_with('=') {
-        1
     } else {
-        0
+        u64::from(data.ends_with('='))
     };
     (data.len() as u64 * 3 / 4).saturating_sub(padding)
 }

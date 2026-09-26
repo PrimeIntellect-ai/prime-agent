@@ -805,7 +805,7 @@ mod tests {
         )
         .unwrap();
         let auth = crate::auth::AuthStorage::in_memory_with_env(
-            Default::default(),
+            crate::auth::types::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::NoOAuth),
             std::sync::Arc::new(NoEnvCredentials),
         );

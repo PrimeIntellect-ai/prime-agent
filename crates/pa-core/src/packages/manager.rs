@@ -402,7 +402,7 @@ impl PackageManager {
         match scope {
             UserOrProject::User => self.settings.set_packages(packages),
             UserOrProject::Project => self.settings.set_project_packages(packages),
-        };
+        }
     }
 
     pub(super) fn base_dir_for_scope(&self, scope: SourceScope) -> PathBuf {

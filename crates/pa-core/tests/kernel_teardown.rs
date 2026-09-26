@@ -33,7 +33,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -42,7 +43,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live teardown test");
+    eprintln!(
+        "kernel python {} not found; skipping live teardown test",
+        candidate.display()
+    );
     None
 }
 
@@ -149,9 +153,9 @@ fn test_options() -> Option<pa_core::kernel::shared::KernelManagerOptions> {
     Some(pa_core::kernel::shared::KernelManagerOptions {
         python: Some(python),
         cwd: Some(std::env::temp_dir()),
-        env: Default::default(),
+        env: std::collections::HashMap::default(),
         session_id: Some("teardown-test".to_string()),
-        host_handlers: Default::default(),
+        host_handlers: pa_core::kernel::shared::HostRequestHandlers::default(),
         python_skills: Vec::new(),
         snapshot: None,
         bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[])),
