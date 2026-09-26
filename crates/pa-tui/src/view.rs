@@ -1522,7 +1522,7 @@ impl AgentView {
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
         // no top bar, transcript, or prompt dock behind it.
         if let Some(screen) = self.onboarding.as_mut() {
-            let frame = screen.render(&self.theme, width, height);
+            let frame = screen.render(&self.theme, width, height, self.editor.keybindings());
             self.frame_rows = frame.len();
             return frame;
         }

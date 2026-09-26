@@ -378,10 +378,11 @@ impl OnboardingPanel {
     }
 
     /// The panel's rows (TS `render`'s active-panel arm; the panel indents
-    /// its own content).
-    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<Line> {
+    /// its own content). The auth panel's hint row renders the
+    /// effective bindings, so the keybindings manager rides along.
+    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match self {
-            OnboardingPanel::Auth { panel, .. } => panel.render(theme, width),
+            OnboardingPanel::Auth { panel, .. } => panel.render(theme, width, kb),
             OnboardingPanel::Providers(picker) => picker.render(theme, width),
             OnboardingPanel::Question(choice) => choice.render(theme, width),
         }
