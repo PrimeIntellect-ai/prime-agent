@@ -1048,11 +1048,11 @@ mod tests {
     use super::*;
 
     /// The pre-fix overlong-word break loop, verbatim from origin/rust
-    /// (the O(token_len x rows) re-measure version): the output oracle for
+    /// (the quadratic re-measure version): the output oracle for
     /// [`wrap_spans_into`]'s arithmetic-tracked rewrite. Every corpus below
     /// must wrap to byte- and style-identical `Line`s on both algorithms —
     /// the rewrite is a complexity fix, never a layout change. The oracle
-    /// stays O(token_len^2), so differential corpora are bounded (~4KiB
+    /// stays quadratic, so differential corpora are bounded (~4KiB
     /// tokens); the linear rewrite gets its own unbounded stress test.
     fn legacy_wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<'_>) {
         if width == 0 {
@@ -1202,7 +1202,7 @@ mod tests {
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         for token in [
             format!("aa{family}aaa"),
-            format!("{family}"),
+            family.to_string(),
             format!("a{family}"),
             format!("{family}a"),
             format!("aa{family}aa"),
@@ -1258,7 +1258,7 @@ mod tests {
         // rows that fit whole, exactly-width tokens, and width 0 (no wrap)
         let spans = vec![Span::styled("abcdefgh".to_string(), Style::default())];
         assert_wrap_parity(&spans, &[0, 1, 7, 8, 9, 100]);
-        let spans = vec![Span::styled("".to_string(), Style::default())];
+        let spans = vec![Span::styled(String::new(), Style::default())];
         assert_wrap_parity(&spans, &[0, 1, 80]);
     }
 
