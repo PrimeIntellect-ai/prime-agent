@@ -107,12 +107,7 @@ impl ClientSubscriptions {
     ) -> bool {
         let was_attached = self.contains(selector);
         if was_attached {
-            registry.move_subscription(
-                selector,
-                current,
-                &self.connection_id,
-                self.queue.clone(),
-            );
+            registry.move_subscription(selector, current, &self.connection_id, self.queue.clone());
             let mut sessions = self.sessions.lock().unwrap();
             sessions.retain(|id| id != selector);
             if !sessions.iter().any(|id| id == current) {
@@ -378,7 +373,11 @@ mod tests {
         client.attach(&registry, "a");
         client.attach(&registry, "b");
         let outcome = registry.publish("a", frame("one"));
-        assert_eq!(outcome.delivered, 1, "a duplicate attach must not double-deliver");
+        assert_eq!(
+            outcome.delivered,
+            1,
+            "a duplicate attach must not double-deliver"
+        );
         assert_eq!(drained(&mut rx).await.len(), 1);
         client.detach_all(&registry);
         assert_eq!(registry.publish("b", frame("late")).delivered, 0);
