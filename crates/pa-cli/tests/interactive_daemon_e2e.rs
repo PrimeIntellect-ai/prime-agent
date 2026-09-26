@@ -4231,6 +4231,18 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // TEMP DEBUG
+    eprintln!("=== DBG frames ===\n{rendered}");
+    for entry in std::fs::read_dir(&session_dir).expect("read session dir").flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            eprintln!("=== DBG file {path:?} ===");
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            for line in content.lines().skip(content.lines().count().saturating_sub(25)) {
+                eprintln!("  {line}");
+            }
+        }
+    }
     assert!(
         ran,
         "the daemon ran the outlived submit's turn for the switched-away session"
