@@ -379,13 +379,16 @@ impl Supervisor {
                     descriptor.session_file.clone(),
                 )
             };
-            self.publish_session_event(&current, std::sync::Arc::new(json!({
-                "type": "session_binding",
-                "previousActiveSessionId": selector,
-                "activeSessionId": current,
-                "sessionId": session_id,
-                "sessionFile": session_file,
-            })));
+            self.publish_session_event(
+                &current,
+                std::sync::Arc::new(json!({
+                    "type": "session_binding",
+                    "previousActiveSessionId": selector,
+                    "activeSessionId": current,
+                    "sessionId": session_id,
+                    "sessionFile": session_file,
+                })),
+            );
         }
         current
     }
@@ -396,9 +399,7 @@ impl Supervisor {
     /// queue drops the frame and the stall-cycle transition lands in the
     /// daemon log (finding 4a visibility).
     pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
-        let outcome = self
-            .session_subscribers
-            .publish(active_session_id, payload);
+        let outcome = self.session_subscribers.publish(active_session_id, payload);
         if !outcome.lagged.is_empty() {
             self.log_line(&format!(
                 "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",
@@ -1382,10 +1383,9 @@ impl Supervisor {
         // Session events ride this per-connection queue (the subscriber
         // registry resolves delivery at publish time, TS `handleWorkerFrame`
         // parity); broadcast-class events keep the ring above.
-        let (targeted_tx, mut targeted_rx) =
-            tokio::sync::mpsc::channel::<Arc<Value>>(
-                crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY,
-            );
+        let (targeted_tx, mut targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(
+            crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY,
+        );
         // Connection state shared with the per-command dispatch tasks: the
         // envelope-overridden client id and the attached-session handle
         // (attach/detach keep the registry and the session list consistent;
