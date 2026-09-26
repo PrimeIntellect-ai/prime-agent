@@ -127,7 +127,7 @@ where
                     .iter()
                     .map(|block| match block {
                         ToolResultContent::Text(text) => text.text.clone(),
-                        _ => String::new(),
+                        ToolResultContent::Image(_) => String::new(),
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

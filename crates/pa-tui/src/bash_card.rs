@@ -331,7 +331,10 @@ mod tests {
             flat.iter().any(|row| row.contains("more lines")),
             "the hidden count names the cut: {flat:?}"
         );
-        assert!(flat.last().map(String::as_str) == Some("\u{2500}".repeat(80).as_str()));
+        assert_eq!(
+            flat.last().map(String::as_str),
+            Some("\u{2500}".repeat(80).as_str())
+        );
     }
 
     /// The settled run marks itself with `(exit N)` for a non-zero exit,

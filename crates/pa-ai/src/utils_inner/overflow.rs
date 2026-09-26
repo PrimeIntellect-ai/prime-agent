@@ -126,6 +126,7 @@ fn content_text(message: &AssistantMessage) -> String {
 mod tests {
     use super::*;
     use crate::types::{Usage, UsageCost};
+    use serde_json::Map;
 
     fn message(
         stop_reason: StopReason,
@@ -145,7 +146,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: error_message.map(std::string::ToString::to_string),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

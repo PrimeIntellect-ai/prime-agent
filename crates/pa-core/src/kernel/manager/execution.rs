@@ -2,6 +2,7 @@
 //! active-execution resolution plus late-sent agent message handlers.
 
 use super::*;
+use std::fmt::Write as _;
 
 impl Inner {
     /// Write one JSON-lines request frame; completes when the OS accepted the bytes.
@@ -81,8 +82,8 @@ impl Inner {
             };
             tokio::select! {
                 () = notified => {}
-                _ = wait => {}
-                _ = async {
+                () = wait => {}
+                () = async {
                     match signal {
                         Some(signal) => signal.cancelled().await,
                         None => std::future::pending().await,
@@ -153,16 +154,18 @@ impl Inner {
             let mut result = buffers.result.take();
             let mut status = buffers.status;
             if buffers.stdout_truncated {
-                stdout.push_str(&format!(
+                let _ = write!(
+                    stdout,
                     "\n[... output truncated at {} chars ...]",
                     execution.max_chars
-                ));
+                );
             }
             if buffers.stderr_truncated {
-                stderr.push_str(&format!(
+                let _ = write!(
+                    stderr,
                     "\n[... output truncated at {} chars ...]",
                     execution.max_chars
-                ));
+                );
             }
             if let Some(text) = &result {
                 if text.len() > execution.max_chars {
@@ -171,10 +174,11 @@ impl Inner {
                     while !clipped.is_char_boundary(clipped.len()) {
                         clipped.pop();
                     }
-                    clipped.push_str(&format!(
+                    let _ = write!(
+                        clipped,
                         "\n[... output truncated at {} chars ...]",
                         execution.max_chars
-                    ));
+                    );
                     result = Some(clipped);
                 }
             }
@@ -190,9 +194,9 @@ impl Inner {
             let mut background_output = std::mem::take(&mut buffers.background_output);
             buffers.background_output_chars = 0;
             if buffers.background_output_truncated {
-                background_output.push_str(&format!(
+                let _ = write!(background_output,
                     "\n[... background output truncated at {MAX_BACKGROUND_OUTPUT_CHARS} chars ...]",
-                ));
+                );
             }
             let done_fields = buffers.done_fields.take();
             let result = ExecuteResult {

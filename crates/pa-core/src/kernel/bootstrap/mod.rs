@@ -10,6 +10,7 @@ pub(crate) mod dir_lock;
 mod runtime_code;
 pub(crate) mod venv;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -106,10 +107,10 @@ fn format_bootstrap_failure(error: &anyhow::Error) -> anyhow::Error {
     // the raw install error alone is not actionable.
     if venv::packaged_runtime_dir().is_none() {
         let package = venv::package_dir();
-        message.push_str(&format!(
+        let _ = write!(message,
             "\nThe packaged prime-agent-runtime directory was not found (looked next to the executable at {} and PI_PACKAGE_DIR); reinstall prime-agent so the kernel runtime ships beside the binary.",
             package.display()
-        ));
+        );
     }
     anyhow!(message)
 }

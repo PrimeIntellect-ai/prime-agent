@@ -96,7 +96,7 @@ mod tests {
             started_at: "a".to_string(),
             updated_at: "b".to_string(),
             heartbeat_at: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 

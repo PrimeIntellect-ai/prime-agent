@@ -33,7 +33,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel test",
+        candidate.display()
+    );
     None
 }
 
@@ -43,7 +46,10 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
@@ -235,7 +241,7 @@ impl Client {
                     last_line = Instant::now();
                 }
                 Err(_) => {
-                    if Instant::now() - last_line >= quiet_ms {
+                    if last_line.elapsed() >= quiet_ms {
                         return;
                     }
                 }

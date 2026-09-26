@@ -126,7 +126,7 @@ pub fn harness_digest_prompt_row(digest: &str, timestamp: u64) -> AgentMessage {
         display: false,
         details: Some(serde_json::json!({ "digest": digest })),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
         role: "custom".to_string(),
@@ -191,7 +191,7 @@ pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
                         .iter()
                         .find_map(|part| match part {
                             UserPart::Text(text) => Some(text.text.as_str()),
-                            _ => None,
+                            UserPart::Image(_) => None,
                         })
                         .unwrap_or(""),
                 };
@@ -224,7 +224,7 @@ pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
                     digest,
                 );
             }
-            _ => {}
+            AgentMessage::Standard(_) => {}
         }
     }
     latest.map(|(_, digest)| digest.to_string())
@@ -262,7 +262,7 @@ pub fn digest_session_message(entry: &FileEntry) -> Option<SessionAgentMessage> 
             display: payload.display,
             details: payload.details.clone(),
             timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         },
     ))
 }
@@ -398,7 +398,7 @@ fn loop_user_text(content: &pa_agent::types::UserContent) -> String {
             .iter()
             .filter_map(|part| match part {
                 pa_agent::types::UserPart::Text(text) => Some(text.text.clone()),
-                _ => None,
+                pa_agent::types::UserPart::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join(" "),

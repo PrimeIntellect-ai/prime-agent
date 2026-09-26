@@ -794,7 +794,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -978,7 +978,7 @@ mod tests {
                 .unwrap();
             self.engine
                 .session
-                .prompt(text, Default::default())
+                .prompt(text, pa_core::session_engine::PromptOptions::default())
                 .await
                 .unwrap();
             self.engine.session.agent().wait_for_idle().await;
@@ -1051,7 +1051,7 @@ mod tests {
         // it lands ahead of the user row in the transcript.
         let entries = bed.engine.session.entries().await;
         let mut kinds: Vec<String> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 pa_types::session::FileEntry::CustomMessage { payload, .. }
                     if payload.custom_type == pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE =>
@@ -1294,7 +1294,7 @@ mod tests {
         // the compaction as the post-compaction turn's leading row.
         let entries = bed.engine.session.entries().await;
         let mut marks: Vec<(String, u64)> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 // The goal-state rows are `Custom` entries (their `data` is
                 // the serialized state); the context rows are
@@ -1412,7 +1412,7 @@ mod tests {
                         String::from("a resumed history turn ") + &"x".repeat(60000),
                     ),
                     timestamp: 1,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .expect("the resumed user turn appends");

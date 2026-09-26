@@ -152,7 +152,7 @@ impl ModelRefusalTelemetry {
             }
         }
         let mut slot = self.client.lock().expect("refusal telemetry lock");
-        if !slot.as_ref().is_some_and(|(bound_cwd, _)| bound_cwd == cwd) {
+        if slot.as_ref().is_none_or(|(bound_cwd, _)| bound_cwd != cwd) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
             *slot = Some((cwd.to_path_buf(), client));
