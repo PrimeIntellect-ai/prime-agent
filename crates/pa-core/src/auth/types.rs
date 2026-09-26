@@ -73,6 +73,16 @@ pub enum AuthCredential {
         /// like TS).
         #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
+        /// The GitHub Enterprise domain the Copilot login ran against (TS
+        /// stores the copilot login's `enterpriseUrl` next to the
+        /// credentials; the refresh and the model base URL resolve through
+        /// it).
+        #[serde(
+            rename = "enterpriseUrl",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        enterprise_url: Option<String>,
         /// Endpoint binding for MCP logins (`mcp:<server>` credentials): the
         /// MCP endpoint the token was issued for; consumers refuse to send
         /// it elsewhere.

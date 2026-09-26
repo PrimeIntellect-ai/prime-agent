@@ -211,8 +211,9 @@ impl OnboardingScreen {
             AuthPanelRequest::PastePrompt {
                 prompt,
                 style,
+                allow_empty,
                 reply,
-            } => panel.mount_paste(prompt, style, reply),
+            } => panel.mount_paste(prompt, style, allow_empty, reply),
             AuthPanelRequest::SelectTeam {
                 teams,
                 current,
