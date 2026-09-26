@@ -670,6 +670,18 @@ pub(crate) enum RebuildKind {
     Resync,
 }
 
+/// Where a compact-dock focus hand-off comes from (TS
+/// `focusSubagentSummary`, shared by `app.subagents.focus` and the
+/// editor's move-below-prompt hook): the selectability gate differs per
+/// caller.
+enum DockFocusSource {
+    /// The editor's Down at the prompt's end (TS `onMoveBelowPrompt`
+    /// -> `focusSubagentSummary`): the subagents box's affordance.
+    PromptDown,
+    /// The `app.subagents.focus` key: any rendered dock group.
+    Shortcut,
+}
+
 /// How the attach settles the dock's data before the rebuild renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DockFold {
@@ -1338,7 +1350,7 @@ impl SessionUi {
     }
 
     /// The editor's Down and Alt+A hand focus to the compact dock.
-    fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
+    fn focus_subagents_summary(&mut self, source: DockFocusSource, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
         // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
         // armed Ctrl+C exit hint, or the streaming follow-up hint over a
@@ -1347,20 +1359,39 @@ impl SessionUi {
         if self.tray_override(view).is_some() {
             return false;
         }
-        // The dock owns the hand-off exactly while it renders: a session
-        // with nothing to show (no subagent history, heartbeats, shells,
-        // or live goal) keeps the dock unmounted and the focus in the
-        // editor. Every group the row renders is traversable, empty
-        // ones included, so no feed gate remains here.
-        let dock = self.activity_dock_state();
-        if !dock.visible() {
-            return false;
-        }
-        if !dock.groups().contains(&self.activity_group) {
-            // Only the goal group leaves with its row: the selection
-            // steps back to the group that now ends the row.
-            self.activity_group =
-                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+        match source {
+            DockFocusSource::PromptDown => {
+                // TS `SubagentSummaryLine.isSelectable()`: the prompt's
+                // Down is the subagents box's own affordance — subagents
+                // must exist, and the grab selects that group. The dock's
+                // other groups (heartbeats, shells, the goal row) never
+                // take this Down; their shortcut stays
+                // `app.subagents.focus`, so the prompt's arrows keep the
+                // input-history recall in every session shape.
+                if !(self.return_to_agents_view && self.subagent_counts.total > 0) {
+                    return false;
+                }
+                self.activity_group = crate::chrome::ActivityGroup::Subagents;
+            }
+            DockFocusSource::Shortcut => {
+                // The dock owns the hand-off exactly while it renders: a
+                // session with nothing to show (no subagent history,
+                // heartbeats, shells, or live goal) keeps the dock
+                // unmounted and the focus in the editor. Every group the
+                // row renders is traversable, empty ones included, so no
+                // feed gate remains here.
+                let dock = self.activity_dock_state();
+                if !dock.visible() {
+                    return false;
+                }
+                if !dock.groups().contains(&self.activity_group) {
+                    // Only the goal group leaves with its row: the
+                    // selection steps back to the group that now ends the
+                    // row.
+                    self.activity_group =
+                        dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+                }
+            }
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -8270,7 +8301,7 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.subagents.focus")
         {
-            self.focus_subagents_summary(view);
+            self.focus_subagents_summary(DockFocusSource::Shortcut, view);
             self.dirty = true;
             return Ok(());
         }
@@ -8459,9 +8490,13 @@ impl SessionUi {
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
         // of the prompt — no autocomplete open, no history browse, the
-        // cursor at the last line's end — hands the focus to the dock
-        // while it renders; every other Down falls through to the
-        // editor's cursor motion (an unmounted dock never takes it).
+        // cursor at the last line's end — hands the focus to the subagent
+        // summary line when it is selectable; every other Down falls
+        // through to the editor's cursor motion (a non-selectable line
+        // never takes it). TS `SubagentSummaryLine.isSelectable()` grants
+        // the grab only when subagents exist — the dock's other groups
+        // keep their `app.subagents.focus` shortcut, so the prompt's
+        // arrows stay the input-history recall in every session shape.
         if view
             .editor
             .keybindings()
@@ -8469,7 +8504,7 @@ impl SessionUi {
             && !view.editor.is_showing_autocomplete()
             && !view.editor.is_history_navigation_active()
             && view.editor.is_cursor_at_end()
-            && self.focus_subagents_summary(view)
+            && self.focus_subagents_summary(DockFocusSource::PromptDown, view)
         {
             // The focus leaves the editor with the selection active: a
             // later keystroke would fall back through to the editor and
