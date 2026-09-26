@@ -1188,13 +1188,13 @@ impl SessionUi {
         let dock = self.activity_dock_state();
         // A focused selection must stay on a rendered group: the arrows
         // visit every group an empty one included, so the selection
-        // only moves when its group unmounts (the goal row ends with
-        // the goal) — and a dock that unmounts entirely (nothing left to
-        // show) returns the focus to the editor.
+        // only moves when its group leaves the row (the goal row ends
+        // with the goal) — and a dock that unmounts entirely (nothing
+        // left to show) returns the focus to the editor.
         if self.subagents_focused {
             if !dock.visible() {
                 self.subagents_focused = false;
-            } else if !self.activity_group_mounted(self.activity_group) {
+            } else if !dock.groups().contains(&self.activity_group) {
                 self.activity_group =
                     dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
             }
@@ -1254,20 +1254,6 @@ impl SessionUi {
         }
     }
 
-    /// Whether the dock renders a group's segment. The subagents,
-    /// heartbeats, and shells groups always render while the dock is
-    /// up — an empty one keeps its zero count and stays traversable
-    /// (the operator's 2026-09-26 directive) — and the goal group is
-    /// mounted exactly while the goal row renders (every live state).
-    fn activity_group_mounted(&self, group: crate::chrome::ActivityGroup) -> bool {
-        match group {
-            crate::chrome::ActivityGroup::Subagents
-            | crate::chrome::ActivityGroup::Heartbeats
-            | crate::chrome::ActivityGroup::Bash => true,
-            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
-        }
-    }
-
     /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
@@ -1287,8 +1273,8 @@ impl SessionUi {
         if !dock.visible() {
             return false;
         }
-        if !self.activity_group_mounted(self.activity_group) {
-            // Only the goal group unmounts with its row: the selection
+        if !dock.groups().contains(&self.activity_group) {
+            // Only the goal group leaves with its row: the selection
             // steps back to the group that now ends the row.
             self.activity_group =
                 dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
