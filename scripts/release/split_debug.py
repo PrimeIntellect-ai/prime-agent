@@ -117,7 +117,12 @@ def main() -> int:
             shutil.copyfileobj(src, gz)
 
     stripped_tmp = binary.with_suffix(binary.suffix + ".stripped")
-    run(["objcopy", "--strip-debug", str(binary), str(stripped_tmp)])
+    # --strip-debug drops the .debug_* DWARF sections but leaves the
+    # binutils-emitted .debug_gdb_scripts auto-load marker (34 bytes); it
+    # is removed explicitly so the shipped image carries NO .debug_*
+    # section at all (--remove-section is a no-op when absent).
+    run(["objcopy", "--strip-debug",
+         "--remove-section=.debug_gdb_scripts", str(binary), str(stripped_tmp)])
     after = debug_sections(stripped_tmp)
     if after:
         fail(f"--strip-debug left .debug_* sections behind: {after}")
