@@ -10,7 +10,7 @@
 
 use pa_tui::ansi::strip_ansi;
 use pa_tui::info_commands::js_to_fixed;
-use pa_tui::width::{str_width, truncate_to_width};
+use pa_tui::width::truncate_to_width;
 use pa_types::daemon::agent_roster::{
     classify_summary_value, session_activity_detail, AgentRosterStatus, SessionActivityOptions,
 };
@@ -109,7 +109,9 @@ fn session_activity_cell(summary: &Value) -> String {
         },
     );
     let recap = compact_cell_text(string_field(summary, "summary"));
-    [Some(detail), recap]
+    // TS filters the empty parts before joining, so an idle session with a
+    // recap renders the recap alone, no leading separator.
+    [(!detail.is_empty()).then_some(detail), recap]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -222,6 +224,7 @@ fn truncate_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_tui::width::str_width;
     use serde_json::json;
 
     const NOW_MS: u64 = 1_780_056_000_000; // 2026-05-29T12:00:00.000Z
@@ -294,7 +297,7 @@ mod tests {
     #[test]
     fn rows_render_the_ts_vectors() {
         let capped_recap = format!("running tools \u{b7} {}…", "a".repeat(43));
-        let capped_name = "n".repeat(59);
+        let capped_name = format!("{}…", "n".repeat(59));
         let vectors: Vec<(&str, Value, [&str; 6])> = vec![
             (
                 "thinking detail",
@@ -440,7 +443,7 @@ mod tests {
 
     #[test]
     fn sorts_failures_first_then_recovering_then_running_then_idle_then_rest() {
-        let sessions = vec![
+        let sessions = [
             make_summary(json!({
                 "sessionName": "plain-saved",
                 "activeSessionId": null,
@@ -474,7 +477,7 @@ mod tests {
 
     #[test]
     fn measures_wide_glyph_cells_by_display_width() {
-        let sessions = vec![
+        let sessions = [
             make_summary(json!({ "sessionName": "中文" })),
             make_summary(json!({
                 "sessionName": "hello",
