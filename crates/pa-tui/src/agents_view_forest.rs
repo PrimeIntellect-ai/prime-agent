@@ -230,6 +230,11 @@ pub fn selection_key(summary: &Value) -> SelectionKey {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rollup {
     pub cost: f64,
+    /// Every descendant subagent's spend (the running line's aggregate
+    /// cost cell): each child's recursive rollup plus this record's
+    /// deleted-descendant bucket. Status-independent — running, idle,
+    /// and inactive descendants all bill.
+    pub descendants: f64,
     pub descendant_count: usize,
 }
 
@@ -441,8 +446,13 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
             })
             .unwrap_or(0.0)
             + deleted_descendants;
+        // `descendants` starts at the deleted-descendant bucket: the
+        // bucket is descendant spend, so the aggregate bills it even
+        // though no live child row carries it (a nested child's own
+        // bucket already rides that child's `cost`).
         let mut rollup = Rollup {
             cost: own_cost,
+            descendants: deleted_descendants,
             descendant_count: 0,
         };
         for child in index.children_by_parent.get(position).into_iter().flatten() {
@@ -450,6 +460,7 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
                 continue;
             }
             rollup.cost += rollups[*child].cost;
+            rollup.descendants += rollups[*child].cost;
             rollup.descendant_count += 1 + rollups[*child].descendant_count;
         }
         rollups[*position] = rollup;
@@ -587,6 +598,9 @@ struct BaseRow {
     age: String,
     own_cost: f64,
     recursive_cost: f64,
+    /// Every descendant's spend (the running line's cost cell): the
+    /// rollup's descendant total, status-independent.
+    descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
     /// Direct children currently roster-running: the `direct` number of
@@ -687,6 +701,7 @@ pub fn build_rows(
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0),
             recursive_cost: rollup.cost,
+            descendant_cost: rollup.descendants,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
             direct_running: 0,
@@ -790,6 +805,7 @@ pub fn build_rows(
         // fallback when the caller passed none (TS `rollup ?? descendants`).
         if !rollups.contains_key(&base[*index].identity) {
             base[*index].descendant_count = descendants;
+            base[*index].descendant_cost = descendants_cost;
             base[*index].recursive_cost = base[*index].own_cost + descendants_cost;
         }
     }
@@ -1273,6 +1289,7 @@ fn running_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agents
         expanded,
         title,
         SUMMARY_ROW_PREFIX,
+        parent.descendant_cost,
         parent.running_subagent_count,
     )
 }
@@ -1309,18 +1326,25 @@ fn inactive_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agent
         expanded,
         title,
         INACTIVE_SUMMARY_ROW_PREFIX,
+        0.0,
         0,
     )
 }
 
 /// One summary line's row: both lines reuse their parent's summary so
-/// the open action and selection keys resolve the parent.
+/// the open action and selection keys resolve the parent. The `cost`
+/// cell is the line's aggregate — the running line bills the whole
+/// descendant tree (the operator's 2026-09-26 ask; TS
+/// `createSubagentSummaryRow` pins `recursiveCost: 0` there, a
+/// deliberate divergence) while the inactive line stays unbilled, and
+/// neither line carries an age.
 fn summary_row(
     parent: &BaseRow,
     depth: usize,
     expanded: bool,
     title: String,
     identity_prefix: &str,
+    cost: f64,
     running_subagent_count: usize,
 ) -> AgentsViewRow {
     AgentsViewRow {
@@ -1331,8 +1355,8 @@ fn summary_row(
         summary: parent.summary.clone(),
         title,
         model: String::new(),
-        cost: 0.0,
-        age: parent.age.clone(),
+        cost,
+        age: String::new(),
         depth,
         descendant_count: 0,
         running_subagent_count,
@@ -2562,5 +2586,156 @@ mod tests {
             "recency breaks score ties before section grouping"
         );
         assert_eq!(rows[1].title, "sweep alpha");
+    }
+
+    /// The operator's 2026-09-26 ask: the collapsed running line's Cost
+    /// cell aggregates EVERY descendant subagent's spend — running, idle,
+    /// and inactive rows all bill — while the inactive line stays
+    /// unbilled and the parent row keeps the recursive total (own +
+    /// descendants).
+    #[test]
+    fn running_line_bills_every_descendant_status() {
+        let mut parent = parent_summary("p");
+        parent["usage"] = json!({ "cost": 0.25 });
+        let mut runner = child_summary("r1", "p", "runner");
+        runner["usage"] = json!({ "cost": 1.25 });
+        let mut grandchild = child_summary("gc", "r1", "grandkid");
+        grandchild["rlmChildId"] = json!("child-gc");
+        grandchild["usage"] = json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = json!({ "cost": 2.5 });
+        let mut inactive_child = child_summary("x1", "p", "old worker");
+        inactive_child["usage"] = json!({ "cost": 0.75 });
+        let roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("r1", "running", runner),
+            roster_entry("gc", "running", grandchild),
+            roster_entry("i1", "idle", idle_child),
+            roster_entry("x1", "inactive", inactive_child),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(
+            rows[0].cost, 5.0,
+            "the parent row keeps own 0.25 + descendants 4.75"
+        );
+        let running = rows
+            .iter()
+            .find(|row| row.identity == "subagents:file:/x/p.jsonl")
+            .expect("running line");
+        assert_eq!(running.title, "1, 1 running");
+        assert_eq!(
+            running.cost, 4.75,
+            "runner subtree 1.50 + idle 2.50 + inactive 0.75 — every status bills"
+        );
+        let inactive = rows
+            .iter()
+            .find(|row| row.identity == "subagents-inactive:file:/x/p.jsonl")
+            .expect("inactive line");
+        assert_eq!(inactive.cost, 0.0, "the inactive line stays unbilled");
+    }
+
+    /// The deleted-descendant bucket (TS #2506's
+    /// `deletedDescendantUsage`) is descendant spend: the running line
+    /// bills it alongside the live subtree even though no live child
+    /// row carries it — a deletion must not erase the money from the
+    /// aggregate any more than from the recursive total.
+    #[test]
+    fn running_line_bills_the_deleted_descendant_bucket() {
+        let deleted = json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 });
+        let saved_parent = json!({
+            "path": "/x/p.jsonl", "id": "p",
+            "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
+            "deletedDescendantUsage": deleted,
+        });
+        let mut parent = parent_summary("p");
+        parent["usage"] = json!({ "cost": 0.25 });
+        let mut runner = child_summary("r1", "p", "runner");
+        runner["usage"] = json!({ "cost": 0.25 });
+        let roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("r1", "running", runner),
+        ];
+        let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent));
+        let rollups = compute_rollups(&records);
+        assert_eq!(
+            rollups
+                .get("file:/x/p.jsonl")
+                .expect("parent rollup")
+                .descendants,
+            0.75,
+            "live child 0.25 + deleted bucket 0.50"
+        );
+        let rows = build_rows(
+            &records,
+            None,
+            &HashSet::new(),
+            &HashSet::new(),
+            &rollups,
+            None,
+        );
+        let running = rows
+            .iter()
+            .find(|row| row.identity == "subagents:file:/x/p.jsonl")
+            .expect("running line");
+        assert_eq!(running.cost, 0.75);
+        assert_eq!(rows[0].cost, 1.0, "own 0.25 + aggregate 0.75");
+    }
+
+    /// A tree that spends nothing bills its `$0.00` cell — the cost cell
+    /// is part of the row, never a value-dependent extra — and a parent
+    /// with no subagents renders no collapsed row to bill at all.
+    #[test]
+    fn running_line_cost_is_zero_when_nothing_bills() {
+        let mut grandchild = child_summary("gc", "r1", "grandkid");
+        grandchild["rlmChildId"] = json!("child-gc");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("r1", "running", child_summary("r1", "p", "runner")),
+            roster_entry("gc", "running", grandchild),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        let running = rows
+            .iter()
+            .find(|row| row.identity == "subagents:file:/x/p.jsonl")
+            .expect("running line");
+        assert_eq!(running.title, "1, 1 running");
+        assert_eq!(running.cost, 0.0);
+        // No subagents: no summary row renders — there is no collapsed
+        // row to bill.
+        let lone = rows_for(&[roster_entry("p", "idle", parent_summary("p"))], None, &[]);
+        assert_eq!(lone.len(), 1);
+        assert_eq!(lone[0].kind, RowKind::Agent);
+    }
+
+    /// A nested parent's own running line bills only that parent's
+    /// subtree, not the root's whole tree: the depth-2 line under an
+    /// expanded child carries the grandchild's spend alone.
+    #[test]
+    fn nested_running_line_bills_its_own_subtree() {
+        let mut runner = child_summary("r1", "p", "runner");
+        runner["usage"] = json!({ "cost": 1.25 });
+        let mut grandchild = child_summary("gc", "r1", "grandkid");
+        grandchild["rlmChildId"] = json!("child-gc");
+        grandchild["usage"] = json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = json!({ "cost": 2.5 });
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("r1", "running", runner),
+            roster_entry("gc", "running", grandchild),
+            roster_entry("i1", "idle", idle_child),
+        ];
+        let rows = rows_for_lists(&roster, None, &["file:/x/p.jsonl"], &[]);
+        let nested = rows
+            .iter()
+            .find(|row| row.identity == "subagents:file:/x/r1.jsonl")
+            .expect("the child's own running line");
+        assert_eq!(nested.title, "1, 0 running");
+        assert_eq!(nested.cost, 0.25, "only the grandchild's spend");
+        let running = rows
+            .iter()
+            .find(|row| row.identity == "subagents:file:/x/p.jsonl")
+            .expect("the root's running line");
+        assert_eq!(running.cost, 4.0, "runner subtree 1.50 + idle 2.50");
     }
 }
