@@ -649,7 +649,7 @@ impl SessionManager {
     /// straight to disk — never deferred behind the bootstrap rule, whose
     /// `flushed = false` would later send `flush_now` into the
     /// window-failing rewrite path.
-    pub fn adopt_window(&mut self, window: super::window::WindowedSessionStore) {
+    pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
         // One-copy adoption: the walk's parsed trees move in (no `to_vec`
         // clone), and the raw JSONL lines drop here — the file itself is the
         // durable raw copy, and a second resident typed copy plus the raw

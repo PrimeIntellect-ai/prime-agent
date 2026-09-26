@@ -748,9 +748,22 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
         assert!(!reference.raw_entries().is_empty());
         let expected = reference.context();
         let actual = manager.active_context();
+        let expected_bytes = serde_json::to_vec(&(
+            &expected.messages,
+            &expected.thinking_level,
+            &expected.service_tier,
+            &expected.model,
+        ))
+        .unwrap();
+        let actual_bytes = serde_json::to_vec(&(
+            &actual.messages,
+            &actual.thinking_level,
+            &actual.service_tier,
+            &actual.model,
+        ))
+        .unwrap();
         assert_eq!(
-            serde_json::to_vec(&actual).unwrap(),
-            serde_json::to_vec(&expected).unwrap(),
+            actual_bytes, expected_bytes,
             "{phase} adopted context diverged from the un-adopted window"
         );
     }
@@ -816,11 +829,13 @@ async fn adopted_manager_live_appends_match_full_reopen() {
             .unwrap();
     manager.append_model_change("live", "m2").unwrap();
     manager
-        .append_message(AgentMessage::User(pa_types::ai::UserMessage {
-            content: pa_types::ai::UserContent::Text("live prompt".to_owned()),
-            timestamp: 5,
-            rest: Default::default(),
-        }))
+        .append_message(pa_types::session::AgentMessage::User(
+            pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("live prompt".to_owned()),
+                timestamp: 5,
+                rest: Default::default(),
+            },
+        ))
         .unwrap();
     // A live attribution whose target sits INSIDE the retained window:
     // the manager folds its own copy (the detached window has none).
@@ -849,15 +864,28 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     let live = manager.active_context();
     let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
     let reopened_ctx = reopened.active_context();
+    let live_bytes = serde_json::to_vec(&(
+        &live.messages,
+        &live.thinking_level,
+        &live.service_tier,
+        &live.model,
+    ))
+    .unwrap();
+    let reopened_bytes = serde_json::to_vec(&(
+        &reopened_ctx.messages,
+        &reopened_ctx.thinking_level,
+        &reopened_ctx.service_tier,
+        &reopened_ctx.model,
+    ))
+    .unwrap();
     assert_eq!(
-        serde_json::to_vec(&live).unwrap(),
-        serde_json::to_vec(&reopened_ctx).unwrap(),
+        live_bytes, reopened_bytes,
         "post-adopt live appends diverged from the full reader's reopen"
     );
     // The folded aggregate is visible in both (assignment, not merge).
     assert!(
         live.messages.iter().any(|m| matches!(m,
-            AgentMessage::Assistant(a)
+            pa_types::session::AgentMessage::Assistant(a)
                 if a.usage.input == 15 && a.usage.output == 3)),
         "the live attribution fold did not reach the served context"
     );
