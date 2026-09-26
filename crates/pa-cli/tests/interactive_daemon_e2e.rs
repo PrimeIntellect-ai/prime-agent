@@ -2819,8 +2819,11 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         "the auth-blind turn resolution must not report the resolver's empty-catalog error:\n{rendered}"
     );
     let last = outcome.frames.last().expect("a final frame");
+    // The reasoning fixture renders its live effort suffix (TS
+    // `getModelContextLabel`): the label the failed pick must hold is
+    // `model:effort`, with the daemon's effective level for glm-5.3.
     assert!(
-        last.contains("z-ai/glm-5.3 ·"),
+        last.contains("z-ai/glm-5.3:high ·"),
         "the footer label holds the resolved flagged model (the failed pick switched nothing):\n{last}"
     );
     drop(supervisor);

@@ -388,6 +388,9 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot tray effort suffix for the next rebuild (the attach
+    /// state's level; `None` clears it).
+    pending_thinking_suffix: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -760,6 +763,7 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
@@ -1093,6 +1097,7 @@ impl SessionUi {
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
         self.spawn_bash_activity_refresh();
         self.pending_model = reconstructed.model_id;
+        self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1367,6 +1372,10 @@ impl SessionUi {
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
         }
+        // The tray's effort suffix moves with the same snapshot: an
+        // attach's state either carries the session's level or reports a
+        // model without reasoning, and the bare name wins in both cases.
+        view.chrome.thinking_suffix = self.pending_thinking_suffix.take();
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -7350,7 +7359,8 @@ impl SessionUi {
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
     /// `set_thinking_level` command switches the session's level (durable
     /// row and settings default included), then the client records the
-    /// `Thinking level: <level>` status row.
+    /// `Thinking level: <level>` status row and the tray's `model:effort`
+    /// label follows the effective level.
     async fn apply_thinking_level(&mut self, level: &str, view: &mut AgentView) {
         let switched = self
             .bounded_request(
@@ -7364,7 +7374,39 @@ impl SessionUi {
             )
             .await;
         match switched {
-            Ok(_) => self.note(&format!("Thinking level: {level}"), view),
+            Ok(_) => {
+                // The tray's effort suffix follows the level the switch
+                // wrote: the daemon clamps the request (TS `setThinkingLevel`
+                // emits the effective level; the Rust daemon answers no such
+                // event, so the client re-reads the state `/effort` targets).
+                // A failed read falls back to the requested level, never the
+                // previous model's stale suffix.
+                let state = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::GetState {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await;
+                match state {
+                    Ok(data) => {
+                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                    }
+                    // The switch succeeded; the state read did not. TS
+                    // `applyThinkingLevel` patches the requested level into
+                    // the connection state (the `thinking_level_changed`
+                    // event corrects it later), so render the requested
+                    // level — never the previous model's stale suffix.
+                    Err(_) => {
+                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
+                            .map(|parsed| parsed.wire_name().to_string());
+                    }
+                }
+                self.note(&format!("Thinking level: {level}"), view);
+            }
             Err(error) => {
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
@@ -7417,6 +7459,9 @@ impl SessionUi {
     /// that omits it falls back to the picked model (`state.model ??
     /// fallbackModel`) — the switch already succeeded, so the label must
     /// move even when the worker's summary cannot re-resolve the model.
+    /// The tray's effort suffix follows the same read: a switch clamps
+    /// the level (a model without the old level re-resolves it), and a
+    /// model without reasoning renders the bare id.
     async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
         let state = self
             .bounded_request(
@@ -7428,15 +7473,22 @@ impl SessionUi {
                 },
             )
             .await;
-        let model_id = match state {
-            Ok(data) => data
+        if let Ok(data) = state {
+            let model_id = data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string),
-            Err(_) => picked_model_id.to_string(),
-        };
-        view.chrome.model_id = Some(model_id);
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            view.chrome.model_id = Some(model_id);
+            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+        } else {
+            // The picked model's effort is unknown when the read fails:
+            // a stale suffix would pair the new model with the old
+            // model's level (a combination TS never renders), so the
+            // bare id wins.
+            view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.thinking_suffix = None;
+        }
         self.dirty = true;
     }
 
