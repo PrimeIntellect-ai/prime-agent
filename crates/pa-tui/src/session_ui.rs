@@ -7904,7 +7904,7 @@ impl SessionUi {
 
     /// The run's first click-driven interaction (`tui click used`,
     /// adoption; later clicks in the same run are not reported).
-    fn track_click(&mut self, surface: &'static str) {
+    pub(crate) fn track_click(&mut self, surface: &'static str) {
         if self.click_adoption_emitted {
             return;
         }
