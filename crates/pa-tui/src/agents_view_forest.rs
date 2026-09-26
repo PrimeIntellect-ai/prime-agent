@@ -2202,8 +2202,8 @@ mod tests {
         let rows = build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
             &rollups,
             None,
         );
@@ -2215,7 +2215,7 @@ mod tests {
         let rows = build_rows(
             &records,
             None,
-            &Default::default(),
+            &HashSet::default(),
             &expanded,
             &rollups,
             None,
@@ -2409,8 +2409,8 @@ mod tests {
         let rows = build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
             &empty,
             None,
         );
@@ -2552,8 +2552,8 @@ mod tests {
         let rows = build_rows(
             &filtered,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
             &rollups,
             None,
         );

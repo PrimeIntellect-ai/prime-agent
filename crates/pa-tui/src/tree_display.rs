@@ -72,8 +72,7 @@ pub fn assistant_text(message: &pa_types::ai::AssistantMessage) -> String {
             pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .collect::<String>()
 }
 
 /// Whether an assistant message carries text (the default filter keeps it).

@@ -81,8 +81,7 @@ pub fn load_context_tree_child(
     // so candidates are tried newest-first until one opens.
     let store = newest_session_files(child_dir)
         .iter()
-        .filter_map(|file| SessionFile::open(file).ok())
-        .next()?;
+        .find_map(|file| SessionFile::open(file).ok())?;
     // Label, status, and model follow the same gap-bridged branch as the
     // usage totals: a ghost-parent gap must not strip a child of its
     // identity either. The context estimate below stays strict — it
@@ -572,7 +571,7 @@ mod tests {
             &artifacts,
             "01a0parent-0000",
             &registry,
-            &Default::default(),
+            &HashSet::default(),
             &TombstonedChildren::new(),
         );
         assert_eq!(nodes.len(), 2, "non-sub dirs and empty dirs drop out");

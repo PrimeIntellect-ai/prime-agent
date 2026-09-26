@@ -358,8 +358,8 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                     next.saturating_sub(now).clamp(1, MAX_TIMEOUT_MS),
                 );
                 tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = &mut notified => continue,
+                    () = tokio::time::sleep(delay) => {}
+                    () = &mut notified => continue,
                 }
                 if core.stopped.load(Ordering::SeqCst) {
                     return;
@@ -460,9 +460,10 @@ mod tests {
         impl AgentCronSchedulerHooks for PanickingHooks {
             async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
                 self.runs.fetch_add(1, Ordering::SeqCst);
-                if self.panic_first.swap(false, Ordering::SeqCst) {
-                    panic!("the first dispatch unwinds");
-                }
+                assert!(
+                    !self.panic_first.swap(false, Ordering::SeqCst),
+                    "the first dispatch unwinds"
+                );
                 Ok(Some("ran"))
             }
             fn now(&self) -> u64 {

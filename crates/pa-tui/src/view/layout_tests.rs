@@ -6,6 +6,14 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
+/// The transcript's condensed runs in order (the block-comparison
+/// helper for these layout tests).
+fn condensed_runs(view: &AgentView) -> Vec<crate::tool_runs::ToolRun> {
+    (0..view.chat.len())
+        .filter_map(|index| view.run_map.run_at(index))
+        .collect()
+}
+
 #[test]
 fn windows_match_uncached_reference_with_variable_height_and_hidden_entries() {
     let mut view = view();
@@ -523,7 +531,7 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
         }
     }
     let assert_two_blocks = |view: &AgentView| {
-        let runs = view.condensed_runs();
+        let runs = condensed_runs(view);
         assert_eq!(runs.len(), 2, "two blocks around the visible assistant");
         assert_eq!(runs[0].calls, 5);
         assert_eq!(runs[1].calls, 5);
@@ -557,7 +565,7 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
     full.sparse_enabled = false;
     full.resolve_sparse_geometry();
     full.sparse_enabled = false;
-    let runs = sparse.condensed_runs();
+    let runs = condensed_runs(&sparse);
     assert_eq!(runs.len(), 1, "the runs merged into one block");
     assert_eq!(
         runs[0].calls, 10,
@@ -641,7 +649,7 @@ fn a_glue_push_after_a_user_row_folds_at_its_own_slot() {
     view.render_frame(80, 12);
     view.scroll_by(-6);
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("original"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -659,12 +667,12 @@ fn a_glue_push_after_a_user_row_folds_at_its_own_slot() {
 
 #[test]
 fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
-    // Four real calls plus an unmatched wire result: the orphan keeps
-    // its standalone card row (it is not a call) and breaks the run -
+    // Two real calls plus an unmatched wire result: the orphan keeps
+    // its standalone card row (it is not an item) and breaks the run -
     // the group never reaches the condensing threshold.
     let mut view = view();
     view.detail = Detail::Overview;
-    for index in 0..4 {
+    for index in 0..2 {
         view.push(crate::session::TranscriptItem::ToolCall {
             id: format!("c{index}"),
             name: "bash".to_string(),
@@ -690,7 +698,7 @@ fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
         is_error: false,
         timestamp: 3,
     });
-    let runs = view.condensed_runs();
+    let runs = condensed_runs(&view);
     assert!(
         runs.is_empty(),
         "the orphan breaks the run: no condensed block ({runs:?})"
@@ -708,7 +716,7 @@ fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
 
 #[test]
 fn a_short_sequence_push_folds_at_the_pushed_slot() {
-    // [user, status rows..., T x3 (an UNCONDENSED tail sequence)]: the
+    // [user, status rows..., T (an UNCONDENSED tail sequence)]: the
     // window pauses with a selection on a card row of the sequence,
     // then one more card lands at the tail. The sequence never reaches
     // the condensing threshold, so the push owns its own slot exactly
@@ -752,19 +760,19 @@ fn a_short_sequence_push_folds_at_the_pushed_slot() {
             kind: StatusKind::Info,
         });
     }
-    for index in 0..3 {
+    for index in 0..1 {
         view.push_entry(card(&format!("a{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
-        .find(|row| row_text(&frame, *row).contains("out a2"))
+    let row = (1..=view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out a0"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
-    // The push: a fourth card lands at the tail (the sequence stays
+    // The push: a second card lands at the tail (the sequence stays
     // under the condensing threshold).
-    view.push_entry(card("a3"));
+    view.push_entry(card("a1"));
     view.render_frame(80, 12);
     view.render_frame(80, 12);
     assert_eq!(
@@ -776,7 +784,7 @@ fn a_short_sequence_push_folds_at_the_pushed_slot() {
 
 #[test]
 fn a_solo_card_growth_folds_at_its_own_slot() {
-    // [status rows..., T x4 (an UNCONDENSED tail sequence)]: the window
+    // [status rows..., T x2 (an UNCONDENSED tail sequence)]: the window
     // pauses with a selection on a card row, then the card MUTATES in
     // place (its output grows). No qualifying block covers the
     // sequence, so the mutation folds at the card's own slot exactly
@@ -816,20 +824,20 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
             kind: StatusKind::Info,
         });
     }
-    for index in 0..4 {
+    for index in 0..2 {
         view.push_entry(card(&format!("b{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
-        .find(|row| row_text(&frame, *row).contains("out b3"))
+    let row = (1..=view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b1"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
     // The mutation: the LAST card's output grows (the sequence never
     // condenses).
-    view.prepare_entry_mutation(33);
-    if let ChatEntry::Tool(owned) = &mut view.chat[33] {
+    view.prepare_entry_mutation(31);
+    if let ChatEntry::Tool(owned) = &mut view.chat[31] {
         owned.result = Some(crate::chat::ToolResultView {
             content: vec![
                 serde_json::json!({"type": "text", "text": "done"}),
@@ -839,7 +847,7 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
             is_error: false,
         });
     }
-    view.mark_entry_stale(33);
+    view.mark_entry_stale(31);
     view.render_frame(80, 12);
     view.render_frame(80, 12);
     assert_eq!(
@@ -851,7 +859,7 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
 
 #[test]
 fn a_short_sequence_pop_folds_at_the_popped_slot() {
-    // [status rows..., T x4 (an UNCONDENSED tail sequence)]: the window
+    // [status rows..., T x2 (an UNCONDENSED tail sequence)]: the window
     // pauses with a selection on a card row, then the LAST card pops
     // (the retry-episode collapse). No qualifying block covers the
     // sequence, so the shrink folds at the popped card's own slot -
@@ -891,7 +899,7 @@ fn a_short_sequence_pop_folds_at_the_popped_slot() {
             kind: StatusKind::Info,
         });
     }
-    for index in 0..4 {
+    for index in 0..2 {
         view.push_entry(card(&format!("b{index}")));
     }
     // A taller viewport: the whole tail sequence stays visible with
@@ -899,13 +907,13 @@ fn a_short_sequence_pop_folds_at_the_popped_slot() {
     let frame = view.render_frame(80, 30);
     // The selection sits on a card ABOVE the popped one (the popped
     // card's own content vanishes with it).
-    let row = (1..1 + view.window_rows)
-        .find(|row| row_text(&frame, *row).contains("out b1"))
+    let row = (1..=view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b0"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
-    // The pop: the TAIL card (b3, below the selection) leaves - the
+    // The pop: the TAIL card (b1, below the selection) leaves - the
     // sequence stays uncondensed.
     view.pop_chat_entry();
     view.render_frame(80, 30);
@@ -993,8 +1001,8 @@ fn a_qualifying_tail_append_patches_the_map_incrementally() {
     for index in 0..5 {
         view.push_entry(card(&format!("c{index}")));
     }
-    // The sixth card lands through the O(1) path (the run owns the
-    // tail already).
+    // The sixth card lands through the in-place tail path (the run
+    // owns the tail already).
     view.push_entry(card("c5"));
     let mut fresh = crate::tool_runs::ToolRuns::default();
     fresh.rebuild_from(&view.chat, 0);
@@ -1008,7 +1016,8 @@ fn a_qualifying_tail_append_patches_the_map_incrementally() {
         Some(crate::tool_runs::ToolRun {
             start: 0,
             end: 6,
-            calls: 6
+            calls: 6,
+            messages: 0
         }),
         "the run's extent widened by the pushed card"
     );
@@ -1016,7 +1025,7 @@ fn a_qualifying_tail_append_patches_the_map_incrementally() {
 
 #[test]
 fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
-    // [status rows..., T x4 (an UNCONDENSED sequence of QUEUED cards)]:
+    // [status rows..., T x2 (an UNCONDENSED sequence of QUEUED cards)]:
     // the window pauses with a selection on a card row, then the
     // result REPLAYS into the pending card - the card's rows grow when
     // the result lands. The replay prepares the sparse fold (exactly
@@ -1044,18 +1053,18 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
             kind: StatusKind::Info,
         });
     }
-    for index in 0..4 {
+    for index in 0..2 {
         view.push_entry(queued_card(&format!("b{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
-        .find(|row| row_text(&frame, *row).contains("out b3"))
+    let row = (1..=view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b1"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     // The replay: the result lands on the pending card.
     view.push(crate::session::TranscriptItem::ToolResult {
-        tool_call_id: "b3".to_string(),
+        tool_call_id: "b1".to_string(),
         tool_name: "bash".to_string(),
         text: "done".to_string(),
         content: Vec::new(),
@@ -1067,7 +1076,7 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
     view.render_frame(80, 12);
     let selected = view.end_active_selection();
     assert!(
-        selected.as_deref().is_some_and(|text| text.contains("b3")),
+        selected.as_deref().is_some_and(|text| text.contains("b1")),
         "the selection stays on the card's own rows (never a drifted row): {selected:?}"
     );
 }
@@ -1111,8 +1120,7 @@ fn a_background_shell_run_keeps_its_block_uncached() {
         view.push_entry(card(&format!("c{index}"), false));
     }
     view.push_entry(card("c4", true));
-    let run = view
-        .condensed_runs()
+    let run = condensed_runs(&view)
         .first()
         .copied()
         .expect("the five-call run condenses");
@@ -1178,7 +1186,7 @@ fn an_assistant_growth_folds_at_its_own_slot() {
     view.render_frame(80, 12);
     view.scroll_by(-6);
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("original"))
         .unwrap();
     assert!(view.begin_selection(row, 0));

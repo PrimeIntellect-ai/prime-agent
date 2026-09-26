@@ -17,6 +17,7 @@
 //! kernel install. Test B is the scripted engine (no kernel).
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -47,7 +48,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -58,7 +60,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live re-adoption wake e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live re-adoption wake e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -197,7 +202,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
         ],
     };
     for data in data {
-        payload.push_str(&format!("data: {data}\n\n"));
+        write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(

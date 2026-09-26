@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use futures::Stream;
+use serde_json::Map;
 
 pub use crate::types::{AssistantContent, AssistantMessage, AssistantMessageEvent, StopReason};
 
@@ -331,7 +332,7 @@ pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> A
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -351,7 +352,7 @@ mod tests {
             content: vec![AssistantContent::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             api: "test".into(),
             provider: "test".into(),
@@ -364,7 +365,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

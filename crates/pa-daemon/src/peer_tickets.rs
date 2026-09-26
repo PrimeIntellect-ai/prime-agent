@@ -25,6 +25,7 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
 use crate::util;
+use serde_json::Map;
 
 /// TS `PEER_TRANSPORT_GRANT_TTL_MS`: how long a minted grant stays valid.
 pub(crate) const PEER_TRANSPORT_GRANT_TTL_MS: u64 = 10_000;
@@ -175,7 +176,7 @@ impl Supervisor {
         let registration = DaemonWorkerCommand::WorkerRegisterPeerTransport {
             id: None,
             grant: grant.clone(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_value(&registration)?;
         let response = self
@@ -336,14 +337,14 @@ mod tests {
                     create_command: DurableDaemonCreateCommand {
                         session_path: None,
                         no_session: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     consecutive_failures: 0,
                     stop_requested_at: None,
                     archive_on_stop: None,
                     last_failure_at: None,
                     last_error: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 std::path::PathBuf::from("/d.json"),
             )

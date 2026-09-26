@@ -195,9 +195,10 @@ mod tests {
     use super::*;
     use crate::types::{
         AssistantContent, AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall,
-        ToolResultMessage, UserMessage, UserMessageContent, UserOrToolContent,
+        ToolResultMessage, Usage, UserMessage, UserMessageContent, UserOrToolContent,
     };
     use serde_json::json;
+    use serde_json::Map;
 
     fn test_model(context_window: u64, max_tokens: u64) -> Model {
         serde_json::from_value(json!({
@@ -215,7 +216,7 @@ mod tests {
             messages: vec![crate::types::Message::User(UserMessage {
                 content: UserMessageContent::Text("x".repeat(chars)),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             tools: None,
         }
@@ -252,7 +253,7 @@ mod tests {
             .push(crate::types::Message::User(UserMessage {
                 content: UserMessageContent::Blocks(vec![UserOrToolContent::Raw(value)]),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         assert_eq!(
             estimated_input_tokens(&context),
@@ -381,16 +382,16 @@ mod tests {
                         UserOrToolContent::Text(TextContent {
                             text: "12345678".to_string(), // 2 tokens
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                         UserOrToolContent::Image(ImageContent {
                             data: "QQ==".to_string(),
                             mime_type: "image/png".to_string(),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }), // 1,200 tokens
                     ]),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 crate::types::Message::Assistant(AssistantMessage {
                     content: vec![
@@ -398,7 +399,7 @@ mod tests {
                             thinking: "12345678".to_string(), // 2 tokens
                             thinking_signature: None,
                             redacted: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                         AssistantContent::ToolCall(ToolCall {
                             id: "c".to_string(),
@@ -406,7 +407,7 @@ mod tests {
                             arguments: json!({"code": "ls"}).as_object().cloned().unwrap(),
                             // 12 chars
                             thought_signature: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                     ],
                     api: "openai-completions".into(),
@@ -415,12 +416,12 @@ mod tests {
                     response_model: None,
                     response_id: None,
                     diagnostics: None,
-                    usage: Default::default(),
+                    usage: Usage::default(),
                     stop_reason: crate::types::StopReason::Stop,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 crate::types::Message::ToolResult(ToolResultMessage {
                     tool_call_id: "c".to_string(),
@@ -428,12 +429,12 @@ mod tests {
                     content: vec![UserOrToolContent::Text(TextContent {
                         text: "12345678".to_string(), // 2 tokens
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             ],
             tools: None,

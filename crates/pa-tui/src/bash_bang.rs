@@ -5,6 +5,7 @@
 //! stays excluded from the context; a bare `!`/`!!` is bash mode with
 //! nothing to run and is never sent as a prompt.
 
+use std::fmt::Write;
 /// The tail-truncation budget shared with the bash tool (TS
 /// `truncateTail` defaults): the last 2000 lines within 50KB win, so a
 /// pane-mounted run cannot seed a follow-up with unbounded output.
@@ -94,12 +95,16 @@ pub fn bash_output_to_text(
         format!("{fence}\n{output}\n{fence}")
     };
     match exit_code {
-        Some(code) if code != 0 => text.push_str(&format!("\n\nCommand exited with code {code}")),
+        Some(code) if code != 0 => {
+            let _ = write!(text, "\n\nCommand exited with code {code}");
+        }
         _ => {}
     }
     if truncated {
         match full_output_path {
-            Some(path) => text.push_str(&format!("\n\n[Output truncated. Full output: {path}]")),
+            Some(path) => {
+                let _ = write!(text, "\n\n[Output truncated. Full output: {path}]");
+            }
             None => text.push_str("\n\n[Output truncated.]"),
         }
     }

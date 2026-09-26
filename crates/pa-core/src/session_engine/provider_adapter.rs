@@ -362,7 +362,7 @@ mod tests {
                 ));
                 Ok(pa_ai::faux::faux_assistant_text_message(
                     "ok",
-                    Default::default(),
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
                 ))
             }));
         registration.set_responses(vec![factory.clone(), factory]);
@@ -416,11 +416,11 @@ mod tests {
                     pa_types::ai::UserContentBlock::Text(pa_types::ai::TextContent {
                         text: "reply with ok".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     }),
                 ]),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         );
     }
@@ -438,7 +438,7 @@ mod tests {
             thinking: "trace".into(),
             thinking_signature: Some("sig-1".into()),
             redacted: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         let wire = serde_json::to_value(&thinking).unwrap();
         assert_eq!(
@@ -460,7 +460,7 @@ mod tests {
             name: "bash".into(),
             arguments: serde_json::Map::new(),
             thought_signature: Some("sig-2".into()),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         let wire = serde_json::to_value(&tool_call).unwrap();
         assert_eq!(

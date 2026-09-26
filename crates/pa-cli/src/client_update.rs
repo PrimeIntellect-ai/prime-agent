@@ -57,9 +57,7 @@ impl UpdateCommands for ClientUpdate {
                 .stderr(Stdio::inherit())
                 .status()
                 .await?;
-            let code = status
-                .code()
-                .unwrap_or(if status.success() { 0 } else { 1 });
+            let code = status.code().unwrap_or(i32::from(!status.success()));
             Ok(code)
         })
     }
