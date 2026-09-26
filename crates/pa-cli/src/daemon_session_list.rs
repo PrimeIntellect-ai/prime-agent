@@ -235,7 +235,7 @@ fn tail(value: &str, length: usize) -> String {
 }
 
 /// `formatSessionAge`: `<n>s|m|h|d|w|y` bucketing from the modified timestamp.
-fn format_session_age(modified: Option<&str>, now_ms: u64) -> String {
+pub(crate) fn format_session_age(modified: Option<&str>, now_ms: u64) -> String {
     let Some(modified) = modified else {
         return String::new();
     };
