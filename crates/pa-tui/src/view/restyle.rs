@@ -46,6 +46,13 @@ impl AgentView {
             RESTYLE_ROWS.with(|count| count.set(0));
             RESTYLE_REBUILDS.with(|count| count.set(0));
         }
+        // No selection spans any rows, so every span below is `None`: the
+        // styled window is the base rows themselves. A scroll frame
+        // (whose window always changed) skips the whole-window clone and
+        // the cache churn it feeds.
+        if !self.has_selection() {
+            return base;
+        }
         let spans: Vec<Option<(usize, usize)>> = (0..base.len())
             .map(|index| self.transcript_highlight_span(start + index))
             .collect();
@@ -137,6 +144,31 @@ mod tests {
             })
             .map(|index| index + 1)
             .expect("the needle renders in the window")
+    }
+
+    #[test]
+    fn frames_without_a_selection_restyle_nothing() {
+        let mut view = view();
+        for index in 0..40 {
+            view.push_entry(ChatEntry::User {
+                text: format!("scroll body {index}"),
+            });
+        }
+        view.render_frame(100, 30);
+        view.scroll_by(-5);
+        // The scrolled frame's window changed: without a selection the
+        // styled window is the base rows themselves, so the restyle
+        // neither rebuilds nor re-styles a row.
+        view.render_frame(100, 30);
+        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), 0));
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
+        // A live drag still restyles: the fast path never covers one.
+        let (base, start) = base_rows(&mut view);
+        let row = row_of(&mut view, "scroll body");
+        view.begin_selection(row, 2);
+        view.extend_active_selection(row + 2, 6);
+        view.selection_styled_window(base, start);
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 1));
     }
 
     #[test]
