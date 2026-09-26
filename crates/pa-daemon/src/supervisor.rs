@@ -183,19 +183,32 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// Build the supervisor: the descriptor dir, the event channel, the
-    /// log, and the compaction-supervision journal. The persisted
-    /// supervisor config is written by [`Supervisor::run`] after the
-    /// socket bind (see [`Supervisor::persist_startup_config`]).
+    /// Build the supervisor: the descriptor dir, the persisted config,
+    /// the event channel, the log, and the compaction-supervision
+    /// journal.
     ///
     /// # Errors
     ///
-    /// Returns an error when the descriptor directory cannot be created
-    /// or the compaction-supervision journal cannot be opened.
+    /// Returns an error when the descriptor directory cannot be created,
+    /// the sessions dir cannot be resolved, the supervisor config
+    /// cannot be persisted, or the compaction-supervision journal cannot
+    /// be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
         paths::ensure_dir(&descriptor_dir)?;
+        persist_supervisor_config(
+            &descriptor_dir.join(SUPERVISOR_CONFIG_FILE_NAME),
+            &PersistedSupervisorConfig {
+                version: 1,
+                socket_path: options.socket_path.to_string_lossy().to_string(),
+                default_session_dir: Some(
+                    paths::sessions_dir(&options.agent_dir)?
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            },
+        )?;
         let (events, _) = broadcast::channel(4096);
         let log = paths::RotatingLog::new(paths::daemon_log_path(
             &options.socket_path,
@@ -229,32 +242,6 @@ impl Supervisor {
             input_pauses: crate::input_pause_lease::SupervisorPauseTable::default(),
             compaction_journal: std::sync::Mutex::new(compaction_journal),
         })
-    }
-
-    /// Persist the supervisor config (the descriptor dir's
-    /// `supervisor-config` file): the same write `Supervisor::new` used to
-    /// run before the socket bind, moved off the boot's accept critical
-    /// path — no serving-path consumer reads the file (the descriptor
-    /// sweeps skip it by extension), so the write lands between the bind
-    /// and the boot reap instead of gating the bind behind its fsync.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sessions dir cannot be resolved or the
-    /// supervisor config cannot be persisted (the boot fails either way).
-    fn persist_startup_config(&self) -> Result<()> {
-        persist_supervisor_config(
-            &self.descriptor_dir.join(SUPERVISOR_CONFIG_FILE_NAME),
-            &PersistedSupervisorConfig {
-                version: 1,
-                socket_path: self.options.socket_path.to_string_lossy().to_string(),
-                default_session_dir: Some(
-                    paths::sessions_dir(&self.options.agent_dir)?
-                        .to_string_lossy()
-                        .to_string(),
-                ),
-            },
-        )
     }
 
     /// Emit the `daemon event` adoption signal for a session-archive sweep
@@ -481,9 +468,8 @@ impl Supervisor {
     /// # Errors
     ///
     /// Returns an error when the socket path cannot be prepared (already
-    /// in use), the supervisor socket cannot be bound, the supervisor
-    /// config cannot be persisted (after the bind, before any client is
-    /// served), or the accept loop fails while not shutting down.
+    /// in use), the supervisor socket cannot be bound, or the accept
+    /// loop fails while not shutting down.
     ///
     /// # Panics
     ///
@@ -551,15 +537,6 @@ impl Supervisor {
         socket::restrict_socket_path(&self.options.socket_path);
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
-
-        // The persisted supervisor config: diagnostic state with no
-        // serving-path consumer, so its atomic write (an fsync) runs
-        // after the bind instead of before it — the slowest boot step on
-        // a network-backed disk must not gate the socket's accept
-        // contract. Same payload, same atomic write, still before the
-        // boot reap and the first served client, and still a boot
-        // failure when it cannot be persisted.
-        self.persist_startup_config()?;
 
         // The boot reap (the operator's same-socket predecessor rule): this
         // daemon now owns the socket's lineage, so leftover worker processes

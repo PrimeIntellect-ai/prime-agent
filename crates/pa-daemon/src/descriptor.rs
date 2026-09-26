@@ -208,6 +208,41 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
         .join(crate::paths::hash_key(&socket_path.to_string_lossy(), 12))
 }
 
+/// Write a file atomically with 0600 permissions, WITHOUT the temp-file
+/// fsync — TS `writeFileAtomicSync` parity for the one writer TS also
+/// leaves unsynced: `persistSupervisorConfig` passes no `fsync` option
+/// (`daemon-supervisor.ts` `persistSupervisorConfig`; `atomic-file.ts`
+/// syncs only `if (options.fsync)`). Atomicity (temp + rename) and the
+/// 0600 restriction are unchanged; only the pre-rename `fsync` — a
+/// durability extra TS does not have — is skipped, so a supervisor-boot
+/// cost TS never pays stays off the daemon's accept critical path. The
+/// durable variant ([`write_file_atomic`]) stays the default: worker
+/// descriptors and update-prepare artifacts genuinely need crash
+/// durability (crash-restart adoption and transactional update state).
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, or when
+/// creating, writing, flushing, or renaming fails; the 0600 restriction
+/// is best effort and never fails the call.
+pub fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    {
+        let file =
+            std::fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(content.as_bytes())?;
+        writer.flush()?;
+    }
+    let _ = pa_core::platform::perms::restrict_file(&temp);
+    pa_core::platform::rename_onto(&temp, path)
+        .with_context(|| format!("persist {}", path.display()))?;
+    Ok(())
+}
+
 /// Write a file atomically with 0600 permissions (port of writeFileAtomicSync).
 ///
 /// # Errors
@@ -294,14 +329,19 @@ pub fn load_supervisor_config(
     Some(config)
 }
 
-/// Persist the supervisor config atomically.
+/// Persist the supervisor config atomically, without the temp-file fsync
+/// (TS parity: the TS supervisor's own persist passes no `fsync` option —
+/// see [`crate::descriptor::write_file_atomic_unsynced`]). The file has no
+/// serving-path reader (descriptor sweeps skip it by extension), so the
+/// boot's write matches the TS product exactly instead of paying an fsync
+/// TS never pays on the daemon's accept critical path.
 ///
 /// # Errors
 ///
 /// Returns an error when the config cannot be serialized or the atomic
 /// write to `path` fails.
 pub fn persist_supervisor_config(path: &Path, config: &PersistedSupervisorConfig) -> Result<()> {
-    write_file_atomic(path, &serde_json::to_string_pretty(config)?)
+    write_file_atomic_unsynced(path, &serde_json::to_string_pretty(config)?)
 }
 
 use std::io::Write as _;
