@@ -1549,6 +1549,21 @@ mod tests {
     #[tokio::test]
     async fn custom_override_never_touches_the_disk_memo() {
         let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+        fn walk(root: &Path, found: &mut Vec<std::path::PathBuf>) {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, found);
+                    } else if path
+                        .file_name()
+                        .is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
+                    {
+                        found.push(path);
+                    }
+                }
+            }
+        }
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -1564,7 +1579,10 @@ mod tests {
         std::env::set_var("HOME", &home);
         std::env::set_var("PRIME_AGENT_KERNEL_PYTHON", &python);
         std::env::remove_var("PRIME_AGENT_KERNEL_VENV");
-        let resolved = super::super::ensure_kernel_python(Default::default()).await;
+        let resolved = super::super::ensure_kernel_python(
+            super::super::EnsureKernelPythonOptions::default(),
+        )
+        .await;
         match previous_venv {
             Some(value) => std::env::set_var("PRIME_AGENT_KERNEL_VENV", value),
             None => std::env::remove_var("PRIME_AGENT_KERNEL_VENV"),
@@ -1584,21 +1602,6 @@ mod tests {
             "the override python is returned as-is"
         );
         let mut found: Vec<std::path::PathBuf> = Vec::new();
-        fn walk(root: &Path, found: &mut Vec<std::path::PathBuf>) {
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        walk(&path, found);
-                    } else if path
-                        .file_name()
-                        .is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
-                    {
-                        found.push(path);
-                    }
-                }
-            }
-        }
         walk(dir.path(), &mut found);
         assert!(
             found.is_empty(),
@@ -1809,6 +1812,12 @@ mod tests {
     #[test]
     #[ignore = "live: needs a real kernel venv under HOME (bench VMs)"]
     fn live_probe_closure_is_stdlib_or_rlm_relative() {
+        #[derive(Debug, serde::Deserialize)]
+        struct ClosureReport {
+            closure: Vec<String>,
+            violations: Vec<String>,
+        }
+
         let real_venv = kernel_venv_dir();
         let real_python = kernel_venv_python(&real_venv);
         if !real_python.is_file() {
@@ -1888,11 +1897,6 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         assert!(output.status.success(), "closure parse failed: {stderr}");
-        #[derive(Debug, serde::Deserialize)]
-        struct ClosureReport {
-            closure: Vec<String>,
-            violations: Vec<String>,
-        }
         let report: ClosureReport = serde_json::from_str(&stdout)
             .unwrap_or_else(|error| panic!("unparseable closure report {stdout:?}: {error}"));
         // The seed set mirrors the RUNTIME_READY_CHECK's imports; if either

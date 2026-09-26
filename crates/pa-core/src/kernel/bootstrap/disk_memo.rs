@@ -152,7 +152,8 @@ fn tmp_path(path: &Path) -> PathBuf {
         || DISK_MEMO_FILE.to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    name.push_str(&format!(".tmp.{}", std::process::id()));
+    name.push_str(".tmp.");
+    name.push_str(std::process::id().to_string().as_str());
     path.with_file_name(name)
 }
 
