@@ -984,6 +984,10 @@ mod tests {
             subagents_running_nested: 1,
             subagents_total: 2,
             heartbeats: 3,
+            heartbeats_paused: 1,
+            bash_running: 1,
+            bash_total: 2,
+            goal_label: Some("Pursuing goal (0s)".to_string()),
             selected: ActivityGroup::Heartbeats,
             focused: true,
         };
@@ -1110,6 +1114,10 @@ mod tests {
             subagents_running_nested: 2,
             subagents_total: 3,
             heartbeats: 2,
+            heartbeats_paused: 1,
+            bash_running: 1,
+            bash_total: 2,
+            goal_label: Some("Pursuing goal (0s)".to_string()),
             ..ActivityDock::default()
         };
         assert_eq!(
