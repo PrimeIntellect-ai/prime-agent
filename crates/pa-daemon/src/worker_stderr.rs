@@ -385,7 +385,7 @@ mod tests {
                 "worker died\n",
             );
         }
-        prune_retained(&logs_dir, &Path::new("absent-keep"));
+        prune_retained(&logs_dir, Path::new("absent-keep"));
         let fresh = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
         assert_eq!(fresh, RETAINED_FILES + 6, "a fresh burst is not pruned");
         // The burst ages past the window: the same prune collapses it to
@@ -393,7 +393,7 @@ mod tests {
         for index in 0..(RETAINED_FILES + 6) {
             backdate(&logs_dir.join(format!("worker-{index:03}.stderr.log")), 0);
         }
-        prune_retained(&logs_dir, &Path::new("absent-keep"));
+        prune_retained(&logs_dir, Path::new("absent-keep"));
         let aged = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
         assert_eq!(aged, RETAINED_FILES, "an aged burst collapses to the cap");
     }
