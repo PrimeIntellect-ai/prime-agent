@@ -230,9 +230,15 @@ async fn fork_at(
                 .map_err(|error| format!("{error:#}"))?
                 .path
         } else {
-            // Fork at the root: a fresh session under the source.
-            let mut forked =
-                crate::session_store::SessionFile::create(&source_cwd, session_file.to_str(), 0);
+            // Fork at the root: a fresh session under the source, carrying
+            // the source's RLM depth (TS `rlmDepth: sourceHeader?.rlmDepth
+            // ?? this.session.rlmDepth` — a depth-N session's children
+            // stay depth-N, so depth-0-only behavior follows the fork).
+            let mut forked = crate::session_store::SessionFile::create(
+                &source_cwd,
+                session_file.to_str(),
+                store.rlm_depth().unwrap_or(0),
+            );
             let file =
                 session_dir.join(crate::session_store::session_file_name(forked.session_id()));
             forked.set_path(file);

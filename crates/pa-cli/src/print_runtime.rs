@@ -240,7 +240,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
             let manager = match &request {
                 pa_daemon::rpc::session::RpcEngineRequest::New { parent_session } => {
                     let session_dir = replacement_session_dir(&options);
-                    match parent_session {
+                    let manager = match parent_session {
                         Some(parent) => {
                             let cwd = options.config.cwd.clone();
                             let mut manager = pa_core::session::manager::SessionManager::persisted(
@@ -257,7 +257,20 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                             &options.config.cwd,
                             &session_dir,
                         ),
-                    }
+                    };
+                    // TS `acquireReplacementLease(sessionManager.getSessionFile())`:
+                    // the fresh session's file is leased BEFORE the
+                    // replacement can write it — the runtime lease is the
+                    // cross-process ownership record, and the handle's
+                    // lease slot releases exactly when the engine that
+                    // owned it goes away.
+                    let lease = pa_daemon::lease::acquire_runtime_session_lease(
+                        manager.get_session_file().expect("a fresh session knows its file"),
+                        &options.config.agent_dir,
+                    )
+                    .map_err(|error| format!("{error:#}"))?;
+                    opened_lease = Some(lease);
+                    manager
                 }
                 pa_daemon::rpc::session::RpcEngineRequest::Open { session_path } => {
                     let session_dir = replacement_session_dir(&options);

@@ -301,14 +301,17 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         .get("customInstructions")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let (model, api_key, engine) = {
-        let handle = state.session.handle().await;
-        (
-            handle.model.clone(),
-            handle.api_key.clone(),
-            handle.engine.clone(),
-        )
-    };
+    // The handle guard stays held through the compaction (the
+    // prompt-admitted path's guard-pass-through): a concurrent
+    // whole-session replacement (whose swap waits on the write guard)
+    // can never dispose the kernel mid-compaction or land a `set_model`
+    // between the snapshot and the summarization — the compaction's
+    // frames and file writes stay on the live session, under the model
+    // the session runs.
+    let handle = state.session.handle().await;
+    let model = handle.model.clone();
+    let api_key = handle.api_key.clone();
+    let engine = handle.engine.clone();
     // Compact rebuilds the session context (like refine): serialize the
     // context-rebuilding commands so their rebuilds cannot interleave
     // and install an older snapshot over a newer one.
@@ -417,14 +420,14 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
             .and_then(Value::as_str)
             .map(str::to_string),
     };
-    let (model, api_key, engine) = {
-        let handle = state.session.handle().await;
-        (
-            handle.model.clone(),
-            handle.api_key.clone(),
-            handle.engine.clone(),
-        )
-    };
+    // The handle guard stays held through the refinement (the compact
+    // handler's guard-pass-through): a concurrent whole-session
+    // replacement or `set_model` cannot interleave between the snapshot
+    // and the refinement's file writes.
+    let handle = state.session.handle().await;
+    let model = handle.model.clone();
+    let api_key = handle.api_key.clone();
+    let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
     // Refine rebuilds the session context (like compact): one
     // context-rebuilding command at a time.

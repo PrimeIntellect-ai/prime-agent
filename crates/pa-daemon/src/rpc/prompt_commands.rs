@@ -11,19 +11,10 @@ use serde_json::Value;
 
 use pa_agent::types::AgentMessage;
 use pa_core::session_engine::session_commands::{execute_session_command, SessionCommandParams};
-use pa_core::session_engine::{PromptOptions, PromptOutcome, StreamingBehavior};
+use pa_core::session_engine::{PromptOptions, PromptOutcome};
 
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
 use super::protocol::{self, ResponseData};
-
-/// The streaming behavior of a prompt command (TS `"steer"`/`"followUp"`).
-fn command_streaming_behavior(payload: &Value) -> Option<StreamingBehavior> {
-    match payload.get("streamingBehavior").and_then(Value::as_str) {
-        Some("steer") => Some(StreamingBehavior::Steer),
-        Some("followUp") => Some(StreamingBehavior::FollowUp),
-        _ => None,
-    }
-}
 
 /// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
 /// source: "rpc"})`): admission-level success — the response fires once
@@ -43,7 +34,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .and_then(Value::as_str)
         .ok_or_else(|| "prompt requires a message".to_string())?;
     let images = protocol::command_images(payload);
-    let behavior = command_streaming_behavior(payload);
+    let behavior = protocol::command_streaming_behavior(payload);
     let handle = state.session.handle().await;
     let engine = handle.engine.clone();
     let admission = engine

@@ -104,11 +104,6 @@ impl RpcSession {
         self.handle.write().await
     }
 
-    /// The engine replacement seam, when the composition root wired one.
-    pub fn factory(&self) -> Option<&RpcEngineFactory> {
-        self.factory.as_ref()
-    }
-
     /// Arm the prompt-response event buffer (TS `promptResponsePending =
     /// true`): while armed, connection events buffer instead of writing.
     pub async fn set_prompt_response_pending(&self, pending: bool) {

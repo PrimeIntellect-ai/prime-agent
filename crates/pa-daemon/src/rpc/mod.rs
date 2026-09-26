@@ -6,10 +6,11 @@
 //! response `data` channel distinguishes an absent key from JSON `null`,
 //! a `prompt` response is written before the turn's stream events
 //! (events landing while the response is pending are buffered and
-//! flushed after it, TS `promptResponsePending`), prompts serialize
-//! behind one lane while other commands run concurrently, and stdin
-//! close settles the running turn before the process exits. SIGTERM
-//! exits 143 and SIGHUP 129 (TS signal exit codes).
+//! flushed after it, TS `promptResponsePending`), prompts serialize on
+//! a stdin-order chain (TS `promptCommandTail`) while other commands
+//! run concurrently, and stdin close settles the running turn before
+//! the process exits. SIGTERM exits 143 and SIGHUP 129 (TS signal exit
+//! codes).
 //!
 //! The in-process transport serves the session engine directly, exactly
 //! like the TS in-process connection: the scheduling and agent-messaging
@@ -187,11 +188,14 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
 }
 
 /// The stdin loop: parse every line, dispatch commands concurrently
-/// (prompts serialize behind one lane), and settle on EOF.
+/// (prompts serialize on the stdin-order chain), and settle on EOF.
 async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
-    // The prompt lane: one prompt command at a time, ordered (TS
-    // `promptCommandTail`).
-    let prompt_lane = Arc::new(tokio::sync::Mutex::new(()));
+    // TS `promptCommandTail`: prompt commands chain on their stdin-order
+    // predecessor — the chain hands each prompt the previous prompt's
+    // completion, so execution and response order follow the read order
+    // (the spawned tasks' scheduling order is not the guarantee, exactly
+    // the TS tail's role).
+    let mut prompt_tail: Option<tokio::sync::oneshot::Receiver<()>> = None;
     // The in-flight handlers EOF waits for (TS `pendingInputHandlers`).
     let mut pending = tokio::task::JoinSet::new();
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
@@ -213,9 +217,18 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
             ParsedLine::ExtensionUiResponse => {}
             ParsedLine::Command(command) => {
                 let state = Arc::clone(&state);
-                let prompt_lane = Arc::clone(&prompt_lane);
+                let is_prompt = command.command == "prompt";
+                let previous = if is_prompt { prompt_tail.take() } else { None };
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                if is_prompt {
+                    prompt_tail = Some(done_rx);
+                }
                 pending.spawn(async move {
-                    dispatch_one(state, prompt_lane, command).await;
+                    if let Some(previous) = previous {
+                        let _ = previous.await;
+                    }
+                    dispatch_one(state, command).await;
+                    let _ = done_tx.send(());
                 });
             }
         }
@@ -233,21 +246,16 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
     0
 }
 
-/// One command's dispatch: prompts hold the lane and buffer connection
-/// events until their response is written (TS `handleInputLine`); every
-/// other command runs unlocked.
-async fn dispatch_one(
-    state: Arc<commands::RpcState>,
-    prompt_lane: Arc<tokio::sync::Mutex<()>>,
-    command: RpcCommand,
-) {
-    let is_prompt = command.command == "prompt";
-    if !is_prompt {
+/// One command's dispatch: prompts run on the stdin-order chain (the
+/// caller hands each prompt its predecessor's completion) and buffer
+/// connection events until their response is written (TS
+/// `handleInputLine`); every other command runs unlocked.
+async fn dispatch_one(state: Arc<commands::RpcState>, command: RpcCommand) {
+    if command.command != "prompt" {
         let response = commands::handle_command(&state, command).await;
         state.writer.write(response);
         return;
     }
-    let lane = prompt_lane.lock().await;
     state.session.set_prompt_response_pending(true).await;
     let response = commands::handle_command(&state, command).await;
     // The response writes while the buffer stays armed (TS `output` of
@@ -255,5 +263,4 @@ async fn dispatch_one(
     // disarms and emits them in arrival order.
     state.writer.write(response);
     state.session.flush_connection_events().await;
-    drop(lane);
 }
