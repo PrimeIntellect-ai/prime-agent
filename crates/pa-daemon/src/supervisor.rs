@@ -1383,7 +1383,9 @@ impl Supervisor {
         // registry resolves delivery at publish time, TS `handleWorkerFrame`
         // parity); broadcast-class events keep the ring above.
         let (targeted_tx, mut targeted_rx) =
-            tokio::sync::mpsc::channel::<Arc<Value>>(crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY);
+            tokio::sync::mpsc::channel::<Arc<Value>>(
+                crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY,
+            );
         // Connection state shared with the per-command dispatch tasks: the
         // envelope-overridden client id and the attached-session handle
         // (attach/detach keep the registry and the session list consistent;

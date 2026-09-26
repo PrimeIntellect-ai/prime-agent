@@ -666,26 +666,22 @@ impl Supervisor {
                         // an active session id is dropped - TS's
                         // `!activeSessionId` guard in the same handler, not
                         // broadcast to every client.
-                        match active_session_id {
-                            Some(active_session_id) => reader_supervisor
-                                .publish_session_event(
-                                    &active_session_id,
-                                    std::sync::Arc::new(payload),
-                                ),
-                            None => {}
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
                         }
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        match active_session_id {
-                            Some(active_session_id) => reader_supervisor
-                                .publish_session_event(
-                                    &active_session_id,
-                                    std::sync::Arc::new(payload),
-                                ),
-                            None => {}
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
                         }
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good

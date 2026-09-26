@@ -107,7 +107,12 @@ impl ClientSubscriptions {
     ) -> bool {
         let was_attached = self.contains(selector);
         if was_attached {
-            registry.move_subscription(selector, current, &self.connection_id, self.queue.clone());
+            registry.move_subscription(
+                selector,
+                current,
+                &self.connection_id,
+                self.queue.clone(),
+            );
             let mut sessions = self.sessions.lock().unwrap();
             sessions.retain(|id| id != selector);
             if !sessions.iter().any(|id| id == current) {
@@ -153,7 +158,12 @@ impl SessionSubscribers {
         }
     }
 
-    fn register(&self, active_session_id: &str, connection_id: &str, queue: mpsc::Sender<Arc<Value>>) {
+    fn register(
+        &self,
+        active_session_id: &str,
+        connection_id: &str,
+        queue: mpsc::Sender<Arc<Value>>,
+    ) {
         let mut sessions = self.sessions.lock().unwrap();
         sessions
             .entry(active_session_id.to_string())
@@ -194,16 +204,13 @@ impl SessionSubscribers {
                 sessions.remove(from);
             }
         }
-        sessions
-            .entry(to.to_string())
-            .or_default()
-            .insert(
-                connection_id.to_string(),
-                Subscriber {
-                    queue,
-                    logged_full: false,
-                },
-            );
+        sessions.entry(to.to_string()).or_default().insert(
+            connection_id.to_string(),
+            Subscriber {
+                queue,
+                logged_full: false,
+            },
+        );
     }
 
     /// The send-time delivery pass: enqueue to every attached connection
