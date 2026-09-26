@@ -1482,7 +1482,7 @@ mod tests {
             "the missing skill installs: {calls:?}"
         );
         assert!(
-            !calls[0].contains("edit"),
+            !calls[0].contains("skills/edit"),
             "the installed skill is not reinstalled: {calls:?}"
         );
         assert_eq!(calls[0].matches("--editable").count(), 1);
