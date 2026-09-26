@@ -815,7 +815,17 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
 fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     let steps = vec![
         HeadlessStep::Submit("run a turn".to_string()),
-        HeadlessStep::WaitMs(400),
+        // The bang must land while the turn is VISIBLY streaming: the
+        // turn's text on screen means the prompt's admission round trip
+        // settled and the stream events flow, so the held-card pending
+        // regime exists regardless of ACK latency under load (a fixed
+        // WaitMs raced the backgrounded submit's outcome and lost under
+        // battery/CI load — the frame order the old blocking submit
+        // guaranteed by construction).
+        HeadlessStep::WaitRender {
+            needle: "Let me run the long check.".to_string(),
+            timeout_ms: 30_000,
+        },
         HeadlessStep::Submit("!echo mid".to_string()),
         HeadlessStep::WaitMs(400),
         HeadlessStep::WaitMs(1000),
