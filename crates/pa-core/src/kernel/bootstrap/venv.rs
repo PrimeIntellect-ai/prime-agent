@@ -792,13 +792,10 @@ fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
         Ok(meta) => {
             let modified = meta
                 .modified()
-                .map(|time| format!("{time:?}"))
-                .unwrap_or_else(|_| "no-mtime".to_string());
+                .map_or_else(|_| "no-mtime".to_string(), |time| format!("{time:?}"));
             hasher.update(format!("py:{}:{}:{modified}", python.display(), meta.len()).as_bytes());
         }
-        Err(error) => {
-            hasher.update(format!("py-error:{}:{error}", python.display()).as_bytes())
-        }
+        Err(error) => hasher.update(format!("py-error:{}:{error}", python.display()).as_bytes()),
     }
     match installed_rlm_dir(venv) {
         Some(rlm) => match hash_python_tree(&rlm) {
@@ -1103,8 +1100,7 @@ mod tests {
         let python_str = python.to_string_lossy().to_string();
         let probe_count = || {
             std::fs::read_to_string(&counter)
-                .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0)
+                .map_or(0, |text| text.lines().filter(|l| !l.trim().is_empty()).count())
         };
 
         invalidate_runtime_probe_cache();
