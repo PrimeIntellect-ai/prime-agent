@@ -2197,19 +2197,29 @@ impl AgentsViewMode {
             }
             _ => "open",
         };
-        let key_text = |id: &str| {
-            crate::keybindings::format_key_text(&self.keybindings.get_keys(id).join("/"))
-        };
         // The bar lists every effective action key of the view, so a
         // merged binding can never ship without its slot (the
-        // operator's completeness directive). Each segment renders its
-        // effective binding; an unbound action drops its segment, never
-        // a default key.
-        let mut segments = vec![format!(
-            "{}/{} navigate",
-            key_text("tui.select.up"),
-            key_text("tui.select.down")
-        )];
+        // operator's completeness directive). Every segment — including
+        // navigate, open, parent, and new — renders its bindings' first
+        // effective keys and drops entirely when its action is unbound
+        // (the same contract as the jump and stop-or-delete slots; the
+        // bar never advertises a default key the handler does not
+        // take).
+        let first = |id: &str| {
+            self.keybindings
+                .first_key(id)
+                .map(|key| crate::keybindings::format_key_text(&key))
+        };
+        // A two-key segment keeps whichever of the pair is bound.
+        let pair = |a: &str, b: &str| match (first(a), first(b)) {
+            (Some(a), Some(b)) => Some(format!("{a}/{b}")),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        };
+        let mut segments = Vec::new();
+        if let Some(keys) = pair("tui.select.up", "tui.select.down") {
+            segments.push(format!("{keys} navigate"));
+        }
         // The jump slot shows the first effective key of each edge
         // binding (the full key sets would overflow the one-line hint);
         // an override that empties either binding drops the slot.
@@ -2223,11 +2233,9 @@ impl AgentsViewMode {
                 crate::keybindings::format_key_text(&bottom)
             ));
         }
-        segments.push(format!(
-            "{}/{} {right_action}",
-            key_text("tui.select.confirm"),
-            key_text("app.agents.open")
-        ));
+        if let Some(keys) = pair("tui.select.confirm", "app.agents.open") {
+            segments.push(format!("{keys} {right_action}"));
+        }
         // The stop-or-delete slot rides the selected row's arming target
         // (the same gate the handler takes): the word matches what the
         // second press would do, and a row with no target — a summary
@@ -2244,9 +2252,13 @@ impl AgentsViewMode {
             ));
         }
         if self.scope_active {
-            segments.push(format!("{} parent", key_text("app.agents.back")));
+            if let Some(back) = first("app.agents.back") {
+                segments.push(format!("{back} parent"));
+            }
         }
-        segments.push(format!("{} new", key_text("app.agents.new")));
+        if let Some(new) = first("app.agents.new") {
+            segments.push(format!("{new} new"));
+        }
         let hints = segments.join("   ");
         truncate_line(vec![theme.fg(ThemeColor::Muted, hints)], width)
     }
@@ -4714,6 +4726,49 @@ the holder exits.";
             !flat(&mode.render_hints(120, None)).contains("Ctrl+X"),
             "an unbound delete never advertises"
         );
+    }
+
+    /// Every bar segment drops when its action is unbound — navigate,
+    /// open, parent, and new follow the jump and stop-or-delete slots'
+    /// contract; a two-key segment keeps whichever of the pair is
+    /// bound.
+    #[test]
+    fn hints_drop_segments_for_unbound_actions() {
+        // up/down emptied drops navigate; open emptied keeps the bound
+        // confirm key alone; new emptied drops its segment.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.up".to_string(), Vec::new());
+        cfg.insert("tui.select.down".to_string(), Vec::new());
+        cfg.insert("app.agents.open".to_string(), Vec::new());
+        cfg.insert("app.agents.new".to_string(), Vec::new());
+        let mut mode = mode_with_parent_and_child();
+        mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(!hints.contains("navigate"), "{hints}");
+        assert!(hints.contains("Enter open"), "{hints}");
+        assert!(!hints.contains("Enter/\u{2192}"), "{hints}");
+        assert!(!hints.contains("new"), "{hints}");
+        assert!(hints.contains("Ctrl+X stop"), "{hints}");
+        assert!(hints.contains("Home/End first/last"), "{hints}");
+        // confirm and open both emptied drops the open segment
+        // entirely; the other segments keep their keys.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.confirm".to_string(), Vec::new());
+        cfg.insert("app.agents.open".to_string(), Vec::new());
+        let mut mode = mode_with_parent_and_child();
+        mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(!hints.contains(" open"), "{hints}");
+        assert!(hints.contains("navigate"), "{hints}");
+        // The scoped parent segment drops when the back binding is
+        // emptied.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.agents.back".to_string(), Vec::new());
+        let mut mode = mode_with_parent_and_child();
+        mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
+        mode.scope_active = true;
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(!hints.contains("parent"), "{hints}");
     }
 
     #[test]

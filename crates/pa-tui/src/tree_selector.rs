@@ -254,33 +254,45 @@ impl TreeSelector {
         // user `keybindings.json` override moves the hint with the
         // handler; the move/page/fold arrows stay the literal glyphs TS
         // renders (`^←/^→ or Alt+←/Alt+→`).
-        let key_text = |id: &str| crate::keybindings::format_key_text(&kb.get_keys(id).join("/"));
-        let filter_keys = [
+        // Each derived cell keeps only its bound keys' labels (a
+        // multi-key binding names its first key, the crate's one-line
+        // grammar), an override that empties a binding drops that key,
+        // and a part whose every binding is empty drops its whole
+        // segment — the hint never shows a blank slot or an unlabelled
+        // action.
+        let first = |id: &str| {
+            kb.first_key(id)
+                .map(|key| crate::keybindings::format_key_text(&key))
+        };
+        let bound = |ids: &[&str]| {
+            let keys: Vec<String> = ids.iter().filter_map(|id| first(id)).collect();
+            (!keys.is_empty()).then(|| keys.join("/"))
+        };
+        let mut hint = "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch.".to_string();
+        if let Some(label) = first("app.tree.editLabel") {
+            hint.push_str(&format!(" {label}: label."));
+        }
+        if let Some(filters) = bound(&[
             "app.tree.filter.default",
             "app.tree.filter.noTools",
             "app.tree.filter.userOnly",
             "app.tree.filter.labeledOnly",
             "app.tree.filter.all",
-        ]
-        .iter()
-        .map(|id| key_text(id))
-        .collect::<Vec<_>>()
-        .join("/");
-        let cycle_keys = format!(
-            "{}/{}",
-            key_text("app.tree.filter.cycleForward"),
-            key_text("app.tree.filter.cycleBackward")
-        );
-        let label_key = key_text("app.tree.editLabel");
-        let time_key = key_text("app.tree.toggleLabelTimestamp");
+        ]) {
+            match bound(&[
+                "app.tree.filter.cycleForward",
+                "app.tree.filter.cycleBackward",
+            ]) {
+                Some(cycle) => hint.push_str(&format!(" {filters}: filters ({cycle} cycle).")),
+                None => hint.push_str(&format!(" {filters}: filters.")),
+            }
+        }
+        if let Some(time) = first("app.tree.toggleLabelTimestamp") {
+            hint.push_str(&format!(" {time}: label time"));
+        }
         // `TruncatedText` cuts the colored string and appends a plain
         // `...` after the color reset.
-        let hints_line = vec![theme.fg_span(
-            ThemeColor::Muted,
-            format!(
-                "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch. {label_key}: label. {filter_keys}: filters ({cycle_keys} cycle). {time_key}: label time"
-            ),
-        )];
+        let hints_line = vec![theme.fg_span(ThemeColor::Muted, hint)];
         if line_width(&hints_line) > width {
             let mut hints = truncate_line(&hints_line, width.saturating_sub(3), "");
             hints.push(crate::Span::raw("..."));
@@ -482,6 +494,57 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Shift+L: label"), "{text}");
+    }
+
+    /// An override that empties a tree binding drops its key, and a
+    /// part whose every binding is empty drops its whole segment — the
+    /// hint never shows a blank slot or an unlabelled action.
+    #[test]
+    fn tree_hint_drops_unbound_keys_and_segments() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        // One emptied filter drops its key from the key run.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.tree.filter.noTools".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let text = frame_text(&selector().render(&theme, 200, &kb));
+        assert!(
+            text.contains("Ctrl+D/Ctrl+U/Ctrl+L/Ctrl+A: filters ("),
+            "the emptied filter leaves no blank slot: {text}"
+        );
+        assert!(!text.contains("//"), "no empty key slot: {text}");
+        // Both cycle keys emptied drops the cycle suffix.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        for id in [
+            "app.tree.filter.cycleForward",
+            "app.tree.filter.cycleBackward",
+        ] {
+            cfg.insert(id.to_string(), Vec::new());
+        }
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let text = frame_text(&selector().render(&theme, 200, &kb));
+        assert!(
+            text.contains("Ctrl+D/Ctrl+T/Ctrl+U/Ctrl+L/Ctrl+A: filters."),
+            "the cycle suffix drops with its keys: {text}"
+        );
+        assert!(!text.contains("cycle"), "{text}");
+        // Every filter plus the label key emptied drops the whole
+        // filter and label segments; the time part stays.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        for id in [
+            "app.tree.filter.default",
+            "app.tree.filter.noTools",
+            "app.tree.filter.userOnly",
+            "app.tree.filter.labeledOnly",
+            "app.tree.filter.all",
+        ] {
+            cfg.insert(id.to_string(), Vec::new());
+        }
+        cfg.insert("app.tree.editLabel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let text = frame_text(&selector().render(&theme, 200, &kb));
+        assert!(!text.contains("filters"), "{text}");
+        assert!(!text.contains("label."), "{text}");
+        assert!(text.contains("Shift+T: label time"), "{text}");
     }
 
     /// The summarize pane's select/back pair and the input panes'
