@@ -8,15 +8,21 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use serde_json::{json, Value};
 
-/// Environment mutations are process-global: the PRIME_AGENT_CODING_AGENT_DIR
-/// redirect serializes on one lock and restores on exit.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// Environment mutations are process-global: the
+/// `PRIME_AGENT_CODING_AGENT_DIR` redirect serializes on one lock and
+/// restores on exit. A tokio mutex: each test holds the guard across its
+/// view-run awaits (a std guard across an await is a clippy error).
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the env-serialization lock for the whole test body.
+async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().await
+}
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -54,10 +60,7 @@ impl MockSupervisor {
                     "serverCapabilities": [],
                 }),
             );
-            loop {
-                let Some(line) = read_line(&mut reader) else {
-                    break;
-                };
+            while let Some(line) = read_line(&mut reader) {
                 let Ok(envelope) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
@@ -244,7 +247,7 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
 /// notice line from the log tail").
 #[tokio::test]
 async fn renders_the_collapsed_worker_crash_notice_line() {
-    let _env = env_lock();
+    let _env = env_lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
     let mock = MockSupervisor::bind(&socket, 1);
@@ -309,7 +312,7 @@ async fn renders_the_collapsed_worker_crash_notice_line() {
 /// asserts through `persistentState`).
 #[tokio::test]
 async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
-    let _env = env_lock();
+    let _env = env_lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
     let mock = MockSupervisor::bind(&socket, 2);
@@ -395,7 +398,7 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
 /// confirmation with Esc instead of dismissing the notice").
 #[tokio::test]
 async fn esc_cancels_an_armed_delete_confirmation_and_keeps_the_notice() {
-    let _env = env_lock();
+    let _env = env_lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
     let mock = MockSupervisor::bind(&socket, 1);
