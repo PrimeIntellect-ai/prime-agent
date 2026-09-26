@@ -1642,7 +1642,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
 /// state read must resolve the models.json model, not the faux one.
 #[tokio::test]
 async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_flag() {
-    let dir = tempfile::TempDir::expect("temp dir");
+    let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
