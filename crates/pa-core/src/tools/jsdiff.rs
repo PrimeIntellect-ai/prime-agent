@@ -71,7 +71,7 @@ struct DiffEngine<'a> {
     components: Vec<Component>,
 }
 
-impl<'a> DiffEngine<'a> {
+impl DiffEngine<'_> {
     fn equals(&self, left: &str, right: &str) -> bool {
         left == right
     }
@@ -258,14 +258,13 @@ impl<'a> DiffEngine<'a> {
                     // If we have hit the end of both strings, then we are done.
                     done = Some(self.build_values(base_path.last_component));
                     break;
-                } else {
-                    best_path.insert(diagonal_path, base_path);
-                    if base_path.old_pos + 1 >= old_len {
-                        max_diagonal_to_consider = max_diagonal_to_consider.min(diagonal_path - 1);
-                    }
-                    if new_pos + 1 >= new_len {
-                        min_diagonal_to_consider = min_diagonal_to_consider.max(diagonal_path + 1);
-                    }
+                }
+                best_path.insert(diagonal_path, base_path);
+                if base_path.old_pos + 1 >= old_len {
+                    max_diagonal_to_consider = max_diagonal_to_consider.min(diagonal_path - 1);
+                }
+                if new_pos + 1 >= new_len {
+                    min_diagonal_to_consider = min_diagonal_to_consider.max(diagonal_path + 1);
                 }
                 diagonal_path += 2;
             }

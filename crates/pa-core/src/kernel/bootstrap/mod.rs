@@ -10,20 +10,26 @@ pub(crate) mod dir_lock;
 mod runtime_code;
 pub(crate) mod venv;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context};
 
 use dir_lock::acquire_bootstrap_lock;
-pub use runtime_code::build_rlm_bootstrap_code;
+pub use runtime_code::{
+    build_rlm_bootstrap_code, parse_unavailable_python_skills, UnavailablePythonSkills,
+    PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
+};
 use venv::{
     bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
     resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
 };
+pub use venv::{
+    invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python, resolve_runtime_identity,
+};
 use venv::{kernel_base_ready, kernel_ready};
-pub use venv::{kernel_venv_dir, kernel_venv_python, resolve_runtime_identity};
 
 /// One Python skill the kernel should import at bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,10 +110,10 @@ fn format_bootstrap_failure(error: &anyhow::Error) -> anyhow::Error {
     // the raw install error alone is not actionable.
     if venv::packaged_runtime_dir().is_none() {
         let package = venv::package_dir();
-        message.push_str(&format!(
+        let _ = write!(message,
             "\nThe packaged prime-agent-runtime directory was not found (looked next to the executable at {} and PI_PACKAGE_DIR); reinstall prime-agent so the kernel runtime ships beside the binary.",
             package.display()
-        ));
+        );
     }
     anyhow!(message)
 }
@@ -122,6 +128,19 @@ static IN_FLIGHT: Mutex<InFlightBootstrap> = Mutex::new(None);
 
 /// Resolve the Python interpreter for the kernel: the `PRIME_AGENT_KERNEL_PYTHON`
 /// override when valid, else the auto-bootstrapped venv python.
+///
+/// # Errors
+///
+/// Returns an error when the `PRIME_AGENT_KERNEL_PYTHON` override points to
+/// a Python missing the kernel runtime or default packages, when a writable
+/// venv directory cannot be resolved, or when the kernel venv bootstrap or
+/// its skill sync fails (the failure is formatted with remediation hints,
+/// including a missing packaged runtime directory).
+///
+/// # Panics
+///
+/// The in-flight promise stores its outcome under the same lock that takes
+/// it, so the internal `expect` on the stored outcome is unreachable.
 pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow::Result<PathBuf> {
     let python_skills = normalize_python_skills(&options.python_skills);
     let key = [

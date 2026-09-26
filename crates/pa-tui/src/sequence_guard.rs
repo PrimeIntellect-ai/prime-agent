@@ -801,7 +801,7 @@ mod tests {
             .filter_map(|out| match out {
                 GuardOutput::Mouse(report) => Some(*report),
                 GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
-                _ => None,
+                GuardOutput::Event(_) => None,
             })
             .collect()
     }
@@ -1277,7 +1277,7 @@ mod tests {
         let now = Instant::now();
         assert!(guard.feed(esc_press(), now).is_empty());
         assert!(guard
-            .flush_expired(now + HOLD - Duration::from_millis(1))
+            .flush_expired((now + HOLD).checked_sub(Duration::from_millis(1)).unwrap())
             .is_empty());
         assert_eq!(
             guard.flush_expired(now + HOLD),

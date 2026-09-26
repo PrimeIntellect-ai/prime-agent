@@ -11,7 +11,7 @@ use pa_types::session::FileEntry;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// PR #277 made the loader tolerant of foreign spellings: the raw OpenAI
+/// PR #277 made the loader tolerant of foreign spellings: the raw `OpenAI`
 /// wire value `tool_calls` deserializes through `StopReason`'s serde alias
 /// to the canonical `toolUse`, so a captured foreign line reserializes with
 /// the canonical spelling. The corpus keeps the foreign line as captured

@@ -3,7 +3,7 @@
 //! grammar through cli-highlight's theme mapping). Cell-level scope coloring
 //! only: cli-highlight's parent-scope wrap is invisible once a child token
 //! colors the same cells, so the render needs one color per cell, matching
-//! the `theme.ts` mapping (keyword -> syntaxKeyword, built_in/type ->
+//! the `theme.ts` mapping (keyword -> syntaxKeyword, `built_in/type` ->
 //! syntaxType, literal/number -> syntaxNumber, string -> syntaxString,
 //! comment -> syntaxComment, title -> syntaxFunction, params ->
 //! syntaxVariable, everything else default). F-string substitutions and
@@ -493,12 +493,11 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
                 if let Some(next) = header_mode(code, i, word_len, &mut plain, &mut tokens) {
                     i = next;
                     continue;
-                } else {
-                    flush_plain(&mut plain, &mut tokens);
-                    tokens.push((word.to_string(), Scope::Keyword));
-                    i += word_len;
-                    continue;
                 }
+                flush_plain(&mut plain, &mut tokens);
+                tokens.push((word.to_string(), Scope::Keyword));
+                i += word_len;
+                continue;
             }
             match scope {
                 Scope::Plain => plain.push_str(word),
@@ -531,7 +530,6 @@ fn header_mode(
     while code[i..].starts_with(|c: char| c.is_whitespace()) && !code[i..].starts_with('\n') {
         i += 1;
     }
-    let _gap = gap_start;
     let name_len = code[i..]
         .char_indices()
         .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')

@@ -1,8 +1,9 @@
 //! `AuthStorage`: credential resolution with runtime overrides, environment
 //! keys, stored credentials, fallback resolvers, and stale-marking. Port of
-//! the AuthStorage class.
+//! the `AuthStorage` class.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::resolve_config_value::{resolve_config_value, resolve_config_value_uncached};
@@ -23,7 +24,10 @@ fn fingerprint(source: AuthSource, material: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 /// One candidate credential source.
@@ -229,7 +233,14 @@ impl AuthStorage {
 
     /// File-backed storage at `agentDir/auth.json`.
     pub fn create(agent_dir: impl AsRef<std::path::Path>) -> Self {
-        Self::create_with_oauth(agent_dir, Arc::new(NoOAuth))
+        // The built-in subscription providers' integration (the codex
+        // refresh): the TS storage delegates to the AI library's oauth
+        // registry on every instance, and `api_key_for` matches `NoOAuth`
+        // (the access token passthrough), so only token refresh gains.
+        Self::create_with_oauth(
+            agent_dir,
+            Arc::new(super::provider_oauth::ProviderOAuth::new()),
+        )
     }
 
     /// File-backed storage with an explicit OAuth integration (the MCP
@@ -251,7 +262,7 @@ impl AuthStorage {
     /// In-memory storage with no ambient environment source: hermetic
     /// resolution for embedded hosts and test harnesses that must pin the
     /// model catalog scope (an ambient provider credential variable such
-    /// as PRIME_API_KEY cannot make models available through this
+    /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
     pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
@@ -312,7 +323,7 @@ impl AuthStorage {
             content = current;
             Ok(((), None))
         });
-        match result.and_then(|_| parse_storage_data(content.as_deref())) {
+        match result.and_then(|()| parse_storage_data(content.as_deref())) {
             Ok(data) => {
                 self.data = data;
                 self.load_error = None;
@@ -656,7 +667,7 @@ impl AuthStorage {
         self.reload();
     }
 
-    /// API-key resolution: runtime > (prime-inference: env) > stored (api_key
+    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
     /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
     /// are skipped.
     /// Provider-scoped request headers (prime-inference team header only).
@@ -1005,7 +1016,7 @@ mod tests {
     use super::*;
 
     /// Fixed environment credential source: hermetic against the ambient
-    /// process env (e.g. this sandbox exports PRIME_API_KEY globally).
+    /// process env (e.g. this sandbox exports `PRIME_API_KEY` globally).
     struct ScriptedEnv(HashMap<String, String>);
 
     impl EnvCredentialSource for ScriptedEnv {
@@ -1349,7 +1360,7 @@ mod tests {
             update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
         ) -> anyhow::Result<()> {
             let current = self.0.lock().unwrap().clone();
-            let (_, next) = update(current)?;
+            let ((), next) = update(current)?;
             match next {
                 Some(_) => Err(anyhow::anyhow!("the locked write failed")),
                 None => Ok(()),

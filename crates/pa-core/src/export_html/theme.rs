@@ -513,7 +513,7 @@ mod tests {
         std::fs::create_dir_all(&themes).expect("themes dir");
         std::fs::write(
             themes.join("circular.json"),
-            r##"{ "name": "circular", "vars": { "a": "b", "b": "a" }, "colors": { "accent": "a" } }"##,
+            r#"{ "name": "circular", "vars": { "a": "b", "b": "a" }, "colors": { "accent": "a" } }"#,
         )
         .expect("write theme");
         let error = resolve_export_theme(Some("circular"), dir.path())
@@ -524,7 +524,7 @@ mod tests {
         );
         std::fs::write(
             themes.join("missing.json"),
-            r##"{ "name": "missing", "colors": { "accent": "nope" } }"##,
+            r#"{ "name": "missing", "colors": { "accent": "nope" } }"#,
         )
         .expect("write theme");
         let error = resolve_export_theme(Some("missing"), dir.path())

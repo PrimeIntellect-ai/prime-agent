@@ -9,6 +9,7 @@
 //! a sanctioned divergence documented per the #289 precedent.
 
 use serde_json::Value;
+use std::fmt::Write;
 use std::path::Path;
 
 /// The live session holding a session file (one roster row's fields).
@@ -76,7 +77,7 @@ fn single_line(value: &str) -> String {
 /// `{id, provider}` object's id (the provider only when no id rides).
 fn model_label(model: &Value) -> Option<String> {
     match model {
-        Value::String(label) => Some(label.to_string()),
+        Value::String(label) => Some(label.clone()),
         Value::Object(map) => map
             .get("id")
             .and_then(Value::as_str)
@@ -178,13 +179,13 @@ pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> Stri
     let mut lines = vec![already_active_line(&holder.id, session_path)];
     let mut identity = format!("Holder: session {}", holder.id);
     if let Some(name) = &holder.name {
-        identity.push_str(&format!(" \u{201c}{name}\u{201d}"));
+        let _ = write!(identity, " \u{201c}{name}\u{201d}");
     }
     if let Some(cwd) = &holder.cwd {
-        identity.push_str(&format!(" \u{b7} cwd {cwd}"));
+        let _ = write!(identity, " \u{b7} cwd {cwd}");
     }
     if let Some(model) = &holder.model {
-        identity.push_str(&format!(" \u{b7} model {model}"));
+        let _ = write!(identity, " \u{b7} model {model}");
     }
     lines.push(identity);
     lines.push(format!(
@@ -211,13 +212,13 @@ pub fn decorate_interactive_refusal(
         Some(h) => {
             let mut identity = format!("Holder: session {}", h.id);
             if let Some(name) = &h.name {
-                identity.push_str(&format!(" \u{201c}{name}\u{201d}"));
+                let _ = write!(identity, " \u{201c}{name}\u{201d}");
             }
             if let Some(cwd) = &h.cwd {
-                identity.push_str(&format!(" \u{b7} cwd {cwd}"));
+                let _ = write!(identity, " \u{b7} cwd {cwd}");
             }
             if let Some(model) = &h.model {
-                identity.push_str(&format!(" \u{b7} model {model}"));
+                let _ = write!(identity, " \u{b7} model {model}");
             }
             format!(
                 "{identity} \u{b7} Attach instead: prime-agent {} \u{b7} The file unlocks when that session exits",

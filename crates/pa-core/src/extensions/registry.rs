@@ -78,7 +78,7 @@ pub const RESERVED_KEYBINDING_IDS: &[&str] = &[
 /// key id -> (canonical binding id, whether extension overrides are blocked).
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinKeybindings {
-    /// Key id -> (keybinding id, restrict_override).
+    /// Key id -> (keybinding id, `restrict_override`).
     pub by_key: HashMap<String, (String, bool)>,
 }
 

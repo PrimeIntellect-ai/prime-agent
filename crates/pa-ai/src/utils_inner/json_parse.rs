@@ -5,6 +5,8 @@
 //! strings keep their content, truncated containers are closed, incomplete
 //! keys/values are dropped), and fail only on genuinely invalid input.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value};
 
 const VALID_JSON_ESCAPES: [char; 8] = ['"', '\\', '/', 'b', 'f', 'n', 'r', 't'];
@@ -63,7 +65,7 @@ pub fn repair_json(json: &str) -> String {
                         && digits.len() == 4
                         && digits.chars().all(|c| c.is_ascii_hexdigit());
                     if digits_ok {
-                        repaired.push_str(&format!("\\u{digits}"));
+                        let _ = write!(repaired, "\\u{digits}");
                         index += 5;
                         continue;
                     }
@@ -94,6 +96,12 @@ pub fn repair_json(json: &str) -> String {
 }
 
 /// Parse JSON; when parsing fails, retry once against the repaired text.
+///
+/// # Errors
+///
+/// Returns the original parse error when the text stays invalid after repair
+/// (including when the repair leaves it unchanged), otherwise the parse error
+/// of the repaired text.
 pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
     match serde_json::from_str::<Value>(json) {
         Ok(value) => Ok(value),
@@ -120,6 +128,12 @@ pub enum ParseError {
 /// Tolerant partial-JSON parser. `Ok` means a usable value was recovered
 /// (possibly a partial one); `Err(ParseError::Invalid)` means the input is not
 /// parseable JSON even with truncation tolerance.
+///
+/// # Errors
+///
+/// Returns `Err(ParseError::Invalid)` when the input is not usable even with
+/// truncation tolerance: a truncated top-level literal, malformed input, or
+/// trailing non-whitespace after the recovered value.
 pub fn parse_partial_json(input: &str) -> Result<Value, ParseError> {
     let mut parser = PartialParser {
         chars: input.chars().collect(),
@@ -404,11 +418,10 @@ impl PartialParser {
             }
 
             // Key: on EOF inside the key string the pair is dropped.
-            let (key, key_closed) = match self.parse_string() {
-                Ok(result) => result,
-                // parse_string never fails on truncation, only on invalid
-                // escape sequences inside the key.
-                Err(_) => return Err(ParseError::Invalid),
+            // parse_string never fails on truncation, only on invalid
+            // escape sequences inside the key.
+            let Ok((key, key_closed)) = self.parse_string() else {
+                return Err(ParseError::Invalid);
             };
             self.skip_whitespace();
             if !key_closed || self.peek() != Some(':') {

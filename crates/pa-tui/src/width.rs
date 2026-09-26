@@ -33,6 +33,47 @@ pub fn pad_cell(text: &str, width: usize) -> String {
     cell
 }
 
+/// Truncate a plain string to a display-width budget, ellipsis included
+/// (TS `truncateToWidth(text, maxWidth, ellipsis)` over sanitized text:
+/// no ANSI and no pad). The kept grapheme prefix leaves room for the
+/// ellipsis; a budget too small for the ellipsis clips the ellipsis
+/// instead of emitting one past the budget.
+pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if max_width == 0 || text.is_empty() {
+        return String::new();
+    }
+    if str_width(text) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis_width = str_width(ellipsis);
+    if ellipsis_width >= max_width {
+        let mut clipped = String::new();
+        let mut used = 0usize;
+        for grapheme in ellipsis.graphemes(true) {
+            let width = grapheme_width(grapheme);
+            if used + width > max_width {
+                break;
+            }
+            clipped.push_str(grapheme);
+            used += width;
+        }
+        return clipped;
+    }
+    let target = max_width - ellipsis_width;
+    let mut kept = String::new();
+    let mut used = 0usize;
+    for grapheme in text.graphemes(true) {
+        let width = grapheme_width(grapheme);
+        if used + width > target {
+            break;
+        }
+        kept.push_str(grapheme);
+        used += width;
+    }
+    format!("{kept}{ellipsis}")
+}
+
 /// Width of one grapheme cluster approximated by its first char plus zero-width
 /// continuation chars. Good enough for the terminal layout we render.
 pub fn char_width(c: char) -> usize {
@@ -120,6 +161,14 @@ pub(crate) fn escape_len(s: &str) -> Option<usize> {
     }
 }
 
+/// The visible width of a string (grapheme clusters, escape sequences at
+/// zero width, tabs expanded to three spaces).
+///
+/// # Panics
+///
+/// Panics when the width-cache mutex is poisoned (a thread panicked
+/// while holding it); the `expect` guards the loop condition and
+/// cannot fire.
 pub fn str_width(s: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     if s.is_empty() {
@@ -231,7 +280,7 @@ fn is_leading_nonprinting(c: char) -> bool {
 }
 
 /// Single-codepoint RGI emoji: TS `\p{RGI_Emoji}` matches a bare codepoint
-/// exactly when Emoji_Presentation=Yes (`⭐`, `⌚`, `🀄`, the flag RIs, …).
+/// exactly when `Emoji_Presentation=Yes` (`⭐`, `⌚`, `🀄`, the flag RIs, …).
 fn is_emoji_presentation(c: char) -> bool {
     matches!(
         c.emoji_status(),
@@ -242,7 +291,7 @@ fn is_emoji_presentation(c: char) -> bool {
     )
 }
 
-fn grapheme_width(g: &str) -> usize {
+pub(crate) fn grapheme_width(g: &str) -> usize {
     // TS `visibleWidth` replaces tabs with three spaces before segmenting,
     // so a tab cluster measures 3 columns (GB5 keeps it its own cluster).
     if g == "\t" {
@@ -391,6 +440,11 @@ pub fn pad_line(mut line: Line, width: usize) -> Line {
 
 /// Truncate a line to `max_width` visible columns, appending `ellipsis` (also
 /// measured) when content was cut.
+///
+/// # Panics
+///
+/// Cannot panic: the `expect` guards the loop condition (`rest` is
+/// non-empty exactly when checked).
 pub fn truncate_line(line: &Line, max_width: usize, ellipsis: &str) -> Line {
     if line_width(line) <= max_width {
         return line.clone();
@@ -494,6 +548,11 @@ pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
 /// The `strict` form of TS `sliceByColumn` (sliceWithWidth): clip a wide
 /// cluster whose end crosses the slice boundary (the overlay-compositing
 /// form) instead of including it whole.
+///
+/// # Panics
+///
+/// Cannot panic: the `expect` guards the loop condition (`rest` is
+/// non-empty exactly when checked).
 pub fn slice_line_by_column_strict(line: &Line, start: usize, length: usize, strict: bool) -> Line {
     use unicode_segmentation::UnicodeSegmentation;
     let mut out: Line = Vec::new();
@@ -569,6 +628,30 @@ mod tests {
         assert_eq!(str_width("\u{200d}"), 0); // lone ZWJ
         assert_eq!(str_width("a\u{200d}b"), 2); // ZWJ does not cluster letters
     }
+
+    #[test]
+    fn truncate_to_width_keeps_the_ellipsis_inside_the_budget() {
+        // Fits: unchanged.
+        assert_eq!(truncate_to_width("hello", 8, "…"), "hello");
+        assert_eq!(truncate_to_width("", 8, "…"), "");
+        assert_eq!(truncate_to_width("x", 0, "…"), "");
+        // The kept prefix leaves room for the ellipsis: 16 + 43 + 1 = 60.
+        let recap = format!("running tools \u{b7} {}", "a".repeat(100));
+        assert_eq!(
+            truncate_to_width(&recap, 60, "…"),
+            format!("running tools \u{b7} {}…", "a".repeat(43))
+        );
+        // Wide glyphs count their terminal columns: 29 rockets (58) + "…".
+        assert_eq!(
+            truncate_to_width(&"\u{1f680}".repeat(40), 60, "…"),
+            format!("{}…", "\u{1f680}".repeat(29))
+        );
+        // A budget too small for the ellipsis clips the ellipsis.
+        assert_eq!(truncate_to_width("abcdef", 1, "…"), "\u{2026}");
+        assert_eq!(truncate_to_width("abcdef", 2, "..."), "..");
+        // An empty ellipsis is a hard truncate at the budget.
+        assert_eq!(truncate_to_width("abcdef", 4, ""), "abcd");
+    }
 }
 
 /// Golden widths from the TS `visibleWidth` (utils.ts:196, the installed
@@ -577,6 +660,8 @@ mod tests {
 /// AM, zero-width, wide box-drawing, halfwidth/fullwidth forms, east-
 /// asian ambiguous, jamo, and tabs (3 columns, TS-measured).
 #[test]
+// deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+#[allow(clippy::unicode_not_nfc)]
 fn str_width_matches_ts_golden_corpus() {
     let cases: Vec<(&str, usize)> = vec![
         ("你好世界，这是一段很长的中文文本", 32),

@@ -4,7 +4,7 @@
 //!
 //! The behavior contract is the TS TUI package's `terminal-image.ts`:
 //! image protocols are enabled only on terminals positively identified
-//! as supporting them (kitty, Ghostty, WezTerm -> Kitty protocol;
+//! as supporting them (kitty, Ghostty, `WezTerm` -> Kitty protocol;
 //! iTerm2 -> inline images). tmux and screen swallow the graphics
 //! sequences, so they - and every unrecognized terminal - report no
 //! image support and every image renders the textual fallback.
@@ -343,7 +343,7 @@ pub fn encode_iterm2(base64_data: &str, options: Iterm2EncodeOptions) -> String 
     use base64::Engine;
     let mut params: Vec<String> = vec![format!(
         "inline={}",
-        if options.inline == Some(false) { 0 } else { 1 }
+        i32::from(options.inline != Some(false))
     )];
     if let Some(width) = &options.width {
         params.push(format!("width={width}"));

@@ -1,8 +1,10 @@
 //! Prime Inference login, API-key surface: the auth endpoints (the whoami
 //! access check, the team list), and the production prime-cli config
-//! reuse. Port of the API-key paths of prime-inference-auth.ts; the
-//! browser challenge (the RSA-encrypted `auth_challenge` flow) is not
-//! ported — the interactive flow prompts for a pasted key instead.
+//! reuse. Port of the API-key paths of prime-inference-auth.ts; the login
+//! orchestration (the prime-cli reuse, the browser challenge over the
+//! shared `auth_challenge` core, the access checks) is
+//! `prime_inference_login.rs`'s, and the interactive surface (the URL
+//! raced against the paste prompt) lives in the composition root.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -13,8 +15,9 @@ use super::types::PrimeTeamCredential;
 
 /// TS `DEFAULT_PRIME_API_BASE_URL`: the Prime API the login talks to.
 pub const DEFAULT_PRIME_API_BASE_URL: &str = "https://api.primeintellect.ai";
-/// TS `DEFAULT_PRIME_FRONTEND_URL`: the browser challenge target (the
-/// production guard consults it; the flow itself does not open it).
+/// TS `DEFAULT_PRIME_FRONTEND_URL`: the browser challenge's URL host (the
+/// production guard consults it and the challenge URL rides it; the flow
+/// itself never opens a browser — the composition root does).
 pub const DEFAULT_PRIME_FRONTEND_URL: &str = "https://app.primeintellect.ai";
 /// TS `DEFAULT_PRIME_INFERENCE_URL` (module-local there too): the value
 /// the prime-cli config's `inference_url` must carry to count as
@@ -337,6 +340,13 @@ pub(super) async fn check_prime_scope_access(
 
 /// TS `checkPrimeInferenceAccess` (scope `inference`): the stored or pasted
 /// key must carry the inference write permission.
+///
+/// # Errors
+///
+/// Returns [`PrimeAccessError::Failed`] when the `whoami` request fails or
+/// its response body is invalid, and [`PrimeAccessError::Denied`] when the
+/// request is rejected, the response is missing user or scope data, the
+/// token lacks the inference scope, or the scope lacks the write permission.
 pub async fn check_prime_inference_access(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -355,6 +365,12 @@ pub async fn check_prime_inference_access(
 }
 
 /// TS `fetchPrimeTeams`: the key's teams, paginated at 100 a page.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when a team-list request fails,
+/// the API responds with a non-2xx status, or the response body cannot be
+/// parsed as a team list.
 pub async fn fetch_prime_teams(
     http: &dyn PrimeHttp,
     base_url: &str,

@@ -179,6 +179,11 @@ impl std::error::Error for MissingSubsystem {}
 /// has only the [`UnavailableRuntime`] implementation, which produces typed
 /// [`MissingSubsystem`] errors for every mode that needs unmerged crates.
 pub trait Runtime {
+    /// Execute the requested mode.
+    ///
+    /// # Errors
+    /// Returns a [`MissingSubsystem`] error naming the subsystem the
+    /// requested mode needs when it is not linked into the binary.
     fn run(&self, options: &RunOptions) -> Result<i32, MissingSubsystem>;
 }
 
@@ -198,8 +203,8 @@ impl Runtime for UnavailableRuntime {
 }
 
 /// TS main.ts `telemetryDisabled = isTelemetryEnabled(settings) ? undefined
-/// : true`: env overrides first (PI_OFFLINE / DO_NOT_TRACK /
-/// PRIME_AGENT_TELEMETRY), then the settings AND. Returns true when
+/// : true`: env overrides first (`PI_OFFLINE` / `DO_NOT_TRACK` /
+/// `PRIME_AGENT_TELEMETRY`), then the settings AND. Returns true when
 /// telemetry is disabled for this invocation.
 pub fn telemetry_disabled(settings: &pa_core::settings::SettingsManager) -> bool {
     match pa_telemetry::env_telemetry_override() {

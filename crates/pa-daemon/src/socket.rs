@@ -69,6 +69,13 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
 /// (Windows) have no filesystem residue - the first listener creates the
 /// pipe - so preparing the path is a no-op there (the TS `prepareDaemonSocketPath`
 /// returns early on win32 for the same reason).
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, the
+/// socket path cannot be stat'ed, a live listener already answers on the
+/// socket (in use), the cross-process cleanup lock cannot be acquired,
+/// or the locked cleanup itself fails.
 #[cfg(unix)]
 pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -177,9 +184,8 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
         return;
     }
     #[cfg(unix)]
-    let _cleanup_lock = match pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) {
-        Ok(lock) => lock,
-        Err(_) => return,
+    let Ok(_cleanup_lock) = pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) else {
+        return;
     };
     if let Some(expected) = expected_identity {
         match socket_identity(path) {

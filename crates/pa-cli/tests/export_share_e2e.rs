@@ -231,7 +231,7 @@ async fn tui_export_and_share_surface() {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -248,9 +248,9 @@ async fn tui_export_and_share_surface() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -272,7 +272,7 @@ async fn tui_export_and_share_surface() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };

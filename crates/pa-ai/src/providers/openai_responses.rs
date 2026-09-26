@@ -1,4 +1,4 @@
-//! OpenAI Responses API streaming provider.
+//! `OpenAI` Responses API streaming provider.
 //! Port of `packages/ai/src/providers/openai-responses.ts`: session-affinity
 //! headers, prompt-cache retention, reasoning params with encrypted-content
 //! include, service-tier pricing, and the shared Responses stream processor.
@@ -10,7 +10,7 @@ use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
-use crate::models::clamp_thinking_level;
+use crate::models::{clamp_thinking_level, supports_thinking};
 use crate::providers::openai_responses_shared::{
     apply_service_tier_pricing, convert_responses_messages, convert_responses_tools,
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ReasoningSummary,
@@ -50,9 +50,14 @@ pub struct ResolvedResponsesCompat {
 }
 
 pub fn get_responses_compat(model: &Model) -> ResolvedResponsesCompat {
-    let compat = model.compat_kind().and_then(|kind| match kind {
-        crate::types::CompatKind::OpenAiResponses(compat) => Some(compat),
-        _ => None,
+    // TS reads the responses compat directly: the wire object cannot tag
+    // its shape, and a shared-key-only object (the xAI subscription's
+    // `supportsLongCacheRetention: false`) still decodes — every field is
+    // optional and unknown keys are ignored, so the responses view of any
+    // compat object is lossless for this API.
+    let compat = model.compat.as_ref().and_then(|compat| {
+        serde_json::from_value::<pa_types::ai::OpenAiResponsesCompat>(compat.raw.clone().into())
+            .ok()
     });
     ResolvedResponsesCompat {
         send_session_id_header: compat
@@ -122,7 +127,7 @@ pub fn stream_openai_responses(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -233,7 +238,7 @@ fn build_params(model: &Model, context: &Context, options: &OpenAIResponsesOptio
             );
         }
     }
-    if model.reasoning {
+    if supports_thinking(model) {
         if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
             let effort = match options.reasoning_effort {
                 Some(effort) => model
@@ -356,9 +361,8 @@ async fn run_stream(
             );
         let mut decoder = SseDecoder::new();
         loop {
-            let chunk = match response.next_text().await? {
-                Some(chunk) => chunk,
-                None => break,
+            let Some(chunk) = response.next_text().await? else {
+                break;
             };
             for sse in decoder.push_text(&chunk) {
                 if sse.data.trim().is_empty() {
@@ -428,7 +432,7 @@ pub fn stream_simple_openai_responses(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -476,5 +480,84 @@ impl Provider for OpenAIResponsesProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_openai_responses(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A responses-served model with a wire `compat` object (the whole
+    /// model need not be responses-shaped for the compat resolution).
+    fn compat_model(raw: serde_json::Value) -> Model {
+        serde_json::from_value(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-responses", "provider": "xai",
+            "baseUrl": "https://api.x.ai/v1", "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100,
+            "compat": raw,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_shared_key_only_compat_decodes_for_responses_models() {
+        // TS `getXaiSubscriptionModel`'s compat carries only
+        // `supportsLongCacheRetention: false`; the responses provider
+        // reads the responses view directly (the wire object cannot tag
+        // its shape).
+        let model = compat_model(serde_json::json!({ "supportsLongCacheRetention": false }));
+        let compat = get_responses_compat(&model);
+        assert!(!compat.supports_long_cache_retention);
+        assert!(
+            compat.send_session_id_header,
+            "the absent header flag defaults on"
+        );
+    }
+
+    #[test]
+    fn the_responses_shaped_compat_keeps_its_values() {
+        let model = compat_model(
+            serde_json::json!({ "sendSessionIdHeader": false, "supportsLongCacheRetention": true }),
+        );
+        let compat = get_responses_compat(&model);
+        assert!(!compat.send_session_id_header);
+        assert!(compat.supports_long_cache_retention);
+        // Absent compat: both defaults on (TS's defaults).
+        let plain = serde_json::from_value::<Model>(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1", "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100
+        }))
+        .unwrap();
+        let compat = get_responses_compat(&plain);
+        assert!(compat.send_session_id_header);
+        assert!(compat.supports_long_cache_retention);
+    }
+
+    /// A `reasoning: false` model whose map addresses levels (the live
+    /// catalog's `gpt-5.3-chat-latest` shape, served over the Responses
+    /// API) is thinking-capable: the requested effort reaches the request
+    /// with the map's value. The flag alone must not veto a route that
+    /// declares addressable levels.
+    #[test]
+    fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-5.3-chat-latest", "name": "GPT-5.3 Chat (latest)",
+            "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1", "reasoning": false,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = OpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.reasoning_effort = Some(ModelThinkingLevel::Xhigh);
+        let params = build_params(&model, &Context::default(), &options);
+        assert_eq!(
+            params.get("reasoning"),
+            Some(&json!({ "effort": "xhigh", "summary": "auto" }))
+        );
     }
 }

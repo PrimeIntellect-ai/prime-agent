@@ -230,7 +230,7 @@ impl Inner {
                 }
                 tokio::select! {
                     result = task.wait() => result,
-                    _ = signal.cancelled() => Ok(()),
+                    () = signal.cancelled() => Ok(()),
                 }
             }
         }
@@ -318,7 +318,7 @@ impl Inner {
                     }
                     tokio::select! {
                         result = repair.slot.wait() => result?,
-                        _ = signal.cancelled() => return Ok(()),
+                        () = signal.cancelled() => return Ok(()),
                     }
                 }
             }

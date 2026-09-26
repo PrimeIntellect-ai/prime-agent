@@ -41,6 +41,14 @@ pub struct UpdateCommandOptions {
 
 /// `prime-agent update`: plan, stage, spawn the coordinator, and relay its
 /// terminal status. Returns the process exit code.
+///
+/// # Errors
+/// Returns an error when this binary is not owned by the installer (no
+/// managed install root), when the update lock cannot be acquired, handed
+/// over, or released, when a status-record write fails, when planning,
+/// downloading, staging, or candidate validation fails (a planning failure
+/// records `Aborted` first), or when the detached coordinator cannot be
+/// spawned.
 pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     let socket_path = pa_daemon::socket::default_daemon_socket_path();
@@ -64,11 +72,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             // coordinator's invoker owns the telemetry emission.
             let status = tail_status(&status_path).await;
             print_terminal(&status);
-            return Ok(if status.state == UpdateState::Complete {
-                0
-            } else {
-                1
-            });
+            return Ok(i32::from(status.state != UpdateState::Complete));
         }
         AcquireOutcome::Acquired => {}
     }
@@ -231,11 +235,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     phases.finish().await;
     track_update_completed(&status).await;
     print_terminal(&status);
-    Ok(if status.state == UpdateState::Complete {
-        0
-    } else {
-        1
-    })
+    Ok(i32::from(status.state != UpdateState::Complete))
 }
 
 /// The manual/direct install (`--archive <payload>`): no manifest and no
@@ -349,13 +349,13 @@ fn unreported(status_path: &std::path::Path, message: &str) -> UpdateStatus {
         coordinator: None,
         predecessor: None,
         successor: None,
-        counts: Default::default(),
+        counts: pa_types::daemon::update_flow::UpdateStatusCounts::default(),
         failures: Vec::new(),
         message: Some(message.to_string()),
         started_at: String::new(),
         updated_at: String::new(),
         heartbeat_at: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
@@ -536,6 +536,12 @@ async fn track_update_completed(status: &UpdateStatus) {
 /// --daemon-socket <path> --internal-update-restart-status <path>`): the
 /// detached process that adopts the staged status and drives the FSM to a
 /// terminal state. Returns the process exit code.
+///
+/// # Errors
+/// Returns an error when the coordinator cannot adopt the staged status
+/// record or a status write fails. An invalid invocation (a status path
+/// outside the agent dir's `update-restarts/`) is reported on stderr and
+/// returns `Ok(1)` instead.
 pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     // TS parity: the status file belongs under the agent dir's
@@ -553,9 +559,5 @@ pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) ->
     };
     let status = super::coordinator::run(&options).await?;
     print_terminal(&status);
-    Ok(if status.state == UpdateState::Complete {
-        0
-    } else {
-        1
-    })
+    Ok(i32::from(status.state != UpdateState::Complete))
 }

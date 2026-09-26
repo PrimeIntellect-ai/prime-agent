@@ -3,8 +3,10 @@
 //! `printPackageCommandHelp`).
 
 use pa_core::packages::{PackageManager, ProgressEvent, ProgressEventKind, UserOrProject};
+use pa_core::update::version::UpdateChannel;
 
 use crate::config::{get_agent_dir, APP_NAME, CONFIG_DIR_NAME};
+use crate::self_update::SelfUpdateOptions;
 
 use crate::public_command::{
     DAEMON_UPDATE_RESTART_COORDINATOR_FLAG, DAEMON_UPDATE_RESTART_ORIGIN_FLAG,
@@ -79,7 +81,9 @@ impl UpdateTarget {
 struct PackageCommandOptions {
     local: bool,
     help: bool,
+    force: bool,
     rollback: bool,
+    channel: Option<UpdateChannel>,
     update_target: Option<UpdateTarget>,
     invalid_option: Option<String>,
     invalid_argument: Option<String>,
@@ -143,7 +147,9 @@ fn parse_package_command(args: &[String]) -> Option<PackageCommandOptions> {
                 }
             }
             "--force" => {
-                if command != PackageCommand::Update {
+                if command == PackageCommand::Update {
+                    options.force = true;
+                } else {
                     options
                         .invalid_option
                         .get_or_insert_with(|| arg.to_string());
@@ -284,6 +290,7 @@ fn parse_package_command(args: &[String]) -> Option<PackageCommandOptions> {
     }
 
     if command == PackageCommand::Update {
+        options.channel = channel.and_then(UpdateChannel::from_wire);
         if extension_flag_source.is_some() {
             if self_flag || extensions_flag {
                 options.conflicting_options.get_or_insert_with(|| {
@@ -372,9 +379,9 @@ fn print_package_command_help(command: PackageCommand) {
     }
 }
 
-/// Run a package command, mirroring `handlePackageCommand` up to the point
-/// where the package manager subsystem is needed; those paths produce a clear
-/// typed error instead.
+/// Run a package command, mirroring `handlePackageCommand`: validation and
+/// help here, the package manager subsystem below, and the update case's
+/// self target through the native self-update flow (`crate::self_update`).
 pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
     let Some(options) = parse_package_command(args) else {
         return PackageCommandOutcome { exit_code: None };
@@ -502,59 +509,112 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         UserOrProject::User
     };
 
-    let result = match command {
+    // The TS `handlePackageCommand` shape: one outcome per case, the exit
+    // code the case itself decides (the update case's two halves compose
+    // abort/no-change codes of their own).
+    match command {
         PackageCommand::Install => {
             let source = options.source.as_deref().expect("checked above");
-            manager
-                .install_and_persist(source, scope)
-                .map(|()| println!("Installed {source}"))
+            match manager.install_and_persist(source, scope) {
+                Ok(()) => {
+                    println!("Installed {source}");
+                    HANDLED_OK
+                }
+                Err(error) => fail(&format!("Error: {error}"), None),
+            }
         }
         PackageCommand::Remove => {
             let source = options.source.as_deref().expect("checked above");
-            manager.remove_and_persist(source, scope).map(|removed| {
-                if !removed {
-                    eprintln!("No matching package found for {source}");
-                    std::process::exit(1);
+            match manager.remove_and_persist(source, scope) {
+                Ok(true) => {
+                    println!("Removed {source}");
+                    HANDLED_OK
                 }
-                println!("Removed {source}");
-            })
+                Ok(false) => {
+                    eprintln!("No matching package found for {source}");
+                    PackageCommandOutcome { exit_code: Some(1) }
+                }
+                Err(error) => fail(&format!("Error: {error}"), None),
+            }
         }
         PackageCommand::List => {
             print_package_list(&manager.list_configured_packages());
-            Ok(())
+            HANDLED_OK
         }
-        PackageCommand::Update => run_package_update(&mut manager, options.update_target),
-    };
-
-    match result {
-        Ok(()) => HANDLED_OK,
-        Err(error) => fail(&format!("Error: {error}"), None),
+        PackageCommand::Update => run_package_update(
+            &mut manager,
+            options,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &crate::self_update::run,
+        ),
     }
 }
 
-/// Update installed packages (and Prime Agent itself when the target asks
-/// for it; the self-update half is a native-release subsystem that is not
-/// linked into this build).
+/// The `package update` case (TS `handlePackageCommand`'s update case):
+/// the nightly-switch confirmation runs before any update work so declining
+/// changes nothing, then the extensions half, then the self target through
+/// the same native flow `prime-agent update` runs — never a stub. The
+/// extensions half runs first (TS order); a self-update the binary's
+/// installation does not support surfaces the flow's installer-ownership
+/// message instead of a misleading refusal.
 fn run_package_update(
     manager: &mut PackageManager,
-    target: Option<UpdateTarget>,
-) -> anyhow::Result<()> {
-    let target = target.unwrap_or(UpdateTarget::All);
+    options: PackageCommandOptions,
+    stdin_is_terminal: bool,
+    self_update: &dyn Fn(&SelfUpdateOptions, Option<String>) -> i32,
+) -> PackageCommandOutcome {
+    let target = options.update_target.unwrap_or(UpdateTarget::All);
+    let persisted_wire = manager
+        .settings()
+        .get_update_channel()
+        .map(crate::self_update::settings_channel_wire_name)
+        .map(str::to_string);
+    let abort_code = if target.includes_self() {
+        crate::self_update::confirm_nightly_switch(
+            options.force,
+            options.channel,
+            persisted_wire.as_deref(),
+            stdin_is_terminal,
+        )
+    } else {
+        None
+    };
+    if let Some(abort_code) = abort_code {
+        return PackageCommandOutcome {
+            exit_code: Some(abort_code),
+        };
+    }
     if target.includes_extensions() {
         let update_source = match &target {
             UpdateTarget::Extensions { source } => source.as_deref(),
             _ => None,
         };
-        manager.update(update_source)?;
+        if let Err(error) = manager.update(update_source) {
+            return fail(&format!("Error: {error}"), None);
+        }
         match update_source {
             Some(source) => println!("Updated {source}"),
             None => println!("Updated packages"),
         }
     }
-    if target.includes_self() {
-        anyhow::bail!("self-update is not available in this build yet; native release updates are not linked in");
+    if !target.includes_self() {
+        return HANDLED_OK;
     }
-    Ok(())
+    let invocation = SelfUpdateOptions {
+        force: options.force,
+        rollback: options.rollback,
+        channel: options.channel,
+        archive: None,
+        source: None,
+    };
+    let code = self_update(&invocation, persisted_wire);
+    if code == 0 {
+        HANDLED_OK
+    } else {
+        PackageCommandOutcome {
+            exit_code: Some(code),
+        }
+    }
 }
 
 /// Print the configured package list (user section, then project section).
@@ -612,5 +672,210 @@ pub(crate) fn report_settings_errors(
             pa_core::settings::SettingsScope::Project => "project",
         };
         eprintln!("Warning ({context}, {scope} settings): {}", error.message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> PackageCommandOptions {
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
+        parse_package_command(&args).expect("the args parse")
+    }
+
+    #[test]
+    fn update_options_store_force_and_the_channel() {
+        let options = parse(&["update", "--force", "--nightly"]);
+        assert!(options.force, "--force must reach the self target");
+        assert_eq!(options.channel, Some(UpdateChannel::Nightly));
+        assert_eq!(options.update_target, Some(UpdateTarget::All));
+        let options = parse(&["update", "--stable"]);
+        assert_eq!(options.channel, Some(UpdateChannel::Stable));
+        // The conflict survives: both channel flags never resolve to one.
+        assert!(parse(&["update", "--nightly", "--stable"])
+            .conflicting_options
+            .is_some());
+        // The other commands reject both flags outright.
+        assert!(parse(&["install", "--force"]).invalid_option.is_some());
+        assert!(parse(&["remove", "--nightly"]).invalid_option.is_some());
+    }
+
+    /// An empty package-manager store in its own sandbox: no configured
+    /// packages, so the extensions half is a no-op and the self target is
+    /// the only thing under observation.
+    fn sandbox_manager(dir: &std::path::Path, update_channel: Option<&str>) -> PackageManager {
+        let cwd = dir.join("cwd");
+        let agent_dir = dir.join("agent");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        if let Some(channel) = update_channel {
+            std::fs::write(
+                agent_dir.join("settings.json"),
+                format!(r#"{{"updateChannel": "{channel}"}}"#),
+            )
+            .unwrap();
+        }
+        let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+        PackageManager::new(cwd, agent_dir, settings)
+    }
+
+    /// A recording self-update runner: the invoked options plus the
+    /// persisted channel, and the exit code to hand back.
+    struct RecordedSelfUpdates {
+        seen: std::sync::Mutex<Vec<(SelfUpdateOptions, Option<String>)>>,
+        code: i32,
+    }
+
+    impl RecordedSelfUpdates {
+        fn new(code: i32) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                code,
+            }
+        }
+
+        fn runner(&self) -> impl Fn(&SelfUpdateOptions, Option<String>) -> i32 + '_ {
+            move |options, persisted| {
+                self.seen.lock().unwrap().push((options.clone(), persisted));
+                self.code
+            }
+        }
+
+        fn invocations(&self) -> Vec<(SelfUpdateOptions, Option<String>)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    /// The self-update invocation the flags produce (no direct-install
+    /// payload: the package path cannot carry `--archive`).
+    fn expected_invocation(
+        force: bool,
+        rollback: bool,
+        channel: Option<UpdateChannel>,
+    ) -> SelfUpdateOptions {
+        SelfUpdateOptions {
+            force,
+            rollback,
+            channel,
+            archive: None,
+            source: None,
+        }
+    }
+
+    #[test]
+    fn a_declined_nightly_switch_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), Some("stable"));
+        let options = parse(&["update", "--nightly"]);
+        let recorded = RecordedSelfUpdates::new(0);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(
+            outcome.exit_code,
+            Some(1),
+            "an unconfirmed switch on a non-tty run aborts with failure"
+        );
+        assert!(
+            recorded.invocations().is_empty(),
+            "declining runs neither half"
+        );
+    }
+
+    #[test]
+    fn force_confirms_the_switch_and_the_self_target_sees_the_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), Some("stable"));
+        let options = parse(&["update", "--force", "--nightly"]);
+        let recorded = RecordedSelfUpdates::new(0);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(outcome.exit_code, None, "a completed run exits 0");
+        assert_eq!(
+            recorded.invocations(),
+            vec![(
+                expected_invocation(true, false, Some(UpdateChannel::Nightly)),
+                Some("stable".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_rollback_runs_the_self_target_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), None);
+        // `--rollback` parses as the self target; with no persisted channel
+        // the runner receives none either.
+        let options = parse(&["update", "--rollback"]);
+        let recorded = RecordedSelfUpdates::new(0);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(outcome.exit_code, None);
+        assert_eq!(
+            recorded.invocations(),
+            vec![(expected_invocation(false, true, None), None)]
+        );
+    }
+
+    #[test]
+    fn the_extensions_only_target_never_runs_the_self_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), None);
+        let options = parse(&["update", "--extensions"]);
+        let recorded = RecordedSelfUpdates::new(0);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(outcome.exit_code, None);
+        assert!(recorded.invocations().is_empty());
+    }
+
+    #[test]
+    fn the_no_change_exit_code_reaches_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), None);
+        let options = parse(&["update", "--self"]);
+        let recorded = RecordedSelfUpdates::new(75);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(
+            outcome.exit_code,
+            Some(75),
+            "the interactive child's not-attempted code is the process exit code"
+        );
+    }
+
+    #[test]
+    fn a_failed_self_update_fails_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = sandbox_manager(dir.path(), None);
+        let options = parse(&["update", "--self"]);
+        let recorded = RecordedSelfUpdates::new(1);
+        let outcome = run_package_update(
+            &mut manager,
+            options,
+            /*stdin_is_terminal*/ false,
+            &recorded.runner(),
+        );
+        assert_eq!(outcome.exit_code, Some(1));
     }
 }

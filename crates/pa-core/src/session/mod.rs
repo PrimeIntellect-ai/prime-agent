@@ -223,7 +223,6 @@ fn entry_base_mut(entry: &mut FileEntry) -> Option<&mut EntryBase> {
         | FileEntry::Label { base, .. }
         | FileEntry::SessionInfo { base, .. }
         | FileEntry::SessionState { base, .. }
-        | FileEntry::AgentStatus { base, .. }
         | FileEntry::GitState { base, .. }
         | FileEntry::CustomMessage { base, .. } => Some(base),
     }

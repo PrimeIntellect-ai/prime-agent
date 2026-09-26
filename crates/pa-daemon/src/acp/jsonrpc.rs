@@ -49,9 +49,8 @@ pub fn parse_line(line: &str) -> Result<Incoming, Value> {
             ))
         }
     };
-    let object = match value {
-        Value::Object(map) => map,
-        _ => return Err(bad_request()),
+    let Value::Object(object) = value else {
+        return Err(bad_request());
     };
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(bad_request());

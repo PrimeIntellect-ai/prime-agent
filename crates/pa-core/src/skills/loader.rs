@@ -23,7 +23,7 @@ pub struct LoadSkillsResult {
     pub diagnostics: Vec<ResourceDiagnostic>,
 }
 
-/// Agent-side config dir name (TS CONFIG_DIR_NAME).
+/// Agent-side config dir name (TS `CONFIG_DIR_NAME`).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 fn normalize_path(input: &str) -> PathBuf {
@@ -260,7 +260,7 @@ mod tests {
         assert!(names.contains(&"beta"));
         // The user-scope skill wins; the project copy reports a collision.
         let beta = result.skills.iter().find(|s| s.name == "beta").unwrap();
-        assert!(beta.source_info.scope == SourceScope::User);
+        assert_eq!(beta.source_info.scope, SourceScope::User);
         assert!(result
             .diagnostics
             .iter()

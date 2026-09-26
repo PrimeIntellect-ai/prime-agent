@@ -458,10 +458,8 @@ fn ipython_rich_output(result: &Value) -> Option<Value> {
 fn base64_byte_length(data: &str) -> usize {
     let padding = if data.ends_with("==") {
         2
-    } else if data.ends_with('=') {
-        1
     } else {
-        0
+        usize::from(data.ends_with('='))
     };
     ((data.len() * 3) / 4).saturating_sub(padding)
 }

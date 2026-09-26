@@ -3,11 +3,12 @@
 //! the headless agents-view plan typing queries and asserting the redesigned
 //! picker contract (Kevin's 2026-09-23 directive): queries match the
 //! session NAME, the durable session ID, and the CWD — never first
-//! messages, transcript text, recap summaries, or file paths — and hits
+//! messages, transcript text, or file paths — and hits
 //! render as one flat, relevance-ranked list. `PA_SEARCH_FRAMES_DIR`
 //! dumps every frame for before/after evidence captures.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -115,18 +116,18 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     let mut content = format!(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}}\n"
     );
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -225,6 +226,7 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
@@ -367,6 +369,7 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![

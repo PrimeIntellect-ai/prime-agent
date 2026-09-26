@@ -12,6 +12,12 @@ use super::types::AuthStorageData;
 /// Locked read/modify/write over the auth document. `update` returns
 /// `(result, next)`; `next: Some` writes it back atomically.
 pub trait AuthStorageBackend: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error when the backend fails to acquire its lock, when
+    /// the `update` callback fails, or when preparing or writing the auth
+    /// document fails. Reading the current document is best-effort: an
+    /// unreadable file reaches the callback as `None`, not an error.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
@@ -95,7 +101,7 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
         let current = fs::read_to_string(&self.auth_path).ok();
-        let (_, next) = update(current)?;
+        let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write(&self.auth_path, &next)?;
         }
@@ -115,7 +121,7 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()> {
         let mut guard = self.value.lock().unwrap();
-        let (_, next) = update(guard.clone())?;
+        let ((), next) = update(guard.clone())?;
         if let Some(next) = next {
             *guard = Some(next);
         }
@@ -125,6 +131,11 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
 
 /// Parse an auth document; invalid JSON or a non-object root is a load error
 /// (the TS throws too).
+///
+/// # Errors
+///
+/// Returns an error when the content is not valid JSON or its root is not a
+/// JSON object. Empty content parses as the default, empty document.
 pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
     let content = content.filter(|content| !content.is_empty());
     let Some(content) = content else {

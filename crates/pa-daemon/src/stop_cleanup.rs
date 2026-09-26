@@ -345,6 +345,63 @@ impl Supervisor {
         Ok(())
     }
 
+    /// TS `persistWorkerStopTombstone(worker, false)`: the per-session
+    /// stop's durable intent (TS `completeOwnedSession` ->
+    /// `stopWorker(worker, true)` with the archive default off — the
+    /// stopped session stays resumable). The stop variant is explicit on
+    /// the tombstone (`archive_on_stop = false`): boot adoption routes
+    /// the graceful shutdown + schedule-cancel half, never the kill's
+    /// cascade + archive belt. Idempotent on an existing tombstone: the
+    /// plain kill's earlier persist keeps its archive intent
+    /// (`stopRequestedAt ??=` / `archiveOnStop ||=` in TS), and a persist
+    /// failure fails the stop before the shutdown is forwarded (the
+    /// worker's intentional-stop flag flips only once the tombstone is
+    /// durable) — EXCEPT when the durable intent already exists: a plain
+    /// kill reaches here holding the route-side persist's tombstone, so
+    /// its re-write is a no-op whose failure must not abort the stop
+    /// (aborting leaves the killed worker running on its session lease
+    /// until the next boot — the exact symptom this lane exists to end).
+    pub(crate) async fn persist_stop_tombstone_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> anyhow::Result<()> {
+        let mut descriptor = resident.descriptor.lock().await;
+        let old_stop_requested_at = descriptor.stop_requested_at.clone();
+        let old_archive_on_stop = descriptor.archive_on_stop;
+        if descriptor.stop_requested_at.is_none() {
+            descriptor.stop_requested_at = Some(crate::util::now_iso());
+        }
+        if descriptor.archive_on_stop.is_none() {
+            descriptor.archive_on_stop = Some(false);
+        }
+        if let Err(error) =
+            crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
+        {
+            if old_stop_requested_at.is_none() {
+                // No durable intent anywhere: roll the in-memory mutation
+                // back (a later descriptor write must not carry a
+                // tombstone the rejected stop never durably set —
+                // adoption would finish a stop nobody requested) and
+                // fail the stop.
+                descriptor.stop_requested_at = old_stop_requested_at;
+                descriptor.archive_on_stop = old_archive_on_stop;
+                return Err(error);
+            }
+            // The durable intent already exists — the plain kill's
+            // route-side persist put it on disk before the forward — so
+            // this re-write's failure must not abort the stop: the
+            // mutation touched only what the existing tombstone already
+            // carried, and the stop proceeds to its escalation instead of
+            // leaving the killed worker running on its session lease
+            // until the next boot.
+        }
+        drop(descriptor);
+        resident
+            .intentional_stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
     /// The durable half of a kill stop (TS `finalizeArchivedWorkerStop` +
     /// `deleteRlmSubagentArtifacts`), run after the stopped worker left
     /// the registry: the session tree's scheduled jobs cancel (the belt

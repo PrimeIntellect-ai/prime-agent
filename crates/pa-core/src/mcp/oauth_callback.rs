@@ -135,9 +135,7 @@ impl CallbackServer {
 
 /// One browser request: read it, answer it, settle the login's waiter.
 async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShared) {
-    let request = if let Some(request) = read_request_head(&mut stream).await {
-        request
-    } else {
+    let Some(request) = read_request_head(&mut stream).await else {
         let _ = write_response(
             &mut stream,
             "400 Bad Request",

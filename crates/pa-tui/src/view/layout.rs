@@ -82,10 +82,7 @@ impl AgentView {
             | ChatEntry::ShellCompletion(_)
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
-            | ChatEntry::CustomPanel(_)
-            | ChatEntry::ClientMarkdown { .. }
-            | ChatEntry::ClientText { .. }
-            | ChatEntry::ChangelogPanel { .. } => true,
+            | ChatEntry::CustomPanel(_) => true,
             ChatEntry::Assistant(message) => !message.streaming,
             ChatEntry::Tool(card) => !matches!(
                 crate::tool_card::panel_status(card),
@@ -144,10 +141,7 @@ impl AgentView {
             ChatEntry::Status { .. }
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
-            | ChatEntry::CustomPanel(_)
-            | ChatEntry::ClientMarkdown { .. }
-            | ChatEntry::ClientText { .. }
-            | ChatEntry::ChangelogPanel { .. } => false,
+            | ChatEntry::CustomPanel(_) => false,
         }
     }
 
@@ -161,14 +155,22 @@ impl AgentView {
             crate::chat::Detail::Details => 1,
             crate::chat::Detail::All => 2,
         };
-        let splash = render_splash(&self.chrome, &self.theme, width);
+        // A splash suppressed at the rebuild boundary (a chat that opened
+        // directly into content) contributes no rows: the offsets start
+        // at the first entry and every scroll/geometry consumer sees the
+        // same layout with or without it.
+        let splash = if self.splash_suppressed {
+            Vec::new()
+        } else {
+            render_splash(&self.chrome, &self.theme, width)
+        };
         let mut offsets = Vec::with_capacity(self.chat.len() + 1);
         offsets.push(splash.len());
         let mut first = true;
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
             let spacing = self.entry_spacing(index, entry, first, preceded_by_tool_activity);
-            let cacheable = self.entry_cacheable(entry);
+            let cacheable = self.entry_cacheable_at(index, entry);
             let cached_height = self.entry_heights[index][detail]
                 .filter(|(cached_spacing, _)| cacheable && *cached_spacing == spacing)
                 .map(|(_, height)| height);
@@ -226,27 +228,9 @@ impl AgentView {
 
     pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
         let mut tail: Vec<Line> = Vec::new();
-        // The `?` quick-shortcut guide renders right below the chat rows
-        // (TS mounts `shortcutGuideContainer` between the chat and the
-        // status area, inside the scrollable main view): `Spacer(1)` then
-        // `new Markdown(guide, 1, 1)` — one blank, the markdown paddingY
-        // blank, the content, and the closing paddingY blank.
-        if let Some(guide) = &self.shortcut_guide {
-            tail.push(Vec::new());
-            tail.push(Vec::new());
-            let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-            md.code_block_indent.clone_from(&self.code_block_indent);
-            tail.extend(crate::chat::render_markdown_block(
-                guide,
-                &md,
-                width,
-                &mut crate::markdown::MarkdownBlockCache::default(),
-            ));
-            tail.push(Vec::new());
-        }
         // In-flight bash output for the current turn renders ABOVE the
         // execution indicator (TS `pendingMessagesContainer` sits between
-        // the shortcut guide and the status area) and flushes into the
+        // the chat rows and the status area) and flushes into the
         // transcript when the turn settles.
         if !self.pending_bash.is_empty() {
             // TS `keyText("tui.select.cancel")`: every key of the
@@ -288,6 +272,17 @@ impl AgentView {
                 compaction,
                 self.pulse_frame,
                 &cancel_hint,
+                &self.theme,
+                width,
+            ));
+            // The live streamed-summary block (the operator's "stream
+            // the compacted summary" feature): under the loader row, the
+            // expanded view renders the summary as the compaction model
+            // generates it — one delta at a time — nested on the branch
+            // grammar like the expanded summary row that settles it.
+            tail.extend(crate::compaction_row::render_compaction_stream(
+                compaction,
+                self.detail.tool_output_expanded(),
                 &self.theme,
                 width,
             ));
@@ -335,7 +330,13 @@ impl AgentView {
                 break;
             }
             let source = self.sparse_entry_rows(index, self.layout_width);
+            let from = rows.len();
             Self::slice_rows(&source, &mut rows, offset, start, end);
+            // The entry's visible span feeds the click surface's window
+            // map (view/click.rs) — bounded by the rows on screen.
+            if from < rows.len() {
+                self.click.record_window_section(index, from, rows.len());
+            }
         }
         Self::slice_rows(
             &layout.tail,

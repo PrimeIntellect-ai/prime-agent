@@ -82,6 +82,13 @@ struct CatalogEnvelope {
 }
 
 /// Parse a catalog payload against the strict schema.
+///
+/// # Errors
+///
+/// Fails on an unsupported `schemaVersion` or payload shape, a `models`
+/// list that is empty or over the size limit, an invalid entry under
+/// [`InvalidEntries::Reject`], duplicate `(provider, id)` pairs, or when
+/// no entry survives validation.
 pub fn parse_model_catalog(
     value: &serde_json::Value,
     policy: InvalidEntries,

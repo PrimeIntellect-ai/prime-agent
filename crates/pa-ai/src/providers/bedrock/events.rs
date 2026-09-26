@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
 use crate::models::calculate_cost;
@@ -61,7 +61,7 @@ pub(crate) fn handle_event(
                 // classifier; the exception name is the classification key.
                 status: None,
                 body: None,
-                headers: Default::default(),
+                headers: HashMap::default(),
                 request_id: request_id.clone(),
                 sdk_name: Some(exception_type.clone()),
                 retry_after_ms: None,
@@ -142,9 +142,9 @@ fn handle_content_block_start(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            arguments: Default::default(),
+            arguments: Map::default(),
             thought_signature: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }));
         let index = output.content.len() - 1;
         state.slots.insert(
@@ -192,7 +192,7 @@ fn handle_content_block_delta(
             output.content.push(AssistantContent::Text(TextContent {
                 text: String::new(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
             let index = output.content.len() - 1;
             state
@@ -256,7 +256,7 @@ fn handle_content_block_delta(
                     thinking: String::new(),
                     thinking_signature: Some(String::new()),
                     redacted: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
             let index = output.content.len() - 1;
             state

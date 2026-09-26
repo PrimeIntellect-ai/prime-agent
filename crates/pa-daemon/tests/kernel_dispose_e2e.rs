@@ -42,13 +42,14 @@ fn test_lock() -> MutexGuard<'static, ()> {
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -59,7 +60,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel-dispose e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel-dispose e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -413,7 +417,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     await_kernels_gone(&baseline, Duration::from_secs(90));
 }
 
-/// A SIGKILLed supervisor leaves orphaned workers: the supervisor-lost
+/// A `SIGKILLed` supervisor leaves orphaned workers: the supervisor-lost
 /// monitor exits them after the lost window, and the exit path (TS
 /// `shutdown(0)`'s session close) disposes the kernel first — the exit
 /// itself would orphan it forever.

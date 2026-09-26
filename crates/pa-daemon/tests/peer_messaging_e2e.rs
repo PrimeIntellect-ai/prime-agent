@@ -19,7 +19,7 @@
 //! (`engine: "faux"`), so the kernel host request, the supervisor link, the
 //! peer ticket, and the direct socket delivery are all exercised for real.
 //!
-//! Linux-only e2e (AF_UNIX sockets, process-group kills): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, process-group kills): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -53,7 +53,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -64,7 +65,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live peer-messaging e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live peer-messaging e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -624,7 +628,7 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    assert!(re_registered.len() == 2);
+    assert_eq!(re_registered.len(), 2);
 
     // The next kernel send still delivers: the supervisor link reconnects,
     // the ticket mints against the rebuilt roster, and B runs the prompt.

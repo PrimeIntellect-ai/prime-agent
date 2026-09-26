@@ -26,7 +26,7 @@ const DELIVERY_TIMEOUT_MS: u64 = 15_000;
 pub(crate) enum PeerDeliveryOutcome {
     /// The target answered this response (a failure response is final
     /// too - the target refused the delivery). Boxed: the response's
-    /// insertion-ordered JSON maps (preserve_order, wire parity) would
+    /// insertion-ordered JSON maps (`preserve_order`, wire parity) would
     /// dwarf the empty variants (`large_enum_variant`).
     Answered(Box<DaemonResponse>),
     /// The link could not be established (connect, hello, or the grant
@@ -74,9 +74,8 @@ async fn deliver_once(
 ) -> PeerDeliveryOutcome {
     // Link establishment: connect, hello, and the grant burn. Any failure
     // here means nothing was delivered.
-    let stream = match connect_transport(std::path::Path::new(&ticket.socket_path)).await {
-        Ok(stream) => stream,
-        Err(_) => return PeerDeliveryOutcome::NotEstablished,
+    let Ok(stream) = connect_transport(std::path::Path::new(&ticket.socket_path)).await else {
+        return PeerDeliveryOutcome::NotEstablished;
     };
     let (reader, mut writer) = stream.split();
     let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
@@ -85,7 +84,7 @@ async fn deliver_once(
         return PeerDeliveryOutcome::NotEstablished;
     }
     // Burn the grant: peer_auth with the `worker` purpose.
-    let auth = match request(
+    let Ok(auth) = request(
         &mut writer,
         &mut reader,
         "peer_auth",
@@ -98,9 +97,8 @@ async fn deliver_once(
         }),
     )
     .await
-    {
-        Ok(auth) => auth,
-        Err(_) => return PeerDeliveryOutcome::NotEstablished,
+    else {
+        return PeerDeliveryOutcome::NotEstablished;
     };
     if !auth.success {
         return PeerDeliveryOutcome::NotEstablished;

@@ -90,7 +90,7 @@ pub fn create_rlm_child_terminal_notice(
         display: true,
         details: Some(details),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -113,7 +113,7 @@ pub fn create_rlm_child_failure_message(
             "error": error,
         })),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 

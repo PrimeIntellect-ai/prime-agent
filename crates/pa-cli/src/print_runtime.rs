@@ -318,6 +318,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             // true), so the kernel boots in the background at creation;
             // the engine's depth-0 gate matches the TS session's.
             prewarm_ipython_kernel: Some(true),
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
@@ -504,7 +505,7 @@ fn thinking_block_text(
         .unwrap_or_default()
 }
 
-/// Serialize one loop event to the TS session_event wire shape.
+/// Serialize one loop event to the TS `session_event` wire shape.
 fn agent_event_json(event: &pa_agent::types::AgentEvent) -> Option<String> {
     use pa_agent::types::AgentEvent;
     fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {
@@ -649,8 +650,12 @@ fn build_session_manager(
     // project's session copied into this cwd) — with no daemon-active
     // guard: the copy writes a fresh file, never the hosted source.
     if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
         let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
             ResolvedSession::Path(path)
             | ResolvedSession::Local(path)
@@ -716,7 +721,7 @@ fn assert_session_not_active_in_daemon(
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
         if list.success {
@@ -835,7 +840,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),
@@ -996,7 +1001,11 @@ async fn run_prompts_and_emit(
             .await?;
         engine
             .session
-            .prompt_with_images(prompt, images, Default::default())
+            .prompt_with_images(
+                prompt,
+                images,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
@@ -1251,6 +1260,7 @@ async fn build_faux_engine_parts(
             // The faux engine is a Rust-only verification harness, not a
             // product surface: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },

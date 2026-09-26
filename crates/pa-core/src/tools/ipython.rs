@@ -6,6 +6,7 @@
 //! the [`IpythonKernelProvisioner`] trait (TS: `ReplKernelManager`), owned by
 //! the kernel manager module.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -265,10 +266,11 @@ fn format_execute_text(result: &ExecuteResult, background_output: Option<&str>) 
         }
     }
     if let Some(background) = background_output {
-        text.push_str(&format!(
-            "{}[background output (unattributed)]\n{background}",
-            if text.is_empty() { "" } else { "\n" }
-        ));
+        let separator = if text.is_empty() { "" } else { "\n" };
+        let _ = write!(
+            text,
+            "{separator}[background output (unattributed)]\n{background}"
+        );
     }
     text
 }

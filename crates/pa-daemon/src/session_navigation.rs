@@ -74,7 +74,7 @@ impl SessionNavigation {
 
     /// Swap the worker's live session onto `file`: the store, the engine's
     /// session file, and the rebuilt context (the shared tail of
-    /// new_session / switch_session / import_jsonl). The caller retires
+    /// `new_session` / `switch_session` / `import_jsonl`). The caller retires
     /// the previous runtime (the worker's `teardown_for_replacement`)
     /// before this runs - and rebinds the worker's cwd when the moved-to
     /// session records another one - so the context park lands on the

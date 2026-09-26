@@ -1,4 +1,4 @@
-//! Differential parity harness: prints word_wrap_line chunks for a JSON
+//! Differential parity harness: prints `word_wrap_line` chunks for a JSON
 //! corpus of [line, maxWidth] pairs, one output array per case, matching the
 //! TS wordWrapLine shape (text + start/end indices) for byte-diffing.
 use std::io::Read;

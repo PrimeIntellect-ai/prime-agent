@@ -95,9 +95,11 @@ Every contributor (human or agent) must read this before working on this repo.
   direction) and classify the change: internals, new `pub` surface, or a new
   dependency/cross-crate re-export. The latter two are architectural changes — an innocent-looking
   `pub use` is a very simple way to break encapsulation.
-- Edit generated data via its generator, never by hand
-  (`crates/pa-ai/src/models_generated.rs` comes from `crates/pa-ai/scripts/generate-models.py`).
-  Generated files are exempt from the size guidance.
+- The compiled fallback model catalog `crates/pa-ai/src/models_generated.rs` is
+  hand-maintained Rust mirroring the TS `packages/ai/src/models.generated.ts` object
+  literal — edit it by hand, exactly like its TS source (there is no generator). The
+  parity fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with
+  `scripts/generate-catalog-fixture.py`. Bulk data files are exempt from the size guidance.
 
 ## Adoption telemetry
 
@@ -160,6 +162,6 @@ Layering rules:
 
 ## References
 
-- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the session engine port, the completion matrix, the keybindings).
+- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the completion matrix, the keybindings).
 - `docs/FEATURE_PARITY.md` is the exhaustive interactive-mode audit: every TS component walked and verified against the Rust implementation.
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.

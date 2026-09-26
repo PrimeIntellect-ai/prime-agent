@@ -33,6 +33,11 @@ impl ActivationState {
 /// `bin/previous`, then atomically point `bin/prime-agent` at the
 /// candidate. Every symlink write is create-tmp + rename, so a reader
 /// never observes a missing launcher.
+///
+/// # Errors
+/// Returns an error when the `.activation-state` recovery record cannot be
+/// written or made durable, or when the `previous` or current launcher
+/// repoint fails.
 pub fn activate(
     root: &Path,
     current_target: &str,
@@ -69,6 +74,9 @@ pub fn activate(
 /// Repoint the launcher back at the previous release (spec §4 `Rollback`):
 /// the previous target is already recorded; the swap is the same atomic
 /// write.
+///
+/// # Errors
+/// Returns an error when the current launcher repoint fails.
 pub fn restore_previous(root: &Path, previous_target: &str) -> Result<()> {
     write_launcher(
         root,
@@ -79,6 +87,9 @@ pub fn restore_previous(root: &Path, previous_target: &str) -> Result<()> {
 
 /// Delete the activation state on `Complete` (spec §7: deleted after the new
 /// supervisor's hello; a leftover file is only a recovery hint).
+///
+/// # Errors
+/// Returns an error when the `.activation-state` file cannot be removed.
 pub fn clear_activation_state(root: &Path) -> Result<()> {
     let path = root.join(".activation-state");
     if path.exists() {
@@ -112,6 +123,10 @@ fn write_launcher(root: &Path, link: &str, target: &str) -> Result<()> {
 }
 
 /// The launcher's current link target (the `../releases/...` text).
+///
+/// # Errors
+/// Returns an error when the launcher symlink cannot be read or its
+/// target is not valid UTF-8.
 pub fn launcher_target(root: &Path, link: &str) -> Result<String> {
     let launcher = root.join("bin").join(link);
     let target =
@@ -125,6 +140,11 @@ pub fn launcher_target(root: &Path, link: &str) -> Result<String> {
 /// The validation probes of the candidate executable (TS `native-update.ts`
 /// parity): `--version` must print exactly `version`, `--help` must exit
 /// cleanly. Both run detached with a hard timeout.
+///
+/// # Errors
+/// Returns an error when the candidate binary's reported version cannot
+/// be obtained, when it differs from `version`, or when the `--help` probe
+/// fails, times out, or exits nonzero.
 pub async fn validate_candidate(exe: &Path, version: &str) -> Result<()> {
     // The release name and the binary it holds must agree: a directory
     // claiming a version its binary does not report is an inconsistent

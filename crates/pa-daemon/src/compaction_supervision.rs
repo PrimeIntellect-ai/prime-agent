@@ -28,6 +28,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
+
+use crate::backpressure::RouteAdmission;
 
 /// How long the supervisor waits for the worker's own `compaction_end`
 /// after an abort before declaring the run terminal. A healthy worker
@@ -509,6 +512,7 @@ impl crate::supervisor::Supervisor {
                         "abort_compaction",
                         payload,
                         ABORT_FORWARD_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                     .and_then(|response| {
@@ -606,7 +610,7 @@ impl crate::supervisor::Supervisor {
             active_session_id: terminal.active_session_id.clone(),
             event,
             meta: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
         .unwrap_or_default();
         let _ = self.events.send((

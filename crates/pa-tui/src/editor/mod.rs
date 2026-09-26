@@ -19,6 +19,7 @@ use text_utils::{char_at, split_at_char};
 use wrap::{parse_paste_marker, segment_with_markers};
 
 mod autocomplete;
+mod click;
 mod input;
 mod kill_ring;
 mod layout;
@@ -83,7 +84,7 @@ pub struct EditorPasteSnapshot {
 /// Outcome of a submit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitOutcome {
-    /// Expanded + trimmed text, as delivered to on_submit.
+    /// Expanded + trimmed text, as delivered to `on_submit`.
     pub text: String,
 }
 

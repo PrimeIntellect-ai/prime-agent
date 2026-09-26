@@ -32,7 +32,7 @@ use super::runtime::SessionRuntime;
 /// `agent_dir` (registry) or the no-children behavior (host).
 #[derive(Default)]
 pub struct RlmWiring {
-    /// Registry `rlm.find_models` searches. Defaults to the agent_dir catalog.
+    /// Registry `rlm.find_models` searches. Defaults to the `agent_dir` catalog.
     pub model_registry: Option<Arc<crate::models::registry::ModelRegistry>>,
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
@@ -211,7 +211,7 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// goal/heartbeat bridge plus the pre-imported Python skills.
 ///
 /// The session's agent dir is propagated explicitly into the kernel env
-/// (PRIME_AGENT_CODING_AGENT_DIR): ambient inheritance is correct for the
+/// (`PRIME_AGENT_CODING_AGENT_DIR`): ambient inheritance is correct for the
 /// product paths, but an embedding host whose ambient env differs from the
 /// session's agent dir must not leak its own paths into the kernel. Same
 /// discipline as the daemon worker env (#109).
@@ -230,6 +230,8 @@ pub fn kernel_provisioner(
     agent_dir: &std::path::Path,
     snapshot_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
+    on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
+    on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(1);
@@ -253,6 +255,8 @@ pub fn kernel_provisioner(
             snapshot_dir,
             ready_gate: None,
             on_restore,
+            on_background_work_settled,
+            on_unavailable_skills,
             on_bootstrap_result,
         },
     ))

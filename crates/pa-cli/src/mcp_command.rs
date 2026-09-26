@@ -328,9 +328,9 @@ fn parse_mcp_add_args(args: &[String]) -> Result<(&str, McpServerConfig, bool)> 
                     bail!("Duplicate child environment variable: {child}");
                 }
                 env.insert(
-                    child.to_string(),
+                    child.clone(),
                     EnvRef {
-                        env: source.to_string(),
+                        env: source.clone(),
                     },
                 );
             }

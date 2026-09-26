@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success, DaemonResponse};
 use crate::supervisor::{
     client_command_payload, Supervisor, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
@@ -55,7 +56,7 @@ pub(crate) struct PromptAdmissionTable {
 }
 
 impl PromptAdmissionTable {
-    /// The TS parse-time registration: a prompt/prompt_and_wait carrying
+    /// The TS parse-time registration: a `prompt/prompt_and_wait` carrying
     /// an `admissionId` reserves it (duplicates answer the TS error).
     pub(crate) fn register(
         &self,
@@ -237,8 +238,8 @@ impl Supervisor {
                 "Prompt admission was cancelled.",
             );
         }
-        let (worker_admission_id, timeout) =
-            match connection.prompt_admissions.with(&key, |admission| {
+        let Some((worker_admission_id, timeout)) =
+            connection.prompt_admissions.with(&key, |admission| {
                 (
                     admission.worker_admission_id.clone(),
                     if matches!(
@@ -250,16 +251,14 @@ impl Supervisor {
                         ROUTE_TIMEOUT_MS
                     },
                 )
-            }) {
-                Some(fields) => fields,
-                // An admission that vanished before the route: the prompt
-                // routes through the generic path (TS `admission undefined`).
-                None => {
-                    return self
-                        .route_client_command(command, client_id, attached, command_id, type_name)
-                        .await
-                }
-            };
+            })
+        else {
+            // An admission that vanished before the route: the prompt
+            // routes through the generic path (TS `admission undefined`).
+            return self
+                .route_client_command(command, client_id, attached, command_id, type_name)
+                .await;
+        };
         // Resolve the session (the generic route's wake-aware resolution).
         let mut rebound_to: Option<String> = None;
         let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
@@ -340,7 +339,13 @@ impl Supervisor {
         // prompt still lands exactly once (the generic client route's
         // contract).
         let response = self
-            .route_command_ready(&resident, command_type, payload, timeout)
+            .route_command_ready(
+                &resident,
+                command_type,
+                payload,
+                timeout,
+                RouteAdmission::ClientRequest,
+            )
             .await;
         let mut response = match response {
             Ok(response) => response,
@@ -462,6 +467,7 @@ impl Supervisor {
                         "cancel_prompt_admission",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                 {

@@ -1,4 +1,4 @@
-//! Azure OpenAI Responses API streaming provider.
+//! Azure `OpenAI` Responses API streaming provider.
 //! Port of `packages/ai/src/providers/azure-openai-responses.ts`: deployment
 //! name resolution (options/env map), base-URL normalization with the
 //! /openai/v1 path, api-version query parameter, and the shared Responses
@@ -13,7 +13,7 @@ use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
-use crate::models::clamp_thinking_level;
+use crate::models::{clamp_thinking_level, supports_thinking};
 use crate::providers::openai_responses_shared::{
     convert_responses_messages, convert_responses_tools, ConvertResponsesMessagesOptions,
     ConvertResponsesToolsOptions, ResponsesStreamHooks, AZURE_TOOL_CALL_PROVIDERS,
@@ -202,7 +202,7 @@ fn build_params(
             );
         }
     }
-    if model.reasoning {
+    if supports_thinking(model) {
         if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
             let effort = match options.reasoning_effort {
                 Some(effort) => model
@@ -261,7 +261,7 @@ pub fn stream_azure_openai_responses(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -386,9 +386,8 @@ async fn run_stream(
             );
         let mut decoder = SseDecoder::new();
         loop {
-            let chunk = match response.next_text().await? {
-                Some(chunk) => chunk,
-                None => break,
+            let Some(chunk) = response.next_text().await? else {
+                break;
             };
             for sse in decoder.push_text(&chunk) {
                 if sse.data.trim().is_empty() {
@@ -458,7 +457,7 @@ pub fn stream_simple_azure_openai_responses(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -509,5 +508,34 @@ impl Provider for AzureOpenAIResponsesProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_azure_openai_responses(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `reasoning: false` model whose map addresses levels (the live
+    /// catalog's `gpt-5.3-chat-latest` azure shape) is thinking-capable:
+    /// the requested effort reaches the request with the map's value. The
+    /// flag alone must not veto a route that declares addressable levels.
+    #[test]
+    fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-5.3-chat-latest", "name": "GPT-5.3 Chat (latest)",
+            "api": "azure-openai-responses", "provider": "azure-openai-responses",
+            "baseUrl": "", "reasoning": false,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = AzureOpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.reasoning_effort = Some(ModelThinkingLevel::Xhigh);
+        let params = build_params(&model, &Context::default(), &options, "deploy");
+        assert_eq!(
+            params.get("reasoning"),
+            Some(&json!({ "effort": "xhigh", "summary": "auto" }))
+        );
     }
 }

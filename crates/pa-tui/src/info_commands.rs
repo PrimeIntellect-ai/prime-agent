@@ -3,12 +3,15 @@
 //! `handleContextCommand` over `formatContextTree`,
 //! `handleSystemPromptCommand`, `handleLogsCommand`, and
 //! `handleChangelogCommand` over `parseChangelog`). Row data and render are
-//! pure; the session UI owns the daemon fetches that feed the builders, the
-//! view owns the paint. Every builder returns the structured form of the TS
-//! `theme.fg(...)`-embedded info strings: one [`ClientLine`] per source
-//! line, spans carrying their theme color so the view resolves them at
-//! render time.
+//! pure; the session UI owns the daemon fetches that feed the builders, and
+//! the read-only info panel (`info_panel`) owns the paint (the operator's
+//! 2026-09-26 directive: these displays render as the docked popup panel,
+//! not as transcript rows). Every builder returns the structured form of
+//! the TS `theme.fg(...)`-embedded info strings: one [`ClientLine`] per
+//! source line, spans carrying their theme color so the view resolves them
+//! at render time.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
@@ -22,6 +25,11 @@ use ratatui::style::Style;
 const CONTEXT_BAR_WIDTH: usize = 10;
 /// The minimum agent-label column width (TS `MIN_LABEL_WIDTH`).
 const MIN_LABEL_WIDTH: usize = 16;
+/// The collapsed view's agent-row budget (a deliberate TS delta: TS
+/// renders every row of every tree): a tree with at most this many rows
+/// renders the full TS shape; a bigger tree keeps its highest-usage rows
+/// and folds the rest into the summary row behind the expand hint.
+const CONTEXT_ROW_BUDGET: usize = 10;
 
 /// One styled segment of a client info row: text plus its theme color
 /// (`None` keeps the default foreground).
@@ -81,7 +89,7 @@ pub(crate) fn grouped(value: u64) -> String {
 /// exact rational value: `value = mantissa / 2^exponent` and
 /// `value * 10^digits = mantissa * 5^digits / 2^(exponent - digits)`
 /// reduce to one integer divide with a half-away tie on the remainder.
-pub(crate) fn js_to_fixed(value: f64, digits: usize) -> String {
+pub fn js_to_fixed(value: f64, digits: usize) -> String {
     let bits = value.to_bits();
     let biased = ((bits >> 52) & 0x7ff) as i64;
     let (mantissa, exponent) = if biased == 0 {
@@ -332,6 +340,15 @@ impl UsageTotals {
         self.input + self.output + self.cache_read + self.cache_write
     }
 
+    /// Fold another parsed total into this one (the per-model tree sums).
+    fn add_fold(&mut self, other: &UsageTotals) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.cost_total += other.cost_total;
+    }
+
     fn add(&mut self, other: &Value) {
         let u64_field = |value: &Value, field: &str| {
             value.get(field).and_then(Value::as_u64).unwrap_or_default()
@@ -373,7 +390,19 @@ impl ContextUsageSnapshot {
     }
 }
 
-/// One agent row of the context tree (TS `ContextTreeNode`).
+/// One model's own-usage bucket from the daemon's per-model fold
+/// (`ownUsageByModel`): the spend billed at that model's rates.
+#[derive(Debug, Clone, PartialEq)]
+struct ModelUsage {
+    provider: String,
+    id: String,
+    totals: UsageTotals,
+}
+
+/// One agent row of the context tree (TS `ContextTreeNode`), plus this
+/// port's per-model own-usage breakdown (a deliberate TS delta: a
+/// session that switches models mid-conversation — or hosts subagents on
+/// other models — shows which model billed what).
 #[derive(Debug, Clone, PartialEq)]
 struct ContextNode {
     id: String,
@@ -381,6 +410,7 @@ struct ContextNode {
     status: String,
     model: Option<(String, String)>,
     own_usage: UsageTotals,
+    own_usage_by_model: Vec<ModelUsage>,
     context_usage: Option<ContextUsageSnapshot>,
     children: Vec<ContextNode>,
 }
@@ -421,6 +451,25 @@ fn parse_context_node(value: &Value) -> ContextNode {
             Some((provider.to_string(), id.to_string()))
         }),
         own_usage: value.get("ownUsage").map(usage_from).unwrap_or_default(),
+        own_usage_by_model: value
+            .get("ownUsageByModel")
+            .and_then(Value::as_array)
+            .map(|buckets| {
+                buckets
+                    .iter()
+                    .filter_map(|bucket| {
+                        let provider = bucket.get("provider")?.as_str()?.to_string();
+                        let id = bucket.get("id")?.as_str()?.to_string();
+                        let totals = bucket.get("ownUsage").map(usage_from)?;
+                        Some(ModelUsage {
+                            provider,
+                            id,
+                            totals,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         context_usage,
         children: value
             .get("children")
@@ -573,12 +622,111 @@ fn sum_own_usage(node: &ContextNode, total: &mut UsageTotals) {
     }
 }
 
+/// The whole tree's own usage summed per model (the `/context` Cost
+/// section's breakdown): every node's per-model buckets fold into tree
+/// buckets keyed by `provider/id`, so a mid-conversation switch — or
+/// subagents on other models — shows each model's share of the total.
+/// `None` when a node with billable own usage carries no per-model fold
+/// (a foreign file): a partial breakdown would not add up to the
+/// displayed total, so the Cost section stays plain.
+fn sum_own_usage_by_model(node: &ContextNode, total: &mut Vec<ModelUsage>) {
+    for bucket in &node.own_usage_by_model {
+        if let Some(existing) = total
+            .iter_mut()
+            .find(|existing| existing.provider == bucket.provider && existing.id == bucket.id)
+        {
+            existing.totals.add_fold(&bucket.totals);
+        } else {
+            total.push(bucket.clone());
+        }
+    }
+    for child in &node.children {
+        sum_own_usage_by_model(child, total);
+    }
+}
+
+/// The tree's per-model buckets when they account for every billed row.
+fn tree_own_usage_by_model(root: &ContextNode) -> Option<Vec<ModelUsage>> {
+    fn billed(node: &ContextNode) -> bool {
+        node.own_usage.spent_tokens() > 0 || node.own_usage.cost_total > 0.0
+    }
+    fn covers(node: &ContextNode) -> bool {
+        (!billed(node) || !node.own_usage_by_model.is_empty()) && node.children.iter().all(covers)
+    }
+    if !covers(root) {
+        return None;
+    }
+    let mut total = Vec::new();
+    sum_own_usage_by_model(root, &mut total);
+    Some(total)
+}
+
+/// The collapsed view's summary row (a deliberate TS delta): the hidden
+/// agents folded into one label and their spend, so the visible rows plus
+/// the summary still add up to the grand totals.
+struct HiddenAgents {
+    label: String,
+    tokens: String,
+    cost: String,
+}
+
+/// Which agent rows [`context_tree_rows`] renders — this port's collapse
+/// knob, a deliberate TS delta (TS `formatContextTree` renders every row):
+/// a fleet session's tree outgrows the terminal, so the default keeps the
+/// display bounded and names the command that renders the whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextTreeScope {
+    /// The default: a tree over the row budget renders its highest-usage
+    /// rows, a summary row for the rest, and the expand hint; a tree
+    /// within the budget renders every row, exactly the TS shape.
+    Collapsed,
+    /// `/context all`: every row of every tree, whatever its size.
+    EveryAgent,
+}
+
 /// The `/context` rows (TS `formatContextTree`): the agent tree with own
 /// token/cost columns and per-agent context utilization, then the grand
 /// totals. `width` is the TS render width: `clamp(columns - 2, 60, 120)`.
-pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
+/// `scope` is this port's collapse knob (see [`ContextTreeScope`]); TS
+/// has no collapse.
+pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) -> Vec<ClientLine> {
     let root = parse_context_node(tree);
-    let rows = flatten_tree(&root);
+    let mut rows = flatten_tree(&root);
+
+    // The collapse (a deliberate TS delta: TS renders every row): a tree
+    // over the row budget keeps its highest-usage rows — spend decides
+    // which agents matter — and folds the rest into the summary row
+    // under the table. Ties keep tree order (the sort is stable); the
+    // summary and the grand totals still cover the whole tree.
+    let mut summary: Option<HiddenAgents> = None;
+    if scope == ContextTreeScope::Collapsed && rows.len() > CONTEXT_ROW_BUDGET {
+        rows.sort_by(|left, right| {
+            right
+                .node
+                .own_usage
+                .spent_tokens()
+                .cmp(&left.node.own_usage.spent_tokens())
+                .then_with(|| {
+                    right
+                        .node
+                        .own_usage
+                        .cost_total
+                        .total_cmp(&left.node.own_usage.cost_total)
+                })
+        });
+        let hidden_count = rows.len() - CONTEXT_ROW_BUDGET;
+        let mut hidden_total = UsageTotals::default();
+        for row in &rows[CONTEXT_ROW_BUDGET..] {
+            hidden_total.add_fold(&row.node.own_usage);
+        }
+        let noun = if hidden_count == 1 { "agent" } else { "agents" };
+        summary = Some(HiddenAgents {
+            label: format!("{hidden_count} more {noun}"),
+            tokens: crate::chrome::format_token_count(hidden_total.spent_tokens()),
+            cost: format_cost(hidden_total.cost_total),
+        });
+        rows.truncate(CONTEXT_ROW_BUDGET);
+    }
 
     let token_cells: Vec<String> = rows
         .iter()
@@ -592,17 +740,43 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
         .iter()
         .map(String::len)
         .chain(["tokens".len()])
+        .chain(summary.iter().map(|hidden| hidden.tokens.len()))
         .max()
         .unwrap_or_default();
     let cost_width = cost_cells
         .iter()
         .map(String::len)
         .chain(["cost".len()])
+        .chain(summary.iter().map(|hidden| hidden.cost.len()))
         .max()
         .unwrap_or_default();
+    // The per-row model column — a deliberate TS delta (TS shows only the
+    // root's `Model:` line): the model decides the cost, so every agent
+    // row carries its bare model id, "-" when the node carries no model.
+    // The column appears only when at least one node has a model; a tree
+    // without model identity renders exactly the TS layout.
+    let model_cells: Vec<String> = rows
+        .iter()
+        .map(|row| match &row.node.model {
+            Some((_, id)) => id.rsplit('/').next().unwrap_or(id).to_string(),
+            None => "-".to_string(),
+        })
+        .collect();
+    let show_models = rows.iter().any(|row| row.node.model.is_some());
+    let model_width = if show_models {
+        model_cells
+            .iter()
+            .map(|cell| str_width(cell))
+            .chain(["model".len()])
+            .max()
+            .unwrap_or_default()
+    } else {
+        0
+    };
     let max_label = rows
         .iter()
         .map(|row| row.prefix.chars().count() + 2 + str_width(&row.node.label))
+        .chain(summary.iter().map(|hidden| 2 + str_width(&hidden.label)))
         .max()
         .unwrap_or_default();
     let label_width = MIN_LABEL_WIDTH.max(
@@ -610,6 +784,7 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             width
                 .saturating_sub(token_width)
                 .saturating_sub(cost_width)
+                .saturating_sub(model_width + if show_models { 2 } else { 0 })
                 .saturating_sub(28),
         ),
     );
@@ -622,13 +797,17 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
         ]);
         lines.push(vec![]);
     }
-    lines.push(vec![dim(format!(
-        "  {}  {}  {}  {}",
-        pad_end("agent", label_width),
+    let mut header = format!("  {}", pad_end("agent", label_width),);
+    if show_models {
+        let _ = write!(header, "  {}", pad_end("model", model_width));
+    }
+    let _ = write!(
+        header,
+        "  {}  {}  context",
         pad_start("tokens", token_width),
-        pad_start("cost", cost_width),
-        "context"
-    ))]);
+        pad_start("cost", cost_width)
+    );
+    lines.push(vec![dim(header)]);
     for (index, row) in rows.iter().enumerate() {
         let label_space = label_width
             .saturating_sub(row.prefix.chars().count())
@@ -648,6 +827,10 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             "{}  ",
             " ".repeat((label_width + 2).saturating_sub(label_used))
         )));
+        if show_models {
+            spans.push(dim(pad_end(&model_cells[index], model_width)));
+            spans.push(raw_span("  "));
+        }
         spans.push(raw_span(pad_start(&token_cells[index], token_width)));
         spans.push(raw_span("  "));
         spans.push(raw_span(
@@ -660,6 +843,34 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             row.node.id == "root",
         ));
         lines.push(spans);
+    }
+
+    if let Some(hidden) = &summary {
+        // The summary row (the hidden agents' folded spend, so the
+        // visible rows plus the summary still add up to the totals) and
+        // the expand affordance: the whole tree stays one command away.
+        let label_space = label_width.saturating_sub(2).max(1);
+        let label = truncate_plain(&hidden.label, label_space);
+        let mut spans = vec![dim("..."), dim(format!(" {label}"))];
+        let label_used: usize = spans.iter().map(|span| str_width(&span.text)).sum();
+        spans.push(raw_span(format!(
+            "{}  ",
+            " ".repeat((label_width + 2).saturating_sub(label_used))
+        )));
+        if show_models {
+            spans.push(dim(pad_end("-", model_width)));
+            spans.push(raw_span("  "));
+        }
+        spans.push(dim(pad_start(&hidden.tokens, token_width)));
+        spans.push(raw_span("  "));
+        spans.push(raw_span(
+            " ".repeat(cost_width.saturating_sub(str_width(&hidden.cost))),
+        ));
+        spans.push(dim(&hidden.cost));
+        spans.push(raw_span("  "));
+        spans.push(dim("-"));
+        lines.push(spans);
+        lines.push(vec![dim("Use /context all to show every agent.")]);
     }
 
     let mut totals = UsageTotals::default();
@@ -709,6 +920,27 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             dim("Total:"),
             raw_span(format!(" ${}", js_to_fixed(totals.cost_total, 4))),
         ]);
+        // The per-model breakdown (the model mix decides the cost): the
+        // whole tree's per-model buckets, most expensive model first.
+        // Rendered only when the daemon sent buckets and the tree used
+        // more than one model — a single-model tree already names its
+        // model in the `Model:` line and renders exactly TS.
+        let by_model = tree_own_usage_by_model(&root);
+        if let Some(mut by_model) = by_model.filter(|by_model| by_model.len() > 1) {
+            by_model.sort_by(|a, b| {
+                b.totals
+                    .cost_total
+                    .total_cmp(&a.totals.cost_total)
+                    .then_with(|| a.provider.cmp(&b.provider))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            for bucket in &by_model {
+                lines.push(vec![
+                    dim(format!("{}/{}:", bucket.provider, bucket.id)),
+                    raw_span(format!(" ${}", js_to_fixed(bucket.totals.cost_total, 4))),
+                ]);
+            }
+        }
     }
 
     if let Some(root_context) = &root.context_usage {
@@ -745,38 +977,6 @@ fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
         .collect()
 }
 
-/// Count client text using the same styled input runs as rendering.
-pub(crate) fn client_text_row_count(rows: &[ClientLine], theme: &Theme, width: usize) -> usize {
-    1 + rows
-        .iter()
-        .map(|row| {
-            crate::width::wrapped_line_count(
-                &styled_spans(row, theme),
-                width.saturating_sub(2).max(1),
-            )
-        })
-        .sum::<usize>()
-}
-
-fn changelog_style(theme: &Theme, code_block_indent: &str) -> crate::markdown::MarkdownStyle {
-    let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-    md.code_block_indent = code_block_indent.to_string();
-    md
-}
-
-pub(crate) fn changelog_panel_row_count(
-    markdown: &str,
-    theme: &Theme,
-    code_block_indent: &str,
-    width: usize,
-) -> usize {
-    7 + crate::markdown::markdown_row_count(
-        markdown.trim(),
-        width.saturating_sub(2).max(1),
-        &changelog_style(theme, code_block_indent),
-    )
-}
-
 /// TS `Spacer(1)` + `Text(info, 1, 0)`: one blank row, then each source
 /// line wrapped at `width - 2` with a one-column margin on each side and
 /// rows padded to the full width (continuation rows pad inside the open
@@ -803,38 +1003,6 @@ pub fn render_client_text(rows: &[ClientLine], theme: &Theme, width: usize) -> V
     out
 }
 
-/// TS `handleChangelogCommand`: `Spacer(1)`, `DynamicBorder`, the accent
-/// `What's New` title (`Text(title, 1, 0)`), `Spacer(1)` + `Markdown(md, 1,
-/// 1)`, and the closing `DynamicBorder`.
-pub fn render_changelog_panel(
-    markdown: &str,
-    theme: &Theme,
-    code_block_indent: &str,
-    width: usize,
-) -> Vec<Line> {
-    let mut rows: Vec<Line> = Vec::new();
-    rows.push(Vec::new());
-    rows.push(vec![
-        theme.fg(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-    ]);
-    let title: Line = vec![Span::raw(" "), theme.fg(ThemeColor::Accent, "What's New")];
-    rows.push(crate::chat::pad_to(title, width, Style::default()));
-    rows.push(Vec::new());
-    rows.push(Vec::new());
-    let md = changelog_style(theme, code_block_indent);
-    rows.extend(crate::chat::render_markdown_block(
-        markdown,
-        &md,
-        width,
-        &mut crate::markdown::MarkdownBlockCache::default(),
-    ));
-    rows.push(Vec::new());
-    rows.push(vec![
-        theme.fg(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-    ]);
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,32 +1017,43 @@ mod tests {
         serde_json::from_str(text).expect("fixture json")
     }
 
+    /// The info rows the panel windows over: every rendered row pads to
+    /// exactly the render width (wide glyphs never overflow a row) and
+    /// wraps tighter at a narrow terminal instead of truncating content.
     #[test]
-    fn geometry_matches_client_and_changelog_rows() {
+    fn client_text_rows_wrap_and_pad_to_the_width() {
         let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
         let rows = vec![
             vec![],
             vec![raw_span("  ")],
             vec![dim("prefix "), raw_span("wide 界 words words")],
         ];
-        for width in [0, 1, 2, 7, 23, 80] {
-            assert_eq!(
-                client_text_row_count(&rows, &theme, width),
-                render_client_text(&rows, &theme, width).len()
-            );
-            for markdown in [
-                "",
-                "  ",
-                "# Heading\n\nwrapped words 界 words",
-                "| a | b |\n|---|---|\n| x | y |",
-                "```python\nprint(1)\n```",
-            ] {
+        // Sane terminal widths (at a degenerate width-1 terminal a wide
+        // glyph cannot fit a row, so exact-width padding is a width-2+
+        // property).
+        for width in [7, 23, 80] {
+            let rendered = render_client_text(&rows, &theme, width);
+            // The TS `Spacer(1)` leading blank rides first, unpadded;
+            // every CONTENT row below it pads to exactly the width.
+            assert!(!rendered.is_empty(), "the leading spacer always renders");
+            assert!(rendered[0].is_empty(), "the leading spacer is the TS blank");
+            for row in &rendered[1..] {
                 assert_eq!(
-                    changelog_panel_row_count(markdown, &theme, "    ", width),
-                    render_changelog_panel(markdown, &theme, "    ", width).len()
+                    crate::width::spans_width(row),
+                    width,
+                    "rows pad to the width: {row:?}"
                 );
             }
         }
+        let rendered = render_client_text(&rows, &theme, 7);
+        let text: Vec<String> = rendered
+            .iter()
+            .map(|row| row.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("界")),
+            "the wide glyph survives the wrap"
+        );
     }
 
     #[test]
@@ -929,14 +1108,14 @@ mod tests {
             rows,
             vec![
                 "Logs".to_string(),
-                "".to_string(),
+                String::new(),
                 format!("Directory: {}", logs.display()),
-                "".to_string(),
+                String::new(),
                 // 2048/1024 = 2.0 KB; the 1-byte file rounds to 0.0 KB;
                 // rows sort by name; dot-entries stay hidden.
                 "• a-second.log (0.0 KB)".to_string(),
                 "• client-errors.log (2.0 KB)".to_string(),
-                "".to_string(),
+                String::new(),
                 "Daemon crashes log to <socket>.log; agent-open failures log to client-errors.log."
                     .to_string(),
             ]
@@ -999,7 +1178,7 @@ mod tests {
             }"#,
         );
         assert_eq!(
-            plain(&context_tree_rows(&tree, 120)),
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
             vec![
                 "Context",
                 "",
@@ -1035,11 +1214,22 @@ mod tests {
                                "cacheWrite": 678, "cost": {"total": 1.2345}},
                 "contextUsage": {"tokens": 1250000, "contextWindow": 131072,
                                  "percent": 95.42},
+                "ownUsageByModel": [
+                    {"provider": "prime-inference", "id": "z-ai/glm-5.3",
+                     "ownUsage": {"input": 1234567, "output": 2345, "cacheRead": 12345,
+                                  "cacheWrite": 678, "cost": {"total": 1.2345}}}
+                ],
                 "children": [
                     {"id": "sub-1", "label": "run the verifier suite for parity",
                      "status": "done",
+                     "model": {"provider": "anthropic", "id": "claude-opus-4-6"},
                      "ownUsage": {"input": 500, "output": 60, "cacheRead": 0,
                                   "cacheWrite": 100, "cost": {"total": 0.009}},
+                     "ownUsageByModel": [
+                        {"provider": "anthropic", "id": "claude-opus-4-6",
+                         "ownUsage": {"input": 500, "output": 60, "cacheRead": 0,
+                                      "cacheWrite": 100, "cost": {"total": 0.009}}}
+                     ],
                      "totalUsage": {"input": 500, "output": 60, "cacheRead": 0,
                                     "cacheWrite": 100, "cost": {"total": 0.009}},
                      "contextUsage": {"tokens": 600, "contextWindow": 131072,
@@ -1066,17 +1256,17 @@ mod tests {
             }"#,
         );
         assert_eq!(
-            plain(&context_tree_rows(&tree, 100)),
+            plain(&context_tree_rows(&tree, 100, ContextTreeScope::Collapsed)),
             vec![
                 "Context",
                 "",
                 "Model: prime-inference/z-ai/glm-5.3",
                 "",
-                "  agent                                                          tokens   cost  context",
-                "\u{25cf} my session                                                       1.2M  $1.23  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593} 95% (1.2M/131k)",
-                "\u{251c}\u{2500} \u{2713} run the verifier suite for parity                              660  $0.01  0% (600/131k)",
-                "\u{2514}\u{2500} \u{25c6} a very long child label that must truncate when the l...      1.5k  $0.02  -",
-                "   \u{2514}\u{2500} \u{2717} grandkid                                                     11  $0.00  unknown after compaction",
+                "  agent                                         model            tokens   cost  context",
+                "\u{25cf} my session                                    glm-5.3            1.2M  $1.23  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593} 95% (1.2M/131k)",
+                "\u{251c}\u{2500} \u{2713} run the verifier suite for parity          claude-opus-4-6     660  $0.01  0% (600/131k)",
+                "\u{2514}\u{2500} \u{25c6} a very long child label that must tr...    -                  1.5k  $0.02  -",
+                "   \u{2514}\u{2500} \u{2717} grandkid                                -                    11  $0.00  unknown after compaction",
                 "",
                 "Total: 1.3M tokens \u{b7} $1.26 across 4 agents",
                 "",
@@ -1094,6 +1284,90 @@ mod tests {
                 "Current: 1,250,000 / 131,072 (95.4%)",
             ]
         );
+        // The per-model breakdown STAYS OFF here: the root and sub-1
+        // carry buckets, but the two billed children without them would
+        // leave lines that do not add up to the displayed total — a
+        // partial breakdown degrades to the plain TS totals.
+    }
+
+    /// The operator's cost question end to end: a session that switches
+    /// models mid-conversation (sol -> opus, the switch's first request
+    /// re-caching the whole history) plus a subagent on a third model.
+    /// Every node's row carries its model, and the Cost section breaks
+    /// the total down per model, most expensive first. The fixture's
+    /// cost blocks are the provider-computed records (sol turn:
+    /// 100k\u{d7}$4/M + 2k\u{d7}$20/M = $0.44; the opus switch burst:
+    /// 5k\u{d7}$5/M + 1k\u{d7}$25/M + 104k cache-write\u{d7}$6.25/M =
+    /// $0.70; the opus cache-hit turn: 500\u{d7}$5/M + 800\u{d7}$25/M +
+    /// 110k cache-read\u{d7}$0.5/M = $0.0775; the glm subagent:
+    /// $0.023).
+    #[test]
+    fn context_tree_shows_per_model_costs_across_a_switch() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "switched session", "status": "active",
+                "model": {"provider": "anthropic", "id": "claude-opus-4-6"},
+                "ownUsage": {"input": 105500, "output": 3800, "cacheRead": 110000,
+                             "cacheWrite": 104000, "totalTokens": 221700,
+                             "cost": {"total": 1.2175}},
+                "ownUsageByModel": [
+                    {"provider": "openai", "id": "gpt-5.6-sol",
+                     "ownUsage": {"input": 100000, "output": 2000, "cacheRead": 0,
+                                  "cacheWrite": 0, "totalTokens": 1200,
+                                  "cost": {"total": 0.44}}},
+                    {"provider": "anthropic", "id": "claude-opus-4-6",
+                     "ownUsage": {"input": 5500, "output": 1800, "cacheRead": 110000,
+                                  "cacheWrite": 104000, "totalTokens": 220500,
+                                  "cost": {"total": 0.7775}}}
+                ],
+                "contextUsage": {"tokens": 221000, "contextWindow": 1000000,
+                                 "percent": 22.1},
+                "children": [
+                    {"id": "sub-1", "label": "scan the pricing tables", "status": "done",
+                     "model": {"provider": "prime-inference", "id": "internal/glm-5.3-fast"},
+                     "ownUsage": {"input": 1000, "output": 400, "cacheRead": 0,
+                                  "cacheWrite": 0, "totalTokens": 1400,
+                                  "cost": {"total": 0.023}},
+                     "ownUsageByModel": [
+                        {"provider": "prime-inference", "id": "internal/glm-5.3-fast",
+                         "ownUsage": {"input": 1000, "output": 400, "cacheRead": 0,
+                                      "cacheWrite": 0, "totalTokens": 1400,
+                                      "cost": {"total": 0.023}}}
+                     ],
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+            vec![
+                "Context",
+                "",
+                "Model: anthropic/claude-opus-4-6",
+                "",
+                "  agent                         model            tokens   cost  context",
+                "\u{25cf} switched session              claude-opus-4-6    323k  $1.22  \u{2593}\u{2593}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 22% (221k/1.0M)",
+                "\u{2514}\u{2500} \u{2713} scan the pricing tables    glm-5.3-fast       1.4k  $0.02  -",
+                "",
+                "Total: 325k tokens \u{b7} $1.24 across 2 agents",
+                "",
+                "Tokens",
+                "Input: 106,500",
+                "Output: 4,200",
+                "Cache Read: 110,000",
+                "Cache Write: 104,000",
+                "Total: 324,700",
+                "",
+                "Cost",
+                "Total: $1.2405",
+                "anthropic/claude-opus-4-6: $0.7775",
+                "openai/gpt-5.6-sol: $0.4400",
+                "prime-inference/internal/glm-5.3-fast: $0.0230",
+                "",
+                "Context",
+                "Current: 221,000 / 1,000,000 (22.1%)",
+            ]
+        );
     }
 
     #[test]
@@ -1107,7 +1381,7 @@ mod tests {
                 "children": []
             }"#,
         );
-        let rows = context_tree_rows(&tree, 120);
+        let rows = context_tree_rows(&tree, 120, ContextTreeScope::Collapsed);
         // The root row carries the bar: warning at >= 80 percent.
         let bar = rows[3]
             .iter()
@@ -1116,6 +1390,492 @@ mod tests {
         assert_eq!(bar.color, Some(ThemeColor::Warning));
         // Under 80 the bar is the accent color (fixture A covers it at
         // 0.5 percent); the token cells are default-foreground.
+    }
+
+    /// The collapse boundary: a tree of exactly the row budget (root + 9
+    /// runners) renders the full TS shape — every row in tree order, no
+    /// summary row, no expand hint. The runner usages are deliberately
+    /// unsorted, so a leaked ranking would reorder the rows.
+    #[test]
+    fn context_tree_ten_rows_render_the_full_shape() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "fleet lead", "status": "active",
+                "model": {"provider": "prime-inference", "id": "z-ai/glm-5.3"},
+                "ownUsage": {"input": 9000, "output": 900, "cacheRead": 0,
+                             "cacheWrite": 100, "cost": {"total": 0.5}},
+                "totalUsage": {"input": 13500, "output": 900, "cacheRead": 0,
+                               "cacheWrite": 100, "cost": {"total": 0.5}},
+                "contextUsage": {"tokens": 12000, "contextWindow": 200000,
+                                 "percent": 6.0},
+                "children": [
+                    {"id": "runner-1", "label": "runner-1", "status": "done",
+                     "ownUsage": {"input": 300, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 300, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-2", "label": "runner-2", "status": "done",
+                     "ownUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-3", "label": "runner-3", "status": "done",
+                     "ownUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-4", "label": "runner-4", "status": "done",
+                     "ownUsage": {"input": 200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 200, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-5", "label": "runner-5", "status": "done",
+                     "ownUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-6", "label": "runner-6", "status": "done",
+                     "ownUsage": {"input": 400, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 400, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-7", "label": "runner-7", "status": "done",
+                     "ownUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-8", "label": "runner-8", "status": "done",
+                     "ownUsage": {"input": 600, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 600, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "runner-9", "label": "runner-9", "status": "done",
+                     "ownUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                    "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+            vec![
+                "Context",
+                "",
+                "Model: prime-inference/z-ai/glm-5.3",
+                "",
+                "  agent             model    tokens   cost  context",
+                "\u{25cf} fleet lead        glm-5.3     10k  $0.50  \u{2593}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 6% (12k/200k)",
+                "\u{251c}\u{2500} \u{2713} runner-1       -           300  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-2       -           100  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-3       -           500  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-4       -           200  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-5       -           900  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-6       -           400  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-7       -           700  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} runner-8       -           600  $0.00  -",
+                "\u{2514}\u{2500} \u{2713} runner-9       -           800  $0.00  -",
+                "",
+                "Total: 15k tokens \u{b7} $0.50 across 10 agents",
+                "",
+                "Tokens",
+                "Input: 13,500",
+                "Output: 900",
+                "Cache Write: 100",
+                "Total: 14,500",
+                "",
+                "Cost",
+                "Total: $0.5000",
+                "",
+                "Context",
+                "Current: 12,000 / 200,000 (6%)"
+            ]
+        );
+    }
+
+    /// The collapsed shape: a fleet tree of 13 agent rows (root + 12
+    /// workers) renders its ten highest-usage rows — the root first, then
+    /// the workers by own spend — folds the three cheapest into the `...`
+    /// summary row (their spend fills the token and cost cells, so the
+    /// table still adds up), and names the `/context all` command that
+    /// renders the whole tree. The trailing totals still cover all 13
+    /// agents.
+    #[test]
+    fn context_tree_collapses_over_the_budget_to_top_usage_rows() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "fleet lead", "status": "active",
+                "model": {"provider": "prime-inference", "id": "z-ai/glm-5.3"},
+                "ownUsage": {"input": 90000, "output": 9000, "cacheRead": 0,
+                             "cacheWrite": 1000, "cost": {"total": 0.9}},
+                "totalUsage": {"input": 131300, "output": 9000, "cacheRead": 0,
+                               "cacheWrite": 1000, "cost": {"total": 1.313}},
+                "contextUsage": {"tokens": 100000, "contextWindow": 200000,
+                                 "percent": 50.0},
+                "children": [
+                    {"id": "worker-01", "label": "worker-01", "status": "done",
+                     "ownUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.012}},
+                     "totalUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.012}},
+                     "children": []},
+                    {"id": "worker-02", "label": "worker-02", "status": "done",
+                     "ownUsage": {"input": 3000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.03}},
+                     "totalUsage": {"input": 3000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.03}},
+                     "children": []},
+                    {"id": "worker-03", "label": "worker-03", "status": "done",
+                     "ownUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.005}},
+                     "totalUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.005}},
+                     "children": []},
+                    {"id": "worker-04", "label": "worker-04", "status": "done",
+                     "ownUsage": {"input": 2400, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.024}},
+                     "totalUsage": {"input": 2400, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.024}},
+                     "children": []},
+                    {"id": "worker-05", "label": "worker-05", "status": "done",
+                     "ownUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.009}},
+                     "totalUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.009}},
+                     "children": []},
+                    {"id": "worker-06", "label": "worker-06", "status": "running",
+                     "ownUsage": {"input": 6000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.06}},
+                     "totalUsage": {"input": 6000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.06}},
+                     "children": []},
+                    {"id": "worker-07", "label": "worker-07", "status": "done",
+                     "ownUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.001}},
+                     "totalUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.001}},
+                     "children": []},
+                    {"id": "worker-08", "label": "worker-08", "status": "done",
+                     "ownUsage": {"input": 4200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.042}},
+                     "totalUsage": {"input": 4200, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.042}},
+                     "children": []},
+                    {"id": "worker-09", "label": "worker-09", "status": "done",
+                     "ownUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.008}},
+                     "totalUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.008}},
+                     "children": []},
+                    {"id": "worker-10", "label": "worker-10", "status": "done",
+                     "ownUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.015}},
+                     "totalUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.015}},
+                     "children": []},
+                    {"id": "worker-11", "label": "worker-11", "status": "done",
+                     "ownUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.007}},
+                     "totalUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.007}},
+                     "children": []},
+                    {"id": "worker-12", "label": "worker-12", "status": "done",
+                     "model": {"provider": "prime-inference", "id": "glm-5.3-fast"},
+                     "ownUsage": {"input": 20000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.2}},
+                     "totalUsage": {"input": 20000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.2}},
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+            vec![
+                "Context",
+                "",
+                "Model: prime-inference/z-ai/glm-5.3",
+                "",
+                "  agent             model         tokens   cost  context",
+                "\u{25cf} fleet lead        glm-5.3         100k  $0.90  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 50% (100k/200k)",
+                "\u{2514}\u{2500} \u{2713} worker-12      glm-5.3-fast     20k  $0.20  -",
+                "\u{251c}\u{2500} \u{25c6} worker-06      -               6.0k  $0.06  -",
+                "\u{251c}\u{2500} \u{2713} worker-08      -               4.2k  $0.04  -",
+                "\u{251c}\u{2500} \u{2713} worker-02      -               3.0k  $0.03  -",
+                "\u{251c}\u{2500} \u{2713} worker-04      -               2.4k  $0.02  -",
+                "\u{251c}\u{2500} \u{2713} worker-10      -               1.5k  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-01      -               1.2k  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-05      -                900  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-09      -                800  $0.01  -",
+                "... 3 more agents   -               1.3k  $0.01  -",
+                "Use /context all to show every agent.",
+                "",
+                "Total: 141k tokens \u{b7} $1.31 across 13 agents",
+                "",
+                "Tokens",
+                "Input: 131,300",
+                "Output: 9,000",
+                "Cache Write: 1,000",
+                "Total: 141,300",
+                "",
+                "Cost",
+                "Total: $1.3130",
+                "",
+                "Context",
+                "Current: 100,000 / 200,000 (50%)"
+            ]
+        );
+    }
+
+    /// The expanded shape (`/context all`): the same 13-agent tree renders
+    /// every row in tree order — no ranking, no summary row, no hint.
+    #[test]
+    fn context_tree_all_renders_every_row() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "fleet lead", "status": "active",
+                "model": {"provider": "prime-inference", "id": "z-ai/glm-5.3"},
+                "ownUsage": {"input": 90000, "output": 9000, "cacheRead": 0,
+                             "cacheWrite": 1000, "cost": {"total": 0.9}},
+                "totalUsage": {"input": 131300, "output": 9000, "cacheRead": 0,
+                               "cacheWrite": 1000, "cost": {"total": 1.313}},
+                "contextUsage": {"tokens": 100000, "contextWindow": 200000,
+                                 "percent": 50.0},
+                "children": [
+                    {"id": "worker-01", "label": "worker-01", "status": "done",
+                     "ownUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.012}},
+                     "totalUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.012}},
+                     "children": []},
+                    {"id": "worker-02", "label": "worker-02", "status": "done",
+                     "ownUsage": {"input": 3000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.03}},
+                     "totalUsage": {"input": 3000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.03}},
+                     "children": []},
+                    {"id": "worker-03", "label": "worker-03", "status": "done",
+                     "ownUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.005}},
+                     "totalUsage": {"input": 500, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.005}},
+                     "children": []},
+                    {"id": "worker-04", "label": "worker-04", "status": "done",
+                     "ownUsage": {"input": 2400, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.024}},
+                     "totalUsage": {"input": 2400, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.024}},
+                     "children": []},
+                    {"id": "worker-05", "label": "worker-05", "status": "done",
+                     "ownUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.009}},
+                     "totalUsage": {"input": 900, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.009}},
+                     "children": []},
+                    {"id": "worker-06", "label": "worker-06", "status": "running",
+                     "ownUsage": {"input": 6000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.06}},
+                     "totalUsage": {"input": 6000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.06}},
+                     "children": []},
+                    {"id": "worker-07", "label": "worker-07", "status": "done",
+                     "ownUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.001}},
+                     "totalUsage": {"input": 100, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.001}},
+                     "children": []},
+                    {"id": "worker-08", "label": "worker-08", "status": "done",
+                     "ownUsage": {"input": 4200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.042}},
+                     "totalUsage": {"input": 4200, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.042}},
+                     "children": []},
+                    {"id": "worker-09", "label": "worker-09", "status": "done",
+                     "ownUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.008}},
+                     "totalUsage": {"input": 800, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.008}},
+                     "children": []},
+                    {"id": "worker-10", "label": "worker-10", "status": "done",
+                     "ownUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.015}},
+                     "totalUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.015}},
+                     "children": []},
+                    {"id": "worker-11", "label": "worker-11", "status": "done",
+                     "ownUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.007}},
+                     "totalUsage": {"input": 700, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.007}},
+                     "children": []},
+                    {"id": "worker-12", "label": "worker-12", "status": "done",
+                     "model": {"provider": "prime-inference", "id": "glm-5.3-fast"},
+                     "ownUsage": {"input": 20000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.2}},
+                     "totalUsage": {"input": 20000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.2}},
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::EveryAgent)),
+            vec![
+                "Context",
+                "",
+                "Model: prime-inference/z-ai/glm-5.3",
+                "",
+                "  agent             model         tokens   cost  context",
+                "\u{25cf} fleet lead        glm-5.3         100k  $0.90  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 50% (100k/200k)",
+                "\u{251c}\u{2500} \u{2713} worker-01      -               1.2k  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-02      -               3.0k  $0.03  -",
+                "\u{251c}\u{2500} \u{2713} worker-03      -                500  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-04      -               2.4k  $0.02  -",
+                "\u{251c}\u{2500} \u{2713} worker-05      -                900  $0.01  -",
+                "\u{251c}\u{2500} \u{25c6} worker-06      -               6.0k  $0.06  -",
+                "\u{251c}\u{2500} \u{2713} worker-07      -                100  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} worker-08      -               4.2k  $0.04  -",
+                "\u{251c}\u{2500} \u{2713} worker-09      -                800  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-10      -               1.5k  $0.01  -",
+                "\u{251c}\u{2500} \u{2713} worker-11      -                700  $0.01  -",
+                "\u{2514}\u{2500} \u{2713} worker-12      glm-5.3-fast     20k  $0.20  -",
+                "",
+                "Total: 141k tokens \u{b7} $1.31 across 13 agents",
+                "",
+                "Tokens",
+                "Input: 131,300",
+                "Output: 9,000",
+                "Cache Write: 1,000",
+                "Total: 141,300",
+                "",
+                "Cost",
+                "Total: $1.3130",
+                "",
+                "Context",
+                "Current: 100,000 / 200,000 (50%)"
+            ]
+        );
+    }
+
+    /// The ranking is pure spend: an orchestrator that offloaded everything
+    /// to 10 scouts falls out of its own top rows. The summary row folds the
+    /// root in ("1 more agent"), the utilization bar leaves the table with
+    /// it, and the trailing `Context` section still reports the root's
+    /// window.
+    #[test]
+    fn context_tree_collapse_can_fold_the_root_into_the_summary() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "orchestrator", "status": "active",
+                "ownUsage": {"input": 50, "output": 0, "cacheRead": 0,
+                             "cacheWrite": 0, "cost": {"total": 0.0}},
+                "totalUsage": {"input": 15550, "output": 0, "cacheRead": 0,
+                               "cacheWrite": 0, "cost": {"total": 0.0}},
+                "contextUsage": {"tokens": 5000, "contextWindow": 200000,
+                                 "percent": 2.5},
+                "children": [
+                    {"id": "scout-01", "label": "scout-01", "status": "done",
+                     "ownUsage": {"input": 2000, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 2000, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-02", "label": "scout-02", "status": "done",
+                     "ownUsage": {"input": 1900, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1900, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-03", "label": "scout-03", "status": "done",
+                     "ownUsage": {"input": 1800, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1800, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-04", "label": "scout-04", "status": "done",
+                     "ownUsage": {"input": 1700, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1700, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-05", "label": "scout-05", "status": "done",
+                     "ownUsage": {"input": 1600, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1600, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-06", "label": "scout-06", "status": "done",
+                     "ownUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1500, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-07", "label": "scout-07", "status": "done",
+                     "ownUsage": {"input": 1400, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1400, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-08", "label": "scout-08", "status": "done",
+                     "ownUsage": {"input": 1300, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1300, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-09", "label": "scout-09", "status": "done",
+                     "ownUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1200, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []},
+                    {"id": "scout-10", "label": "scout-10", "status": "done",
+                     "ownUsage": {"input": 1100, "output": 0, "cacheRead": 0,
+                                  "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "totalUsage": {"input": 1100, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "cost": {"total": 0.0}},
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+            vec![
+                "Context",
+                "",
+                "  agent             tokens   cost  context",
+                "\u{251c}\u{2500} \u{2713} scout-01         2.0k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-02         1.9k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-03         1.8k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-04         1.7k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-05         1.6k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-06         1.5k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-07         1.4k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-08         1.3k  $0.00  -",
+                "\u{251c}\u{2500} \u{2713} scout-09         1.2k  $0.00  -",
+                "\u{2514}\u{2500} \u{2713} scout-10         1.1k  $0.00  -",
+                "... 1 more agent        50  $0.00  -",
+                "Use /context all to show every agent.",
+                "",
+                "Total: 16k tokens \u{b7} $0.00 across 11 agents",
+                "",
+                "Tokens",
+                "Input: 15,550",
+                "Output: 0",
+                "Total: 15,550",
+                "",
+                "Context",
+                "Current: 5,000 / 200,000 (2.5%)"
+            ]
+        );
     }
 
     #[test]
@@ -1150,29 +1910,6 @@ mod tests {
         // Content width 6: the wrapped rows keep the one-column margins
         // and pad to the full width.
         assert_eq!(text, vec!["", " aaaa   ", " bb cc  "]);
-    }
-
-    #[test]
-    fn changelog_panel_renders_the_ts_borders_and_title() {
-        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-        let rows = render_changelog_panel("Entry one.", &theme, "  ", 20);
-        let text: Vec<String> = rows
-            .iter()
-            .map(|row| row.iter().map(|span| span.content.as_str()).collect())
-            .collect();
-        assert_eq!(
-            text,
-            vec![
-                "".to_string(),
-                "\u{2500}".repeat(20),
-                format!(" What's New{}", " ".repeat(9)),
-                "".to_string(),
-                "".to_string(),
-                format!(" Entry one.{}", " ".repeat(9)),
-                "".to_string(),
-                "\u{2500}".repeat(20),
-            ]
-        );
     }
 
     #[test]

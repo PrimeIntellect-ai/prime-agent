@@ -6,7 +6,7 @@
 //! re-register within a bounded window, the roster rebuilds, and a scripted
 //! turn completes through an attach to the rebuilt roster.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -328,17 +328,15 @@ fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &
         .join(format!("{session_id}.recovery.jsonl"));
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let evidence = std::fs::read_to_string(&journal_path)
-            .ok()
-            .is_some_and(|content| {
-                content.lines().any(|line| {
-                    let Ok(record) = serde_json::from_str::<Value>(line) else {
-                        return false;
-                    };
-                    record["activeSessionId"].as_str() == Some(session_id)
-                        && record["busy"].as_bool() == Some(true)
-                })
-            });
+        let evidence = std::fs::read_to_string(&journal_path).is_ok_and(|content| {
+            content.lines().any(|line| {
+                let Ok(record) = serde_json::from_str::<Value>(line) else {
+                    return false;
+                };
+                record["activeSessionId"].as_str() == Some(session_id)
+                    && record["busy"].as_bool() == Some(true)
+            })
+        });
         if evidence {
             return;
         }

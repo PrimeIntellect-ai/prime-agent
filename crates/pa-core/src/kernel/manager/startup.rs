@@ -177,7 +177,10 @@ impl Inner {
             Ok(child) => child,
             Err(error) => {
                 // Fail a pending start promptly instead of riding out the
-                // ready timeout.
+                // ready timeout. The interpreter itself failed to launch, so
+                // the memoized runtime-ready result is stale: drop it so a
+                // startup retry re-probes (and rebuilds when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
                 {
                     let mut g = lock(&self.guarded);
@@ -211,6 +214,10 @@ impl Inner {
                     // Never tear down a newer start's kernel.
                     return Err(error);
                 }
+                // The child died or never reached ready, so the memoized
+                // runtime-ready result is stale: drop it and let a startup
+                // retry re-probe (and rebuild the venv when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
@@ -230,6 +237,9 @@ impl Inner {
             return Err(anyhow!("{startup_error}"));
         }
         if protocol != REPL_PROTOCOL_VERSION as i64 {
+            // A stale runtime passed a memoized probe's key but speaks the
+            // wrong protocol: the memo is stale, so a retry re-probes.
+            crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             return Err(anyhow!(
                 "Kernel runtime speaks protocol {protocol}, expected {REPL_PROTOCOL_VERSION}. \
                  Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."

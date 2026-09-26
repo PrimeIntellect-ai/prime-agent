@@ -5,6 +5,7 @@
 //! primitives).
 
 use pa_types::ai::{Model, ModelThinkingLevel};
+use std::fmt::Write;
 
 use super::{EffortLayout, ModelPicker};
 use crate::keybindings::{format_key_text, KeybindingsManager};
@@ -224,16 +225,16 @@ fn detail_lines(theme: &Theme, width: usize, model: &Model) -> Vec<Line> {
         let row = |index: usize| -> String {
             entries
                 .iter()
-                .map(|(label, value)| {
+                .fold(String::new(), |mut output, (label, value)| {
                     let cell = if index == 0 {
                         (*label).to_string()
                     } else {
                         value.clone()
                     };
                     let pad = column_width.saturating_sub(cell.chars().count());
-                    format!("{cell}{}", " ".repeat(pad))
+                    let _ = write!(output, "{cell}{}", " ".repeat(pad));
+                    output
                 })
-                .collect::<String>()
         };
         let mut labels = vec![Span::raw(" "), theme.fg_span(ThemeColor::Muted, row(0))];
         labels.push(Span::raw(" "));

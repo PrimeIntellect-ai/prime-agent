@@ -1,5 +1,5 @@
 //! Kernel host-request handlers for the bundled goal and rlm-heartbeat
-//! skills: the snake_case bridge the Python REPL skills call. Port of
+//! skills: the `snake_case` bridge the Python REPL skills call. Port of
 //! handleGoalHostRequest / handleRlmHeartbeatHostRequest in agent-session.ts
 //! plus rlmHeartbeatHostResponse.
 
@@ -17,7 +17,7 @@ use crate::session::manager::SessionManager;
 
 use super::goal_driver::GoalDriver;
 
-/// The snake_case heartbeat payload returned to the rlm-heartbeat skill.
+/// The `snake_case` heartbeat payload returned to the rlm-heartbeat skill.
 pub fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
     json!({
         "id": job.id,
@@ -59,7 +59,13 @@ fn nullable_string(value: Option<String>) -> Value {
 }
 
 /// Handle a `goal.*` host request. All goal state stays host-side; the kernel
-/// only sees the serialized snake_case response.
+/// only sees the serialized `snake_case` response.
+///
+/// # Errors
+///
+/// Returns an error when the request payload's fields are invalid, the
+/// objective or budget fails validation, the request type is unknown, or a
+/// goal-state persist fails.
 pub fn handle_goal_host_request(
     request_type: &str,
     payload: &Value,
@@ -161,6 +167,11 @@ pub struct RlmHeartbeatHostOutcome {
 /// Handle an `rlm_heartbeat.*` host request from the bundled rlm-heartbeat
 /// skill. These heartbeats are internal to the active session and never read
 /// or mutate the user-level /heartbeat.
+///
+/// # Errors
+///
+/// Returns an error when the request payload's fields are invalid, the
+/// schedule text cannot be parsed, or the request type is unknown.
 pub fn handle_rlm_heartbeat_host_request(
     request_type: &str,
     payload: &Value,

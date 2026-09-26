@@ -200,7 +200,7 @@ impl Client {
         while Instant::now() < deadline {
             if self.try_read_line().is_some() {
                 last_line = Instant::now();
-            } else if Instant::now() - last_line >= quiet {
+            } else if last_line.elapsed() >= quiet {
                 return;
             }
         }
