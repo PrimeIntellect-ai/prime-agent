@@ -959,9 +959,10 @@ impl AgentsViewMode {
     /// user's — opening it would confirm an arbitrary row (on a
     /// continue-recent launch that can be an unrelated live session). The
     /// open waits instead: the anchor lands the selection once its row
-    /// appears, and any direction key cancels the wait for an explicit
-    /// manual pick. A scoped view never lists its anchor (the scope root
-    /// is excluded), so its wait never resolves — it keeps the open.
+    /// appears, and any direction key or row click cancels the wait for
+    /// an explicit manual pick. A scoped view never lists its anchor
+    /// (the scope root is excluded), so its wait never resolves — it
+    /// keeps the open.
     /// End the entry anchor's wait (the anchor row landed).
     fn end_anchor_wait(&mut self) {
         self.anchor_selection_pending = false;
@@ -1715,9 +1716,11 @@ impl AgentsViewMode {
     /// drag kills the pending click, and a plain release on the same
     /// row selects and opens that row — the Enter action, so the
     /// selection's own feedback (the band moves, the session opens)
-    /// is the click's. Wheel turns and other buttons are consumed
-    /// without a dispatch: the view's window is selection-centered,
-    /// not scroll-driven.
+    /// is the click's. The clicked row is an explicit user choice, a
+    /// direction key's peer: it ends the entry anchor's wait, so the
+    /// open targets the clicked row, never the loading hint. Wheel
+    /// turns and other buttons are consumed without a dispatch: the
+    /// view's window is selection-centered, not scroll-driven.
     fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
         if !crate::mouse_tracking::active() {
             return;
@@ -1754,6 +1757,11 @@ impl AgentsViewMode {
             return;
         };
         self.selected = *index;
+        // A click is an explicit user choice like a direction key: it
+        // ends the entry anchor's wait, so the open below targets the
+        // clicked row, never the loading hint.
+        self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
         self.sync_selected_row_state();
         self.open_selected();
     }
@@ -4280,6 +4288,61 @@ the holder exits.";
             .push(roster_entry("s2", "idle", parent_summary("s2")));
         mode.rebuild_rows();
         assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+    }
+
+    /// A plain click during the entry anchor's wait is an explicit user
+    /// choice too — the clicked row IS the pick — so it cancels the wait
+    /// and opens that row; the keyboard Enter's loading hint never stands
+    /// between a visible row and its open (Macroscope: the click grammar
+    /// must not inherit Enter's wait).
+    #[test]
+    fn a_click_cancels_the_anchor_wait_and_opens_the_clicked_row() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![
+                roster_entry("s1", "idle", parent_summary("s1")),
+                roster_entry("s3", "idle", parent_summary("s3")),
+            ],
+        );
+        assert!(mode.anchor_selection_pending, "the anchor waits on its row");
+        // Enter during the wait arms the loading hint (the default row is
+        // not the user's pick); the user then clicks a different row.
+        mode.handle_key("enter");
+        assert!(mode.opened.is_none(), "the wait still holds the open");
+        mode.render_frame(120, 24);
+        let clicked = mode
+            .rows
+            .iter()
+            .position(|row| row.summary["sessionId"] == "s3")
+            .expect("the other row renders");
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, index)| *index == clicked)
+            .copied()
+            .expect("the clicked row is on screen");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert_eq!(mode.selected, clicked, "the click selected the row");
+        assert!(
+            !mode.anchor_selection_pending,
+            "the click ends the entry anchor's wait"
+        );
+        let opened = mode.opened.expect("the click opened the row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s3-live".to_string())
+        );
+        assert!(
+            mode.status.is_none(),
+            "the click drops the loading hint with the wait"
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 
     /// A terminal saved-catalog failure settles the entry anchor's wait (TS
