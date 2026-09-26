@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use pa_types::daemon::{DaemonCommand, DaemonWorkerLifecycle};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::persist_worker;
 use crate::protocol::{response_failure, response_line, response_success};
 use crate::registry::ResidentWorker;
@@ -259,7 +260,13 @@ impl Supervisor {
     /// worker cannot answer - the TS arm answers `data: null` then).
     async fn retry_summary(&self, resident: &Arc<ResidentWorker>) -> Option<Value> {
         match self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) if response.success => response.data,

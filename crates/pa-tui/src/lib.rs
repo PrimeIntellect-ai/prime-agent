@@ -50,6 +50,7 @@ mod image_component;
 pub mod image_load;
 mod image_markers;
 pub mod info_commands;
+pub mod info_panel;
 mod input;
 pub mod interactive;
 pub mod keybindings;

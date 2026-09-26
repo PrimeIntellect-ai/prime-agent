@@ -4,7 +4,6 @@
 //! view crate modules; this module only decides what the view shows.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
@@ -31,6 +30,7 @@ use crate::image_markers::{
     collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
 };
 use crate::info_commands;
+use crate::info_panel::{InfoContent, InfoPanelAction};
 use crate::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
 use crate::keys::key_event_to_id;
 use crate::model_picker::{
@@ -1547,6 +1547,10 @@ impl SessionUi {
             // the new session's own `goal_update` lands it would keep
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
+            // The read-only info panel dies the same death: it holds the
+            // previous session's fetched document, and a stale panel
+            // would keep consuming keys over the new session.
+            view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -2301,9 +2305,6 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
-        // TS `clearShortcutGuide`: every prompt submission dismisses the
-        // `?` quick-shortcut guide (slash commands keep it).
-        view.shortcut_guide = None;
         self.send_prompt(text, behavior, view).await
     }
 
@@ -2563,9 +2564,6 @@ impl SessionUi {
         shortcut: &crate::bash_bang::BashShortcut,
         view: &mut AgentView,
     ) -> Result<()> {
-        // Every prompt submission dismisses the `?` shortcut guide (TS
-        // `clearShortcutGuide` at onSubmit's top).
-        view.shortcut_guide = None;
         // A running user command blocks a second one (TS `isBashRunning`
         // guard); the editor buffer already cleared on submit, so the
         // draft is not restored.
@@ -3622,17 +3620,22 @@ impl SessionUi {
                     self.error_row("Usage: /hotkeys", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: "/hotkeys".to_string(),
-                });
-                view.push_entry(ChatEntry::ClientMarkdown {
-                    text: crate::hotkeys::hotkeys_guide(view.editor.keybindings()),
-                });
-                self.dirty = true;
+                // The operator's 2026-09-26 directive: the full guide
+                // renders as the read-only info panel instead of the
+                // multi-screen markdown flood in the transcript (the
+                // content itself is unchanged).
+                self.open_info_panel(
+                    view,
+                    Some("Hotkeys".to_string()),
+                    InfoContent::Markdown(crate::hotkeys::hotkeys_guide(view.editor.keybindings())),
+                );
+                self.track_menu_opened("hotkeys", "command");
             }
 
-            // `/session` (TS `handleSessionCommand`): the daemon's session
-            // stats as the `Session Info` block after the command echo.
+            // `/session` (TS `handleSessionCommand`): the daemon's
+            // session stats as the `Session Info` rows — rendered in the
+            // read-only info panel (the operator's 2026-09-26
+            // directive), not as transcript rows.
             "session" => {
                 self.track_command_used("session");
                 if !resolved.args.is_empty() {
@@ -3640,9 +3643,6 @@ impl SessionUi {
                     self.error_row("Usage: /session", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let stats = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3656,10 +3656,17 @@ impl SessionUi {
                 match stats {
                     Ok(stats) => {
                         let name = self.session_name.clone();
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::session_info_rows(&stats, name.as_deref()),
-                        });
-                        self.dirty = true;
+                        // The content's own `Session Info` header row is
+                        // the panel's head (no title duplication).
+                        self.open_info_panel(
+                            view,
+                            None,
+                            InfoContent::Rows(info_commands::session_info_rows(
+                                &stats,
+                                name.as_deref(),
+                            )),
+                        );
+                        self.track_menu_opened("session", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3668,11 +3675,13 @@ impl SessionUi {
             }
             // `/context` and its `/usage` alias (TS
             // `handleContextCommand` over `formatContextTree`): the agent
-            // tree with own token/cost columns and context utilization.
-            // The optional `all` argument is a deliberate TS delta (TS
-            // takes none): over the row budget the default view collapses
-            // to the highest-usage agents plus a summary row and the
-            // expand hint, and `all` renders the whole tree.
+            // tree with own token/cost columns and context utilization —
+            // rendered in the scrollable read-only info panel (the
+            // operator's 2026-09-26 directive), not as transcript rows.
+            // The optional `all` argument is #2842's deliberate TS delta
+            // (TS takes none): over the row budget the default view
+            // collapses to the highest-usage agents plus a summary row
+            // and the expand hint, and `all` renders the whole tree.
             "context" => {
                 self.track_command_used("context");
                 let scope = match resolved.args.as_str() {
@@ -3684,9 +3693,6 @@ impl SessionUi {
                         return Ok(());
                     }
                 };
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let tree = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3701,10 +3707,16 @@ impl SessionUi {
                     Ok(tree) => {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::context_tree_rows(&tree, width, scope),
-                        });
-                        self.dirty = true;
+                        // The content's own `Context` header row is the
+                        // panel's head (no title duplication).
+                        self.open_info_panel(
+                            view,
+                            None,
+                            InfoContent::Rows(info_commands::context_tree_rows(
+                                &tree, width, scope,
+                            )),
+                        );
+                        self.track_menu_opened("context", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3712,7 +3724,10 @@ impl SessionUi {
                 }
             }
             // `/system-prompt` (TS `handleSystemPromptCommand`): the header
-            // with the char count, then the exact assembled prompt.
+            // with the char count, then the exact assembled prompt — a
+            // document of unbounded size, so it renders in the
+            // scrollable read-only info panel (the operator's 2026-09-26
+            // directive) instead of flooding the transcript.
             "system-prompt" => {
                 self.track_command_used("system-prompt");
                 if !resolved.args.is_empty() {
@@ -3720,9 +3735,6 @@ impl SessionUi {
                     self.error_row("Usage: /system-prompt", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let prompt = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3739,13 +3751,13 @@ impl SessionUi {
                             .get("systemPrompt")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::system_prompt_header_rows(prompt),
-                        });
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::system_prompt_body_rows(prompt),
-                        });
-                        self.dirty = true;
+                        let mut rows = info_commands::system_prompt_header_rows(prompt);
+                        rows.push(Vec::new());
+                        rows.extend(info_commands::system_prompt_body_rows(prompt));
+                        // The header row (`System Prompt (N chars)`) is
+                        // the panel's head.
+                        self.open_info_panel(view, None, InfoContent::Rows(rows));
+                        self.track_menu_opened("system-prompt", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3753,7 +3765,9 @@ impl SessionUi {
                 }
             }
             // `/logs` (TS `handleLogsCommand`): a client-side read of the
-            // logs directory (the daemon writes it, this client lists it).
+            // logs directory (the daemon writes it, this client lists
+            // it), rendered in the read-only info panel (the operator's
+            // 2026-09-26 directive).
             "logs" => {
                 self.track_command_used("logs");
                 if !resolved.args.is_empty() {
@@ -3761,9 +3775,6 @@ impl SessionUi {
                     self.error_row("Usage: /logs", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let Some(agent_dir) = pa_types::platform::agent_dir() else {
                     self.error_row(
                         "home directory not found: set HOME (or USERPROFILE on Windows)",
@@ -3771,14 +3782,19 @@ impl SessionUi {
                     );
                     return Ok(());
                 };
-                view.push_entry(ChatEntry::ClientText {
-                    rows: info_commands::logs_rows(&agent_dir.join("logs")),
-                });
-                self.dirty = true;
+                // The content's own `Logs` header row is the panel's
+                // head.
+                self.open_info_panel(
+                    view,
+                    None,
+                    InfoContent::Rows(info_commands::logs_rows(&agent_dir.join("logs"))),
+                );
+                self.track_menu_opened("logs", "command");
             }
             // `/changelog` (TS `handleChangelogCommand`): the shipped
-            // CHANGELOG.md entries, newest first, between the panel
-            // borders.
+            // CHANGELOG.md entries, newest first, in the read-only info
+            // panel (the operator's 2026-09-26 directive; the TS accent
+            // `What's New` title is the panel's title).
             "changelog" => {
                 self.track_command_used("changelog");
                 if !resolved.args.is_empty() {
@@ -3786,13 +3802,14 @@ impl SessionUi {
                     self.error_row("Usage: /changelog", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
-                view.push_entry(ChatEntry::ChangelogPanel {
-                    markdown: info_commands::changelog_markdown(&Self::changelog_path()),
-                });
-                self.dirty = true;
+                self.open_info_panel(
+                    view,
+                    Some("What's New".to_string()),
+                    InfoContent::Markdown(info_commands::changelog_markdown(
+                        &Self::changelog_path(),
+                    )),
+                );
+                self.track_menu_opened("changelog", "command");
             }
             // `/settings` (TS `showSettingsSelector`): the inline settings
             // menu; the rows read the daemon state and the settings seam.
@@ -4561,11 +4578,11 @@ impl SessionUi {
                     session_file.as_deref(),
                     &crate::traces::traces_base_url(),
                 );
-                // TS `chatContainer.addChild(new Spacer(1))` then
-                // `new Text(info, 1, 0)`: the info-display block the
-                // `/session`-style commands share.
-                view.push_entry(ChatEntry::ClientText { rows });
-                self.dirty = true;
+                // The info-display rows the `/session`-style commands
+                // share — in the read-only info panel (the operator's
+                // 2026-09-26 directive), never as transcript rows.
+                self.open_info_panel(view, None, InfoContent::Rows(rows));
+                self.track_menu_opened("traces", "command");
             }
             "off" | "disable" => {
                 // TS `setAgentTracesEnabled(false)` + `flush()`, then the
@@ -4597,8 +4614,10 @@ impl SessionUi {
                 match traces.0.preview(session_file.as_deref()).await {
                     crate::traces::TracePreviewOutcome::Ready(info) => {
                         let rows = crate::traces::preview_block(&info);
-                        view.push_entry(ChatEntry::ClientText { rows });
-                        self.dirty = true;
+                        // The preview block's own `Trace Preview`
+                        // header row is the panel's head.
+                        self.open_info_panel(view, None, InfoContent::Rows(rows));
+                        self.track_menu_opened("traces", "command");
                     }
                     crate::traces::TracePreviewOutcome::NoSessionFile => {
                         self.note(
@@ -6431,9 +6450,15 @@ impl SessionUi {
             .unwrap_or_default();
         self.list_rows = sorted_session_rows(sessions);
         let sessions = &self.list_rows;
-        let mut lines = String::from("live sessions:");
+        // The listing renders in the read-only info panel (the
+        // operator's 2026-09-26 directive): it no longer lands in the
+        // transcript as a multi-line status row. The row content is
+        // unchanged — `/switch <n|id>` still resolves against the same
+        // cached rows.
+        let raw = |text: String| vec![info_commands::ClientSpan { text, color: None }];
+        let mut rows = vec![raw("live sessions:".to_string())];
         if sessions.is_empty() {
-            lines.push_str("\n  (none)");
+            rows.push(raw("  (none)".to_string()));
         }
         for (index, row) in sessions.iter().enumerate() {
             let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -6452,14 +6477,14 @@ impl SessionUi {
                 .and_then(Value::as_str)
                 .unwrap_or("idle");
             let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or_default();
-            let _ = write!(
-                lines,
-                "\n{current} {}. {name} ({id}) {activity} {cwd}",
+            rows.push(raw(format!(
+                "{current} {}. {name} ({id}) {activity} {cwd}",
                 index + 1
-            );
+            )));
         }
-        lines.push_str("\nswitch with /switch <n|id>");
-        self.note(&lines, view);
+        rows.push(raw("switch with /switch <n|id>".to_string()));
+        self.open_info_panel(view, Some("Sessions".to_string()), InfoContent::Rows(rows));
+        self.track_menu_opened("list", "command");
         Ok(())
     }
 
@@ -6652,6 +6677,7 @@ impl SessionUi {
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
+            || view.info_panel.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -6858,8 +6884,8 @@ impl SessionUi {
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
         // where a later Enter would submit it unedited. The read-only
-        // goal panel consumes it the same way.
-        if view.bash_view.is_some() || view.goal_panel.is_some() {
+        // goal panel and info panel consume it the same way.
+        if view.bash_view.is_some() || view.goal_panel.is_some() || view.info_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -7137,6 +7163,24 @@ impl SessionUi {
         self.dirty = true;
     }
 
+    /// Open the read-only info panel over the editor dock (the
+    /// operator's 2026-09-26 directive: the client info displays —
+    /// `/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
+    /// `/hotkeys`, the `/traces` blocks, and `/list` — render as the
+    /// docked popup panel, the `/mcp` and `/model` panel grammar,
+    /// instead of flooding the transcript with rows that persist). The
+    /// content is whatever the command already built; ESC closes and
+    /// returns focus to the chat with the transcript untouched.
+    fn open_info_panel(
+        &mut self,
+        view: &mut AgentView,
+        title: Option<String>,
+        content: InfoContent,
+    ) {
+        view.info_panel = Some(crate::info_panel::InfoPanel::new(title, content));
+        self.dirty = true;
+    }
+
     /// The goal panel owns the frame while open: the close and back
     /// keys dismiss it; every other key is consumed (a read-only view).
     async fn handle_goal_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
@@ -7157,6 +7201,30 @@ impl SessionUi {
             view.goal_panel = None;
             self.dirty = true;
         }
+        Ok(())
+    }
+
+    /// The info panel owns the frame while open: the navigation keys
+    /// scroll its window, the close keys dismiss it, and every other key
+    /// is consumed — the read-only document never leaks a key back to
+    /// the editor, and the transcript gains nothing while it is open.
+    async fn handle_info_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (close, not exit): report the handled
+        // press so the force-quit guard can disarm once the whole pair was
+        // consumed with TS semantics (the same discipline as the other
+        // modal handlers).
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if view.info_panel.as_mut().is_some_and(|panel| {
+            panel.handle_key(&id, view.editor.keybindings()) == InfoPanelAction::Close
+        }) {
+            view.info_panel = None;
+        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -8300,6 +8368,10 @@ impl SessionUi {
         if view.goal_panel.is_some() {
             return self.handle_goal_panel_key(key, view).await;
         }
+        // The read-only info panel owns the frame the same way.
+        if view.info_panel.is_some() {
+            return self.handle_info_panel_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -8575,16 +8647,6 @@ impl SessionUi {
             }
             self.interrupt_running_work(view);
             self.show_ctrl_c_hint();
-            self.dirty = true;
-            return Ok(());
-        }
-        // TS `app.shortcuts` (default `?`, empty editor only — the action
-        // loop's `getText().length === 0` gate): mount the quick-shortcut
-        // guide above the dock until the next submission.
-        if view.editor.keybindings().matches(&id, "app.shortcuts")
-            && view.editor.get_text().is_empty()
-        {
-            view.shortcut_guide = Some(crate::hotkeys::shortcut_guide(view.editor.keybindings()));
             self.dirty = true;
             return Ok(());
         }
@@ -10264,7 +10326,7 @@ fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
         .count()
 }
 
-fn picker_viewport_rows(terminal_rows: u16) -> usize {
+pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
     menu_rows.saturating_sub(1).max(1)

@@ -29,6 +29,7 @@ use pa_types::daemon::{DaemonCommand, UpdateId};
 use serde_json::{json, Map};
 use tokio::sync::Notify;
 
+use crate::backpressure::RouteAdmission;
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
 
@@ -555,6 +556,7 @@ async fn continuation_treatment(
             "prompt",
             json!({ "message": UPDATE_RESTART_CONTINUATION_PROMPT }),
             crate::supervisor::LONG_ROUTE_TIMEOUT_MS,
+            RouteAdmission::SupervisorInternal,
         )
         .await;
     match response {

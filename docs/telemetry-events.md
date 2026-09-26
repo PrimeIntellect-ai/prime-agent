@@ -168,10 +168,14 @@ a live worker's `worker_register` was refused with the unknown-worker
 verdict (no descriptor exists for its identity) — the refused-
 registration self-heal retires the worker so its session lease releases;
 one event per refusal (the retired worker never re-registers).
+`worker_overloaded`: a request-shaped client command was refused at the
+target worker's in-flight bound (or its full queue) with the typed
+`worker_overloaded` error — the bound-adoption signal (how often
+saturation bites in the field); one event per refusal.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption`, `registration_refused` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption`, `registration_refused`, `worker_overloaded` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
 | `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / how many served saved-session rows carry a usage summary / how many tombstoned ledger edges received the deletion's durable usage amendment / one wedged-worker compaction the supervisor declared aborted |
 | `source` | string | only for `deleted_child_usage_captured`: `rlm_delete` (the kill route's finalize), `saved_delete` (the saved-session delete's pre-unlink tombstone), `adoption` (an interrupted delete finished from the ledger tombstone at boot) |
@@ -417,11 +421,15 @@ output, prompt, or goal content is collected.
 A menu surface opened (adoption of the unified menu panel): `source` is
 `command` (the bare slash submission — `/model`, `/mcp`, `/settings`) or
 `tab` (a typed partial + Tab in the command's argument context, opening the
-menu filtered to the match). Never carries prompt or search content.
+menu filtered to the match). The read-only info panel commands report
+their own `menu` names (the operator's 2026-09-26 inline-panel directive:
+`/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
+`/hotkeys`, the `/traces` status and preview blocks, and `/list`). Never
+carries prompt or search content.
 
 | property | type | notes |
 |---|---|---|
-| `menu` | string | `model` / `mcp` / `settings` |
+| `menu` | string | `model` / `mcp` / `settings` / `context` / `session` / `system-prompt` / `logs` / `changelog` / `hotkeys` / `traces` / `list` |
 | `source` | string | `command` / `tab` |
 
 ### `tui prompt stash`

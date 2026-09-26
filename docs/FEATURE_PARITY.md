@@ -629,7 +629,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4365-4371 | onEscape handler (double-escape tree/clear repeat) | crates/pa-tui/src/session_ui.rs:2680-2711,1927-1950 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4373 | app.clear -> handleCtrlC (interrupt + exit hint + second-press exit) | crates/pa-tui/src/session_ui.rs:2718-2753,2114-2142 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4374 | app.interrupt handler | MISSING (binding unbound by default in TS too) | MISSING | utility-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4375 | app.shortcuts -> showShortcutGuide | crates/pa-tui/src/session_ui.rs:2757-2763 + hotkeys.rs:139-169 | MATCHES |  |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4375 | app.shortcuts -> showShortcutGuide | REMOVED (operator directive 2026-09-26: the `?` quick-shortcut guide is removed in Rust; `/hotkeys` remains the reference) | REMOVED |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4376 | Ctrl+D exit (empty editor) | crates/pa-tui/src/session_ui.rs:2713-2717 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4377,661-688 | app.suspend -> handleCtrlZ suspend cycle | crates/pa-tui/src/session_ui.rs:2771-2778 + interactive.rs:670-688 + suspend.rs | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4380-4382 | ui.onDebug -> /debug | MISSING | MISSING | info-commands |
@@ -683,15 +683,15 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4972-4981 | /copy -> handleCopyCommand | MISSING | MISSING | clip-auth-cmds |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4982-4986 | /name -> handleNameCommand | MISSING | MISSING | info-commands |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4987-4991 | /rlm-max-depth -> handleRlmMaxDepthCommand | MISSING | MISSING | info-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4992-5002 | /session -> handleSessionCommand | MISSING | MISSING | info-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5003-5013 | /system-prompt -> handleSystemPromptCommand | MISSING | MISSING | info-commands |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4992-5002 | /session -> handleSessionCommand | DELTA: crates/pa-tui/src/session_ui.rs (/session arm) + info_commands.rs builders | DELTA: operator directive 2026-09-26 — the rows render in the read-only info panel (info_panel.rs), not as chat-transcript rows like TS | info-commands |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5003-5013 | /system-prompt -> handleSystemPromptCommand | DELTA: crates/pa-tui/src/session_ui.rs (/system-prompt arm) + info_commands.rs builders | DELTA: operator directive 2026-09-26 — the rows render in the scrollable read-only info panel, not as chat rows like TS | info-commands |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5014-5018 | /traces -> handleTracesCommand | MISSING | MISSING | info-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5019-5029 | /context -> handleContextCommand | MISSING | MISSING | info-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5030-5040 | /logs -> handleLogsCommand | MISSING | MISSING | info-commands |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5019-5029 | /context -> handleContextCommand | DELTA: crates/pa-tui/src/session_ui.rs (/context arm) + info_commands.rs builders | DELTA: operator directive 2026-09-26 — the tree renders in the scrollable read-only info panel, not as chat rows like TS | info-commands |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5030-5040 | /logs -> handleLogsCommand | DELTA: crates/pa-tui/src/session_ui.rs (/logs arm) + info_commands.rs builders | DELTA: operator directive 2026-09-26 — the rows render in the read-only info panel, not as chat rows like TS | info-commands |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5041-5045 | /heartbeat -> handleHeartbeatCommand (session forward + arg completions) | crates/pa-tui/src/session_ui.rs:1226-1228 (session lane); no arg completions | PARTIAL | heartbeats-menu |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5046-5055 | /heartbeats -> showHeartbeatManager | MISSING | MISSING | heartbeats-menu |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5056-5066 | /changelog -> handleChangelogCommand | MISSING | MISSING | info-commands |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5067-5077 | /hotkeys -> handleHotkeysCommand | crates/pa-tui/src/session_ui.rs:1424-1439 + hotkeys.rs:18-133 | MATCHES |  |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5056-5066 | /changelog -> handleChangelogCommand | DELTA: crates/pa-tui/src/session_ui.rs (/changelog arm) + info_commands.rs builders | DELTA: operator directive 2026-09-26 — the entries render in the info panel (the `What's New` title kept), not as chat rows like TS | info-commands |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5067-5077 | /hotkeys -> handleHotkeysCommand | crates/pa-tui/src/session_ui.rs (/hotkeys arm) + hotkeys.rs:18-133 | DELTA: operator directive 2026-09-26 — the guide renders in the scrollable read-only info panel, not as chat rows like TS |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5078-5087 | /fork -> showUserMessageSelector | crates/pa-tui/src/session_ui.rs:1375-1382,1792-1858 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5088-5097 | /clone -> handleCloneCommand | crates/pa-tui/src/session_ui.rs:1385-1392,1899-1925 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5098-5108 | /tree -> showTreeSelector | crates/pa-tui/src/session_ui.rs:1364-1372,1632-1791 | MATCHES |  |
@@ -714,7 +714,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5384-5416 | rejected submission draft restore (paste snapshot + generation guard) | crates/pa-tui/src/interactive.rs:718-725 (plain text restore only) | PARTIAL | prompt-stash |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5419-5435 | post-submit stash restore + deferred release bookkeeping | MISSING | IN-FLIGHT | prompt-stash |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5701-5717 | handleEvent prelude (footer invalidate, state patch, baseline reset on user message) | crates/pa-tui/src/session_ui.rs:3217-3225 + interactive.rs:766-795 | MATCHES |  |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5710-5714 | message_start user: clear shortcut guide + file changes + recap | crates/pa-tui/src/session_ui.rs:962 (guide cleared at submit only) | PARTIAL | edit-diffs (the qwen recap was removed 2026-09-25 by operator directive) |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5710-5714 | message_start user: clear shortcut guide + file changes + recap | REMOVED (the `?` shortcut guide is gone entirely — operator directive 2026-09-26) | REMOVED | edit-diffs (the qwen recap was removed 2026-09-25 by operator directive) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5720-5739 | agent_start (pending-tool reset, retry loader teardown, working loader start) | crates/pa-tui/src/session_ui.rs:3219-3223,1065-1077 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5723-5724,5990,6026 | terminal setProgress (OSC 9;4) on activity | MISSING | MISSING | terminal-progress (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5741-5745 | session_action_update -> queued strip refresh | crates/pa-tui/src/session_ui.rs:3409-3435 + snapshot.rs:573-579 | MATCHES |  |
@@ -796,7 +796,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 - `interactive-mode.ts:5144-5156` — /new with parseNewSessionCommand options (name, initial prompt, cwd override): Rust /new ignores all arguments — no session name, no initial prompt, no cwd override.
 - `interactive-mode.ts:5157-5161` — /resume [selector] -> agents view or resume: Rust resolves file/attach selectors; an unresolvable selector errors with a note instead of falling back to the agents view like TS.
 - `interactive-mode.ts:5384-5416` — rejected submission draft restore (paste snapshot + generation guard): A rejected prompt restores plain text only — no paste snapshot, no generation guard, no durable stash retention.
-- `interactive-mode.ts:5710-5714` — message_start user: clear shortcut guide + file changes + recap: Rust clears the shortcut guide at submit time only; queued/steered user messages arriving via events do not clear it, and file-change recap reset is unported.
+- `interactive-mode.ts:5710-5714` — message_start user: clear shortcut guide + file changes + recap: the shortcut guide is removed in Rust (operator directive 2026-09-26), so its clearing no longer applies; file-change recap reset is unported (the recap itself was removed 2026-09-25).
 - `interactive-mode.ts:5848-5878` — message_start: turn anchor, custom rows, refine loader start/stop on /refine rows: Custom rows render, but the /refine start/result rows do not start/stop a refine loader (missing), and the turn-start timestamp anchor is not kept.
 - `interactive-mode.ts:5894-5935` — message_end (aborted/error rows, retry-attempt abort text, pending tool failure flush, args complete): Rust renders aborted/error inside the assistant component, but the "Aborted after N retry attempts · elapsed" text shape and pending-tool failure text are approximations (assistant_error_row).
 - `interactive-mode.ts:6055-6091` — auto_retry_start (countdown loader + reason messages backup/usage/unavailable/default): Rust renders only the quick-countdown and backup-failover message shapes; usage-recovery and provider-unavailable wording fall back to the quick shape.
@@ -948,12 +948,12 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:9724 | handleCopyCommand (/copy last assistant text) | MISSING | MISSING | utility-commands |
 | interactive-mode.ts:9739 | handleNameCommand (/name set/show) | MISSING | MISSING | info-commands |
 | interactive-mode.ts:9759 | handleRlmMaxDepthCommand (get/set + --global) | MISSING | MISSING | info-commands |
-| interactive-mode.ts:9810 | handleSessionCommand (/session stats card) | MISSING | MISSING | info-commands |
-| interactive-mode.ts:9833 | handleLogsCommand (/logs directory listing) | MISSING | MISSING | info-commands |
-| interactive-mode.ts:9866 | handleSystemPromptCommand (/system-prompt) | MISSING (daemon supports it: crates/pa-daemon/src/state_getters.rs:198) | MISSING | info-commands |
+| interactive-mode.ts:9810 | handleSessionCommand (/session stats card) | DELTA: the rows render in the read-only info panel, not chat rows (operator directive 2026-09-26) | DELTA | info-commands |
+| interactive-mode.ts:9833 | handleLogsCommand (/logs directory listing) | DELTA: the rows render in the read-only info panel, not chat rows (operator directive 2026-09-26) | DELTA | info-commands |
+| interactive-mode.ts:9866 | handleSystemPromptCommand (/system-prompt) | DELTA: the rows render in the scrollable read-only info panel, not chat rows (operator directive 2026-09-26; daemon supports it: crates/pa-daemon/src/state_getters.rs:198) | DELTA | info-commands |
 | interactive-mode.ts:9877 | traces upload/preview result formatting | MISSING | MISSING | utility-commands |
 | interactive-mode.ts:9989 | handleTracesCommand (status/on/off/preview/upload/upload-all/login) | MISSING | MISSING | utility-commands |
-| interactive-mode.ts:10125 | handleContextCommand (/context tree) | MISSING (daemon supports get_context_tree: crates/pa-daemon/src/state_getters.rs:68) | MISSING | info-commands |
+| interactive-mode.ts:10125 | handleContextCommand (/context tree) | DELTA: the tree renders in the scrollable read-only info panel, not chat rows (operator directive 2026-09-26; daemon supports get_context_tree: crates/pa-daemon/src/state_getters.rs:68) | DELTA | info-commands |
 | interactive-mode.ts:8370 | getHeartbeatArgumentCompletions | MISSING (autocomplete.rs:925) | MISSING | heartbeats-menu |
 | interactive-mode.ts:8380 | getTracesArgumentCompletions | MISSING (autocomplete.rs:925) | MISSING | utility-commands |
 | interactive-mode.ts:10141 | handleHeartbeatCommand (status/set/pause/resume/clear) | MISSING (registry entry only: crates/pa-types/src/slash_commands.rs:80) | IN-FLIGHT | heartbeats-menu |
@@ -962,11 +962,11 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:10340 | manageHeartbeat (pause/resume/stop actions) | MISSING | IN-FLIGHT | heartbeats-menu |
 | interactive-mode.ts:10366 | showHeartbeat status card | MISSING | IN-FLIGHT | heartbeats-menu |
 | interactive-mode.ts:6494 | getTrayHeartbeatLabel (count/paused/shortcut) | MISSING | IN-FLIGHT | heartbeats-menu |
-| interactive-mode.ts:10392 | handleChangelogCommand (bordered markdown "What's New") | MISSING | MISSING | utility-commands |
-| interactive-mode.ts:10433 | getShortcutGuide | crates/pa-tui/src/hotkeys.rs:139-175 | MATCHES | — |
-| interactive-mode.ts:10576 | showShortcutGuide/clearShortcutGuide (? overlay, cleared on submit) | crates/pa-tui/src/session_ui.rs:2754-2763 + 962 | MATCHES | — |
+| interactive-mode.ts:10392 | handleChangelogCommand (bordered markdown "What's New") | DELTA: the entries render in the info panel (the What's New title kept), not chat rows (operator directive 2026-09-26) | DELTA | utility-commands |
+| interactive-mode.ts:10433 | getShortcutGuide | REMOVED (operator directive 2026-09-26) | REMOVED | — |
+| interactive-mode.ts:10576 | showShortcutGuide/clearShortcutGuide (? overlay, cleared on submit) | REMOVED (operator directive 2026-09-26) | REMOVED | — |
 | interactive-mode.ts:10460 | getHotkeysGuide (full reference tables) | crates/pa-tui/src/hotkeys.rs:18-137 | PARTIAL | ext-shortcuts |
-| interactive-mode.ts:10585 | handleHotkeysCommand (echo + guide) | crates/pa-tui/src/session_ui.rs:1424-1440 | MATCHES | — |
+| interactive-mode.ts:10585 | handleHotkeysCommand (echo + guide) | crates/pa-tui/src/session_ui.rs (/hotkeys arm): the guide mounts the read-only info panel, no echo row (operator directive 2026-09-26) | DELTA | — |
 | interactive-mode.ts:10601 | handleClearCommand (/clear --name/--prompt, restore+resubmit, "✓ New session started") | crates/pa-tui/src/session_ui.rs:1243-1251 (bare new session, "started session {id}") | PARTIAL | utility-commands |
 | interactive-mode.ts:10638 | handleDebugCommand (/debug rendered-lines dump) | MISSING (also absent from the Rust command registry) | MISSING | utility-commands |
 | interactive-mode.ts:10675 | handleArminSaysHi (/armin easter egg) | MISSING | MISSING | easter-eggs |
