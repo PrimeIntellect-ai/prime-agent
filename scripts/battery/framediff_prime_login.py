@@ -196,9 +196,36 @@ def make_side(name: str, binary: str, root: Path, prime_port: int) -> B.Side:
     # permits the key, the account carries two teams (the team question).
     side.env["PRIME_AGENT_INFERENCE_API_BASE_URL"] = f"http://127.0.0.1:{prime_port}"
     side.env["PRIME_AGENT_INFERENCE_FRONTEND_URL"] = "https://mock.example"
-    # No PRIME_API_KEY: the home is not model-ready, so the full first-run
-    # flow runs (welcome -> sign-in -> team question -> picker -> traces).
-    side.write_models_json()
+    # No PRIME_API_KEY and no stored apiKey: the home is not model-ready
+    # (batterylib's write_models_json seeds a configured prime-inference
+    # key, which would SKIP the welcome/login flow this harness drives),
+    # so the catalog carries the model without the credential and the
+    # full first-run flow runs (welcome -> sign-in -> team question ->
+    # picker -> traces).
+    side.agent_dir.mkdir(parents=True, exist_ok=True)
+    (side.agent_dir / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "prime-inference": {
+                        "api": "openai-completions",
+                        "baseUrl": side.base_url(),
+                        "models": [
+                            {
+                                "id": "mock-1",
+                                "name": "Mock 1",
+                                "api": "openai-completions",
+                                "baseUrl": side.base_url(),
+                                "contextWindow": 128000,
+                                "maxTokens": 4096,
+                            }
+                        ],
+                    }
+                }
+            },
+            indent=1,
+        )
+    )
     return side
 
 

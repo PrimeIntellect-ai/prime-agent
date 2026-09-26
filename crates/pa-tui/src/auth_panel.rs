@@ -560,6 +560,13 @@ impl AuthPanel {
         self.flow_cancel = Some(cancel);
     }
 
+    /// Whether the team picker owns the panel (TS the selector is its own
+    /// component: its Esc answers the picker and keeps the dialog
+    /// mounted, so a session cancel unmounts every other state only).
+    pub fn team_picker_mounted(&self) -> bool {
+        matches!(self.input, PanelInput::Teams { .. })
+    }
+
     /// TS `showProgress`: the first line lands under the section title
     /// (the title renders only when the panel was still empty).
     /// One request-fold entry (the session's channel arm calls it).
@@ -924,10 +931,23 @@ impl AuthPanel {
             // text) when the terminal is known to implement hyperlinks,
             // else prints it plain.
             let safe = scrub_controls(url).replace('\n', "");
-            let linked = if crate::hyperlinks::hyperlinks_enabled() {
-                format!("{}{safe}{OSC8_CLOSE}", osc8_open(&safe))
+            // The OSC 8 wrap survives truncation intact: the display text
+            // truncates to the column budget BEFORE the wrap (a long URL
+            // cut mid-sequence would leave the terminal's link region
+            // open), and the URI parameter always carries the full URL.
+            let budget = width.saturating_sub(2);
+            let display = if crate::width::str_width(&safe) > budget {
+                crate::width::truncate_line(&[Span::raw(safe.clone())], budget, "")
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
             } else {
-                safe
+                safe.clone()
+            };
+            let linked = if crate::hyperlinks::hyperlinks_enabled() {
+                format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
+            } else {
+                display
             };
             lines.push(content_row(theme, width, ThemeColor::Text, &linked));
             // TS `addSectionSpacer`: the browser-step text reads apart

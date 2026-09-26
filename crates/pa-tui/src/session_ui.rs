@@ -3836,16 +3836,24 @@ impl SessionUi {
         if let Some(panel) = view.auth_panel.as_mut() {
             panel.handle_key(&id, kb);
         }
-        // A cancel key on an armed panel flow ends it cooperatively
-        // (#2770): the flag marks the blocking body (no credential write
-        // after the exit), the panel unmounts, and the settled outcome
-        // is the silent cancel.
+        // A cancel key on the mounted panel ends it (TS `cancel()` closes
+        // the dialog): the armed flag marks the blocking body (#2770 — no
+        // credential write after the exit), every flow reads its own
+        // dropped oneshot or cooperative flag as the silent cancel, and
+        // the panel unmounts immediately so a cancelled login never
+        // strands the frame. The team picker's Esc answers the picker and
+        // keeps the dialog mounted (TS the selector is its own component
+        // whose cancel keeps the login going).
         let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
-        if cancel_key {
+        let team_picker = view
+            .auth_panel
+            .as_ref()
+            .is_some_and(|panel| panel.team_picker_mounted());
+        if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                view.auth_panel = None;
             }
+            view.auth_panel = None;
         }
         self.dirty = true;
         Ok(())

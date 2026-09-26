@@ -35,6 +35,14 @@ const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 pub(crate) trait TracesLoginUi: Send + Sync {
     /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
+    /// The driving surface's cooperative cancel state (`true` once the
+    /// pane that mounted the login exited): the flow checks it before
+    /// its credential writes, so a cancelled flow can neither
+    /// authenticate nor report success. The default (`false`) serves
+    /// the surfaces that never cancel mid-flow (the scripted tests).
+    fn is_cancelled(&self) -> bool {
+        false
+    }
     /// TS `dialog.showAuth` (the URL + the code line) and the terminal
     /// port's browser open.
     fn on_auth(&self, url: &str, instructions: &str);
@@ -129,7 +137,14 @@ async fn run_traces_login_inner(
             line = async { manual.as_mut().expect("the manual read is armed").as_mut().await }, if manual.is_some() => Step::Manual(line),
         };
         match step {
-            Step::Login(Ok((api_key, _source))) => return complete_login(inputs, &api_key),
+            Step::Login(Ok((api_key, _source))) => {
+                // A cancelled surface never authenticates (the pane exit
+                // marks the flag; the check before the credential write).
+                if ui.is_cancelled() {
+                    return TraceLoginOutcome::Cancelled;
+                }
+                return complete_login(inputs, &api_key);
+            }
             Step::Login(Err(error)) => {
                 // TS the browser-unavailable fallback: keep the dialog
                 // open and fall back to plain API key entry.
@@ -148,6 +163,12 @@ async fn run_traces_login_inner(
                 let Some(api_key) = line else {
                     return TraceLoginOutcome::Cancelled;
                 };
+                // A cancelled surface never authenticates: the check
+                // runs before the access request and the credential
+                // write below.
+                if ui.is_cancelled() {
+                    return TraceLoginOutcome::Cancelled;
+                }
                 // TS the manual path: stop the browser flow (the login
                 // future above is dropped when this branch wins) and
                 // check the pasted key's trace access.
@@ -238,6 +259,10 @@ impl PanelTracesLoginUi {
 impl TracesLoginUi for PanelTracesLoginUi {
     fn progress(&self, message: &str) {
         self.panel.progress(message);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.panel.cancelled()
     }
 
     fn on_auth(&self, url: &str, instructions: &str) {

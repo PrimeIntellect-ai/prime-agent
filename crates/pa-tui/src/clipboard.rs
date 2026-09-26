@@ -96,6 +96,15 @@ const PIPE_POLL: Duration = Duration::from_millis(20);
 /// 5s timeout): a helper that does not finish inside the cap is killed
 /// and reported as a failed copy.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
+    // The stdin write can block only when the helper refuses to read a
+    // payload larger than the pipe buffer: clipboard payloads are URLs
+    // and keys, so anything past the buffer budget fails the copy
+    // instead of hanging the write (the budget stays under the smallest
+    // guaranteed pipe buffer).
+    const PIPE_WRITE_BUDGET: usize = 16 * 1024;
+    if text.len() > PIPE_WRITE_BUDGET {
+        return false;
+    }
     let Ok(mut child) = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
