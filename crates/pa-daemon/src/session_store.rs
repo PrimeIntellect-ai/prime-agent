@@ -76,6 +76,21 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+/// The windowed message sequence's summary scalars (TS
+/// `summaryForActiveSession`): the newest message timestamp, the summed
+/// assistant usage, and the window's message count. Produced by
+/// [`SessionFile::scan_message_scalars`] without materializing the fold.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MessageWindowScalars {
+    /// The timestamp of the last windowed message that carries one (the
+    /// fold's reverse `find_map`, preserved in walk order).
+    pub last_timestamp_ms: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+    pub message_count: usize,
+}
+
 impl SessionEntry {
     fn new(
         type_: &str,
@@ -790,13 +805,67 @@ impl SessionFile {
     /// after the compaction. Without a compaction this is the plain
     /// message list.
     pub fn messages(&self) -> Vec<Value> {
-        // The transcript form of one entry: `message` rows contribute their
-        // persisted message; custom rows rejoin as their wire message form
-        // (`role: "custom"`), the shape TS sessions keep in
-        // `agent.state.messages`.
-        let entry_message = |entry: &SessionEntry| -> Option<Value> {
+        let mut messages = Vec::new();
+        self.walk_message_values(|message| messages.push(message.into_owned()));
+        messages
+    }
+
+    /// The summary scalars the TS `summaryForActiveSession` fold derives
+    /// from the windowed message sequence — the newest message timestamp
+    /// (the last message in fold order that carries one, matching the
+    /// fold's reverse scan), the summed assistant usage, and the window's
+    /// message count — without materializing the transcript. One borrowed
+    /// walk of the same sequence [`Self::messages`] folds, so the scan can
+    /// never disagree with the materialized fold.
+    pub fn scan_message_scalars(&self) -> MessageWindowScalars {
+        let mut scalars = MessageWindowScalars::default();
+        self.walk_message_values(|message| {
+            scalars.message_count += 1;
+            if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
+                scalars.last_timestamp_ms = Some(timestamp);
+            }
+            if crate::types::message_role(&message) == Some("assistant") {
+                if let Some(usage) = message.get("usage") {
+                    scalars.input_tokens += usage
+                        .get("input")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheRead")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheWrite")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.output_tokens += usage
+                        .get("output")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.cost += usage
+                        .get("cost")
+                        .and_then(|cost| cost.get("total"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or_default();
+                }
+            }
+        });
+        scalars
+    }
+
+    /// The windowed message sequence behind [`Self::messages`]: `message`
+    /// rows borrow their persisted message; `custom_message` rows rejoin as
+    /// their wire message form (`role: "custom"`), the shape TS sessions
+    /// keep in `agent.state.messages`; a compaction window prepends its
+    /// summary message and keeps `firstKeptEntryId` onward (the id is only
+    /// recognized on a message-bearing row, matching the fold), then
+    /// everything appended after the compaction. Every consumer — the
+    /// materialized fold and the scalar scan — derives from this one walk,
+    /// so the two can never disagree on the sequence.
+    fn walk_message_values<'a>(&'a self, mut visit: impl FnMut(std::borrow::Cow<'a, Value>)) {
+        let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
             match entry.type_.as_str() {
-                "message" => entry.fields.get("message").cloned(),
+                "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
                 "custom_message" => {
                     let mut message = entry.fields.clone();
                     if let Some(object) = message.as_object_mut() {
@@ -806,7 +875,7 @@ impl SessionFile {
                             Value::String(entry.timestamp.clone()),
                         );
                     }
-                    Some(message)
+                    Some(std::borrow::Cow::Owned(message))
                 }
                 _ => None,
             }
@@ -815,10 +884,12 @@ impl SessionFile {
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
-            return branch
-                .iter()
-                .filter_map(|entry| entry_message(entry))
-                .collect();
+            for entry in &branch {
+                if let Some(message) = entry_message(entry) {
+                    visit(message);
+                }
+            }
+            return;
         };
         let compaction = branch[compaction_position];
         let first_kept_entry_id = compaction
@@ -826,10 +897,29 @@ impl SessionFile {
             .get("firstKeptEntryId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mut retained: Vec<Value> = Vec::new();
+        // Counting pass: the compaction summary message carries the retained
+        // count, so the kept prefix is counted before anything is visited.
+        // The bearing check borrows only — no message is materialized here.
+        let mut keeping = false;
+        let mut retained_count = 0usize;
+        for entry in &branch[..compaction_position] {
+            if !entry_bears_message(entry) {
+                continue;
+            }
+            if !keeping && entry.id == first_kept_entry_id {
+                keeping = true;
+            }
+            if keeping {
+                retained_count += 1;
+            }
+        }
+        visit(std::borrow::Cow::Owned(compaction_summary_message(
+            compaction,
+            retained_count,
+        )));
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
-            if entry_message(entry).is_none() {
+            if !entry_bears_message(entry) {
                 continue;
             }
             if !keeping && entry.id == first_kept_entry_id {
@@ -837,18 +927,15 @@ impl SessionFile {
             }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    retained.push(message);
+                    visit(message);
                 }
             }
         }
-        let mut messages = vec![compaction_summary_message(compaction, retained.len())];
-        messages.extend(retained);
-        messages.extend(
-            branch[compaction_position + 1..]
-                .iter()
-                .filter_map(|entry| entry_message(entry)),
-        );
-        messages
+        for entry in &branch[compaction_position + 1..] {
+            if let Some(message) = entry_message(entry) {
+                visit(message);
+            }
+        }
     }
 
     /// The durable entry id the compaction cut keeps: the same
@@ -1161,6 +1248,18 @@ fn message_role(message: &Value) -> Option<&str> {
 
 /// The `compactionSummary` message a compaction fold starts with (TS
 /// `createCompactionSummaryMessage`).
+/// Whether one entry contributes a message to the windowed fold: `message`
+/// rows need their persisted message; `custom_message` rows always rejoin as
+/// their wire form. The borrowing twin of the `entry_message` Some-ness, so
+/// counting and keeping walks never materialize what they only classify.
+fn entry_bears_message(entry: &SessionEntry) -> bool {
+    match entry.type_.as_str() {
+        "message" => entry.fields.get("message").is_some(),
+        "custom_message" => true,
+        _ => false,
+    }
+}
+
 fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
     // TS `createCompactionSummaryMessage` key order: role, summary,
@@ -1553,11 +1652,13 @@ impl SessionScanState {
     }
 }
 
-/// The listing fold only needs message metadata after the search corpus is full.
-/// Unknown fields (especially large assistant content) are skipped by serde.
+/// The listing fold only needs message metadata after the search corpus is
+/// full. Unknown fields are skipped by serde; the one field the text fold
+/// still needs — `content` — rides as a borrowed raw span, so a guarded row
+/// re-parses its content alone instead of the whole entry.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoMessage {
+struct SessionInfoMessage<'a> {
     #[serde(default)]
     role: Option<Value>,
     #[serde(default)]
@@ -1570,11 +1671,16 @@ struct SessionInfoMessage {
     /// a partial persisted block must not reject the row.
     #[serde(default)]
     usage: Option<crate::session_usage::ScanUsage>,
+    /// The message's `content`, borrowed from the scanned line (zero
+    /// copy, no materialization): the corpus and first-message text read
+    /// it only when the fold's guard passes.
+    #[serde(default, borrow)]
+    content: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoEntry {
+struct SessionInfoEntry<'a> {
     #[serde(rename = "type")]
     type_: String,
     #[serde(rename = "id")]
@@ -1593,8 +1699,8 @@ struct SessionInfoEntry {
     model_id: Option<Value>,
     #[serde(default)]
     thinking_level: Option<Value>,
-    #[serde(default)]
-    message: Option<SessionInfoMessage>,
+    #[serde(default, borrow)]
+    message: Option<SessionInfoMessage<'a>>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
     #[serde(default)]
     target_id: Option<String>,
@@ -1786,6 +1892,22 @@ impl SessionScanState {
     }
 }
 
+/// The text fold of one message's `content`, from the raw span the typed
+/// parse borrowed: parsing the span back yields the identical `Value`
+/// [`message_text`] read from a fully re-parsed entry, without walking the
+/// whole line a second time. `None` content and an unparsable span both
+/// read as empty text — exactly what [`message_text`] returns for a
+/// message without content.
+fn message_content_text(content: Option<&serde_json::value::RawValue>) -> String {
+    content
+        .map(|raw| {
+            crate::types::content_to_text(
+                &serde_json::from_str::<Value>(raw.get()).unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Fold one complete line into the scan state (the old scan-loop body).
 /// `None` = the abort arm (a `model_change` without its model identity).
 fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
@@ -1872,22 +1994,20 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                     || (matches!(role, Some("user" | "assistant"))
                         && acc.search_text_chars < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
                 {
-                    if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
-                        if let Some(message) = full.fields.get("message") {
-                            if role == Some("user") && acc.first_message.is_empty() {
-                                let text = message_text(message);
-                                if !text.is_empty() {
-                                    acc.first_message = text;
-                                }
-                            }
-                            if matches!(role, Some("user" | "assistant")) {
-                                acc.search_text_chars = append_capped_search_text(
-                                    &mut acc.all_messages_text,
-                                    &message_text(message),
-                                    acc.search_text_chars,
-                                );
-                            }
-                        }
+                    // The text reads the `content` span the typed parse
+                    // borrowed; re-parsing the whole entry (a second full
+                    // `Value` walk plus every string it materializes) paid
+                    // for one field the fold never otherwise touches.
+                    let text = message_content_text(message.content);
+                    if role == Some("user") && acc.first_message.is_empty() && !text.is_empty() {
+                        acc.first_message.clone_from(&text);
+                    }
+                    if matches!(role, Some("user" | "assistant")) {
+                        acc.search_text_chars = append_capped_search_text(
+                            &mut acc.all_messages_text,
+                            &text,
+                            acc.search_text_chars,
+                        );
                     }
                 }
             }
