@@ -7203,8 +7203,7 @@ mod agent_message_tests {
             // the first occurrence of a key name marks its byte position.
             let after = |payload: &str, left: &str, right: &str| {
                 assert!(
-                    payload.find(&format!("\"{left}\""))
-                        < payload.find(&format!("\"{right}\"")),
+                    payload.find(&format!("\"{left}\"")) < payload.find(&format!("\"{right}\"")),
                     "{left} must serialize before {right}"
                 );
             };
@@ -7267,7 +7266,6 @@ mod agent_message_tests {
             }
         }
     }
-
 }
 
 #[cfg(test)]
