@@ -24,7 +24,7 @@
 //! a refresh here can never clobber user config.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::bundled::{load_bundled_models, BundledAssets};
 use crate::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
@@ -54,8 +54,9 @@ pub enum RefreshTrigger {
 }
 
 impl RefreshTrigger {
-    /// Forced triggers skip the hourly gating window.
-    fn forced(self) -> bool {
+    /// Forced triggers skip the hourly gating window (startup and auth
+    /// change; the hourly and picker-open triggers stay gated).
+    pub fn forced(self) -> bool {
         matches!(self, RefreshTrigger::Startup | RefreshTrigger::AuthChange)
     }
 }
@@ -89,6 +90,13 @@ pub struct ModelCatalog {
     pi_base_url: Arc<str>,
     /// Guards [`ModelCatalog::spawn_hourly_refresh`]: one loop per instance.
     hourly_loop: OnceLock<()>,
+    /// The Prime Inference credential scope the last catalog request in
+    /// this process observed ([`ModelCatalog::credentials_changed`]'s
+    /// state): `None` until the first observation (the disk snapshot's
+    /// stored scope seeds it, so a login or logout that predates this
+    /// process's first request is still detected), then the live scope
+    /// (`Some(None)` = no credentials).
+    pi_scope_seen: Mutex<Option<Option<String>>>,
 }
 
 impl ModelCatalog {
@@ -144,6 +152,7 @@ impl ModelCatalog {
             compiled,
             pi_base_url: Arc::from(pi_base_url),
             hourly_loop: OnceLock::new(),
+            pi_scope_seen: Mutex::new(None),
         }
     }
 
@@ -152,6 +161,32 @@ impl ModelCatalog {
     /// views of it (the private-authorization lane).
     pub fn prime_inference_base_url(&self) -> &str {
         &self.pi_base_url
+    }
+
+    /// Whether the live Prime Inference credential scope changed since the
+    /// last catalog request this process served — the split-process port
+    /// of TS `authStorage.onChange` (the client process writes auth.json;
+    /// the daemon observes the change on the next request). The
+    /// comparison is always live credentials against the last observed
+    /// LIVE scope; the disk PI snapshot's stored scope only seeds the
+    /// FIRST observation of a process (so a login or logout that happened
+    /// before this process's first request is still detected), and is
+    /// never trusted over live auth afterwards. Consuming observation:
+    /// every call records the current scope as the next comparison base.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scope-observation mutex is poisoned (another thread
+    /// panicked while holding the lock).
+    pub fn credentials_changed(&self, credentials: Option<&PrimeCredentials>) -> bool {
+        let current = credentials
+            .map(|credentials| self.prime_inference.scope_for(&credentials.as_inference()));
+        let mut seen = self.pi_scope_seen.lock().expect("scope observation lock");
+        let last = seen
+            .clone()
+            .unwrap_or_else(|| self.prime_inference.stored_scope());
+        *seen = Some(current.clone());
+        last != current
     }
 
     /// Resolve the current catalog through the no-cold-start chain, merging
@@ -447,5 +482,107 @@ mod tests {
         assert!(RefreshTrigger::AuthChange.forced());
         assert!(!RefreshTrigger::Hourly.forced());
         assert!(!RefreshTrigger::PickerOpen.forced());
+    }
+
+    /// The compiled Prime Inference entries as a valid snapshot payload
+    /// (the parse gate needs the coverage; no marker).
+    fn pi_snapshot_payload() -> serde_json::Value {
+        let data: Vec<serde_json::Value> = transports::prime_inference_offline_entries()
+            .iter()
+            .map(|model| {
+                json!({
+                    "id": model.id,
+                    "display_name": model.name,
+                    "pricing": {
+                        "input_usd_per_mtok": model.cost.input.as_f64(),
+                        "output_usd_per_mtok": model.cost.output.as_f64(),
+                    },
+                    "specs": {
+                        "context_window": model.context_window,
+                        "max_output_tokens": model.max_tokens,
+                        "supports_reasoning": model.reasoning,
+                        "modalities": {"input": ["text"], "output": ["text"]},
+                    },
+                })
+            })
+            .collect();
+        json!({ "data": data })
+    }
+
+    /// Write the Prime Inference disk snapshot for `credentials`' scope
+    /// (the shape `CatalogCache` persists; a fresh process seeds its first
+    /// auth-scope observation from it).
+    fn write_pi_snapshot(dir: &std::path::Path, credentials: &PrimeCredentials) {
+        let scope = crate::prime_inference::scope_key(
+            &credentials.api_key,
+            credentials.team_id.as_deref().unwrap_or_default(),
+        );
+        let snapshot = json!({
+            "url": "http://catalog.test/api/v1/models",
+            "scope": scope,
+            "fetchedAt": 1,
+            "payload": pi_snapshot_payload(),
+        });
+        std::fs::write(
+            dir.join("prime-inference-models-cache.json"),
+            serde_json::to_string(&snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn account(api_key: &str, team_id: &str) -> PrimeCredentials {
+        PrimeCredentials {
+            api_key: api_key.to_string(),
+            team_id: Some(team_id.to_string()),
+        }
+    }
+
+    fn hermetic_catalog(dir: &std::path::Path) -> ModelCatalog {
+        ModelCatalog::with_urls(
+            Some(dir.to_path_buf()),
+            Some(dir.to_path_buf()),
+            "http://catalog.test/catalog",
+            "http://catalog.test/api/v1",
+        )
+    }
+
+    /// A restarted process seeds its first credential-scope observation
+    /// from the stored disk snapshot: the same account stays `PickerOpen`
+    /// (gated, no forced refresh), a changed account — a login or logout
+    /// that happened while the process was down — is detected and forced.
+    #[test]
+    fn first_observation_after_a_restart_compares_against_the_stored_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let account_a = account("sk-a", "team-a");
+        write_pi_snapshot(dir.path(), &account_a);
+
+        // Same account: not a change.
+        let catalog = hermetic_catalog(dir.path());
+        assert!(!catalog.credentials_changed(Some(&account_a)));
+        // The observation is consuming: still the same account.
+        assert!(!catalog.credentials_changed(Some(&account_a)));
+        // A changed account is a change, once.
+        let account_b = account("sk-b", "team-b");
+        assert!(catalog.credentials_changed(Some(&account_b)));
+        assert!(!catalog.credentials_changed(Some(&account_b)));
+        // A logout (credentials gone while a snapshot remains) is a
+        // change, once; staying logged out is not.
+        assert!(catalog.credentials_changed(None));
+        assert!(!catalog.credentials_changed(None));
+    }
+
+    /// Without a stored snapshot (a fresh install, or the first request of
+    /// a process whose caches never warmed), the seed is "no scope":
+    /// credentials present is a change (forced once — the fetch arms the
+    /// scope's snapshot), no credentials is not (the startup refresh
+    /// already covers the fresh process).
+    #[test]
+    fn first_observation_without_a_stored_snapshot_seeds_no_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = hermetic_catalog(dir.path());
+        assert!(!catalog.credentials_changed(None));
+        let account_a = account("sk-a", "team-a");
+        assert!(catalog.credentials_changed(Some(&account_a)));
+        assert!(!catalog.credentials_changed(Some(&account_a)));
     }
 }
