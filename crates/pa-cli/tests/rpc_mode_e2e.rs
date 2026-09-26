@@ -878,12 +878,18 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         "sessionPath": "/nonexistent/no-such-session.jsonl"
     }));
     let (failed, _) = client.wait_response(&bad, TIMEOUT);
-    assert_eq!(failed["success"], false, "the missing file fails the switch");
+    assert_eq!(
+        failed["success"], false,
+        "the missing file fails the switch"
+    );
     // The parked steer delivers as the live session's next turn.
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let timeout_left = deadline.saturating_duration_since(Instant::now());
-        assert!(!timeout_left.is_zero(), "no second turn: the parked steer stranded");
+        assert!(
+            !timeout_left.is_zero(),
+            "no second turn: the parked steer stranded"
+        );
         match client.lines.recv_timeout(timeout_left) {
             Ok(line) => {
                 let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
