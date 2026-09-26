@@ -1,16 +1,15 @@
-//! Headless e2e for the `/nightly` command (TS `interactive-mode.ts`
-//! 5455-5484): the status arm resolves the effective channel from the
-//! running version when no preferred channel is set, the usage error keeps
-//! the TS wording, and the off arm pins the channel through the settings
-//! seam (a stub seam: the write lands in memory; the persisted wire form is
-//! covered by the pa-cli seam round-trip test).
+//! Headless e2e for the slash-menu panel's top border (the operator's
+//! 2026-09-26 directive): the dropdown opens with the one full-width
+//! muted rule every inline menu panel opens with (TS `MenuPanel.render`,
+//! the rule that separates a panel from the transcript above), drawn
+//! directly above the menu rows — so an open slash-command menu reads as
+//! a panel, not as loose transcript rows.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
-use anyhow::Result;
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
@@ -76,6 +75,20 @@ impl MockSupervisor {
                                 "sessionId": "sess-1",
                                 "sessionFile": "/tmp/sess-1.jsonl",
                             },
+                        }),
+                    );
+                }
+                "get_commands" => {
+                    // No skill commands: the dropdown lists the builtin
+                    // registry alone, the plain slash menu.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_commands",
+                            "success": true,
+                            "data": { "commands": [] },
                         }),
                     );
                 }
@@ -149,7 +162,7 @@ fn attach_data(id: &str) -> Value {
                     "activeSessionId": "s1",
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
-                    "sessionName": "nightly session",
+                    "sessionName": "slash menu session",
                     "model": null,
                     "isStreaming": false,
                     "isCompacting": false,
@@ -164,144 +177,6 @@ fn attach_data(id: &str) -> Value {
             "lastEventCursor": null,
         },
     })
-}
-
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence, and the channel pair
-/// resolves like the composition root (the version infers when unset).
-#[derive(Default)]
-struct StubSettings {
-    update_channel: std::sync::Mutex<Option<String>>,
-}
-
-impl pa_tui::client_settings::ClientSettings for StubSettings {
-    fn theme(&self) -> Option<String> {
-        None
-    }
-    fn set_theme(&self, _theme: &str) -> Result<()> {
-        Ok(())
-    }
-    fn fullscreen(&self) -> bool {
-        true
-    }
-    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_images(&self) -> bool {
-        true
-    }
-    fn set_show_images(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn clear_on_shrink(&self) -> bool {
-        false
-    }
-    fn set_clear_on_shrink(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_terminal_progress(&self) -> bool {
-        false
-    }
-    fn set_show_terminal_progress(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn image_auto_resize(&self) -> bool {
-        true
-    }
-    fn set_image_auto_resize(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn block_images(&self) -> bool {
-        false
-    }
-    fn set_block_images(&self, _blocked: bool) -> Result<()> {
-        Ok(())
-    }
-    fn enable_skill_commands(&self) -> bool {
-        true
-    }
-    fn set_enable_skill_commands(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn enable_builtin_skills(&self) -> bool {
-        true
-    }
-    fn set_enable_builtin_skills(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_hardware_cursor(&self) -> bool {
-        false
-    }
-    fn set_show_hardware_cursor(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn editor_padding_x(&self) -> u64 {
-        0
-    }
-    fn set_editor_padding_x(&self, _padding: u64) -> Result<()> {
-        Ok(())
-    }
-    fn autocomplete_max_visible(&self) -> u64 {
-        5
-    }
-    fn set_autocomplete_max_visible(&self, _max_visible: u64) -> Result<()> {
-        Ok(())
-    }
-    fn quiet_startup(&self) -> bool {
-        false
-    }
-    fn set_quiet_startup(&self, _quiet: bool) -> Result<()> {
-        Ok(())
-    }
-    fn idle_eviction_minutes(&self) -> String {
-        "90".to_string()
-    }
-    fn set_idle_eviction_minutes(&self, _value: &str) -> Result<()> {
-        Ok(())
-    }
-    fn mermaid_rendering_mode(&self) -> String {
-        "streaming".to_string()
-    }
-    fn set_mermaid_rendering_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tree_filter_mode(&self) -> String {
-        "user-only".to_string()
-    }
-    fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn chat_detail(&self) -> String {
-        "details".to_string()
-    }
-    fn set_chat_detail(&self, _detail: &str) -> Result<()> {
-        Ok(())
-    }
-    fn warnings_anthropic_extra_usage(&self) -> bool {
-        true
-    }
-    fn set_warnings_anthropic_extra_usage(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn update_channel(&self) -> Option<String> {
-        self.update_channel.lock().expect("channel lock").clone()
-    }
-    fn set_update_channel(&self, channel: &str) -> Result<()> {
-        *self.update_channel.lock().expect("channel lock") = Some(channel.to_string());
-        Ok(())
-    }
-    fn effective_update_channel(&self, version: &str) -> String {
-        if let Some(channel) = self.update_channel() {
-            return channel;
-        }
-        // The inference TS resolveUpdateChannel applies: a -beta*
-        // prerelease reads nightly, anything else stable.
-        if version.contains("-beta") {
-            "nightly".to_string()
-        } else {
-            "stable".to_string()
-        }
-    }
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {
@@ -336,9 +211,11 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
-        client_settings: Some(std::sync::Arc::new(StubSettings::default())),
+        client_settings: None,
     }
 }
+
+const WIDTH: usize = 100;
 
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
@@ -353,7 +230,7 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
         .expect("tokio runtime");
     let plan = HeadlessPlan {
         steps,
-        width: 100,
+        width: WIDTH as u16,
         height: 30,
     };
     let outcome = runtime
@@ -363,42 +240,42 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/nightly status` reports the inferred channel (the headless harness
-/// has no settings seam, so no preferred channel is set) and the running
-/// version; a bad argument gets the TS usage error.
+/// Typing `/` opens the slash-command panel with its top border: the
+/// full-width muted rule renders directly above the selected marker row —
+/// no blank row between them — so the panel reads as open against the
+/// transcript above it.
 #[test]
-fn nightly_status_and_usage_error_render_the_ts_wording() {
+fn slash_menu_opens_with_the_top_border_rule() {
     let steps = vec![
-        HeadlessStep::Submit("/nightly status".to_string()),
-        HeadlessStep::WaitMs(200),
-        HeadlessStep::Submit("/nightly maybe".to_string()),
-        HeadlessStep::WaitMs(200),
+        // The command-catalog fetch lands in the background (the attach
+        // spawns it); give the fold a beat before typing.
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type("/".to_string()),
+        HeadlessStep::SettleIdle,
+        HeadlessStep::WaitMs(100),
     ];
     let frames = run_plan(steps);
-    assert!(!frames.is_empty(), "frames were captured");
-    let all = frames.join("\n");
+    let frame = frames
+        .iter()
+        .rev()
+        .find(|frame| {
+            frame
+                .split('\n')
+                .any(|line| line.trim_start().starts_with('\u{203a}'))
+        })
+        .expect("a frame renders the open slash menu");
+    let lines: Vec<&str> = frame.split('\n').collect();
+    let marker = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('\u{203a}'))
+        .expect("the selected marker row");
     assert!(
-        all.contains("Updates follow the stable channel (inferred from the running version). v0.0.0 installed."),
-        "the status note rendered:\n{all}"
+        marker > 0,
+        "the marker row is not the frame's first row:\n{frame}"
     );
-    assert!(
-        all.contains("Usage: /nightly [on|off|status]"),
-        "the usage error rendered:\n{all}"
-    );
-}
-
-/// `/nightly off` pins the channel through the settings seam and renders
-/// the TS stable-pin note.
-#[test]
-fn nightly_off_renders_the_stable_pin_note() {
-    let steps = vec![
-        HeadlessStep::Submit("/nightly off".to_string()),
-        HeadlessStep::WaitMs(200),
-    ];
-    let frames = run_plan(steps);
-    let all = frames.join("\n");
-    assert!(
-        all.contains("Updates now follow the stable channel. Run /update to install the latest stable release."),
-        "the stable-pin note rendered:\n{all}"
+    assert_eq!(
+        lines[marker - 1],
+        "\u{2500}".repeat(WIDTH),
+        "the panel's top border sits directly above the menu rows:\n{frame}"
     );
 }

@@ -5015,6 +5015,17 @@ impl SessionUi {
         self.note(&status, view);
     }
 
+    /// TS #2709: the Ctrl+O cycle saves the new level as the global
+    /// `chatDetail` setting (`settingsManager.setChatDetail`), so every
+    /// later chat opens at it. A failed save only lands in the settings
+    /// store's own diagnostics (TS `save` -> `recordError`): the chat
+    /// keeps the applied level either way, so the keybind shows no error.
+    fn save_chat_detail(&self, view: &AgentView) {
+        if let Some(settings) = &self.client_settings {
+            let _ = settings.set_chat_detail(view.detail.wire_name());
+        }
+    }
+
     /// `/speed on/off`: toggles the footer tok/sec readout for this
     /// session (TS `setSpeedDisplay`): the flag lives on the client;
     /// disabling clears the stats and the row (TS `resetSpeedStats`), and
@@ -7796,6 +7807,7 @@ impl SessionUi {
             }
             if kb.matches(&id, "app.tools.expand") {
                 view.detail = view.detail.next();
+                self.save_chat_detail(view);
                 self.dirty = true;
                 return Ok(());
             }
@@ -7967,8 +7979,10 @@ impl SessionUi {
         }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
-            // detail: overview -> details -> all -> overview.
+            // detail: overview -> details -> all -> overview, and #2709
+            // saves the new level as the `chatDetail` setting.
             view.detail = view.detail.next();
+            self.save_chat_detail(view);
             // TS `applyChatExpansion` also re-flags the side-question pane
             // (the pane has no bash rows here, so the flag is the only
             // carried state).
