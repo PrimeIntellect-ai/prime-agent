@@ -4013,9 +4013,9 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -4037,7 +4037,7 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -4142,9 +4142,9 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -4166,7 +4166,7 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -4282,7 +4282,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
             .request_ok(DaemonCommand::Kill {
                 id: None,
                 active_session_id: kill_session_id.clone(),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .await
             .expect("kill session worker");
@@ -4303,9 +4303,9 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -4327,7 +4327,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
