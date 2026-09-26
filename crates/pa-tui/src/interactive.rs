@@ -1282,9 +1282,10 @@ fn next_idle_tick_deadline(
     selection_auto_scroll_armed: bool,
     last_bash_refresh: Instant,
     next_toast_expiry: Option<Instant>,
+    now: Instant,
 ) -> Instant {
     if autocomplete_pending || selection_auto_scroll_armed {
-        return Instant::now() + IDLE_TICK_CADENCE;
+        return now + IDLE_TICK_CADENCE;
     }
     let bash_deadline = last_bash_refresh + BASH_ACTIVITY_REFRESH_INTERVAL;
     next_toast_expiry.map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
@@ -2212,6 +2213,7 @@ async fn run_interactive_surface(
             session.selection_auto_scroll_active(),
             last_bash_refresh,
             view.toasts.next_expiry(),
+            Instant::now(),
         );
         tokio::select! {
             maybe_event = async {
@@ -3569,11 +3571,11 @@ mod tests {
         let now = Instant::now();
         // A parked autocomplete request: the dropdown materializes on the
         // first tick after typing pauses (the old sleep's exact window).
-        let deadline = next_idle_tick_deadline(true, false, now, None);
+        let deadline = next_idle_tick_deadline(true, false, now, None, now);
         assert!(deadline > now && deadline <= now + IDLE_TICK_CADENCE);
         // An armed selection auto-scroll (a drag holding the edge): the
         // same cadence drives the 150 ms hold + tick scroll.
-        let deadline = next_idle_tick_deadline(false, true, now, None);
+        let deadline = next_idle_tick_deadline(false, true, now, None, now);
         assert!(deadline > now && deadline <= now + IDLE_TICK_CADENCE);
         // Fully idle: the bash-activity refresh deadline, exactly 2 s out
         // from the last refresh.
@@ -3581,14 +3583,14 @@ mod tests {
             .checked_sub(Duration::from_secs(1))
             .expect("a fresh now always backs off a second");
         assert_eq!(
-            next_idle_tick_deadline(false, false, last_refresh, None),
+            next_idle_tick_deadline(false, false, last_refresh, None, now),
             last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL
         );
         // A toast on screen wakes at its own expiry when that is due
         // sooner, so the pre-gate prune repaints it away at its TTL.
         let toast_expiry = last_refresh + Duration::from_millis(1500);
         assert_eq!(
-            next_idle_tick_deadline(false, false, last_refresh, Some(toast_expiry)),
+            next_idle_tick_deadline(false, false, last_refresh, Some(toast_expiry), now),
             toast_expiry
         );
         // A toast past its expiry fires immediately (the tick body's
@@ -3597,13 +3599,13 @@ mod tests {
             .checked_sub(Duration::from_millis(1))
             .expect("a fresh now always backs off a millisecond");
         assert_eq!(
-            next_idle_tick_deadline(false, false, last_refresh, Some(expired)),
+            next_idle_tick_deadline(false, false, last_refresh, Some(expired), now),
             expired
         );
         // A toast outliving the refresh deadline never delays the poll.
         let late_toast = last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL * 2;
         assert_eq!(
-            next_idle_tick_deadline(false, false, last_refresh, Some(late_toast)),
+            next_idle_tick_deadline(false, false, last_refresh, Some(late_toast), now),
             last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL
         );
     }
