@@ -567,7 +567,10 @@ mod tests {
             openable_href("https://example.com/docs"),
             Some("https://example.com/docs".to_string())
         );
-        assert_eq!(openable_href("http://example.com"), Some("http://example.com/".to_string()));
+        assert_eq!(
+            openable_href("http://example.com"),
+            Some("http://example.com/".to_string())
+        );
         assert_eq!(
             openable_href("file:///home/user/notes"),
             Some("file:///home/user/notes".to_string())
@@ -586,8 +589,14 @@ mod tests {
             end_col: 8,
             url: "https://example.com".to_string(),
         }];
-        assert_eq!(url_at(&ranges, 2, 5), Some("https://example.com".to_string()));
-        assert_eq!(url_at(&ranges, 2, 4), Some("https://example.com".to_string()));
+        assert_eq!(
+            url_at(&ranges, 2, 5),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            url_at(&ranges, 2, 4),
+            Some("https://example.com".to_string())
+        );
         assert_eq!(url_at(&ranges, 2, 8), None, "the end column is outside");
         assert_eq!(url_at(&ranges, 3, 5), None, "another row");
     }

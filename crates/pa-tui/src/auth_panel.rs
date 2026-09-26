@@ -852,19 +852,22 @@ impl AuthPanel {
         match self.copy_status {
             Some(CopyStatus::Copied) => {
                 parts.push(vec![
-                    theme.fg_span(ThemeColor::Success, "Copied sign-in link".to_string()),
+                    theme.fg_span(ThemeColor::Success, "Copied sign-in link".to_string())
                 ]);
             }
             Some(CopyStatus::Failed) => {
-                parts.push(vec![
-                    theme.fg_span(ThemeColor::Error, "Failed to copy sign-in link".to_string()),
-                ]);
+                parts.push(vec![theme.fg_span(
+                    ThemeColor::Error,
+                    "Failed to copy sign-in link".to_string(),
+                )]);
             }
             None => {}
         }
         let keys = kb.get_keys("app.clipboard.copyLoginUrl");
         let keys: Vec<String> = if field_visible {
-            keys.into_iter().filter(|key| !is_text_entry_keybinding(key)).collect()
+            keys.into_iter()
+                .filter(|key| !is_text_entry_keybinding(key))
+                .collect()
         } else {
             keys.into_iter().take(1).collect()
         };

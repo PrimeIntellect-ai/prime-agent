@@ -1525,7 +1525,7 @@ impl AgentView {
         // the frame-selection regions span the whole frame.
         if let Some(screen) = self.onboarding.as_mut() {
             let kb = self.editor.keybindings();
-            let mut frame = screen.render(&self.theme, width, height, &kb);
+            let mut frame = screen.render(&self.theme, width, height, kb);
             self.frame_rows = frame.len();
             self.apply_frame_selection(&mut frame, 0, width);
             return frame;
@@ -1595,7 +1595,7 @@ impl AgentView {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(panel) = self.auth_panel.as_mut() {
                 let kb = self.editor.keybindings();
-                dock.extend(panel.render(&self.theme, width, &kb));
+                dock.extend(panel.render(&self.theme, width, kb));
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {

@@ -896,9 +896,14 @@ async fn run_onboarding_phase(
         },
         prime_cancel,
     );
-    let (mut screen, outcome) =
-        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow), &mut session.osc_sink)
-        .await?;
+    let (mut screen, outcome) = drive_onboarding_pane(
+        view,
+        &mut *drive,
+        screen,
+        Some(prime_flow),
+        &mut session.osc_sink,
+    )
+    .await?;
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
