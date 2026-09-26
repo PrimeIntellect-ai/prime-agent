@@ -338,7 +338,10 @@ fn same_incident_notice(a: Option<&IncidentNotice>, b: Option<&IncidentNotice>) 
 struct IncidentLogChunk {
     lines: Vec<String>,
     next_offset: u64,
-    file_id: String,
+    /// `None` where the platform keeps no stable file identity: the
+    /// caller then treats the log as never-rotated on identity (appends
+    /// stay same-generation) and leans on the offset-past-size check.
+    file_id: Option<String>,
 }
 
 /// Rotation-safe incremental read of agent.jsonl. Without a previous
@@ -363,7 +366,8 @@ fn read_incident_log_lines(
     let mut file = std::fs::File::open(log_path).ok()?;
     let stats = file.metadata().ok()?;
     let file_id = file_identity(&stats);
-    let rotated = previous_file_id.is_some_and(|id| id != file_id);
+    let rotated =
+        previous_file_id.is_some_and(|id| file_id.as_deref().is_some_and(|current| current != id));
     // Re-tail when nothing was read yet, after a rotation (a new file),
     // when the file shrank (recreated in place), or when more than one
     // tail bound appended since the last poll; every read stays bounded
@@ -458,24 +462,26 @@ fn read_incident_log_lines(
 }
 
 /// The filesystem identity of the log: `dev:ino` on Unix (a rotation
-/// changes the inode); the TS `stats.dev}:${stats.ino}` shape. The
-/// non-Unix fallback keys on size + mtime, the stabilities available
-/// without a stat API there.
+/// changes the inode); the TS `stats.dev}:${stats.ino}` shape. Node
+/// surfaces the same pair on Windows, but Rust's std has no dev/ino
+/// there (the native volume serial + file index are outside the
+/// staged port's surface), and keying on size + mtime instead would
+/// flip the identity on every append — re-tailing consumed bytes into
+/// phantom update restarts. Per the platform identity precedent
+/// ([`pa_types::platform::identity`]'s `None`), the non-Unix arm has
+/// no identity: appends stay same-generation, and a rotation still
+/// re-tails through the offset-past-size check (the daemon recreates
+/// the live log empty), at the cost of the `.old` bridge on that
+/// platform.
 #[cfg(unix)]
-fn file_identity(stats: &std::fs::Metadata) -> String {
+fn file_identity(stats: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    format!("{}:{}", stats.dev(), stats.ino())
+    Some(format!("{}:{}", stats.dev(), stats.ino()))
 }
 
 #[cfg(not(unix))]
-fn file_identity(stats: &std::fs::Metadata) -> String {
-    let mtime = stats
-        .modified()
-        .ok()
-        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    format!("{}:{mtime}", stats.len())
+fn file_identity(_stats: &std::fs::Metadata) -> Option<String> {
+    None
 }
 
 /// Keep windowed entries in stable time order across polls: new entries
@@ -576,8 +582,8 @@ pub fn refresh_incident_notice_state(
             }
         } else if state
             .log_file_id
-            .as_deref()
-            .is_some_and(|previous_id| chunk_id != previous_id)
+            .as_ref()
+            .is_some_and(|previous_id| chunk_id.as_ref() != Some(previous_id))
         {
             // A rotation between polls strands the un-consumed tail of
             // the previous generation at the .old path: no later poll
@@ -599,7 +605,7 @@ pub fn refresh_incident_notice_state(
         }
         parsed.extend(parse_windowed_lines(&chunk.lines));
         state.log_offset = Some(chunk.next_offset);
-        state.log_file_id = Some(chunk_id);
+        state.log_file_id = chunk_id;
     }
     // A missing or unreadable log keeps the consumed offset and file id
     // exactly as they are: resetting them would make the next poll
