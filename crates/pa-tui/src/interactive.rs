@@ -3577,7 +3577,9 @@ mod tests {
         assert!(deadline > now && deadline <= now + IDLE_TICK_CADENCE);
         // Fully idle: the bash-activity refresh deadline, exactly 2 s out
         // from the last refresh.
-        let last_refresh = now - Duration::from_secs(1);
+        let last_refresh = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("a fresh now always backs off a second");
         assert_eq!(
             next_idle_tick_deadline(false, false, last_refresh, None),
             last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL
@@ -3591,7 +3593,9 @@ mod tests {
         );
         // A toast past its expiry fires immediately (the tick body's
         // prune drops it and the recomputed deadline parks again).
-        let expired = now - Duration::from_millis(1);
+        let expired = now
+            .checked_sub(Duration::from_millis(1))
+            .expect("a fresh now always backs off a millisecond");
         assert_eq!(
             next_idle_tick_deadline(false, false, last_refresh, Some(expired)),
             expired
