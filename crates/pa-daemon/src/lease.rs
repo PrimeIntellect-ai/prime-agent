@@ -347,6 +347,9 @@ impl SessionLease {
             return;
         }
         let _ = pa_core::session::window::flush_cache(&self.session_path);
+        // The lease's session is over: drop this process's cached append
+        // descriptor so the file does not stay open past the runtime.
+        pa_core::session::window::invalidate_cached_append(&self.session_path);
         let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {

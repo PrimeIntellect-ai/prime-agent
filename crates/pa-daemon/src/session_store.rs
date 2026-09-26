@@ -1103,6 +1103,9 @@ impl SessionFile {
     pub fn set_path(&mut self, path: PathBuf) {
         if self.path != path {
             self.lease = None;
+            // The store no longer appends to the old path: drop its cached
+            // append descriptor so the file does not stay open past the move.
+            pa_core::session::window::invalidate_cached_append(&self.path);
         }
         self.path = path;
     }

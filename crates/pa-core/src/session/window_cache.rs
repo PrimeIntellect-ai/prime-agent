@@ -167,14 +167,46 @@ pub enum AppendOwnership {
     /// No runtime lease: append without publishing an incremental snapshot.
     Unleased,
 }
-/// Cached append-mode session descriptors (unix only): durable appends
-/// reuse one open file per path instead of paying open+close per row.
-/// Write and `fdatasync` still run on every append, so on-disk bytes and
+/// Cached append-mode session descriptors: durable appends reuse one open
+/// file per path instead of paying open+close per row. Write and
+/// `fdatasync` still run on every append, so on-disk bytes and
 /// crash-safety are unchanged.
-fn append_handles() -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<File>>>> {
-    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<File>>>>> =
-        OnceLock::new();
+///
+/// The cache is bounded: at most [`APPEND_HANDLE_CAP`] descriptors stay
+/// open process-wide, least-recently-used first, so a long-lived daemon
+/// touching many sessions plateaus instead of leaking descriptors toward
+/// EMFILE (the old per-append open closed every time). An evicted or
+/// invalidated session simply reopens by path on its next append —
+/// exactly the pre-cache behavior.
+const APPEND_HANDLE_CAP: usize = 64;
+
+struct AppendHandle {
+    file: std::sync::Arc<Mutex<File>>,
+    last_use: u64,
+}
+
+impl AppendHandle {
+    fn new(file: File) -> Self {
+        Self {
+            file: std::sync::Arc::new(Mutex::new(file)),
+            last_use: next_handle_use(),
+        }
+    }
+
+    fn touch(&mut self) {
+        self.last_use = next_handle_use();
+    }
+}
+
+fn append_handles() -> &'static Mutex<HashMap<PathBuf, AppendHandle>> {
+    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, AppendHandle>>> = OnceLock::new();
     HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_handle_use() -> u64 {
+    static NEXT: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+    NEXT.get_or_init(|| std::sync::atomic::AtomicU64::new(1))
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Open (or reuse) the append descriptor for `path`.
@@ -184,36 +216,64 @@ fn append_handles() -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<File
 /// Surfaces the open error unchanged: the first append to a missing file
 /// fails exactly as a per-call open would.
 #[cfg(unix)]
-fn cached_append_handle(path: &Path) -> io::Result<std::sync::Arc<Mutex<File>>> {
+fn cached_append_handle(path: &Path) -> io::Result<(std::sync::Arc<Mutex<File>>, bool)> {
     let mut handles = append_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(handle) = handles.get(path) {
-        return Ok(std::sync::Arc::clone(handle));
+    if let Some(handle) = handles.get_mut(path) {
+        handle.touch();
+        return Ok((std::sync::Arc::clone(&handle.file), true));
     }
     let file = std::fs::OpenOptions::new().append(true).open(path)?;
-    let handle = std::sync::Arc::new(Mutex::new(file));
-    handles.insert(path.to_owned(), std::sync::Arc::clone(&handle));
-    Ok(handle)
+    // Only descriptors whose inode is exclusively this file are cached: a
+    // hard-linked session replaced by a rename keeps its old inode alive
+    // (nlink stays above one), where the per-append staleness check could
+    // not tell a replaced file from the live one. Hard-linked sessions
+    // simply keep the per-append open, like before the cache existed.
+    if file_link_count(&file) != Some(1) {
+        return Ok((std::sync::Arc::new(Mutex::new(file)), false));
+    }
+    let handle = AppendHandle::new(file);
+    let file = std::sync::Arc::clone(&handle.file);
+    handles.insert(path.to_owned(), handle);
+    // Evict least-recently-used when over the cap: dropping the map entry
+    // closes the descriptor once no in-flight append still holds it.
+    if handles.len() > APPEND_HANDLE_CAP {
+        let oldest = handles
+            .iter()
+            .min_by_key(|(_, handle)| handle.last_use)
+            .map(|(path, _)| path.to_owned());
+        if let Some(oldest) = oldest {
+            handles.remove(&oldest);
+        }
+    }
+    Ok((file, true))
 }
 
 /// Drop `path`'s cached append descriptor (if any): the next append
-/// reopens by path. Every in-process replace or removal of a session file
-/// must invalidate here so appends land on the file that exists now, not
-/// an unlinked inode.
+/// reopens by path. Every in-process replace or removal of a session
+/// file must invalidate here so appends land on the file that exists
+/// now, not an unlinked inode.
 pub fn invalidate_cached_append(path: &Path) {
     if let Ok(mut handles) = append_handles().lock() {
         handles.remove(path);
     }
 }
 
-/// True when the descriptor's file was replaced (rename onto the path) or
-/// unlinked: POSIX drops the old inode's link count to zero, so one cheap
+/// The descriptor's link count (`None` when the metadata read fails, so
+/// callers treat the descriptor as stale).
+#[cfg(unix)]
+fn file_link_count(file: &File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().map(|meta| meta.nlink())
+}
+
+/// True when the descriptor's file was replaced (rename onto the path)
+/// or unlinked: POSIX drops the sole link's count to zero, so one cheap
 /// fstat detects a stale descriptor cross-process.
 #[cfg(unix)]
 fn handle_unlinked(file: &File) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    file.metadata().map(|meta| meta.nlink() == 0).unwrap_or(true)
+    file_link_count(file) != Some(1)
 }
 
 /// Append authoritative JSONL bytes. Only a caller holding the existing session
@@ -233,11 +293,11 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
         // append then lands on the file that exists now, as a per-call
         // open always did.
         for _ in 0..2 {
-            let handle = cached_append_handle(path)?;
+            let (handle, cached) = cached_append_handle(path)?;
             let mut file = handle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !handle_unlinked(&file) {
+            if !cached || !handle_unlinked(&file) {
                 return append_with(&mut file, path, bytes, ownership);
             }
             drop(file);
@@ -326,5 +386,113 @@ pub(super) mod float_bits {
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
         u64::deserialize(deserializer).map(f64::from_bits)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod append_cache_tests {
+    use super::{append_cached, invalidate_cached_append, AppendOwnership, APPEND_HANDLE_CAP};
+    use std::path::Path;
+
+    fn append(path: &Path, line: &str) -> std::io::Result<()> {
+        append_cached(
+            path,
+            format!("{line}\n").as_bytes(),
+            AppendOwnership::Unleased,
+        )
+    }
+
+    /// Count this process's open descriptors into `dir` (the read_dir
+    /// descriptor itself resolves under /proc, so it never counts).
+    fn open_fds_into(dir: &Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .read_link()
+                            .map(|target| target.starts_with(dir))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// More distinct session files than the default RLIMIT_NOFILE must
+    /// plateau the cached-descriptor count at the cap instead of growing
+    /// toward EMFILE, and every appended row must survive eviction.
+    #[test]
+    fn descriptor_use_plateaus_across_more_sessions_than_rlimit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = 1_200;
+        for index in 0..sessions {
+            let path = dir.path().join(format!("session-{index}.jsonl"));
+            std::fs::write(&path, b"").unwrap();
+            append(&path, "row").unwrap();
+        }
+        assert!(
+            open_fds_into(dir.path()) <= APPEND_HANDLE_CAP,
+            "cached descriptors must plateau at the cap"
+        );
+        for index in 0..sessions {
+            let path = dir.path().join(format!("session-{index}.jsonl"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "row\n");
+        }
+    }
+
+    /// An out-of-band unlink (another process, or the delete flows) must
+    /// surface on the next append exactly like a per-call open did.
+    #[test]
+    fn out_of_band_unlink_surfaces_on_the_next_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, b"first\n").unwrap();
+        append(&path, "second").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let error = append(&path, "third").expect_err("unlinked file must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// An out-of-band replace (a rename onto the path, from any process)
+    /// must land the next append on the file that exists now.
+    #[test]
+    fn out_of_band_replace_redirects_the_next_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, b"first\n").unwrap();
+        append(&path, "second").unwrap();
+        let replacement = dir.path().join("replacement.jsonl");
+        std::fs::write(&replacement, b"new-inode\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        append(&path, "third").unwrap();
+        // The append reached the replaced file, not the stale cached inode
+        // (which would still read "first" then "second").
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "new-inode\nthird\n"
+        );
+    }
+
+    /// Hard-linked sessions are never cached (their replaced inodes stay
+    /// alive, so the link-count staleness check could not certify them).
+    #[test]
+    fn hard_linked_sessions_are_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let link = dir.path().join("hard-link.jsonl");
+        std::fs::hard_link(&path, &link).unwrap();
+        for _ in 0..5 {
+            append(&path, "row").unwrap();
+        }
+        assert_eq!(open_fds_into(dir.path()), 0, "hard-linked file stays uncached");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "row\nrow\nrow\nrow\nrow\n"
+        );
+        invalidate_cached_append(&path);
     }
 }
