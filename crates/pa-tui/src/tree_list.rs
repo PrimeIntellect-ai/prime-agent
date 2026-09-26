@@ -501,10 +501,7 @@ impl TreeList {
             let mut path: Vec<usize> = Vec::new();
             let mut outcome: Option<usize> = None;
             let mut current = parent_index_of[index];
-            loop {
-                let Some(next) = current else {
-                    break;
-                };
+            while let Some(next) = current {
                 if let Some(cached) = memo[next] {
                     outcome = cached;
                     break;
@@ -524,8 +521,7 @@ impl TreeList {
                 memo[hidden] = Some(outcome);
             }
             let ancestor = outcome
-                .map(|resolved| self.flat[resolved].data.entry.id())
-                .flatten()
+                .and_then(|resolved| self.flat[resolved].data.entry.id())
                 .map(str::to_string);
             self.visible_parent.insert(id.clone(), ancestor.clone());
             self.visible_children
