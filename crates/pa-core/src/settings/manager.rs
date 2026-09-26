@@ -854,6 +854,12 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
+    /// `requestTiming`: unset means OFF — the per-request timing timeline
+    /// is opt-in, exactly the TS default (`getRequestTiming`).
+    pub fn get_request_timing(&self) -> bool {
+        self.merged.request_timing.unwrap_or(false)
+    }
+
     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
         let session_dir = self.merged.session_dir.as_ref()?;
         let home = pa_types::platform::home_dir()?;

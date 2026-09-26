@@ -561,6 +561,11 @@ impl Worker {
             data["interruptedCompactionPersisted"] =
                 serde_json::json!(interrupted_compaction_persisted);
         }
+        // A resumed create just rebuilt the store from the session file:
+        // its load copies (window walks, parsed entry trees) are dropped
+        // by now — return that freed heap to the OS so the load's peak
+        // does not stay resident.
+        pa_types::memory_release::trim_freed_heap();
         response_success(None, "create", Some(data))
     }
 }
