@@ -208,28 +208,23 @@ mod tests {
     /// host-side report decides notice vs silence.
     #[test]
     fn parse_unavailable_python_skills_table() {
-        let cases: Vec<(String, UnavailablePythonSkills)> = vec![
+        let cases: Vec<(String, Option<UnavailablePythonSkills>)> = vec![
             (
                 format!(
                     "{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"websearch\":\"No module named 'websearch'\"}}\n"
                 ),
-                vec![("websearch".into(), "No module named 'websearch'".into())],
+                Some(vec![("websearch".into(), "No module named 'websearch'".into())]),
             ),
             (
                 format!("noise\n{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"edit\":\"boom\"}}"),
-                vec![("edit".into(), "boom".into())],
+                Some(vec![("edit".into(), "boom".into())]),
             ),
-            ("some unrelated kernel output".to_string(), Vec::new()),
-            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}not json"), Vec::new()),
-            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{}}"), Vec::new()),
+            ("some unrelated kernel output".to_string(), None),
+            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}not json"), None),
+            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{}}"), None),
         ];
         for (stdout, expected) in cases {
-            let parsed = parse_unavailable_python_skills(&stdout);
-            if expected.is_empty() {
-                assert!(parsed.is_none(), "{stdout:?} must not report");
-            } else {
-                assert_eq!(parsed, Some(expected), "{stdout:?}");
-            }
+            assert_eq!(parse_unavailable_python_skills(&stdout), expected, "{stdout}");
         }
     }
 

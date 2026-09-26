@@ -551,8 +551,8 @@ mod tests {
         let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120);
         let meta = flat(&rows[1]).trim_end();
         let names = meta.trim_start_matches(" Python skills unavailable \u{b7} ");
-        assert_eq!(str_width(names), 62, "names width: {names:?}");
-        assert!(names.ends_with("..."), "ellipsized names: {names:?}");
+        assert_eq!(str_width(names), 62, "names width: {names}");
+        assert!(names.ends_with("..."), "ellipsized names: {names}");
         // No skills details: the label alone.
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() },

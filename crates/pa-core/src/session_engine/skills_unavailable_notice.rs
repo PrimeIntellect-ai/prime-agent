@@ -57,7 +57,7 @@ pub fn notice_message(errors: &UnavailablePythonSkills) -> CustomMessage {
             "skills": errors.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
         })),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
