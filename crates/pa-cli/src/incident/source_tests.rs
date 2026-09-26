@@ -78,9 +78,11 @@ fn keeps_structured_lines_around_a_torn_multibyte_tail() {
             "2026-09-10T20:02:39.764Z",
             "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
         );
+        // The stderr-forward classifier keys on a 12-hex worker id
+        // (STDERR_FORWARD), so the fixture carries one.
         let crash = supervisor_line(
             "2026-09-10T20:05:00.000Z",
-            "Session worker 5b1d3aeb91 stderr: uncaught exception: Error: write EPIPE",
+            "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
         );
         // A third line cut two bytes into its three-byte U+26A0: the
         // file is invalid UTF-8 from the write tear onward.
@@ -94,7 +96,7 @@ fn keeps_structured_lines_around_a_torn_multibyte_tail() {
         std::fs::write(agent_dir.join("logs/agent.jsonl"), contents).expect("write log");
         let text = report_text("2026-09-10T20:00", "2026-09-10T20:30");
         assert!(
-            text.contains("worker 5b1d3aeb91 crashed: uncaught exception: Error: write EPIPE"),
+            text.contains("worker 5b1d3aeb91ee crashed: uncaught exception: Error: write EPIPE"),
             "{text}"
         );
         assert!(
