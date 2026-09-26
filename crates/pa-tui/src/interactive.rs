@@ -3683,17 +3683,25 @@ mod tests {
     /// hiccup loop's doubling backoff.
     #[test]
     fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
-        let now = tokio::time::Instant::now();
+        let before = tokio::time::Instant::now();
         let state = ReconnectLoop::start_shutdown();
+        let after = tokio::time::Instant::now();
         assert_eq!(state.kind, RecoveryKind::Shutdown);
+        // The window is 60s off the arming instant: the deadline sits
+        // inside [before + 60s, after + 60s] (the arming ran between the
+        // two clock reads — a single `now + 60s` bound can miss by the
+        // nanoseconds between the reads).
         assert!(
-            state.deadline > now + Duration::from_secs(59)
-                && state.deadline <= now + Duration::from_secs(60),
+            state.deadline >= before + DAEMON_SHUTDOWN_RECONNECT_WINDOW
+                && state.deadline <= after + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
             "the window is TS #2458's 60s reconnect timeout"
         );
         assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The first poll is the TS 100ms cadence off the same arming
+        // instant, inside the same two clock reads.
         assert!(
-            state.next_attempt >= now && state.next_attempt <= now + SHUTDOWN_RECONNECT_RETRY,
+            state.next_attempt >= before + SHUTDOWN_RECONNECT_RETRY
+                && state.next_attempt <= after + SHUTDOWN_RECONNECT_RETRY,
             "the first poll is the TS 100ms cadence"
         );
         // The fixed poll never doubles.
