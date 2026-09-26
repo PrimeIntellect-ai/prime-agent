@@ -334,6 +334,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         session_rlm_depth: view.opened_rlm_depth,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: view.opened_has_children,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let child_plan = pa_tui::interactive::HeadlessPlan {

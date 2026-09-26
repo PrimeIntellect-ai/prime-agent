@@ -510,6 +510,13 @@ pub(crate) struct SessionUi {
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
+    /// A scope-back reopen (the agents view's parent/escape key handed
+    /// the pane back from the dock's Subagents panel) restores the dock
+    /// focus once, at the first summary after the attach: the roster is
+    /// seeded by then, so the panel's own group is actionable at the
+    /// first paint or the editor keeps the focus (a later roster must
+    /// not yank the keyboard back mid-composition).
+    pending_dock_focus_restore: bool,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -845,6 +852,7 @@ impl SessionUi {
             bash_updates: activity_updates.bash,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
+            pending_dock_focus_restore: false,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -893,6 +901,12 @@ impl SessionUi {
             .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
+        // The scope-back reopen's restore arms AFTER the attach: every
+        // later attach's rebind reset clears an armed restore (focus
+        // returns to the editor, TS `resetSubagentSummary`), so the
+        // initial attach must carry the reopen's own restore past that
+        // reset to the first summary.
+        session.pending_dock_focus_restore = options.restore_dock_focus;
         Ok(session)
     }
 
@@ -1133,6 +1147,11 @@ impl SessionUi {
         // the editor (TS `resetSubagentSummary` on rebind).
         self.roster.clear();
         self.subagents_focused = false;
+        // A rebind drops an armed scope-back restore with the session it
+        // belonged to: the arriving session's focus is the editor's
+        // (TS `resetSubagentSummary`), never the left session's
+        // panel-exit state.
+        self.pending_dock_focus_restore = false;
         self.subscribe_roster().await;
         // The dock's heartbeat rows follow `dock_fold` (the enum's
         // contract): a first-content-frame attach folds the fresh fetch
@@ -1276,6 +1295,18 @@ impl SessionUi {
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
         let dock = self.activity_dock_state();
+        // A scope-back reopen hands the dock back its focus exactly once,
+        // at the FIRST summary after the attach: the roster is seeded by
+        // then, so the Subagents group rides the rendered row at its
+        // first paint (the operator's 2026-09-26 panel-exit ruling:
+        // leaving the dock's Subagents panel lands on its own dock item,
+        // not the prompt bar) — and a dock that never mounts keeps the
+        // editor's focus; the one-shot means a LATE roster never yanks
+        // the keyboard back mid-composition.
+        if self.pending_dock_focus_restore {
+            self.pending_dock_focus_restore = false;
+            self.subagents_focused = dock.visible();
+        }
         // A focused selection must stay on a rendered group: the arrows
         // visit every group an empty one included, so the selection
         // only moves when its group leaves the row (the goal row ends
@@ -1344,6 +1375,30 @@ impl SessionUi {
         }
     }
 
+    /// Hand the keyboard focus to the compact dock on its selected group:
+    /// the `app.subagents.focus` shortcut and every dock panel's close
+    /// restore (the operator's 2026-09-26 ruling: leaving a panel lands
+    /// on the panel's own dock item, never the prompt bar). The dock owns
+    /// the hand-off exactly while it renders — a session with nothing to
+    /// show keeps the dock unmounted and the focus where it was; every
+    /// group the row renders is traversable, empty ones included, so no
+    /// feed gate remains here.
+    fn focus_activity_dock(&mut self, view: &mut AgentView) -> bool {
+        let dock = self.activity_dock_state();
+        if !dock.visible() {
+            return false;
+        }
+        if !dock.groups().contains(&self.activity_group) {
+            // Only the goal group leaves with its row: the selection
+            // steps back to the group that now ends the row.
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+        }
+        self.subagents_focused = true;
+        self.update_subagent_summary(view);
+        true
+    }
+
     /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, source: DockFocusSource, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
@@ -1368,25 +1423,7 @@ impl SessionUi {
                 }
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
-            DockFocusSource::Shortcut => {
-                // The dock owns the hand-off exactly while it renders: a
-                // session with nothing to show (no subagent history,
-                // heartbeats, shells, or live goal) keeps the dock
-                // unmounted and the focus in the editor. Every group the
-                // row renders is traversable, empty ones included, so no
-                // feed gate remains here.
-                let dock = self.activity_dock_state();
-                if !dock.visible() {
-                    return false;
-                }
-                if !dock.groups().contains(&self.activity_group) {
-                    // Only the goal group leaves with its row: the
-                    // selection steps back to the group that now ends the
-                    // row.
-                    self.activity_group =
-                        dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-                }
-            }
+            DockFocusSource::Shortcut => return self.focus_activity_dock(view),
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -6077,6 +6114,7 @@ impl SessionUi {
             // `/new` starts a fresh root session: no depth label.
             session_rlm_depth: None,
             session_has_children: false,
+            restore_dock_focus: false,
             client_settings: self.client_settings.clone(),
         }
     }
@@ -6826,6 +6864,10 @@ impl SessionUi {
             || view.editor.keybindings().matches(&id, "app.clear")
         {
             view.goal_panel = None;
+            // The exit restores the dock's own group (the operator's
+            // 2026-09-26 panel-exit ruling): ESC/left lands back on the
+            // goal row, ready to re-open, not on the prompt bar.
+            self.focus_activity_dock(view);
             self.dirty = true;
         }
         Ok(())
@@ -6893,6 +6935,11 @@ impl SessionUi {
         match action {
             Some(BashViewAction::Close) => {
                 view.bash_view = None;
+                // The exit restores the dock's own group (the operator's
+                // 2026-09-26 panel-exit ruling): ESC/left lands back on
+                // the Shells item, ready to re-open, not on the prompt
+                // bar.
+                self.focus_activity_dock(view);
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
                 // The lazy tail: the open asks for the first window only
@@ -6980,6 +7027,11 @@ impl SessionUi {
             }
             Some(HeartbeatsPickerAction::Close) => {
                 view.heartbeats_picker = None;
+                // The exit restores the dock's own group (the operator's
+                // 2026-09-26 panel-exit ruling): ESC/left lands back on
+                // the Heartbeats item, ready to re-open, not on the
+                // prompt bar.
+                self.focus_activity_dock(view);
                 self.dirty = true;
             }
             Some(HeartbeatsPickerAction::Manage {
@@ -7296,10 +7348,17 @@ impl SessionUi {
     /// daemon — a non-blocking refresh lands through the update channel,
     /// and stale-while-revalidate keeps the mounted catalog on failure
     /// (the error surfaces inside the open view only). The picker owns
-    /// the frame: the dock's focus hands off, so closing the picker
-    /// returns to the editor, not the dock.
+    /// the frame while it is open; its close hands the focus back to the
+    /// dock's own group (the operator's 2026-09-26 panel-exit ruling).
     fn open_heartbeats_view(&mut self, view: &mut AgentView) {
         self.subagents_focused = false;
+        // The view IS the dock's Heartbeates item: every entry path —
+        // the dock's Enter or the `/heartbeats` command — leaves the
+        // panel's own group selected, so the close restores the
+        // Heartbeats dock item (the operator's 2026-09-26 panel-exit
+        // ruling; the command path would otherwise keep whatever group
+        // the dock held).
+        self.activity_group = crate::chrome::ActivityGroup::Heartbeats;
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
             self.heartbeat_catalog.clone(),
             None,
