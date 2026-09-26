@@ -469,7 +469,10 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         assert_scan_matches_fold("empty session", &store);
-        assert_eq!(store.scan_message_scalars(), MessageWindowScalars::default());
+        assert_eq!(
+            store.scan_message_scalars(),
+            MessageWindowScalars::default()
+        );
     }
 
     // Degenerate rows: a `message` entry without its persisted message
