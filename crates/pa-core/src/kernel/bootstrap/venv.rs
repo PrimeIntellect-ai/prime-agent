@@ -812,6 +812,7 @@ fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
 /// The installed `rlm` package under the venv's site-packages: the
 /// Windows layout `<venv>/Lib/site-packages/rlm` (no python-version
 /// layer) or the Unix layout `<venv>/lib/python*/site-packages/rlm`.
+#[cfg(test)]
 fn installed_rlm_dir(venv: &Path) -> Option<PathBuf> {
     installed_package_dir(venv, "rlm")
 }
