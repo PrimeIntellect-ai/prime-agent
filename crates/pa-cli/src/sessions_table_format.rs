@@ -10,7 +10,7 @@
 
 use pa_tui::ansi::strip_ansi;
 use pa_tui::info_commands::js_to_fixed;
-use pa_tui::width::truncate_to_width;
+use pa_tui::width::{str_width, truncate_to_width};
 use pa_types::daemon::agent_roster::{
     classify_summary_value, session_activity_detail, AgentRosterStatus, SessionActivityOptions,
 };
@@ -266,10 +266,10 @@ mod tests {
         let rows: Vec<&Value> = sessions.iter().collect();
         let table = format_sessions_table(&rows, NOW_MS);
         let widths: [usize; 6] = std::array::from_fn(|column| {
-            SESSIONS_HEADERS[column].len().max(
+            str_width(SESSIONS_HEADERS[column]).max(
                 expected_rows
                     .iter()
-                    .map(|row| row[column].len())
+                    .map(|row| str_width(row[column]))
                     .max()
                     .unwrap_or(0),
             )
@@ -278,7 +278,7 @@ mod tests {
             row.iter()
                 .enumerate()
                 .map(|(column, cell)| {
-                    let pad = " ".repeat(widths[column] - cell.len());
+                    let pad = " ".repeat(widths[column] - str_width(cell));
                     format!("{cell}{pad}")
                 })
                 .collect::<Vec<_>>()
@@ -482,7 +482,8 @@ mod tests {
             })),
         ];
         let rows: Vec<&Value> = sessions.iter().collect();
-        let lines: Vec<&str> = format_sessions_table(&rows, NOW_MS).lines().collect();
+        let table = format_sessions_table(&rows, NOW_MS);
+        let lines: Vec<&str> = table.lines().collect();
         // Scalar-length padding would misalign the CJK name; the recap cap
         // counts display columns, pair-safe.
         assert!(lines[1].starts_with("中文   idle"), "{lines:?}");
