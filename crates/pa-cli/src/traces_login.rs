@@ -19,7 +19,7 @@ use pa_core::auth::{
     PRIME_AGENT_TRACES_PROVIDER_NAME,
 };
 
-use pa_tui::auth_panel::PasteStyle;
+use pa_tui::auth_panel::{PastePromptTone, PasteStyle};
 use pa_tui::traces::TraceLoginOutcome;
 
 /// TS `armManualInput`'s armed prompt after the browser URL shows.
@@ -251,7 +251,11 @@ impl TracesLoginUi for PanelTracesLoginUi {
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         let panel = self.panel.clone();
         let prompt = prompt.to_string();
-        Box::pin(async move { panel.paste_prompt(&prompt, PasteStyle::Visible).await })
+        Box::pin(async move {
+            panel
+                .paste_prompt(&prompt, PastePromptTone::Muted, PasteStyle::Visible)
+                .await
+        })
     }
 }
 

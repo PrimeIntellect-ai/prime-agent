@@ -323,6 +323,21 @@ fn render_input_field(
     line
 }
 
+/// The login dialog's paste field (TS `MenuSearchInput("Paste value",
+/// true, true)` — inline + plain, the `> ` prompt kept): one full-width
+/// row with the prompt, no enclosing rules — the rules read as clutter
+/// inside the login panel.
+pub(crate) fn login_field_row(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) -> Line {
+    render_input_field(theme, width, value, cursor, focused, placeholder)
+}
+
 /// The prompt-less field row (TS `MenuSearchInput`'s inline + plain +
 /// hidePrompt call: `" "` + the field, no `> ` prompt — the onboarding
 /// picker marks selection with its own caret): one full-width line for

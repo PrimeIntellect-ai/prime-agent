@@ -53,6 +53,41 @@ pub(crate) fn trace_question_config() -> OnboardingChoiceOptions {
     }
 }
 
+/// The onboarding team question's prompt (TS `showPrimeTeamSelector`'s
+/// onboarding arm mounts `OnboardingChoiceComponent` with this prompt).
+pub const TEAM_QUESTION_PROMPT: &str = "Which account should Prime Agent use?";
+/// The onboarding team question's first row (TS the `Personal account`
+/// option, index 0 — the personal answer).
+pub const PERSONAL_ACCOUNT_LABEL: &str = "Personal account";
+
+/// The onboarding team question's rows (TS the options: the personal
+/// account first, then one row per team with its slug as the dim
+/// `@detail` identifier).
+pub(crate) fn team_question_options(
+    teams: &[crate::auth_panel::PrimeTeamOption],
+) -> Vec<OnboardingChoiceOption> {
+    let mut options = vec![OnboardingChoiceOption {
+        label: PERSONAL_ACCOUNT_LABEL.to_string(),
+        detail: None,
+    }];
+    options.extend(teams.iter().map(|team| OnboardingChoiceOption {
+        label: team.name.clone(),
+        detail: team.slug.clone(),
+    }));
+    options
+}
+
+/// The onboarding team question's copy (TS the config: the prompt alone —
+/// no description, no note).
+pub(crate) fn team_question_config() -> OnboardingChoiceOptions {
+    OnboardingChoiceOptions {
+        prompt: Some(TEAM_QUESTION_PROMPT.to_string()),
+        description: None,
+        note: None,
+        row_width: None,
+    }
+}
+
 /// TS `PRIME_COMPACT_BUTTERFLY_LOGO` (7 rows, 22 visible columns).
 const LOGO_LINES: [&str; 7] = [
     "                 ▗▄▄█▀",
@@ -200,25 +235,62 @@ impl OnboardingScreen {
     /// futures, so past-the-dialog requests are a no-op.
     pub fn apply_auth_request(&mut self, request: crate::auth_panel::AuthPanelRequest) {
         use crate::auth_panel::AuthPanelRequest;
-        let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
-            return;
-        };
         match request {
-            AuthPanelRequest::Progress { message } => panel.push_progress(message),
+            // TS `runPrimeInferenceLogin`'s guarded arm: "onboarding
+            // narrates itself; step chatter stays in the chat flows" —
+            // the callback's step lines never render on this surface,
+            // while a direct `showProgress` line (the browser-sign-in
+            // fallback) does.
+            AuthPanelRequest::Progress { message, chatter } => {
+                let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
+                    return;
+                };
+                if !chatter {
+                    panel.push_progress(message);
+                }
+            }
             AuthPanelRequest::AuthUrl { url, instructions } => {
+                let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
+                    return;
+                };
                 panel.show_auth_url(url, instructions);
             }
             AuthPanelRequest::PastePrompt {
                 prompt,
+                tone,
                 style,
                 allow_empty,
                 reply,
-            } => panel.mount_paste(prompt, style, allow_empty, reply),
+            } => {
+                let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
+                    return;
+                };
+                panel.mount_paste(prompt, tone, style, allow_empty, reply);
+            }
+            // TS `showPrimeTeamSelector`'s onboarding arm: the team
+            // selection is a question in the onboarding selection
+            // language (`OnboardingChoiceComponent`, no heading — the
+            // brand line returns), not the `/login` surface's team
+            // picker.
             AuthPanelRequest::SelectTeam {
                 teams,
                 current,
                 reply,
-            } => panel.mount_teams(teams, current, reply),
+            } => {
+                let seed = teams
+                    .iter()
+                    .position(|team| Some(team.team_id.as_str()) == current.as_deref())
+                    .map_or(0, |position| position + 1);
+                self.mount_panel(OnboardingPanel::TeamQuestion {
+                    choice: OnboardingChoice::new(
+                        team_question_options(&teams),
+                        Some(seed),
+                        team_question_config(),
+                    ),
+                    teams,
+                    reply: Some(reply),
+                });
+            }
             AuthPanelRequest::ProviderSettled { .. }
             | AuthPanelRequest::McpSettled { .. }
             | AuthPanelRequest::TracesSettled { .. } => {}
@@ -593,5 +665,153 @@ mod tests {
             ColorMode::TrueColor,
         );
         assert_eq!(highlight_wash(&theme), Color::Rgb(235, 235, 235));
+    }
+
+    /// TS `runPrimeInferenceLogin`'s guarded arm: the `onProgress`
+    /// callback's step chatter never renders on the onboarding block
+    /// ("onboarding narrates itself"), while the browser-fallback's
+    /// direct line does.
+    #[test]
+    fn the_onboarding_fold_drops_step_chatter_keeps_direct_lines() {
+        let mut screen = OnboardingScreen::welcome();
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+            panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::onboarding(
+                "Login to Prime Inference",
+            )),
+            heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+        });
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::Progress {
+            message: "Generating the browser challenge...".to_string(),
+            chatter: true,
+        });
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let rows = screen.render(&theme, 80, 24);
+        let text = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !text
+                .iter()
+                .any(|row| row.contains("Generating the browser challenge")),
+            "the step chatter stays out of the onboarding block: {text:?}"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|row| row.contains("Preparing authentication")),
+            "no progress block opened: {text:?}"
+        );
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::Progress {
+            message: "Browser sign-in unavailable (mock).".to_string(),
+            chatter: false,
+        });
+        let rows = screen.render(&theme, 80, 24);
+        let text = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            text.iter()
+                .any(|row| row.contains("Browser sign-in unavailable (mock).")),
+            "the direct fallback line renders: {text:?}"
+        );
+    }
+
+    /// TS `showPrimeTeamSelector`'s onboarding arm: the `SelectTeam`
+    /// request mounts the onboarding choice question (the brand line
+    /// returns — no heading) with the personal account first and the
+    /// teams' slugs as their dim identifiers, seeded on the stored
+    /// selection; Enter answers the request's oneshot.
+    #[test]
+    fn the_team_selection_mounts_the_onboarding_choice_question() {
+        use crate::auth_panel::{AuthPanelRequest, PrimeTeamOption, PrimeTeamPick};
+        let mut screen = OnboardingScreen::welcome();
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+            panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::onboarding(
+                "Login to Prime Inference",
+            )),
+            heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+        });
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        screen.apply_auth_request(AuthPanelRequest::SelectTeam {
+            teams: vec![
+                PrimeTeamOption {
+                    team_id: "team-acme".to_string(),
+                    name: "Acme Corp".to_string(),
+                    slug: Some("acme".to_string()),
+                    role: Some("Owner".to_string()),
+                    created_at: None,
+                },
+                PrimeTeamOption {
+                    team_id: "team-beta".to_string(),
+                    name: "Beta Team".to_string(),
+                    slug: None,
+                    role: None,
+                    created_at: None,
+                },
+            ],
+            current: Some("team-beta".to_string()),
+            reply,
+        });
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let rows = screen.render(&theme, 80, 24);
+        let text = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        // The heading reverted to the brand line (TS: the choice mounts
+        // without a heading).
+        assert!(
+            text.iter().any(|row| row.contains("Welcome to ")),
+            "the brand line returns over the team question: {text:?}"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|row| row.contains("Login with Prime Intellect")),
+            "no login heading rides the question: {text:?}"
+        );
+        // The question frame: the prompt, the personal account first, the
+        // teams with their slug identifiers, the stored team seeded.
+        assert!(
+            text.iter().any(|row| row.contains(TEAM_QUESTION_PROMPT)),
+            "the TS prompt: {text:?}"
+        );
+        let seed = text
+            .iter()
+            .find(|row| row.contains("> Beta Team"))
+            .expect("the stored team is seeded");
+        assert!(
+            seed.starts_with(" > Beta Team"),
+            "the seeded row renders in the selection language: {seed:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("  Personal account")),
+            "the personal row rides first: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("@acme")),
+            "the team slug renders as the dim identifier: {text:?}"
+        );
+        // Enter answers the seeded row (Beta) through the oneshot.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        screen.handle_key(&crate::keys::KeyId::from("enter"), &kb);
+        match answer.blocking_recv().expect("the pick answered") {
+            PrimeTeamPick::Team(team) => assert_eq!(team.team_id, "team-beta"),
+            other => panic!("the seeded team answered, got {other:?}"),
+        }
     }
 }

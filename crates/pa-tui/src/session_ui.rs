@@ -3917,7 +3917,7 @@ impl SessionUi {
     ) {
         use crate::auth_panel::AuthPanelRequest;
         match request {
-            AuthPanelRequest::Progress { message } => {
+            AuthPanelRequest::Progress { message, .. } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
                     panel.push_progress(message);
                 }
@@ -3929,12 +3929,13 @@ impl SessionUi {
             }
             AuthPanelRequest::PastePrompt {
                 prompt,
+                tone,
                 style,
                 allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, allow_empty, reply);
+                    panel.mount_paste(prompt, tone, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {

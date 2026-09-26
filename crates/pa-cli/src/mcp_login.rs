@@ -17,7 +17,7 @@ use pa_core::auth::AuthStorage;
 use pa_core::mcp::{
     McpLoginUi, McpManager, McpManagerOptions, McpServerConfig, OAuthHttp, ReqwestOAuthHttp,
 };
-use pa_tui::auth_panel::PasteStyle;
+use pa_tui::auth_panel::{PastePromptTone, PasteStyle};
 use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 
 /// The CLI's live MCP manager: the shared auth store, settings-declared
@@ -145,6 +145,7 @@ impl TerminalMcpAuth {
         let token = panel
             .paste_prompt(
                 &format!("Paste the {prompt} for {server}:"),
+                PastePromptTone::Text,
                 PasteStyle::Masked,
             )
             .await
@@ -215,7 +216,9 @@ struct PanelMcpLoginUi {
 
 impl McpLoginUi for PanelMcpLoginUi {
     fn on_progress(&self, message: &str) {
-        self.panel.progress(message);
+        // TS `showLoginDialog`'s `onProgress` arm is unguarded chatter —
+        // a direct `dialog.showProgress` line: renders on every surface.
+        self.panel.progress_line(message);
     }
 
     fn on_auth(&self, url: &str, instructions: &str) {
@@ -232,7 +235,7 @@ impl McpLoginUi for PanelMcpLoginUi {
         let message = format!("{message} (e.g. {placeholder})");
         Box::pin(async move {
             panel
-                .paste_prompt(&message, PasteStyle::Visible)
+                .paste_prompt(&message, PastePromptTone::Text, PasteStyle::Visible)
                 .await
                 .filter(|line| !line.is_empty())
                 .ok_or_else(|| anyhow!("Login cancelled"))
@@ -247,6 +250,7 @@ impl McpLoginUi for PanelMcpLoginUi {
             panel
                 .paste_prompt(
                     "Paste the redirect URL below, or complete login in the browser:",
+                    PastePromptTone::Muted,
                     PasteStyle::Visible,
                 )
                 .await

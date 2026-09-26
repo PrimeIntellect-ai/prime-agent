@@ -1576,8 +1576,10 @@ impl AgentView {
             } else if let Some(confirm) = self.confirm.as_ref() {
                 dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.provider_auth.as_mut() {
+                selector.set_keybindings(self.editor.keybindings().clone());
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(panel) = self.auth_panel.as_mut() {
+                panel.set_keybindings(self.editor.keybindings().clone());
                 dock.extend(panel.render(&self.theme, width));
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));

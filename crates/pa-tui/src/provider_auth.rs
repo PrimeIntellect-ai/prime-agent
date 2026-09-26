@@ -234,6 +234,10 @@ pub struct ProviderAuthSelector {
     selected: usize,
     search: SearchInput,
     visible: usize,
+    /// The resolved keybindings the prompt frame's actions row renders
+    /// (TS reads `getKeybindings()` live; the view syncs its manager at
+    /// render).
+    keybindings: KeybindingsManager,
 }
 
 impl ProviderAuthSelector {
@@ -249,9 +253,16 @@ impl ProviderAuthSelector {
             selected: 0,
             search: SearchInput::new(),
             visible: PREFERRED_VISIBLE_PROVIDERS,
+            keybindings: KeybindingsManager::new(),
         };
         selector.refilter();
         selector
+    }
+
+    /// Sync the keybinding labels the prompt frame's actions row renders
+    /// (the view's render carries its resolved manager).
+    pub fn set_keybindings(&mut self, keybindings: KeybindingsManager) {
+        self.keybindings = keybindings;
     }
 
     /// Preselect a provider's row (the model-picker sign-in route mounts
@@ -268,22 +279,22 @@ impl ProviderAuthSelector {
         }
     }
 
-    /// The panel title (TS `OAuthSelectorOptions.title`).
-    fn title(&self) -> &'static str {
-        match self.mode {
-            Mode::List if self.is_logout() => "Saved Credentials",
-            Mode::List => "Providers",
-            Mode::Prompt { .. } => "Sign In",
+    /// The panel title (TS `OAuthSelectorOptions.title`; the API-key
+    /// prompt is TS `showApiKeyLoginDialog`'s `Login to {provider}`).
+    fn title(&self) -> String {
+        match &self.mode {
+            Mode::Prompt { provider, .. } => format!("Login to {}", provider.name),
+            _ if self.is_logout() => "Saved Credentials".to_string(),
+            _ => "Providers".to_string(),
         }
     }
 
     /// The panel subtitle (TS `MenuPanel` subtitle).
-    fn subtitle(&self) -> &'static str {
-        match self.mode {
-            Mode::List if self.is_logout() => "Choose a credential to remove.",
-            Mode::List => "Connect with a subscription or API key.",
-            Mode::Prompt { .. } => "",
+    fn subtitle(&self) -> String {
+        if self.is_logout() && matches!(self.mode, Mode::List) {
+            return "Choose a credential to remove.".to_string();
         }
+        String::new()
     }
 
     fn refilter(&mut self) {
@@ -438,29 +449,47 @@ impl ProviderAuthSelector {
         // row — no header block, no leading blank.
         let framed = self.is_logout() || !matches!(self.mode, Mode::List);
         if framed {
-            lines.push(Vec::new());
+            // TS `MenuPanel` inline chrome: the borderMuted rule and the
+            // muted one-space title (no leading blank — the content's own
+            // `startContent` blank opens the body).
             lines.push(vec![
-                theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
+                theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width.max(1)))
             ]);
-            lines.push(vec![crate::Span::raw(format!("  {}", self.title()))]);
+            lines.push(vec![
+                theme.fg_span(ThemeColor::Muted, format!(" {}", self.title()))
+            ]);
             if !self.subtitle().is_empty() {
                 lines.push(vec![
-                    theme.fg_span(ThemeColor::Muted, format!("  {}", self.subtitle()))
+                    theme.fg_span(ThemeColor::Muted, format!(" {}", self.subtitle()))
                 ]);
             }
         }
         match &self.mode {
+            // TS `showApiKeyLoginDialog` -> `showPrompt("Enter API key:")`:
+            // the section-title prompt, the plain `> ` field, the blank
+            // between field and actions, and the auth-actions row last —
+            // no bottom rule.
             Mode::Prompt { input, .. } => {
                 lines.push(Vec::new());
-                let prompt = format!("  Enter API key: {}", input.value());
-                lines.push(vec![crate::Span::raw(prompt)]);
-                lines.push(vec![theme.fg_span(
-                    ThemeColor::Muted,
-                    "  enter submit  escape back".to_string(),
-                )]);
                 lines.push(vec![
-                    theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
+                    theme.fg_span(ThemeColor::Text, "Enter API key:".to_string())
                 ]);
+                lines.push(crate::menu_panel::login_field_row(
+                    theme,
+                    width,
+                    input.value(),
+                    input.cursor(),
+                    true,
+                    crate::auth_panel::PASTE_PLACEHOLDER,
+                ));
+                lines.push(Vec::new());
+                lines.push(crate::auth_panel::auth_actions_row(
+                    theme,
+                    width,
+                    &self.keybindings,
+                    true,
+                    None,
+                ));
                 return lines;
             }
             Mode::List => {}
@@ -874,6 +903,53 @@ mod tests {
         assert_eq!(
             selector.handle_key("enter", &kb()),
             AuthSelectorAction::Logout { provider: openai() }
+        );
+    }
+
+    /// TS `showApiKeyLoginDialog`'s prompt frame (the operator addendum:
+    /// the /login API-key prompt aligns with the TS login dialog): the
+    /// borderMuted rule, the muted `Login to {provider}` title, the
+    /// `startContent` blank, the text-coloured `Enter API key:` section
+    /// title, the plain `> ` field, the blank between field and actions,
+    /// and the auth-actions row last — no bottom rule, no "Sign In"
+    /// header, no combined prompt-and-value row.
+    #[test]
+    fn the_api_key_prompt_renders_the_ts_login_dialog_frame() {
+        let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai()]);
+        selector.handle_key("enter", &kb());
+        let rows = selector.render(&theme(), 80);
+        let text = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            text[0].chars().all(|c| c == '\u{2500}'),
+            "the borderMuted rule opens the prompt: {text:?}"
+        );
+        assert_eq!(text[1], " Login to OpenAI", "the muted one-space title");
+        assert_eq!(text[2], "", "the startContent blank");
+        assert_eq!(
+            text[3], " Enter API key:",
+            "the text-coloured section title"
+        );
+        assert!(
+            text[4].starts_with(" > "),
+            "the plain `> ` field rides its own row: {text:?}"
+        );
+        assert!(text[4].contains("Paste value"));
+        assert_eq!(text[5], "", "the blank between the field and the actions");
+        assert_eq!(
+            text[6], " Enter submit  Alt+C copy  Esc/Ctrl+C cancel",
+            "the TS auth-actions row: {text:?}"
+        );
+        assert_eq!(text.len(), 7, "no bottom rule rides the prompt: {text:?}");
+        assert!(
+            !text.iter().any(|row| row.contains("Sign In")),
+            "no raw Sign In title: {text:?}"
         );
     }
 

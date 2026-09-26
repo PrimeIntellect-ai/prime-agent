@@ -873,11 +873,15 @@ async fn run_onboarding_phase(
         // A composition root without the Prime row has no sign-in to run.
         return Ok(false);
     };
+    // TS `loginDialogOptions()`'s onboarding shape: the panel mounts
+    // chrome-less (`topRule: false, hideTitle: true`) — the splash's
+    // heading names the step — and the actions row reads the same
+    // resolved keybindings the pane answers with.
+    let mut prime_dialog =
+        crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", prime_row.name));
+    prime_dialog.set_keybindings(drive.keybindings.clone());
     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-        panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            prime_row.name
-        ))),
+        panel: std::boxed::Box::new(prime_dialog),
         heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
     });
     let prime_panel = session.auth_panel_handle();
@@ -1015,11 +1019,11 @@ async fn run_onboarding_phase(
         // TS `loginProvider`: the row's flow — the panel-prompted key,
         // or the panel-driven flow.
         if row.flow == crate::provider_auth::AuthFlow::ApiKeyPrompt {
+            let mut api_key_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            api_key_dialog.set_keybindings(drive.keybindings.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-                    "Login to {}",
-                    row.name
-                ))),
+                panel: std::boxed::Box::new(api_key_dialog),
                 heading: None,
             });
             let panel = session.auth_panel_handle();
@@ -1038,6 +1042,9 @@ async fn run_onboarding_phase(
                     match panel
                         .paste_prompt(
                             crate::onboarding_flow::API_KEY_PROMPT,
+                            // TS `showPrompt` renders the prompt as a
+                            // section title in the text colour.
+                            crate::auth_panel::PastePromptTone::Text,
                             // The field renders bullets, not the typed key:
                             // a first-run screen is exactly the shared and
                             // recorded surface a secret must never render on
@@ -1061,7 +1068,7 @@ async fn run_onboarding_phase(
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
                 PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 PaneOutcome::Flow(result) => {
                     let outcome = result.unwrap_or_else(|_| {
@@ -1083,12 +1090,14 @@ async fn run_onboarding_phase(
             // subscription OAuth: the `/login` selector's panel path
             // (the non-panel body answers the silent cancel for OAuth
             // rows, so it would dead-end the available rows; the picker
-            // keeps the unavailable ones inert).
+            // keeps the unavailable ones inert). The panel mounts
+            // chrome-less (TS the onboarding `loginDialogOptions`) with
+            // the pane's resolved keybindings.
+            let mut service_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            service_dialog.set_keybindings(drive.keybindings.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-                    "Login to {}",
-                    row.name
-                ))),
+                panel: std::boxed::Box::new(service_dialog),
                 heading: None,
             });
             let panel = session.auth_panel_handle();
@@ -1106,7 +1115,7 @@ async fn run_onboarding_phase(
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
                 PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 PaneOutcome::Flow(result) => {
                     let outcome = result.unwrap_or_else(|_| {
