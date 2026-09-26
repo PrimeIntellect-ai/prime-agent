@@ -716,7 +716,7 @@ mod tests {
         use pa_types::ai::{Message, TextContent, UserContent, UserContentBlock, UserMessage};
         use pa_types::JsonMap;
 
-        let text = "по-русски ✨ マルチバイト \u00e9\u00e8 emoji 🚀";
+        let text = "по-русски ✨ マルチバイト \u{00e9}\u{00e8} emoji 🚀";
         let user = Message::User(UserMessage {
             content: UserContent::Blocks(vec![
                 UserContentBlock::Text(TextContent {
