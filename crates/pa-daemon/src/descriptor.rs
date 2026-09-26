@@ -230,17 +230,24 @@ pub fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
+    let result = (|| -> Result<()> {
         let file =
             std::fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(content.as_bytes())?;
         writer.flush()?;
+        let _ = pa_core::platform::perms::restrict_file(&temp);
+        pa_core::platform::rename_onto(&temp, path)
+            .with_context(|| format!("persist {}", path.display()))?;
+        Ok(())
+    })();
+    // TS `writeFileAtomicSync` removes the temp in a `finally` block: a
+    // failed write leaves no debris beside the destination, and the
+    // success path's rename already consumed the temp.
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    let _ = pa_core::platform::perms::restrict_file(&temp);
-    pa_core::platform::rename_onto(&temp, path)
-        .with_context(|| format!("persist {}", path.display()))?;
-    Ok(())
+    result
 }
 
 /// Write a file atomically with 0600 permissions (port of writeFileAtomicSync).
@@ -361,6 +368,40 @@ mod tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the rename"
+        );
+    }
+
+    #[test]
+    fn unsynced_write_replaces_its_destination_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor-config");
+        std::fs::write(&path, "stale").unwrap();
+        write_file_atomic_unsynced(&path, "next").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the rename"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the write restricts to 0600");
+        }
+    }
+
+    #[test]
+    fn unsynced_write_failure_cleans_up_its_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor-config");
+        // A directory at the rename destination breaks the atomic write:
+        // the failure must clean the temp file and leave the destination.
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(write_file_atomic_unsynced(&path, "next").is_err());
+        assert!(path.is_dir(), "the destination is untouched");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the failed write (TS finally-cleanup parity)"
         );
     }
 

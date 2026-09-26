@@ -788,3 +788,51 @@ fn booted_supervisor_persists_its_config() {
     client.send_command("l", serde_json::json!({ "type": "list" }));
     assert_eq!(client.read_response("l")["success"], true);
 }
+
+/// The fail-before-bind contract of the pre-bind config persist (the
+/// reviewer-routed injection): a supervisor whose config write fails
+/// never binds its socket - no connect()-success window, no stale socket
+/// path. The injection is deterministic: a directory at the
+/// `supervisor-config` rename destination breaks the atomic write inside
+/// `Supervisor::new`, before `prepare_socket_path` ever runs.
+#[test]
+fn persist_failure_before_bind_never_exposes_the_socket() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
+    std::fs::create_dir_all(descriptor_dir.join("supervisor-config")).expect("inject");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+        .arg("supervisor")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--agent-dir")
+        .arg(&agent_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pa-daemon supervisor");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                assert!(
+                    !status.success(),
+                    "a pre-bind config persist failure must fail the boot"
+                );
+                break;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => panic!("supervisor never exited after the injected persist failure"),
+        }
+    }
+    // The socket was never bound: no path file exists to connect to.
+    assert!(
+        !socket.exists(),
+        "a pre-bind persist failure must never expose the socket path"
+    );
+}
