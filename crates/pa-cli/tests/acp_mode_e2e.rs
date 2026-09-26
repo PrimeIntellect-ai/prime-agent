@@ -120,9 +120,10 @@ impl AcpChild {
         let mut notifications = Vec::new();
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for response {id}");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for response {id}"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");

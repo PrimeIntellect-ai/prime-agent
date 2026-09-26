@@ -7,6 +7,18 @@
 //! restarted supervisor can adopt or relaunch live sessions, and routes
 //! commands and events between clients and workers (private-framed channel).
 
+mod adoption;
+mod launch_budget;
+mod options;
+
+use adoption::{AdoptionBoot, AdoptionOutcome};
+use launch_budget::{
+    DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS, WORKER_CONNECT_BACKOFF_MS,
+    WORKER_CONNECT_PROBE_MS, WORKER_CONNECT_TIMEOUT_ENV,
+};
+pub(crate) use options::ClientRouting;
+pub use options::SupervisorOptions;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +32,7 @@ use pa_types::daemon::{
     UpdatePreparedMarker, UpdateTimeoutBudget,
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -53,37 +65,6 @@ use crate::update_roster::{
 use crate::update_stop::{stop_workers_gracefully, WorkerStopVerdict, WORKER_REQUEST_TIMEOUT_MS};
 use crate::{socket, util};
 
-/// Worker connect budget: socket probes, connect, and the auth handshake
-/// all share this deadline from spawn time (TS `WORKER_CONNECT_TIMEOUT_MS`:
-/// 30s on Unix, 90s on Windows). A worker that never comes up fails the
-/// launch within this budget instead of hanging. The budget is
-/// env-overridable (`WORKER_CONNECT_TIMEOUT_ENV`, ms) for environments
-/// whose worker boots need more headroom (e.g. parallel e2e runs on
-/// shared vCPUs); the default keeps the TS wire behavior.
-#[cfg(unix)]
-const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
-#[cfg(not(unix))]
-const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
-/// The auth handshake's minimum budget. Probes, connect, and auth share the
-/// connect deadline, but a probe phase that ate nearly all of it (a
-/// slow-booting worker under load) must not leave the auth route with
-/// crumbs: a worker that just proved life (the probe connected) gets at
-/// least this long to answer the handshake, so the launch fails with the
-/// connect-budget error only when the worker is genuinely wedged.
-const WORKER_AUTH_FLOOR_MS: u64 = 10_000;
-/// Overrides [`DEFAULT_WORKER_CONNECT_TIMEOUT_MS`] when set to a positive
-/// number of milliseconds (tests under parallel load use this seam).
-const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS";
-/// One socket probe attempt (TS `WORKER_CONNECT_PROBE_MS`).
-#[cfg(unix)]
-const WORKER_CONNECT_PROBE_MS: u64 = 500;
-#[cfg(not(unix))]
-const WORKER_CONNECT_PROBE_MS: u64 = 2_000;
-/// Pause between probe attempts (TS backoff min = max on Unix).
-#[cfg(unix)]
-const WORKER_CONNECT_BACKOFF_MS: u64 = 25;
-#[cfg(not(unix))]
-const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 /// The route failure for a worker whose command channel is gone (never
 /// connected, or the writer pump broke on a dead socket): the request did
@@ -114,27 +95,6 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const STABLE_LIFETIME_MS: u64 = 30_000;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
-
-#[derive(Debug, Clone)]
-pub struct SupervisorOptions {
-    pub socket_path: PathBuf,
-    pub agent_dir: PathBuf,
-}
-
-/// Which clients a worker outbound frame reaches.
-#[derive(Debug, Clone)]
-pub(crate) enum ClientRouting {
-    /// Every connected client (e.g. `daemon_closing`).
-    Broadcast,
-    /// Every connected client except one (the shutdown initiator receives its
-    /// `daemon_closing` through the command response instead, so the
-    /// broadcast cannot overtake that response or duplicate the frame).
-    BroadcastExcept { connection_id: String },
-    /// Clients attached to the session.
-    AttachedSession { active_session_id: String },
-    /// Clients holding a roster subscription (`roster_subscribe`).
-    RosterSubscribers,
-}
 
 pub struct Supervisor {
     pub(crate) options: SupervisorOptions,
@@ -221,49 +181,6 @@ pub struct Supervisor {
     /// create replay, cleared by a `compaction_end` that did land.
     pub(crate) compaction_journal:
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
-}
-
-/// The boot the descriptor-adoption pass runs under. An update boot
-/// relaunches kept workers from their descriptors before the roster
-/// restore walks the rows (spec §6 step 2's create-or-adopt order). A
-/// plain startup adopts live workers and revives only genuinely
-/// interrupted ones: a supervisor restart must not mass-revive the
-/// historical idle/completed sessions a TS daemon leaves down (their
-/// clients reopen them lazily through a fresh create).
-#[derive(Clone, PartialEq, Eq)]
-enum AdoptionBoot {
-    /// Update boot: the roster's kept workers (by worker id) relaunch
-    /// eagerly ahead of the restore pass; busy-at-crash workers revive
-    /// too. Descriptors the update does not keep stay down — the update
-    /// must not revive the sessions a plain boot parked (a reopened
-    /// session file may already have a newer worker). The kept set is
-    /// shared (an `Arc`): one clone per descriptor task, not a deep
-    /// copy of every kept id per task.
-    UpdateRoster {
-        kept: Arc<std::collections::HashSet<String>>,
-    },
-    /// Plain startup: only journal-proven live work revives.
-    PlainStartup,
-}
-
-/// One descriptor's boot-adoption decision, reported as a count in the
-/// pass's `worker_adoption` event (telemetry: counts only, never session
-/// payload).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AdoptionOutcome {
-    /// Live socket adopted (incl. a worker that re-registered before the
-    /// descriptor scan reached it).
-    AdoptedLive,
-    /// Dead descriptor relaunched (busy evidence on a plain boot, kept
-    /// worker on an update boot).
-    Revived,
-    /// Dead descriptor with no durable busy evidence: stayed down.
-    SkippedIdle,
-    /// The descriptor carried a durable stop tombstone: the boot re-ran
-    /// the stop's finalization instead of adopting or reviving.
-    Stopped,
-    /// Adoption or relaunch failed.
-    Failed,
 }
 
 impl Supervisor {
@@ -707,7 +624,7 @@ impl Supervisor {
                     }
                 },
                 // begin_shutdown fired: loop back and fall out of the loop.
-                _ = self.shutdown_notify.notified() => continue,
+                () = self.shutdown_notify.notified() => continue,
             };
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
@@ -1557,7 +1474,7 @@ impl Supervisor {
                         request.command_type,
                         written
                             .as_ref()
-                            .map(|_| "ok")
+                            .map(|()| "ok")
                             .map_err(std::string::ToString::to_string)
                     );
                 }
@@ -2126,7 +2043,7 @@ impl Supervisor {
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
@@ -2323,7 +2240,7 @@ impl Supervisor {
             update_resume: Some(self.restore.hello_resume()),
             client_id: client_id.clone(),
             server_capabilities: default_server_capabilities(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
 
@@ -2488,7 +2405,7 @@ impl Supervisor {
         // Detach from every attached session on disconnect (a TUI exit does
         // not stop the session; the worker keeps running).
         let attached_sessions = attached.lock().unwrap().clone();
-        for active_session_id in attached_sessions.iter() {
+        for active_session_id in &attached_sessions {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
@@ -3346,7 +3263,7 @@ impl Supervisor {
             update_id: update_id.clone(),
             expires_at: marker_expires_at_iso(now, &self.update_budget),
             supervisor: identity,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_prepared_artifacts(&self.update_prepared_dir(update_id), &roster, &marker)?;
         match self
@@ -4103,7 +4020,7 @@ impl Supervisor {
         // degrades to bare rows, exactly like the passive merge above.
         match ledger.deleted_descendant_usage_by_parent() {
             Ok(bucket) => {
-                for info in infos.iter_mut() {
+                for info in &mut infos {
                     let path = crate::lease::canonical_session_path(&info.path)
                         .to_string_lossy()
                         .to_string();
@@ -4184,7 +4101,7 @@ impl Supervisor {
             }
             let residents = self.registry.list().await;
             let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-            for resident in residents.iter() {
+            for resident in &residents {
                 let descriptor = resident.descriptor.lock().await;
                 if let Some(session_file) = &descriptor.session_file {
                     resident_by_file.push(ResidentRoot {
@@ -4378,7 +4295,7 @@ impl Supervisor {
         // create at a time per session file. A concurrent open waits
         // behind this one and then reuses the worker it launched — both
         // reaching the launch would race the runtime session lease.
-        let _opening_guard = self.opening_guard(command).await?;
+        let opening_guard = self.opening_guard(command).await?;
         // TS `createOrReuseWorker`'s reuse seam: an open of a session file
         // a live worker already serves answers the LIVE binding (the
         // client attaches next) instead of launching a second worker over
@@ -4446,7 +4363,7 @@ impl Supervisor {
         }
         // The admission settled: the single-flight may release (a
         // concurrent open's classification now finds a durable resident).
-        drop(_opening_guard);
+        drop(opening_guard);
         // The response still matches attach/list rows exactly: prefer a
         // fresh get_state, but a degraded one falls back to the
         // authoritative create summary instead of failing the spawn (the
@@ -5767,14 +5684,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -5832,7 +5749,7 @@ mod tests {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let refused = supervisor
             .launch_worker(&create, None)

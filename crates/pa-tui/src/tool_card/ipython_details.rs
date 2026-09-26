@@ -215,7 +215,7 @@ pub(crate) struct BackgroundShell {
 pub(crate) fn literal_shell_command(code: &str) -> Option<String> {
     let launch: Vec<&str> = code
         .trim()
-        .split('\n')
+        .lines()
         .filter(|line| {
             !line.trim().is_empty() && !line.trim_start().starts_with("from rlm import bash")
         })

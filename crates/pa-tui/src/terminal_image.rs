@@ -343,7 +343,7 @@ pub fn encode_iterm2(base64_data: &str, options: Iterm2EncodeOptions) -> String 
     use base64::Engine;
     let mut params: Vec<String> = vec![format!(
         "inline={}",
-        if options.inline == Some(false) { 0 } else { 1 }
+        i32::from(options.inline != Some(false))
     )];
     if let Some(width) = &options.width {
         params.push(format!("width={width}"));

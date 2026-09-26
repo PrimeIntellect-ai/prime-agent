@@ -184,9 +184,8 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
         return;
     }
     #[cfg(unix)]
-    let _cleanup_lock = match pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) {
-        Ok(lock) => lock,
-        Err(_) => return,
+    let Ok(_cleanup_lock) = pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) else {
+        return;
     };
     if let Some(expected) = expected_identity {
         match socket_identity(path) {

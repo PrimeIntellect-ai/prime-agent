@@ -406,7 +406,9 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
         .await
         .expect("create session");
     assert_eq!(handle.name, "root-b");
-    assert!(handle.session_file.ends_with(".jsonl"));
+    assert!(Path::new(&handle.session_file)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")));
     assert!(Path::new(&handle.session_file).exists());
     assert_eq!(handle.model, "scripted/faux-1");
 

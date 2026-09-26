@@ -158,6 +158,7 @@ fn session_is_archived(session_file: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::util::{iso_from_unix_ms, now_ms};
+    use serde_json::Map;
 
     fn descriptor(session_file: Option<&Path>) -> DaemonWorkerDescriptor {
         DaemonWorkerDescriptor {
@@ -183,14 +184,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

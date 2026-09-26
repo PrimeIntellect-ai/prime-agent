@@ -135,7 +135,7 @@ impl BashOperations for LocalBashOperations {
                         status = &mut waiter => {
                             break 'wait status?;
                         }
-                        _ = async {
+                        () = async {
                             match timeout_deadline {
                                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                                 None => std::future::pending::<()>().await,
@@ -144,7 +144,7 @@ impl BashOperations for LocalBashOperations {
                             timed_out.store(true, Ordering::SeqCst);
                             kill_process_tree(pid);
                         }
-                        _ = async {
+                        () = async {
                             match abort_watcher.as_mut() {
                                 Some(cancelled) => cancelled.as_mut().await,
                                 None => std::future::pending::<()>().await,
