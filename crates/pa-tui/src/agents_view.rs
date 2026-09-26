@@ -3614,11 +3614,6 @@ mod tests {
         );
         mode.handle_mouse(&mouse_report(row, true, false));
         mode.handle_mouse(&mouse_report(row, false, false));
-        let opened = mode.opened.expect("the click opened the row");
-        assert_eq!(
-            opened.selection,
-            SessionSelection::Attach("s-clears".to_string())
-        );
         assert!(!mode.exit_armed, "the click dropped the exit hint");
         assert!(
             mode.pending_delete.is_none(),
@@ -3630,6 +3625,13 @@ mod tests {
         assert!(
             mode.pending_delete_action.is_none(),
             "no execution rode the re-arm"
+        );
+        // The selection binds last: `expect` moves `mode.opened`, so no
+        // method call on `mode` may follow it.
+        let opened = mode.opened.expect("the click opened the row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s-clears".to_string())
         );
         crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
