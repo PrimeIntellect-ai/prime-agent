@@ -4280,7 +4280,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         client
             .request_ok(DaemonCommand::Kill {
                 id: None,
-                active_session_id: Some(kill_session_id.clone()),
+                active_session_id: kill_session_id.clone(),
                 rest: Default::default(),
             })
             .await
