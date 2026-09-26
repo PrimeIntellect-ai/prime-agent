@@ -1478,18 +1478,29 @@ impl Supervisor {
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
         }
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            // Capture the child's start identity alongside its pid (TS
-            // `getProcessStartId(childPid)` at spawn): the identity-aware
-            // holder checks can only recognize a recycled pid when the
-            // descriptor carries the start id the original holder had.
-            let child_pid = child.id().unwrap_or(0);
-            descriptor.pid = child_pid as u64;
-            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
-            descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        }
+        // The descriptor update and the worker-socket probe are independent:
+        // the persist is the durable spawn identity (pid + start id +
+        // lifecycle), the probe is a read-only connect check on the worker's
+        // socket. Running them together keeps the descriptor persist's fsync
+        // off the session-launch critical path; the persist is joined before
+        // this function returns, so the connect handshake and the create
+        // route still observe the persisted descriptor exactly as before
+        // (the same ordering the sequential version gave).
+        let child_pid = child.id().unwrap_or(0);
+        let persist_identity = {
+            let resident = Arc::clone(resident);
+            tokio::spawn(async move {
+                let mut descriptor = resident.descriptor.lock().await;
+                // Capture the child's start identity alongside its pid (TS
+                // `getProcessStartId(childPid)` at spawn): the identity-aware
+                // holder checks can only recognize a recycled pid when the
+                // descriptor carries the start id the original holder had.
+                descriptor.pid = child_pid as u64;
+                descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
+                descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
+                let _ = persist_worker(&resident.descriptor_path, &descriptor);
+            })
+        };
 
         // Probe the worker socket until it accepts connections. A worker that
         // never comes up inside the connect budget is killed here so a stuck
@@ -1503,6 +1514,12 @@ impl Supervisor {
             let _ = child.kill().await;
             return Err(error);
         }
+        // The probe only watches the socket; the durable spawn identity must
+        // still land before the launch hands the resident to the connect
+        // handshake. A probe failure detaches the task (the persist completes
+        // on its own), so a failed launch leaves the same Starting-state
+        // descriptor the sequential version wrote.
+        let _ = persist_identity.await;
         Ok(child)
     }
 
