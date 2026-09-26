@@ -359,10 +359,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.tools.expand",
         def!(&["ctrl+o"], "Cycle conversation detail", scope "editor"),
     ),
-    (
-        "app.transcript.runs",
-        def!(&["alt+t"], "Open the condensed tool runs view"),
-    ),
     ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
         "app.heartbeats.openSelected",
