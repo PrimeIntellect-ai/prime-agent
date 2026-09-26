@@ -2603,7 +2603,7 @@ impl SessionUi {
                     admission_id: None,
                     rlm_notice_nonce: None,
                 },
-                rest: Default::default(),
+                rest: Map::default(),
             };
             let result = tokio::time::timeout(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
