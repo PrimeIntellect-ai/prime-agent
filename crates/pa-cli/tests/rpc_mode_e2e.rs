@@ -854,9 +854,11 @@ fn rpc_fork_leases_the_materialized_file() {
     forked.spawn_stderr = None;
 }
 
-/// A FAILED whole-session replacement re-arms the queued-work pump: the
-/// pre-settle epoch bump retired the old pump, but the live session's
-/// parked steer rows must still deliver (the failure never owned them).
+/// A FAILED whole-session replacement never strands the live session's
+/// queued work: the running turn's post-turn steering fold drains the
+/// parked row while the settle waits the turn out, and the re-armed
+/// pump covers the rest (the pre-settle epoch bump retired the old
+/// pump; the failure never owned the rows).
 #[test]
 fn rpc_failed_replacement_restarts_the_queue_pump() {
     let script = json!({ "responses": [
@@ -891,7 +893,7 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         "sessionPath": bad_file.to_string_lossy()
     }));
     client.drain_stderr();
-    let (failed, _) = client.wait_response(&bad, TIMEOUT);
+    let (failed, before) = client.wait_response(&bad, TIMEOUT);
     assert_eq!(
         failed["success"], false,
         "the stale-cwd session fails the switch: {failed}"
@@ -901,23 +903,31 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         error.contains("Stored session working directory does not exist"),
         "the failure is the crafted stale cwd, not an unrelated refusal: {failed}"
     );
-    // The restart delivers the parked row: the queue drains (the run
-    // takes the row), then the steer's own turn ends with its answer.
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let state = client.request(&json!({ "type": "get_state" }));
-        if state["data"]["sessionActions"]["queuedCount"].as_u64() == Some(0) {
-            break;
+    // The parked row must still deliver: the running turn's post-turn
+    // steering fold drains it while the settle waits the turn out (its
+    // agent_end lands BEFORE the switch's error response), or the
+    // re-armed pump delivers after the failure — either order is the
+    // contract, a failed replacement never strands the live session's
+    // queued work.
+    let steer_answer_landed = |frame: &Value| {
+        if frame.get("type").and_then(Value::as_str) != Some("agent_end") {
+            return false;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the parked steer stayed queued after the failed switch: {state}"
-        );
-        // Pace the poll on the event stream (the steer's own turn may
-        // already be streaming once the queue reads zero).
-        let _ = client
-            .lines
-            .recv_timeout(Duration::from_millis(100));
+        frame["messages"]
+            .as_array()
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["content"]
+                        .as_array()
+                        .and_then(|content| content.first())
+                        .and_then(|part| part.get("text"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.contains("steer answer"))
+                })
+            })
+    };
+    if before.iter().any(steer_answer_landed) {
+        return;
     }
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -929,26 +939,8 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         match client.lines.recv_timeout(timeout_left) {
             Ok(line) => {
                 let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
-                if frame.get("type").and_then(Value::as_str) == Some("agent_end") {
-                    let texts = frame["messages"]
-                        .as_array()
-                        .map(|messages| {
-                            messages
-                                .iter()
-                                .map(|message| {
-                                    message["content"]
-                                        .as_array()
-                                        .and_then(|content| content.first())
-                                        .and_then(|part| part.get("text"))
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    if texts.iter().any(|text| text.contains("steer answer")) {
-                        break;
-                    }
+                if steer_answer_landed(&frame) {
+                    break;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
