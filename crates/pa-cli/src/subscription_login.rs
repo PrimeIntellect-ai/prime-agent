@@ -377,7 +377,7 @@ mod tests {
         ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>> {
             self.manual
                 .as_ref()
-                .map(|answer| Box::pin(std::future::ready(Some(answer.to_string()))) as _)
+                .map(|answer| Box::pin(std::future::ready(Some(answer.clone()))) as _)
         }
 
         fn is_cancelled(&self) -> bool {

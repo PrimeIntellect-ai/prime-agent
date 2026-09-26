@@ -8,10 +8,10 @@
 //! a hard error (TS rejects the server promise and the login fails);
 //! the Codex callback keeps its own listener on its own port.
 
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 /// `PI_OAUTH_CALLBACK_HOST` (TS `CALLBACK_HOST`, default `127.0.0.1`).
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
@@ -101,8 +101,29 @@ impl AnthropicCallbackServer {
     ///
     /// Returns an error when the listener cannot be bound.
     pub async fn bind(host: &str, port: u16, state: &str) -> Result<Self, String> {
-        let listener = TcpListener::bind((host, port))
-            .await
+        // `SO_REUSEADDR`: a closed listener's recent connections linger
+        // in TIME_WAIT on the registered port (the browser race drives
+        // real sockets); the next login's bind must not fail on them
+        // (the plain `TcpListener::bind` leaves the flag unset).
+        let addr: std::net::SocketAddr = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| format!("port {port}: {error}"))?
+            .next()
+            .ok_or_else(|| format!("port {port}: no addresses"))?;
+        let socket = if addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .map_err(|error| format!("port {port}: {error}"))?;
+        socket
+            .set_reuseaddr(true)
+            .map_err(|error| format!("port {port}: {error}"))?;
+        socket
+            .bind(addr)
+            .map_err(|error| format!("port {port}: {error}"))?;
+        let listener = socket
+            .listen(1024)
             .map_err(|error| format!("port {port}: {error}"))?;
         #[cfg(test)]
         let bound_port = listener.local_addr().map_or(port, |addr| addr.port());
