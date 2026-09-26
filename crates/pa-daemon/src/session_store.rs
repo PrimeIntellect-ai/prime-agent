@@ -76,6 +76,21 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+/// The windowed message sequence's summary scalars (TS
+/// `summaryForActiveSession`): the newest message timestamp, the summed
+/// assistant usage, and the window's message count. Produced by
+/// [`SessionFile::scan_message_scalars`] without materializing the fold.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MessageWindowScalars {
+    /// The timestamp of the last windowed message that carries one (the
+    /// fold's reverse `find_map`, preserved in walk order).
+    pub last_timestamp_ms: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+    pub message_count: usize,
+}
+
 impl SessionEntry {
     fn new(
         type_: &str,
@@ -790,13 +805,67 @@ impl SessionFile {
     /// after the compaction. Without a compaction this is the plain
     /// message list.
     pub fn messages(&self) -> Vec<Value> {
-        // The transcript form of one entry: `message` rows contribute their
-        // persisted message; custom rows rejoin as their wire message form
-        // (`role: "custom"`), the shape TS sessions keep in
-        // `agent.state.messages`.
-        let entry_message = |entry: &SessionEntry| -> Option<Value> {
+        let mut messages = Vec::new();
+        self.walk_message_values(|message| messages.push(message.into_owned()));
+        messages
+    }
+
+    /// The summary scalars the TS `summaryForActiveSession` fold derives
+    /// from the windowed message sequence — the newest message timestamp
+    /// (the last message in fold order that carries one, matching the
+    /// fold's reverse scan), the summed assistant usage, and the window's
+    /// message count — without materializing the transcript. One borrowed
+    /// walk of the same sequence [`Self::messages`] folds, so the scan can
+    /// never disagree with the materialized fold.
+    pub fn scan_message_scalars(&self) -> MessageWindowScalars {
+        let mut scalars = MessageWindowScalars::default();
+        self.walk_message_values(|message| {
+            scalars.message_count += 1;
+            if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
+                scalars.last_timestamp_ms = Some(timestamp);
+            }
+            if crate::types::message_role(&message) == Some("assistant") {
+                if let Some(usage) = message.get("usage") {
+                    scalars.input_tokens += usage
+                        .get("input")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheRead")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheWrite")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.output_tokens += usage
+                        .get("output")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.cost += usage
+                        .get("cost")
+                        .and_then(|cost| cost.get("total"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or_default();
+                }
+            }
+        });
+        scalars
+    }
+
+    /// The windowed message sequence behind [`Self::messages`]: `message`
+    /// rows borrow their persisted message; `custom_message` rows rejoin as
+    /// their wire message form (`role: "custom"`), the shape TS sessions
+    /// keep in `agent.state.messages`; a compaction window prepends its
+    /// summary message and keeps `firstKeptEntryId` onward (the id is only
+    /// recognized on a message-bearing row, matching the fold), then
+    /// everything appended after the compaction. Every consumer — the
+    /// materialized fold and the scalar scan — derives from this one walk,
+    /// so the two can never disagree on the sequence.
+    fn walk_message_values<'a>(&'a self, mut visit: impl FnMut(std::borrow::Cow<'a, Value>)) {
+        let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
             match entry.type_.as_str() {
-                "message" => entry.fields.get("message").cloned(),
+                "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
                 "custom_message" => {
                     let mut message = entry.fields.clone();
                     if let Some(object) = message.as_object_mut() {
@@ -806,7 +875,7 @@ impl SessionFile {
                             Value::String(entry.timestamp.clone()),
                         );
                     }
-                    Some(message)
+                    Some(std::borrow::Cow::Owned(message))
                 }
                 _ => None,
             }
@@ -815,10 +884,12 @@ impl SessionFile {
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
-            return branch
-                .iter()
-                .filter_map(|entry| entry_message(entry))
-                .collect();
+            for entry in &branch {
+                if let Some(message) = entry_message(entry) {
+                    visit(message);
+                }
+            }
+            return;
         };
         let compaction = branch[compaction_position];
         let first_kept_entry_id = compaction
@@ -826,10 +897,29 @@ impl SessionFile {
             .get("firstKeptEntryId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mut retained: Vec<Value> = Vec::new();
+        // Counting pass: the compaction summary message carries the retained
+        // count, so the kept prefix is counted before anything is visited.
+        // The bearing check borrows only — no message is materialized here.
+        let mut keeping = false;
+        let mut retained_count = 0usize;
+        for entry in &branch[..compaction_position] {
+            if !entry_bears_message(entry) {
+                continue;
+            }
+            if !keeping && entry.id == first_kept_entry_id {
+                keeping = true;
+            }
+            if keeping {
+                retained_count += 1;
+            }
+        }
+        visit(std::borrow::Cow::Owned(compaction_summary_message(
+            compaction,
+            retained_count,
+        )));
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
-            if entry_message(entry).is_none() {
+            if !entry_bears_message(entry) {
                 continue;
             }
             if !keeping && entry.id == first_kept_entry_id {
@@ -837,18 +927,15 @@ impl SessionFile {
             }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    retained.push(message);
+                    visit(message);
                 }
             }
         }
-        let mut messages = vec![compaction_summary_message(compaction, retained.len())];
-        messages.extend(retained);
-        messages.extend(
-            branch[compaction_position + 1..]
-                .iter()
-                .filter_map(|entry| entry_message(entry)),
-        );
-        messages
+        for entry in &branch[compaction_position + 1..] {
+            if let Some(message) = entry_message(entry) {
+                visit(message);
+            }
+        }
     }
 
     /// The durable entry id the compaction cut keeps: the same
@@ -1161,6 +1248,18 @@ fn message_role(message: &Value) -> Option<&str> {
 
 /// The `compactionSummary` message a compaction fold starts with (TS
 /// `createCompactionSummaryMessage`).
+/// Whether one entry contributes a message to the windowed fold: `message`
+/// rows need their persisted message; `custom_message` rows always rejoin as
+/// their wire form. The borrowing twin of the `entry_message` Some-ness, so
+/// counting and keeping walks never materialize what they only classify.
+fn entry_bears_message(entry: &SessionEntry) -> bool {
+    match entry.type_.as_str() {
+        "message" => entry.fields.get("message").is_some(),
+        "custom_message" => true,
+        _ => false,
+    }
+}
+
 fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
     // TS `createCompactionSummaryMessage` key order: role, summary,

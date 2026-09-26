@@ -252,3 +252,271 @@ fn captured_window_matches_full_transcript_and_stats() {
         }
     }
 }
+
+/// The summary scalars the old full-clone fold computed: the reverse
+/// `find_map` timestamp, the assistant usage sums, and the message count.
+/// This is the exact extraction `summaryForActiveSession` ran over
+/// `messages()` before the scan existed — the reference the scan must
+/// reproduce for every window shape.
+fn fold_reference_scalars(store: &SessionFile) -> (Option<u64>, u64, u64, f64, usize) {
+    let messages = store.messages();
+    let last_timestamp = messages
+        .iter()
+        .rev()
+        .find_map(crate::types::message_timestamp_ms);
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    let mut cost = 0.0f64;
+    for message in &messages {
+        if crate::types::message_role(message) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        input_tokens += usage
+            .get("input")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        input_tokens += usage
+            .get("cacheRead")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        input_tokens += usage
+            .get("cacheWrite")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        output_tokens += usage
+            .get("output")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        cost += usage
+            .get("cost")
+            .and_then(|cost| cost.get("total"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+    }
+    (
+        last_timestamp,
+        input_tokens,
+        output_tokens,
+        cost,
+        messages.len(),
+    )
+}
+
+fn assert_scan_matches_fold(label: &str, store: &SessionFile) {
+    let (last_timestamp, input_tokens, output_tokens, cost, count) =
+        fold_reference_scalars(store);
+    let scalars = store.scan_message_scalars();
+    assert_eq!(
+        scalars.last_timestamp_ms, last_timestamp,
+        "{label}: newest timestamp"
+    );
+    assert_eq!(scalars.input_tokens, input_tokens, "{label}: input tokens");
+    assert_eq!(
+        scalars.output_tokens, output_tokens,
+        "{label}: output tokens"
+    );
+    assert_eq!(scalars.cost, cost, "{label}: cost");
+    assert_eq!(scalars.message_count, count, "{label}: message count");
+}
+
+fn assistant(usage: Value, timestamp: u64) -> Value {
+    json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "work"}],
+        "usage": usage,
+        "timestamp": timestamp,
+    })
+}
+
+fn usage_of(input: u64, output: u64, cache_read: u64, total: f64) -> Value {
+    json!({
+        "input": input, "output": output, "cacheRead": cache_read, "cacheWrite": 0,
+        "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": total}
+    })
+}
+
+/// One shared walk backs both the materialized fold and the scalar scan, so
+/// across every window shape — plain conversations with non-monotonic
+/// timestamps, custom rows, compaction boundaries (kept id on a message
+/// row, a non-bearing row, and a missing id), stacked compactions, the
+/// empty session, and degenerate rows — the scan must reproduce exactly
+/// the scalars the old full-clone fold computed.
+#[test]
+fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Plain conversation: non-monotonic timestamps (the reverse find_map
+    // takes the LAST positioned timestamp, not the maximum), assistant
+    // usage with cache lanes, a custom row carrying a `usage` field (role
+    // `custom` never counts), and a toolResult without a timestamp.
+    {
+        let path = dir.path().join("plain.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_message(json!({"role": "user", "content": "hi", "timestamp": 500u64}));
+        store.append_message(assistant(usage_of(10, 2, 3, 0.1), 300));
+        store.append_entry(
+            "custom_message",
+            json!({"customType": "goal_context", "content": "ctx", "usage": usage_of(999, 999, 0, 99.0)}),
+        );
+        store.append_entry("custom", json!({"customType": "thread_goal_state", "data": {"x": 1}}));
+        store.append_message(assistant(usage_of(7, 1, 0, 0.2), 400));
+        store.append_message(json!({"role": "toolResult", "toolCallId": "c", "content": []}));
+        assert_scan_matches_fold("plain", &store);
+    }
+
+    // A later row with a smaller timestamp keeps the fold's reverse
+    // find_map semantics: the scan reports the last positioned value.
+    {
+        let path = dir.path().join("nonmonotonic.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_message(assistant(usage_of(1, 1, 0, 0.0), 900));
+        store.append_message(json!({"role": "user", "content": "late", "timestamp": 200u64}));
+        assert_scan_matches_fold("non-monotonic tail", &store);
+        let scalars = store.scan_message_scalars();
+        assert_eq!(scalars.last_timestamp_ms, Some(200));
+    }
+
+    // Compaction with the kept id on a message row: the window keeps the
+    // retained prefix, and the summary message itself counts (its role
+    // is `compactionSummary`, never assistant).
+    {
+        let path = dir.path().join("kept-on-message.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_message(json!({"role": "user", "content": "gone", "timestamp": 1u64}));
+        let kept = store.append_message(json!({"role": "user", "content": "kept", "timestamp": 50u64}));
+        store.append_message(assistant(usage_of(4, 5, 6, 0.3), 60));
+        store.append_entry(
+            "compaction",
+            json!({"summary": "s", "firstKeptEntryId": kept, "tokensBefore": 1000}),
+        );
+        store.append_message(assistant(usage_of(8, 9, 1, 0.4), 70));
+        assert_scan_matches_fold("compaction kept on message row", &store);
+        let scalars = store.scan_message_scalars();
+        assert_eq!(scalars.last_timestamp_ms, Some(70));
+        assert_eq!(scalars.input_tokens, 4 + 6 + 8 + 1);
+        assert_eq!(scalars.message_count, 4); // summary + kept + two assistants
+    }
+
+    // The kept id on a NON-bearing row never flips the keeping walk (the
+    // fold skips the row before the id check), so the window holds only
+    // the summary plus the post-compaction rows.
+    {
+        let path = dir.path().join("kept-on-custom.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        let marker = store.append_entry("custom", json!({"customType": "thread_goal_state"}));
+        store.append_message(assistant(usage_of(5, 5, 0, 0.5), 10));
+        store.append_entry(
+            "compaction",
+            json!({"summary": "s", "firstKeptEntryId": marker, "tokensBefore": 100}),
+        );
+        store.append_message(assistant(usage_of(2, 2, 0, 0.25), 20));
+        assert_scan_matches_fold("kept id on non-bearing row", &store);
+        let scalars = store.scan_message_scalars();
+        assert_eq!(scalars.input_tokens, 2);
+        assert_eq!(scalars.message_count, 2); // summary + post-compaction assistant
+    }
+
+    // A kept id that does not exist keeps nothing before the compaction.
+    {
+        let path = dir.path().join("kept-missing.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_message(assistant(usage_of(50, 50, 0, 5.0), 1));
+        store.append_entry(
+            "compaction",
+            json!({"summary": "s", "firstKeptEntryId": "does-not-exist", "tokensBefore": 10}),
+        );
+        store.append_message(json!({"role": "user", "content": "after", "timestamp": 2u64}));
+        assert_scan_matches_fold("missing kept id", &store);
+        let scalars = store.scan_message_scalars();
+        assert_eq!(scalars.message_count, 2);
+        assert_eq!(scalars.last_timestamp_ms, Some(2));
+    }
+
+    // Stacked compactions: only the LAST one windows the read.
+    {
+        let path = dir.path().join("stacked.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_message(assistant(usage_of(1, 1, 0, 0.0), 1));
+        let kept = store.append_message(json!({"role": "user", "content": "k", "timestamp": 2u64}));
+        store.append_entry(
+            "compaction",
+            json!({"summary": "old", "firstKeptEntryId": kept, "tokensBefore": 5}),
+        );
+        store.append_message(assistant(usage_of(3, 3, 0, 0.0), 3));
+        store.append_entry(
+            "compaction",
+            json!({"summary": "new", "firstKeptEntryId": kept, "tokensBefore": 6}),
+        );
+        store.append_message(json!({"role": "user", "content": "tail", "timestamp": 4u64}));
+        assert_scan_matches_fold("stacked compactions", &store);
+    }
+
+    // Empty session: no messages at all.
+    {
+        let path = dir.path().join("empty.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        assert_scan_matches_fold("empty session", &store);
+        assert_eq!(store.scan_message_scalars(), Default::default());
+    }
+
+    // Degenerate rows: a `message` entry without its persisted message
+    // contributes nothing on either path.
+    {
+        let path = dir.path().join("degenerate.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path);
+        store.append_entry("message", json!({"note": "no message payload"}));
+        store.append_message(assistant(usage_of(6, 7, 0, 0.6), 42));
+        assert_scan_matches_fold("degenerate message row", &store);
+        let scalars = store.scan_message_scalars();
+        assert_eq!(scalars.message_count, 1);
+        assert_eq!(scalars.last_timestamp_ms, Some(42));
+    }
+}
+
+/// The compaction boundary shapes pin the materialized fold itself (the
+/// scan's reference): the exact windowed sequence, including the summary
+/// message's retained count, the skip of non-bearing rows before the kept
+/// id, and the post-compaction tail.
+#[test]
+fn walk_pins_the_compaction_boundary_sequences() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pin.jsonl");
+    let mut store = SessionFile::create("/tmp", None, 0);
+    store.set_path(path);
+    store.append_message(json!({"role": "user", "content": "u1", "timestamp": 1u64}));
+    store.append_entry("custom", json!({"customType": "thread_goal_state", "data": {}}));
+    let kept = store.append_message(json!({"role": "user", "content": "u2", "timestamp": 2u64}));
+    store.append_entry(
+        "custom_message",
+        json!({"customType": "goal_context", "content": "ctx"}),
+    );
+    store.append_message(assistant(usage_of(1, 1, 0, 0.0), 3));
+    store.append_entry(
+        "compaction",
+        json!({"summary": "sum", "firstKeptEntryId": kept, "tokensBefore": 9}),
+    );
+    store.append_message(json!({"role": "user", "content": "u3", "timestamp": 4u64}));
+
+    let messages = store.messages();
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|message| message.get("role").and_then(Value::as_str).unwrap_or_default())
+        .collect();
+    assert_eq!(roles, ["compactionSummary", "user", "custom", "assistant", "user"]);
+    assert_eq!(messages[0]["retainedMessageCount"], json!(3));
+    assert_eq!(messages[0]["tokensBefore"], json!(9));
+    assert_eq!(messages[1]["content"], "u2");
+    assert_eq!(messages[2]["role"], "custom");
+    assert_eq!(messages[4]["content"], "u3");
+}
