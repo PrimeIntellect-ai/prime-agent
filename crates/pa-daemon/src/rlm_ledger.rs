@@ -1308,12 +1308,30 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     Ok(true)
 }
 
+/// The bounded header read cap for the legacy registry probe: the header
+/// id the probe extracts rides the file's first line, so the read stays
+/// bounded to a line instead of the parent transcript's whole bytes (a
+/// multi-megabyte parent's registry probe must not read megabytes to
+/// extract one id). A first line longer than the cap reads as absent -
+/// the same judgment `read_first_line_bounded`'s callers make, and far
+/// past any real session header (the 512-byte list gate's class).
+const LEGACY_REGISTRY_HEADER_READ_MAX_BYTES: usize = 64 * 1024;
+
 /// The legacy registry path for one parent session file (TS
 /// `legacyRlmSubagentRegistryPath`): the parent's artifacts dir, keyed by
-/// the session header id.
+/// the session header id. The id rides the file's first line, so the
+/// probe reads that line bounded instead of the whole transcript: the
+/// passive roster walk probes every live child's parent once per walk,
+/// and the whole-file read made each catalog fetch linear in the
+/// family's total transcript bytes (a deep tree of large parents re-read
+/// every parent transcript per `list_saved_sessions`).
 fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
-    let content = fs::read_to_string(session_file).ok()?;
-    let header: Value = serde_json::from_str(content.lines().next()?).ok()?;
+    let line = crate::session_store::read_first_line_bounded(
+        session_file,
+        LEGACY_REGISTRY_HEADER_READ_MAX_BYTES,
+    )?;
+    let text = std::str::from_utf8(&line).ok()?;
+    let header: Value = serde_json::from_str(text.trim()).ok()?;
     let header_id = header.get("id")?.as_str()?;
     // TS `getSessionArtifactsRoot`: the artifacts tree is the sibling of
     // the session file's directory, keyed by the session header id.
@@ -1369,6 +1387,60 @@ mod tests {
     /// tree roots under the agent dir).
     fn ledger_over(agent_dir: &Path, sessions_dir: &Path) -> RlmSpawnLedger {
         RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {})
+    }
+
+    /// The legacy registry probe reads the parent's FIRST line bounded
+    /// (the header id), never the whole transcript: a parent far past the
+    /// cap still resolves, and an over-long first line reads as absent.
+    #[test]
+    fn legacy_registry_probe_reads_the_header_line_bounded() {
+        let dir = temp_dir("legacy-bounded");
+        let parent = dir.join("p.jsonl");
+        let mut content = json!({"type": "session", "id": "p1"}).to_string();
+        content.push('\n');
+        content.push_str(&"x".repeat(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES * 2));
+        fs::write(&parent, content).unwrap();
+        let registry = legacy_registry_path(&parent).expect("registry path");
+        assert!(
+            registry
+                .to_string_lossy()
+                .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
+            "the header id resolves without reading the padded tail"
+        );
+
+        let mut over_long = String::from("{\"id\":\"");
+        over_long.push_str(&"p".repeat(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES));
+        over_long.push_str("\"}");
+        fs::write(dir.join("long.jsonl"), over_long).unwrap();
+        assert_eq!(
+            legacy_registry_path(&dir.join("long.jsonl")),
+            None,
+            "a first line longer than the cap is not judged on truncated bytes"
+        );
+    }
+
+    /// The bounded probe resolves a readable header over a corrupt tail:
+    /// the whole-file read the probe replaced failed on any invalid UTF-8
+    /// in the file; the first-line read judges the header alone (a torn
+    /// write mid-file no longer masks a live parent - display-grade
+    /// metadata either way, disclosed in the bounded probe's commit).
+    #[test]
+    fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
+        let dir = temp_dir("legacy-corrupt-tail");
+        let parent = dir.join("p.jsonl");
+        let mut bytes = json!({"type": "session", "id": "p1"})
+            .to_string()
+            .into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0xff_u8; 4096]);
+        fs::write(&parent, bytes).unwrap();
+        let registry = legacy_registry_path(&parent).expect("registry path over a corrupt tail");
+        assert!(
+            registry
+                .to_string_lossy()
+                .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
+            "a torn-write tail no longer masks the readable header"
+        );
     }
 
     #[test]
