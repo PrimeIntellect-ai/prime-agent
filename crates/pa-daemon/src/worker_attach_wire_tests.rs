@@ -61,12 +61,13 @@ async fn worker_over_fixture(dir: &Path, fixture: &str) -> Arc<Worker> {
         )
         .await;
     assert!(created.success, "create must succeed: {created:?}");
-    let file = std::fs::File::options().write(true).open(&session_path).unwrap();
-    file.set_times(
-        std::fs::FileTimes::new().set_modified(
-            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
-        ),
-    )
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&session_path)
+        .unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+    ))
     .unwrap();
     {
         let mut core = worker.core.lock().unwrap();
@@ -87,7 +88,16 @@ async fn attach_bytes(worker: &Worker, client_id: &str, capabilities: Value) -> 
         .await;
     assert!(response.success, "attach must succeed: {response:?}");
     let data = response.data.expect("the attach result carries data");
-    let leaf_id = worker.core.lock().unwrap().store.as_ref().unwrap().leaf_id.clone().unwrap();
+    let leaf_id = worker
+        .core
+        .lock()
+        .unwrap()
+        .store
+        .as_ref()
+        .unwrap()
+        .leaf_id
+        .clone()
+        .unwrap();
     normalize(serde_json::to_string(&data).unwrap(), &leaf_id)
 }
 
@@ -95,8 +105,12 @@ async fn attach_bytes(worker: &Worker, client_id: &str, capabilities: Value) -> 
 /// shape; the real helper is synchronous over the dispatch result.
 fn normalize(bytes: String, leaf_id: &str) -> String {
     let pid = std::process::id();
-    bytes.replace(&format!("\"workerPid\":{pid}"), "\"workerPid\":<pid>")
-        .replace(&format!("\"leafId\":\"{leaf_id}\""), "\"leafId\":\"leaf-golden\"")
+    bytes
+        .replace(&format!("\"workerPid\":{pid}"), "\"workerPid\":<pid>")
+        .replace(
+            &format!("\"leafId\":\"{leaf_id}\""),
+            "\"leafId\":\"leaf-golden\"",
+        )
 }
 
 /// The base-build goldens (PA_PRINT_GOLDEN=1 prints the current values;
@@ -145,5 +159,11 @@ async fn attach_wire_bytes_match_the_base_build_golden() {
 
 #[tokio::test]
 async fn attach_wire_bytes_match_the_base_build_golden_empty_session() {
-    check_goldens("EMPTY", FIXTURE_EMPTY, GOLDEN_SLIM_EMPTY, GOLDEN_LEGACY_EMPTY).await;
+    check_goldens(
+        "EMPTY",
+        FIXTURE_EMPTY,
+        GOLDEN_SLIM_EMPTY,
+        GOLDEN_LEGACY_EMPTY,
+    )
+    .await;
 }
