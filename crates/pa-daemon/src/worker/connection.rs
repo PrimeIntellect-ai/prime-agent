@@ -664,3 +664,116 @@ impl Worker {
         pa_types::memory_release::trim_freed_heap_if_large(payload.len());
     }
 }
+
+impl Worker {
+    pub(crate) fn handle_attach(&self, payload: &Value) -> DaemonResponse {
+        if let Err(response) = self.require_created("attach") {
+            return response;
+        }
+        // Warm the context-tree cache at every (re)attach (the operators'
+        // Esc agents-view round trip re-attaches): the background walk
+        // fills the cache while the client rebuilds its view, so the
+        // next `/context` finds it ready instead of walking the artifact
+        // tree inline.
+        self.poke_context_tree_refresh();
+        let client_id = payload
+            .get("clientId")
+            .and_then(Value::as_str)
+            .unwrap_or("anonymous")
+            .to_string();
+        let capabilities = payload
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .map_or_else(default_client_capabilities, |array| {
+                normalize_client_capabilities(
+                    &array
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            });
+        let resume_cursor = payload
+            .get("resumeCursor")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value::<DaemonResumeCursor>(value).ok());
+
+        let mut core = self.core.lock().unwrap();
+        if !core.attached_client_ids.iter().any(|id| id == &client_id) {
+            core.attached_client_ids.push(client_id.clone());
+        }
+        let summary = self.summary_locked(&core);
+        let messages: Vec<Value> = core
+            .store
+            .as_ref()
+            .map(crate::session_store::SessionFile::messages)
+            .unwrap_or_default();
+        let state = self.connection_state_locked(&core);
+        let last_event_sequence = core.last_event_sequence;
+        let generation = core.generation.clone();
+        let active_session_id = core.active_session_id.clone();
+        drop(core);
+        let replay =
+            create_daemon_replay_info(resume_cursor.as_ref(), last_event_sequence, &generation);
+        let cursor = json!({ "generation": generation, "sequence": last_event_sequence });
+        let summary_value = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        let state_value = serde_json::to_value(&state).unwrap_or(Value::Null);
+        // The messages move into the snapshot once: the old `json!` build
+        // deep-copied them here and moved the original into the non-slim
+        // top level, holding two message trees per attach.
+        let mut snapshot = json!({
+            "activeSessionId": active_session_id,
+            "summary": summary_value,
+            "state": state_value,
+            "messages": Value::Null,
+            "lastEventSequence": last_event_sequence,
+            "lastEventCursor": cursor,
+            // RLM child roster; empty for top-level daemon sessions.
+            "children": [],
+        });
+        snapshot["messages"] = Value::Array(messages);
+        // Slim clients read summary/messages from the snapshot; duplicating
+        // them at the top level would serialize the history twice per attach
+        // (port of `createAttachResult`).
+        let slim = capabilities.iter().any(|cap| cap == "slim_attach");
+        // TS `createAttachResult` key order: protocol, activeSessionId,
+        // state?, messages? (non-slim), snapshot, replay,
+        // lastEventSequence, lastEventCursor, client. The JSON map
+        // preserves insertion order (the wire byte order), so the
+        // non-slim keys insert at their TS positions, not appended.
+        let mut result = json!({
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "activeSessionId": active_session_id,
+        });
+        if !slim {
+            result["state"] = summary_value;
+            // The non-slim top-level duplication (same wire bytes as
+            // before): one message tree lives in the snapshot, the
+            // duplicate is cloned out of it.
+            result["messages"] = snapshot["messages"].clone();
+        }
+        result["snapshot"] = snapshot;
+        result["replay"] = json!(replay);
+        result["lastEventSequence"] = json!(last_event_sequence);
+        result["lastEventCursor"] = cursor;
+        result["client"] = json!({ "id": client_id, "capabilities": capabilities });
+
+        response_success(None, "attach", Some(result))
+    }
+
+    pub(crate) fn handle_detach(&self, payload: &Value) -> DaemonResponse {
+        let client_id = payload
+            .get("clientId")
+            .and_then(Value::as_str)
+            .unwrap_or("anonymous")
+            .to_string();
+        self.side_questions.abort_for_client(&client_id);
+        // The detaching client's input-pause leases go with the detach
+        // (TS worker `detach` arm releases the client's pauses).
+        self.release_input_pauses_for_detach(&client_id);
+        let mut core = self.core.lock().unwrap();
+        core.attached_client_ids.retain(|id| id != &client_id);
+        response_success(None, "detach", None)
+    }
+}
