@@ -136,4 +136,20 @@ mod tests {
         assert_eq!(settings.theme.as_deref(), Some("prime"));
         assert_eq!(settings.rlm_max_depth, Some(4));
     }
+
+    /// TS #2462: a wrong-typed `requestTiming` behaves as unset (the
+    /// known-field registry entry), never a surviving raw value.
+    #[test]
+    fn wrong_typed_request_timing_loads_as_none() {
+        let value: Value = serde_json::json!({ "requestTiming": "yes" });
+        let settings = from_value_lenient(&value);
+        assert_eq!(settings.request_timing, None);
+        assert!(
+            settings.extra.get("requestTiming").is_none(),
+            "the wrong-typed known field drops out entirely: {:?}",
+            settings.extra
+        );
+        let settings = from_value_lenient(&serde_json::json!({ "requestTiming": true }));
+        assert_eq!(settings.request_timing, Some(true));
+    }
 }

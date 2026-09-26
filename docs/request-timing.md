@@ -90,7 +90,7 @@ branch-summary, refinement) call the provider directly and are not logged.
 | WeakMap correlation by the context / LLM messages arrays | one per-session slot (the loop moves the arrays by value; one request at a time per loop) |
 | `getLogger` + process sink → `logs/agent.jsonl` | `RequestTimingLog` writes `<agentDir>/logs/agent.jsonl` (same `ts`/`level`/`component`/`msg`/`pid` entry shape, 20 MiB rotation) |
 | `SimpleStreamOptions.onPayload`/`onResponse` (loop options into the provider client) | `pa-agent` `StreamRequestOptions.on_payload`/`on_response`, bridged into `pa-ai` `StreamOptions` in `provider_adapter` |
-| `settings-manager` `requestTiming` + `getRequestTiming()` | `crates/pa-core/src/settings`: the `requestTiming` key + `get_request_timing()` |
+| `settings-manager` `requestTiming` + `getRequestTiming()` | `crates/pa-core/src/settings`: the `requestTiming` key + `get_request_timing()` + the lenient-load known-field registry entry (a wrong-typed value reads as unset) |
 | vitest suite (`test/request-timing.test.ts`, 5 tests) | in-module tests in `request_timing.rs` (timeline shape: phase order, sequence identity, summary accounting, omission rules, flag-off silence, engine wiring) |
 
 Deviations, deliberate:
