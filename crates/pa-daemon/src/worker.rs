@@ -354,6 +354,22 @@ impl OutboundFrame {
             seq: 0,
         }
     }
+
+    /// `model_catalog_changed`: a background catalog refresh changed what
+    /// this worker would answer for `get_model_catalog` (Rust-only
+    /// extension over the TS daemon-mode protocol — TS awaits
+    /// `refreshModelCatalog` inside the request; the no-stall picker-open
+    /// refresh returns the validated snapshot instantly and lands the
+    /// fresh catalog through this broadcast instead). Every client
+    /// re-fetches; an open picker folds the catalog through its stable
+    /// update path, so the selection never flickers.
+    pub(crate) fn model_catalog_changed() -> Self {
+        OutboundFrame {
+            payload: br#"{"type":"model_catalog_changed"}"#.to_vec(),
+            outbound_type: "model_catalog_changed",
+            seq: 0,
+        }
+    }
 }
 
 /// The worker's outbound event pump: one sequence-stamped broadcast stream
@@ -513,6 +529,11 @@ pub struct Worker {
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
+    /// The `/model` catalog background-refresh coalescing gate: at most
+    /// one refresh runs per worker with one queued trailing re-arm, so a
+    /// picker burst or an auth-change storm costs one refresh, not N
+    /// parallel entitlement fetches.
+    pub(crate) model_catalog_refresh_gate: std::sync::Arc<crate::model_catalog::RefreshGate>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     /// Live side-question runs (registry, guards, event frames).
     side_questions: crate::side_question::SideQuestionManager,
@@ -1089,6 +1110,9 @@ impl Worker {
             work_notify,
             idle_notify,
             events,
+            model_catalog_refresh_gate: std::sync::Arc::new(
+                crate::model_catalog::RefreshGate::default(),
+            ),
             recovery,
             side_questions,
             peer_grants: PeerGrantStore::new(),
