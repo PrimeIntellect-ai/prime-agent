@@ -113,9 +113,10 @@ impl RpcChild {
         let mut events = Vec::new();
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for response {id} (events: {events:?})");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for response {id} (events: {events:?})"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
@@ -142,9 +143,10 @@ impl RpcChild {
         let deadline = Instant::now() + timeout;
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for event {event_type}");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for event {event_type}"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
