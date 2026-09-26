@@ -4899,8 +4899,11 @@ class Battery:
         `app.tools.expand` from ctrl+o to the plain key x. Both sides must render
         the OVERRIDE in the prompt-context hint, fire the action on the
         override key, ignore the removed default key, and document the
-        effective binding in `/hotkeys`. Keybindings are client-side only:
-        no wire surface is touched by this flow."""
+        effective binding in `/hotkeys` (TS: the guide as chat rows; Rust:
+        the read-only info panel — the operator's 2026-09-26 directive).
+        The `?` quick-shortcut guide diverges BY THE SAME DIRECTIVE (TS
+        mounts it; Rust removed it entirely). Keybindings are client-side
+        only: no wire surface is touched by this flow."""
         flow = "f23_keybindings"
         frames: dict[str, dict[str, str]] = {"ts": {}, "rust": {}}
         for side in (self.sides["ts"], self.sides["rust"]):
@@ -4975,74 +4978,167 @@ class Battery:
                     evidence=side.root / flow / "03-default-key.txt",
                     lane=FLOW_LANES[flow],
                 )
-            # 4) `/hotkeys` documents the effective binding. The guide is
-            #    taller than the default 36-row pane and renders in the
-            #    alternate screen (no tmux scrollback), so the pane grows
-            #    to 80 rows first — both products relayout to the new size
-            #    — and the whole guide renders in one capture.
+            # 4) `/hotkeys` documents the effective binding. The TS side
+            #    renders the guide as chat rows (the whole guide in one
+            #    80-row capture); the Rust side mounts the read-only info
+            #    panel (the operator's 2026-09-26 directive: the guide
+            #    no longer floods the transcript) — the pane grows to 80
+            #    rows on both sides, then Rust scrolls the panel to the
+            #    guide's bottom with End. The two shapes differ BY
+            #    DIRECTIVE, so this step records per-side findings and
+            #    carries no cross-side frame diff.
             B.tmux("resize-window", "-t", tui, "-x", "120", "-y", "80")
             time.sleep(1.0)
             self.tui_send(tui, "/hotkeys")
-            time.sleep(2.5)
-            guide = B.tmux_capture(tui)
-            side.evidence(flow, "04-hotkeys-guide.txt", guide)
-            frames[side.name]["hotkeys-guide"] = guide
-            if "Cycle overview" in guide and "Ctrl+O" not in guide:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: /hotkeys documents the effective override (X row)",
-                    gap=False,
-                )
+            if side.name == "ts":
+                time.sleep(2.5)
+                guide = B.tmux_capture(tui)
+                side.evidence(flow, "04-hotkeys-guide.txt", guide)
+                frames[side.name]["hotkeys-guide"] = guide
+                if "Cycle overview" in guide and "Ctrl+O" not in guide:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: /hotkeys documents the effective override (X row)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: /hotkeys did not show the effective override",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
             else:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: /hotkeys did not show the effective override",
-                    evidence=side.root / flow / "04-hotkeys-guide.txt",
-                    lane=FLOW_LANES[flow],
-                )
-            # 5) `?` (app.shortcuts, empty editor) mounts the quick-
-            #    shortcut guide; the next submission clears it (TS
-            #    `clearShortcutGuide`). The pane stays at 80 rows: the
-            #    guide renders at the transcript tail below the `/hotkeys`
-            #    block. "shell mode" appears only in the quick guide (not
-            #    the `/hotkeys` tables), so the cleared check is exact.
-            self.tui_send(tui, "?", enter=False)
-            guide2 = B.tmux_wait_text(tui, "shell mode", timeout=30)
-            guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
-            side.evidence(flow, "05-shortcut-guide.txt", guide2)
-            frames[side.name]["shortcut-guide"] = guide2
-            if "shell mode" in guide2 and "full reference" in guide2:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: the ? quick-shortcut guide mounted with the effective bindings",
-                    gap=False,
-                )
+                guide = B.tmux_wait_text(tui, "Hotkeys", timeout=30)
+                # The override's row sits mid-document: page down until
+                # the Other section (the expand-tools row, X vs the
+                # removed default Ctrl+O) rides the window — bounded by
+                # the guide's finite length, so the X-vs-Ctrl+O check
+                # reads the actual row, not an off-screen region.
+                for _ in range(12):
+                    self.tui_send(tui, "PageDown", enter=False)
+                    # tmux_wait_text returns the last frame on timeout,
+                    # so the break condition reads the pattern in the
+                    # returned frame, never the frame's mere existence.
+                    if "Cycle overview" in B.tmux_wait_text(tui, "Cycle overview", timeout=4):
+                        break
+                guide = self.settle_frame(tui, quiet_s=1.0, timeout=20)
+                side.evidence(flow, "04-hotkeys-guide.txt", guide)
+                frames[side.name]["hotkeys-guide"] = guide
+                if "Cycle overview" in guide and "Ctrl+O" not in guide:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel scrolled to the override's row (X, not Ctrl+O)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel did not show the effective override",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+                # Esc closes the panel deterministically: send the key,
+                # then poll until the panel's key-hint row is gone from
+                # the pane (the next step's ? must reach the EDITOR, not
+                # an open panel).
+                self.tui_send(tui, "Escape", enter=False)
+                deadline = time.time() + 20
+                closed = B.tmux_capture(tui)
+                while "Esc close" in closed and time.time() < deadline:
+                    time.sleep(0.5)
+                    closed = B.tmux_capture(tui)
+                if "Esc close" in closed:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel did not close on Esc",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+            # 5) The `?` key. TS (`app.shortcuts`, empty editor) mounts
+            #    the quick-shortcut guide and the next submission clears
+            #    it (`clearShortcutGuide`); Rust REMOVED the guide (the
+            #    operator's 2026-09-26 directive): the key types a
+            #    literal `?` into the editor and the guide's vocabulary
+            #    never mounts. Divergent BY DIRECTIVE — per-side
+            #    findings, no cross-side frame diff.
+            if side.name == "ts":
+                self.tui_send(tui, "?", enter=False)
+                guide2 = B.tmux_wait_text(tui, "shell mode", timeout=30)
+                guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
+                side.evidence(flow, "05-shortcut-guide.txt", guide2)
+                frames[side.name]["shortcut-guide"] = guide2
+                if "shell mode" in guide2 and "full reference" in guide2:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the ? quick-shortcut guide mounted with the effective bindings",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the ? quick-shortcut guide did not render",
+                        evidence=side.root / flow / "05-shortcut-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
             else:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: the ? quick-shortcut guide did not render",
-                    evidence=side.root / flow / "05-shortcut-guide.txt",
-                    lane=FLOW_LANES[flow],
-                )
+                self.tui_send(tui, "?", enter=False)
+                time.sleep(1.0)
+                guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
+                side.evidence(flow, "05-shortcut-guide.txt", guide2)
+                frames[side.name]["shortcut-guide"] = guide2
+                if "shell mode" not in guide2 and "full reference" not in guide2:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the removed ? guide never mounts (operator directive)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the removed ? guide still mounted",
+                        evidence=side.root / flow / "05-shortcut-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+                # Esc clears the typed `?` back to the empty editor:
+                # send the key, then poll until the `?` is gone from the
+                # pane (the typed char is the only `?` on this surface),
+                # so the closing submission starts from a clean editor.
+                self.tui_send(tui, "Escape", enter=False)
+                deadline = time.time() + 20
+                cleared_editor = B.tmux_capture(tui)
+                while "?" in cleared_editor and time.time() < deadline:
+                    time.sleep(0.5)
+                    cleared_editor = B.tmux_capture(tui)
+            # 6) The closing submission. TS clears the quick guide at its
+            #    top; Rust's editor is already clean (the panel closed on
+            #    Esc in step 4). Both sides run the turn and return to the
+            #    ready prompt; the guide vocabulary must be gone from
+            #    both frames.
             self.tui_send(tui, "f23 closing turn")
             cleared = self.settle_frame(tui, quiet_s=2.5, timeout=60)
             side.evidence(flow, "06-guide-cleared.txt", cleared)
             frames[side.name]["guide-cleared"] = cleared
-            if "shell mode" not in cleared:
+            if "shell mode" not in cleared and "full reference" not in cleared:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the submission cleared the quick-shortcut guide",
+                    f"{side.name}: the closing turn left the surface guide-free",
                     gap=False,
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the quick-shortcut guide survived the submission",
+                    f"{side.name}: the guide survived the closing submission",
                     evidence=side.root / flow / "06-guide-cleared.txt",
                     lane=FLOW_LANES[flow],
                 )
             B.tmux_kill(tui)
-        for step in ("detail-hint", "override-fired", "default-key", "hotkeys-guide", "shortcut-guide", "guide-cleared"):
+        # The detail-hint, override-fired, and default-key steps render
+        # identically on both sides (the keybindings engine is shared
+        # vocabulary); the /hotkeys and ? surfaces diverge BY OPERATOR
+        # DIRECTIVE (Rust: the read-only info panel + the removed guide),
+        # so only the shared steps carry the cross-side frame diff.
+        for step in ("detail-hint", "override-fired", "default-key"):
             self.frame_diff(
                 flow, step,
                 {name: frames[name].get(step, "") for name in ("ts", "rust")},

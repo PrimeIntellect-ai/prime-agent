@@ -45,6 +45,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
     PersistedSupervisorConfig, SUPERVISOR_CONFIG_FILE_NAME,
@@ -211,7 +212,7 @@ impl Supervisor {
                 ),
             },
         )?;
-        let (events, _) = broadcast::channel(4096);
+        let (events, _) = broadcast::channel(crate::backpressure::EVENT_RING_CAPACITY);
         let log = paths::RotatingLog::new(paths::daemon_log_path(
             &options.socket_path,
             &options.agent_dir,
@@ -773,7 +774,13 @@ impl Supervisor {
             {
                 let command = if kill_stop { "kill" } else { "shutdown" };
                 let _ = self
-                    .route_command(resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        resident,
+                        command,
+                        json!({}),
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -992,10 +999,46 @@ impl Supervisor {
         command_type: &str,
         payload: Value,
         timeout_ms: u64,
+        admission: RouteAdmission,
     ) -> Result<DaemonResponse> {
         let cmd_tx = {
             let guard = resident.cmd_tx.lock().await;
             guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
+        };
+        // Bounded admission (the Codex request/await split): a client's
+        // request-shaped command answers the explicit overload refusal
+        // the moment the worker's in-flight bound is full — nothing is
+        // queued and nothing is dropped, so the caller's retry cannot
+        // duplicate the command; supervisor-internal traffic waits for a
+        // slot inside the route's own budget, so control-plane routes are
+        // never refused. The whole route — admission, enqueue, and reply
+        // waits — never exceeds the caller's budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        // The semaphore methods take their Arc by value (the permit owns
+        // it for its lifetime), so the route hands them a strong reference
+        // of their own.
+        let inflight = Arc::clone(&resident.inflight);
+        let _permit = match admission {
+            RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_saturated) => {
+                    self.note_daemon_event("worker_overloaded", None);
+                    return Ok(crate::backpressure::overloaded_response(
+                        command_type,
+                        &resident.worker_id,
+                    ));
+                }
+            },
+            RouteAdmission::SupervisorInternal => {
+                match tokio::time::timeout_at(deadline, inflight.acquire_owned()).await {
+                    Ok(Ok(permit)) => permit,
+                    // Both remaining shapes are budget exhaustion: the
+                    // wait elapsed, or the semaphore closed with its
+                    // resident. The budget error is the same one a wedged
+                    // worker's silent route produces.
+                    Ok(Err(_)) | Err(_) => return Err(anyhow!("Session worker timed out")),
+                }
+            }
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1004,14 +1047,54 @@ impl Supervisor {
             .lock()
             .await
             .insert(request_id.clone(), reply_tx);
-        cmd_tx
-            .send(WorkerRequest {
-                request_id: request_id.clone(),
-                command_type: command_type.to_string(),
-                payload,
-            })
-            .map_err(|_| anyhow!(WORKER_NOT_CONNECTED))?;
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
+        // The enqueue seam of the bounded queue (the Codex full-queue
+        // answer, `mod.rs:228-259`): a full channel means the writer pump
+        // is wedged — parked frames whose routes already timed out freed
+        // their permits, so a slot can be free while the queue is not. A
+        // client command answers the same explicit overload refusal there;
+        // supervisor-internal traffic instead waits out the remaining
+        // budget (never refused, never silently dropped — the cancelled
+        // send enqueues nothing, so the refused request provably never
+        // left the supervisor and a retry cannot duplicate it).
+        let request = WorkerRequest {
+            request_id: request_id.clone(),
+            command_type: command_type.to_string(),
+            payload,
+        };
+        let unsent = match cmd_tx.try_send(request) {
+            Ok(()) => None,
+            Err(mpsc::error::TrySendError::Full(unsent)) => Some(unsent),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                resident.pending.lock().await.remove(&request_id);
+                return Err(anyhow!(WORKER_NOT_CONNECTED));
+            }
+        };
+        if let Some(unsent) = unsent {
+            match admission {
+                RouteAdmission::ClientRequest => {
+                    resident.pending.lock().await.remove(&request_id);
+                    self.note_daemon_event("worker_overloaded", None);
+                    return Ok(crate::backpressure::overloaded_response(
+                        command_type,
+                        &resident.worker_id,
+                    ));
+                }
+                RouteAdmission::SupervisorInternal => {
+                    match tokio::time::timeout_at(deadline, cmd_tx.send(unsent)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_channel_closed)) => {
+                            resident.pending.lock().await.remove(&request_id);
+                            return Err(anyhow!(WORKER_NOT_CONNECTED));
+                        }
+                        Err(_budget_elapsed) => {
+                            resident.pending.lock().await.remove(&request_id);
+                            return Err(anyhow!("Session worker timed out"));
+                        }
+                    }
+                }
+            }
+        }
+        match tokio::time::timeout_at(deadline, reply_rx).await {
             // The writer pump resolves provably-unsent requests with the
             // not-connected failure: surface it as the retryable route
             // error instead of a worker response.
@@ -1044,13 +1127,17 @@ impl Supervisor {
     /// error (the request never left the supervisor) is retried against the
     /// next connection, while ambiguous failures (timeouts, dropped
     /// replies) are returned as-is so a possibly-processed command is
-    /// never duplicated.
+    /// never duplicated. The [`RouteAdmission`] overload refusal passes
+    /// through untouched: the request never left the supervisor, and the
+    /// caller — not this loop — owns the retry (a saturated worker stays
+    /// saturated for the remainder of the budget).
     pub(crate) async fn route_command_ready(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         command_type: &str,
         payload: Value,
         timeout_ms: u64,
+        admission: RouteAdmission,
     ) -> Result<DaemonResponse> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
@@ -1059,7 +1146,13 @@ impl Supervisor {
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
             match self
-                .route_command(resident, command_type, payload.clone(), remaining_ms)
+                .route_command(
+                    resident,
+                    command_type,
+                    payload.clone(),
+                    remaining_ms,
+                    admission,
+                )
                 .await
             {
                 // The socket died between the liveness check and the send
@@ -1332,7 +1425,13 @@ impl Supervisor {
         };
         let mut child = child;
         let response = match self
-            .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "create",
+                create_payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -1515,13 +1614,30 @@ impl Supervisor {
         // Completed dispatches flow back through this channel so the loop
         // keeps writing: a long command (a turn, a compaction) must not
         // block this client's events or its other commands, like the TS
-        // daemon's async command handlers.
-        let (dispatch_tx, mut dispatch_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Vec<Value>, bool)>();
+        // daemon's async command handlers. Bounded at
+        // [`crate::backpressure::CLIENT_OUTBOUND_CAPACITY`]: a client that
+        // reads nothing stalls only its own dispatch tasks once the queue
+        // fills — memory stays bounded per connection — while every other
+        // client and worker is unaffected.
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+            crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
+        );
+        // One dispatch slot per concurrent command. The read arm is armed
+        // only while a slot is free — at the bound the loop stops reading
+        // the client's socket (the client's own send buffer carries its
+        // input: transport-level flow control instead of unbounded task
+        // spawn), while the dispatch and event arms keep draining, so the
+        // running tasks free their slots and the loop always re-arms the
+        // reader. A spawned task holds its slot until its response bundle
+        // has been handed to the queue, so a task parked on a full
+        // outbound queue still counts against this connection's bound.
+        let dispatch_slots = Arc::new(tokio::sync::Semaphore::new(
+            crate::backpressure::CLIENT_DISPATCH_CONCURRENCY,
+        ));
         loop {
             line.clear();
             tokio::select! {
-                read = reader.read_line(&mut line) => {
+                read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break };
                     if read == 0 {
                         break;
@@ -1530,6 +1646,13 @@ impl Supervisor {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // The arm's guard proved a slot free (this loop is
+                    // the only slot acquirer, and slots only free while
+                    // the loop is between iterations), so the non-blocking
+                    // take always succeeds.
+                    let dispatch_slot = Arc::clone(&dispatch_slots)
+                        .try_acquire_owned()
+                        .expect("the read arm's guard held a dispatch slot");
                     let supervisor = Arc::clone(&self);
                     let effective_client_id = Arc::clone(&effective_client_id);
                     let attached = Arc::clone(&attached);
@@ -1554,7 +1677,7 @@ impl Supervisor {
                                 &stream_tx,
                             )
                             .await;
-                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                        if dispatch_tx.send((lines, stop)).await.is_err() && stop {
                             // The initiating connection left before its response
                             // was selected. Only a terminal shutdown owns the
                             // descriptor-deleting stop pass; an update restart
@@ -1572,6 +1695,10 @@ impl Supervisor {
                                 supervisor.ensure_shutdown_started().await;
                             }
                         }
+                        // The slot frees only once the bundle is in the
+                        // queue: a task parked on a full outbound queue
+                        // still counts against this connection's bound.
+                        drop(dispatch_slot);
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
@@ -1632,7 +1759,18 @@ impl Supervisor {
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // A lagged receiver means the shared event ring
+                        // ([`crate::backpressure::EVENT_RING_CAPACITY`])
+                        // dropped this many events for THIS connection:
+                        // the loss itself is the broadcast's defined
+                        // backpressure, but it must never stay invisible
+                        // (finding 4a) — the daemon log records which
+                        // client lost how much.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            self.log_line(&format!(
+                                "client {connection_id} lagged on the event ring: {skipped} events dropped"
+                            ));
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -1659,7 +1797,13 @@ impl Supervisor {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(&resident, "detach", payload, ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        &resident,
+                        "detach",
+                        payload,
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -1687,7 +1831,7 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -1829,7 +1973,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2461,7 +2605,13 @@ impl Supervisor {
             let resident = Arc::clone(resident);
             async move {
                 let response = self
-                    .route_command(&resident, "update_snapshot", json!({}), rpc_timeout)
+                    .route_command(
+                        &resident,
+                        "update_snapshot",
+                        json!({}),
+                        rpc_timeout,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await?;
                 if !response.success {
                     anyhow::bail!(
@@ -3064,7 +3214,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3177,8 +3327,29 @@ impl Supervisor {
                 // A failed send is the connection loop's death notice (its
                 // receiver is gone): the remaining folds serve nobody, so
                 // the callback stops the scan (the response travels the
-                // same dead channel and drops with it).
-                stream_rows.send((vec![item, progress], false)).is_ok()
+                // same dead channel and drops with it). The scan runs on
+                // the blocking pool, so it must never wait on client I/O:
+                // a FULL queue skips the PROGRESS frame first and retries
+                // the row (the row is the data; the frame is a UI hint),
+                // and a still-full queue skips the row too — the terminal
+                // response carries the authoritative rows regardless,
+                // and the fold still has to visit every file for the data
+                // itself.
+                let mut bundle = (vec![item, progress], false);
+                loop {
+                    match stream_rows.try_send(bundle) {
+                        Ok(()) => break true,
+                        Err(mpsc::error::TrySendError::Full((mut unsent, stopped))) => {
+                            if unsent.len() > 1 {
+                                unsent.pop();
+                                bundle = (unsent, stopped);
+                                continue;
+                            }
+                            break true;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break false,
+                    }
+                }
             });
             (infos, file_total)
         });
@@ -3259,7 +3430,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 item["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![item], false));
+            let _ = stream.send((vec![item], false)).await;
         }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
@@ -3301,7 +3472,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 completion["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![completion], false));
+            let _ = stream.send((vec![completion], false)).await;
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the
@@ -3526,7 +3697,13 @@ impl Supervisor {
     /// fallback for an unreachable worker.
     async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
         let response = self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         match response {
             Ok(response) if response.success => response
@@ -3619,7 +3796,13 @@ impl Supervisor {
         // authoritative create summary instead of failing the spawn (the
         // session is durable at this point; the child is healthy).
         let summary = match self
-            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) if response.success => {
@@ -3774,7 +3957,13 @@ impl Supervisor {
         }
         for resident in self.registry.list().await {
             let response = self
-                .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             if let Ok(response) = response {
                 if let Some(data) = &response.data {
@@ -4037,9 +4226,18 @@ impl Supervisor {
         // inside the command's own budget: a command aimed at a worker that
         // crashed and is being relaunched (crash backoff, relaunch, create
         // replay) must not be lost to the dead window, and must never
-        // overtake the replayed session into existence.
+        // overtake the replayed session into existence. `Kill` is the one
+        // client command with a durable pre-route side effect — its stop
+        // tombstone persists before the route — so it rides the
+        // never-refused control admission: a saturation refusal ("nothing
+        // happened, retry") would contradict the landed tombstone, while
+        // the budget-bounded wait keeps the route's honest timeout shape.
+        let admission = match command {
+            DaemonCommand::Kill { .. } => RouteAdmission::SupervisorInternal,
+            _ => RouteAdmission::ClientRequest,
+        };
         let response = self
-            .route_command_ready(&resident, worker_command, payload, timeout)
+            .route_command_ready(&resident, worker_command, payload, timeout, admission)
             .await;
         match response {
             Ok(mut response) => {
@@ -4134,44 +4332,31 @@ impl Supervisor {
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
-                    if response.success {
-                        // The kill route's own tombstone already persisted
-                        // before the forward, so the stop's durable intent
-                        // stands even when this pass fails; a failure is
-                        // observable (logged) instead of silently
-                        // skipping the retire/registry/passivation tail —
-                        // the boot's tombstoned-stop finalization owns
-                        // whatever this pass could not finish.
+                    // TS's root-kill block wraps the forward in a `finally`
+                    // (daemon-supervisor.ts: `try { response = await
+                    // this.forwardToWorker(...) } finally { await
+                    // this.stopWorker(...) }`): the stop completes on a
+                    // rejected or timed-out forward too — a worker that
+                    // ignores the routed kill would otherwise keep its
+                    // session lease behind a route that never answers (the
+                    // supervisor lives, so no supervisor-lost GC fires) and
+                    // the escalation in `retire_worker_after_stop` would
+                    // never run. The marker-carrying child closes keep the
+                    // success gate: TS forwards them without a stop, and a
+                    // failed cascade is the parent's retry, not a stop.
+                    if plain_kill {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    } else if response.success {
+                        // The cascade stop: a failure is observable (logged)
+                        // instead of silently skipping the
+                        // retire/registry/passivation tail — the boot's
+                        // tombstoned-stop finalization owns whatever this
+                        // pass could not finish.
                         if let Err(error) = self.stop_worker(&resident).await {
                             self.log_line(&format!(
                                 "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
                                 resident.worker_id
                             ));
-                        }
-                        // TS `stopWorkerUntracked`'s archived-stop finalize
-                        // (the plain kill's durable half): the killed
-                        // session tree's scheduled jobs cancel durably and
-                        // the root file carries the `archived` state, so no
-                        // wake pass can revive the stopped session. A
-                        // ledger-tombstoned delete also sweeps the deleted
-                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
-                        // A marker-carrying child close is a cascade, not a
-                        // stop: no finalize (the child's own close arms
-                        // already carried the parent's reason).
-                        if plain_kill {
-                            let deleted_child = rest
-                                .get("rlmLedgerDelete")
-                                .and_then(Value::as_str)
-                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-                                .map(|_| crate::stop_cleanup::DeletedChild {
-                                    child_id: rest
-                                        .get("rlmChildId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                });
-                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
-                                .await;
                         }
                     }
                 }
@@ -4206,16 +4391,84 @@ impl Supervisor {
                 }
                 (vec![response_line(&response)], false)
             }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
+            Err(error) => {
+                // TS's root-kill `finally` runs its stop on a thrown
+                // forward as well (a hung worker never answers the routed
+                // kill): the stop escalates — the bounded `shutdown` route,
+                // then `retire_worker_after_stop`'s SIGTERM -> SIGKILL ->
+                // hard-deadline pass — so the stopped worker's session
+                // lease cannot outlive the command. The marker-carrying
+                // child closes keep TS's plain forward: a failed cascade is
+                // the parent's retry.
+                if plain_kill {
+                    if let DaemonCommand::Kill { rest, .. } = command {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    }
+                }
+                (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &error.to_string(),
+                        None,
+                    ))],
+                    false,
+                )
+            }
         }
+    }
+
+    /// The plain kill's stop aftermath, run on every route outcome: TS's
+    /// root-kill block wraps the forward in a `finally`
+    /// (daemon-supervisor.ts: `try { response = await
+    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
+    /// so a kill a hung worker never answers still completes the stop —
+    /// the graceful `shutdown` route bounded by the route budget, then
+    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
+    /// hard-deadline escalation — and the stopped worker's session lease
+    /// frees through the dead-owner reclaim instead of outliving the
+    /// command behind a route that never answers.
+    ///
+    /// The stop runs first and its failure gates the belt: the only
+    /// `Err` [`Self::stop_worker`] takes is the stop tombstone's persist
+    /// (the stop never durably started — TS's `stopWorkerUntracked`
+    /// throws before any teardown), so the worker stays untouched and
+    /// the kill stays retryable. The belt below must never run against
+    /// a live worker: it cancels the session tree's jobs, archives the
+    /// root file, and sweeps a ledger delete's child artifacts while
+    /// the worker's resident is still serving and its transcript may
+    /// still grow.
+    async fn finish_plain_kill_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        rest: &Map<String, Value>,
+    ) {
+        if let Err(error) = self.stop_worker(resident).await {
+            self.log_line(&format!(
+                "session worker {} stop after kill failed: {error:#}; the stop never durably started and stays retryable",
+                resident.worker_id
+            ));
+            return;
+        }
+        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
+        // kill's durable half): the killed session tree's scheduled jobs
+        // cancel durably and the root file carries the `archived` state,
+        // so no wake pass can revive the stopped session. A
+        // ledger-tombstoned delete also sweeps the deleted child's
+        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        let deleted_child = rest
+            .get("rlmLedgerDelete")
+            .and_then(Value::as_str)
+            .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+            .map(|_| crate::stop_cleanup::DeletedChild {
+                child_id: rest
+                    .get("rlmChildId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        self.finalize_worker_stop(resident, deleted_child.as_ref())
+            .await;
     }
 
     pub(crate) async fn stop_worker(
@@ -4239,7 +4492,13 @@ impl Supervisor {
         // fail fast instead of parking on this worker.
         resident.note_retired();
         let _ = self
-            .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         // The per-session stop shares the terminal-stop contract: the
         // descriptor dies only with a provably-gone process, so a worker
@@ -4344,7 +4603,13 @@ impl Supervisor {
                 continue;
             }
             let _ = self
-                .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             self.retire_worker_after_stop(&resident).await;
         }
@@ -4694,7 +4959,13 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
     ) -> Result<()> {
         resident.intentional_stop.store(true, Ordering::SeqCst);
         let response = self
-            .route_command(resident, "shutdown", json!({}), timeout.as_millis() as u64)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                timeout.as_millis() as u64,
+                RouteAdmission::SupervisorInternal,
+            )
             .await?;
         if !response.success {
             anyhow::bail!(
@@ -5091,6 +5362,174 @@ mod tests {
         );
     }
 
+    /// A kill whose stop never durably started — the stop tombstone's
+    /// persist fails, the only `Err` `stop_worker` takes — must not run
+    /// the kill's belt: the worker is untouched and the kill stays
+    /// retryable (TS `stopWorkerUntracked` throws before any teardown).
+    /// The belt otherwise cancels the session tree's jobs, archives the
+    /// root file, and — for a ledger delete — sweeps the child's
+    /// artifacts against a live worker whose resident still serves the
+    /// file (its stores may still grow).
+    #[tokio::test]
+    async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_file = sessions_dir.join("live-1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"version\":3,\"id\":\"live-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+        )
+        .unwrap();
+        // The live child's artifact partition: a ledger delete's belt
+        // would sweep it; the gated belt must leave it in place.
+        let artifacts = agent_dir.join("session-artifacts").join("live-1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: Some(session_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the stop tombstone's
+        // atomic write cannot land there (the rename onto a directory
+        // fails), so the stop never durably starts.
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        // A ledger-delete kill (delete_subagent's shape: the rest carries
+        // the marker, so the plain-kill path owns it).
+        let rest = Map::from_iter([
+            ("rlmLedgerDelete".to_string(), json!("user")),
+            ("rlmChildId".to_string(), json!("child-1")),
+        ]);
+        supervisor.finish_plain_kill_stop(&resident, &rest).await;
+
+        // The stop never started: the resident stays owned (retryable)
+        // and the live child's artifacts survive the belt.
+        assert!(
+            supervisor.registry.get("w-live").await.is_some(),
+            "the stop never durably started, so the worker stays owned"
+        );
+        assert!(
+            artifacts.join("scheduled-jobs.json").is_file(),
+            "a belt gated behind a failed stop must not sweep a live child's artifacts"
+        );
+    }
+
+    /// A plain kill holds the route-side tombstone when its stop's
+    /// redundant re-write fails: the durable intent is already on disk,
+    /// so the stop proceeds (the escalation runs, the registry row goes,
+    /// the stop is intentional) instead of aborting and leaving the
+    /// killed worker running on its session lease until the next boot —
+    /// the finding-#5 symptom. The belt gate stays keyed on the stop
+    /// that never durably started: no tombstone at all still fails.
+    #[tokio::test]
+    async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: None,
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            // The route-side tombstone the plain kill's pre-route persist
+            // wrote before the forward.
+            stop_requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+            archive_on_stop: Some(true),
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the tombstone's redundant
+        // re-write fails (the rename onto a directory cannot land).
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        supervisor
+            .stop_worker(&resident)
+            .await
+            .expect("the durable tombstone must carry the stop past its failed re-write");
+
+        assert!(
+            supervisor.registry.get("w-live").await.is_none(),
+            "the stop completed: the worker left the registry"
+        );
+        assert!(
+            resident.intentional_stop.load(Ordering::SeqCst),
+            "the stop is intentional"
+        );
+    }
+
     /// The first OS signal's drain: the gate rejects new work, every
     /// client gets the `daemon_closing` event, and the running turn
     /// settles inside its worker's routed `shutdown` before the stop
@@ -5133,7 +5572,10 @@ mod tests {
         // The fake worker connection: the routed `shutdown` reply is the
         // flush barrier, so it is held until the test releases the turn's
         // settle.
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        // The bounded command-channel type (the backpressure lane's
+        // request-path bound): one slot is plenty for the single routed
+        // `shutdown`.
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
         *resident.cmd_tx.lock().await = Some(cmd_tx);
         let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
         let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
@@ -5328,5 +5770,97 @@ mod tests {
             !supervisor.shutting_down.load(Ordering::SeqCst),
             "the committed update stop must not become a terminal stop pass"
         );
+    }
+
+    /// A client that falls behind the shared event ring loses events (the
+    /// broadcast's defined backpressure), but never silently anymore
+    /// (finding 4a): the loss becomes a durable daemon-log line naming the
+    /// client and the dropped count. Drives a real connection loop
+    /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lagged_client_event_stream_is_logged() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        // The test's client only reads; its write half stays held so the
+        // connection's writes fail only when the test ends.
+        let (client_read, _client_write) = client_side.into_split();
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The handshake greeting arrives before the loop's first poll.
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        // The greeting is written BEFORE the loop subscribes to the
+        // event ring, so the flood must wait for the subscription to
+        // exist — sends into a receiver-less ring are dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while supervisor.events.receiver_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the connection loop never subscribed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Flood the ring well past its capacity with frames too big for
+        // the client's socket buffer: the connection loop parks in its
+        // event write, its receiver falls out of the ring's live window,
+        // and the parked write only completes once the drain frees the
+        // buffer again.
+        let capacity = crate::backpressure::EVENT_RING_CAPACITY;
+        let padding = "x".repeat(2048);
+        let flood = capacity + 2048;
+        for index in 0..flood {
+            let _ = supervisor.events.send((
+                ClientRouting::Broadcast,
+                json!({ "type": "session_event", "index": index, "padding": padding }),
+            ));
+        }
+        // Drain the parked connection while watching for the log line: the
+        // loop unparks as the reader frees the socket buffer, its next
+        // event read reports the dropped span, and the loss lands in the
+        // daemon log. The quiet counter only bounds an idle connection,
+        // never a live one (a slow runner may pace the backlog, so the
+        // drain continues as long as the log line has not landed).
+        let mut buffer = vec![0u8; 64 * 1024];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("lagged on the event ring") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lagged drain was never logged; log: {log}"
+            );
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(_) | Err(_)) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        };
+        let line = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("lagged on the event ring"))
+            .expect("the lag line");
+        assert!(
+            line.contains("events dropped"),
+            "the log names the dropped count: {line}"
+        );
+        connection.abort();
     }
 }
