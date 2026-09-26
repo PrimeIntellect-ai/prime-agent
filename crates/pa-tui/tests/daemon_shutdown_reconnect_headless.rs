@@ -98,9 +98,14 @@ impl FirstGeneration {
                     write_json(&mut writer, &attach_data(id));
                 }
                 "prompt" => {
-                    // The mounted turn completes, then the daemon
-                    // announces its non-update closing and exits (the
-                    // socket dies with it).
+                    // The turn stays mid-flight when the daemon announces
+                    // its non-update closing and exits — the operator's
+                    // shutdown does not wait for turns (and the live-turn
+                    // shape also keeps the pane's post-turn stats refresh
+                    // off the dying socket: a turn-end batched with the
+                    // closing would hang the loop's inline refresh the
+                    // full request budget before the recovery could
+                    // poll).
                     write_json(&mut writer, &success_response(id, "prompt"));
                     let question = command
                         .get("message")
@@ -142,20 +147,6 @@ impl FirstGeneration {
                             },
                         }),
                     );
-                    write_session_event(
-                        &mut writer,
-                        &json!({
-                            "type": "message_end",
-                            "message": {
-                                "role": "assistant",
-                                "stopReason": "stop",
-                                "content": [
-                                    { "type": "text", "text": "the streamed answer" },
-                                ],
-                            },
-                        }),
-                    );
-                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
                     write_json(
                         &mut writer,
                         &json!({ "type": "daemon_closing", "reason": "shutdown" }),
