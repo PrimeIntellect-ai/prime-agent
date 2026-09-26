@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use crate::fuzzy::fuzzy_filter;
 use crate::keybindings::KeybindingsManager;
-use crate::menu_panel::{menu_row, search_field_lines};
+use crate::menu_panel::{key_hint, menu_row, search_field_lines};
 use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::Line;
@@ -162,6 +162,21 @@ pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 /// session engine).
 pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
 
+/// The other subscription providers' ids (the same wire identifiers,
+/// carried the same way).
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
+pub const XAI_PROVIDER_ID: &str = "xai";
+
+/// The subscription rows whose logins run on the panel (TS
+/// `loginProvider`'s oauth dispatch): every flow checks the
+/// cooperative cancel flag (#2770).
+pub const SUBSCRIPTION_PROVIDER_IDS: [&str; 4] = [
+    ANTHROPIC_PROVIDER_ID,
+    GITHUB_COPILOT_PROVIDER_ID,
+    OPENAI_CODEX_PROVIDER_ID,
+    XAI_PROVIDER_ID,
+];
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
@@ -413,8 +428,10 @@ impl ProviderAuthSelector {
         self.kind == AuthSelectorKind::Logout
     }
 
-    /// The panel's rendered rows.
-    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<Line> {
+    /// The panel's rendered rows. The hint rows render the effective
+    /// bindings, so a user `keybindings.json` override moves the hint
+    /// with the handler.
+    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         // The logout selector and the API-key prompt keep their framed
         // header (the rule, the title, the subtitle); the login menu
@@ -439,10 +456,15 @@ impl ProviderAuthSelector {
                 lines.push(Vec::new());
                 let prompt = format!("  Enter API key: {}", input.value());
                 lines.push(vec![crate::Span::raw(prompt)]);
-                lines.push(vec![theme.fg_span(
-                    ThemeColor::Muted,
-                    "  enter submit  escape back".to_string(),
-                )]);
+                let hints = [
+                    key_hint(kb, &["tui.select.confirm"], "submit"),
+                    key_hint(kb, &["tui.select.cancel"], "back"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>()
+                .join("  ");
+                lines.push(vec![theme.fg_span(ThemeColor::Muted, format!("  {hints}"))]);
                 lines.push(vec![
                     theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
                 ]);
@@ -528,10 +550,16 @@ impl ProviderAuthSelector {
                 }
             }
         }
-        lines.push(vec![theme.fg_span(
-            ThemeColor::Muted,
-            "  ↑↓ navigate  enter select  escape cancel".to_string(),
-        )]);
+        let hints = [
+            key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
+            key_hint(kb, &["tui.select.confirm"], "select"),
+            key_hint(kb, &["tui.select.cancel"], "cancel"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join("  ");
+        lines.push(vec![theme.fg_span(ThemeColor::Muted, format!("  {hints}"))]);
         if framed {
             lines.push(vec![
                 theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
@@ -710,7 +738,7 @@ mod tests {
         };
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![codex_signed_in, anthropic()]);
-        let rows = selector.render(&theme(), 80);
+        let rows = selector.render(&theme(), 80, &kb());
         let plain = |line: &crate::Line| {
             line.iter()
                 .map(|span| span.content.clone())
@@ -792,8 +820,8 @@ mod tests {
         // under it.
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), linear()]);
-        selector.render(&theme(), 80);
-        let rows = selector.render(&theme(), 80);
+        selector.render(&theme(), 80, &kb());
+        let rows = selector.render(&theme(), 80, &kb());
         let text = rows
             .iter()
             .map(|line| {
@@ -830,7 +858,7 @@ mod tests {
         assert_eq!(rows.last(), Some(&Vec::new()), "one blank under the hint");
         let hint_index = text
             .iter()
-            .position(|row| row.contains("↑↓ navigate"))
+            .position(|row| row.contains("\u{2191}/\u{2193} navigate"))
             .expect("the hint row");
         assert_eq!(
             hint_index,
@@ -842,7 +870,7 @@ mod tests {
     #[test]
     fn the_logout_selector_renders_the_ts_chrome() {
         let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Logout, vec![openai()]);
-        let rows = selector.render(&theme(), 80);
+        let rows = selector.render(&theme(), 80, &kb());
         let text = rows
             .iter()
             .map(|line| {
@@ -865,7 +893,7 @@ mod tests {
     #[test]
     fn the_empty_login_list_renders_the_ts_empty_message() {
         let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, Vec::new());
-        let rows = selector.render(&theme(), 80);
+        let rows = selector.render(&theme(), 80, &kb());
         let text = rows
             .iter()
             .map(|line| {

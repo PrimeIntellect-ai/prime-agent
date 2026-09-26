@@ -435,6 +435,37 @@ fn rust_daemon_cli_commands_end_to_end() {
     assert_eq!(bogus.status.code(), Some(1));
     assert_eq!(stderr(&bogus), "Error: Unknown list option: --bogus\n");
 
+    // Golden: empty sessions table messages (TS binary output).
+    let sessions_empty = run_cli(
+        &cli,
+        dir.path(),
+        &agent_dir,
+        &list_args(&socket_str, &["sessions"]),
+    );
+    assert_eq!(sessions_empty.status.code(), Some(0));
+    assert_eq!(stdout(&sessions_empty), "No active agents.\n");
+
+    let sessions_all = run_cli(
+        &cli,
+        dir.path(),
+        &agent_dir,
+        &list_args(&socket_str, &["sessions", "--all"]),
+    );
+    assert_eq!(stdout(&sessions_all), "No agents.\n");
+
+    // Golden: unknown sessions option (TS binary error).
+    let sessions_bogus = run_cli(
+        &cli,
+        dir.path(),
+        &agent_dir,
+        &list_args(&socket_str, &["sessions", "--bogus"]),
+    );
+    assert_eq!(sessions_bogus.status.code(), Some(1));
+    assert_eq!(
+        stderr(&sessions_bogus),
+        "Error: Unknown sessions option: --bogus\n"
+    );
+
     // One scripted session.
     let script = dir.path().join("script.json");
     std::fs::write(
@@ -492,6 +523,39 @@ fn rust_daemon_cli_commands_end_to_end() {
     ] {
         assert!(row.get(key).is_some(), "summary row must carry {key}");
     }
+
+    // Golden: the sessions operator table over the live session (TS binary
+    // shape): the header, the named row, and its idle status; the
+    // last-heard mark, activity, error, and usage cells stay empty for a
+    // healthy idle session that never recorded a spend.
+    let sessions_table = run_cli(
+        &cli,
+        dir.path(),
+        &agent_dir,
+        &list_args(&socket_str, &["sessions"]),
+    );
+    assert_eq!(
+        sessions_table.status.code(),
+        Some(0),
+        "{}",
+        stderr(&sessions_table)
+    );
+    assert_eq!(
+        normalize(&stdout(&sessions_table)),
+        "name status activity last heard error usage\nparity idle\n",
+        "sessions table shape must match the TS golden"
+    );
+
+    // The sessions --json dump is the same list RPC data (the sessions
+    // command reuses it, TS `runSessions`).
+    let sessions_json = run_cli(
+        &cli,
+        dir.path(),
+        &agent_dir,
+        &list_args(&socket_str, &["sessions", "--json"]),
+    );
+    let parsed: Value = serde_json::from_str(&stdout(&sessions_json)).expect("valid json sessions");
+    assert_eq!(parsed["sessions"][0]["sessionName"], "parity");
 
     // Golden: rename output (TS binary).
     let rename = run_cli(
@@ -788,6 +852,38 @@ fn ts_daemon_differential_cli_output() {
     let rs_json: Value = serde_json::from_str(&stdout(&rs_list_json)).expect("rust json");
     if canonicalize(&ts_json) != canonicalize(&rs_json) {
         failures.push(format!("list --json: ts {ts_json} vs rs {rs_json}"));
+    }
+
+    // The sessions operator table (TS #2422): the same list RPC rendered as
+    // the one-line-per-agent table, plus its flag surface.
+    compare(
+        &mut failures,
+        &["sessions"],
+        &["sessions"],
+        "sessions table",
+    );
+    compare(
+        &mut failures,
+        &["sessions", "--all"],
+        &["sessions", "--all"],
+        "sessions table --all",
+    );
+    compare(
+        &mut failures,
+        &["sessions", "--bogus"],
+        &["sessions", "--bogus"],
+        "sessions unknown option",
+    );
+    let ts_sessions_json = run_cli(&ts, dir.path(), &agent_dir, &["sessions", "--json"]);
+    let rs_sessions_json = run_cli(&rust, dir.path(), &agent_dir, &["sessions", "--json"]);
+    let ts_sessions: Value =
+        serde_json::from_str(&stdout(&ts_sessions_json)).expect("ts sessions json");
+    let rs_sessions: Value =
+        serde_json::from_str(&stdout(&rs_sessions_json)).expect("rust sessions json");
+    if canonicalize(&ts_sessions) != canonicalize(&rs_sessions) {
+        failures.push(format!(
+            "sessions --json: ts {ts_sessions} vs rs {rs_sessions}"
+        ));
     }
 
     // Both renames target the same session with the same new name.

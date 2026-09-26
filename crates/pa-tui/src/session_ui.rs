@@ -4,7 +4,6 @@
 //! view crate modules; this module only decides what the view shows.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
@@ -18,6 +17,7 @@ use crate::chat::{
     ToolResultView, WorkingState,
 };
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
+use crate::daemon_reconnect::RecoveryKind;
 use crate::effort_picker::{self, EffortPickerAction};
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
 use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
@@ -30,6 +30,7 @@ use crate::image_markers::{
     collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
 };
 use crate::info_commands;
+use crate::info_panel::{InfoContent, InfoPanelAction};
 use crate::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
 use crate::keys::key_event_to_id;
 use crate::model_picker::{
@@ -38,7 +39,6 @@ use crate::model_picker::{
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
-use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };
@@ -75,6 +75,12 @@ const ESCAPE_REPEAT_WINDOW_MS: std::time::Duration = std::time::Duration::from_m
 /// best-effort like the detach, never able to hold the exit open.
 const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 
+/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (auth-flows.ts, #2645): the
+/// ban-risk warning a completed Anthropic subscription login shows once
+/// per session (the settings toggle `warnings.anthropicExtraUsage`
+/// gates it).
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
+
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
@@ -98,6 +104,77 @@ pub(crate) type TracesUploadNote = crate::traces::TraceUploadAllNote;
 /// The `/reload` task's report: the daemon reloaded the session's live
 /// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
 pub(crate) type ReloadNote = Result<(), String>;
+
+/// One backgrounded prompt round trip's settled outcome (TS `onSubmit`
+/// awaits `agentConnection.prompt` off the render path —
+/// `interactive-mode.ts` clears the editor and lets Ink paint before the
+/// await, and the daemon answer folds back later): `Ok(())` is an
+/// admitted/queued prompt; the error is the daemon failure the inline
+/// await used to surface on the key path.
+pub(crate) struct PromptSubmitNote {
+    /// The submit-time active id: the outcome applies only while the
+    /// client still holds that session (a switch, a supersede rebind, or
+    /// a `/new` replaced it) — TS's staleness guard for a submit that
+    /// outlived its session.
+    pub(crate) active_session_id: String,
+    /// The submit-time durable session id: a stale FAILURE retains its
+    /// rejected draft into THAT session's stash (TS `retainSubmittedDraft`
+    /// targets the submit-time `submissionStashState`), never the newly
+    /// mounted session's.
+    pub(crate) session_id: String,
+    /// The submitted text (the draft restore and the rebind replay).
+    pub(crate) text: String,
+    /// The submit lane (the queued-input telemetry and the rebind replay).
+    pub(crate) behavior: SubmitBehavior,
+    /// The collected prompt images (the rebind replay sends the same set).
+    pub(crate) images: Option<serde_json::Value>,
+    /// The submit-time image snapshot behind the submitted text's markers
+    /// (TS `snapshotPromptStash` at submit): the refusal's retention keeps
+    /// the attachments rehydratable even after the editor cleared and the
+    /// registry could evict them.
+    pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
+    /// Whether the turn was already active at submit time (the
+    /// queued-input telemetry's lane gate; the inline path read the same
+    /// flag after its await, which nothing could move while the loop was
+    /// blocked).
+    pub(crate) turn_was_active: bool,
+    /// The expected end of this admitted prompt in submit order.
+    pub(crate) expected_turn_end: u64,
+    /// The submit's generation (TS `inputSubmissionGeneration`): a newer
+    /// submit supersedes an older one's draft-restore right.
+    pub(crate) generation: u64,
+    /// Whether a failure may still rebind once (the replayed request is
+    /// the second and last attempt — the inline path's
+    /// `rebind_available`).
+    pub(crate) rebind_available: bool,
+    /// The settled request: admitted/queued on `Ok`; the daemon error
+    /// otherwise.
+    pub(crate) result: Result<(), anyhow::Error>,
+}
+
+/// One queued prompt round trip for the submit worker (the ordered channel
+/// that replaces per-submit spawns): the worker drains its inbox one
+/// request at a time, so the wire write for submit N+1 only happens after
+/// submit N's round trip settles — cross-submit order is guaranteed on
+/// the terminal path exactly like the blocked loop and TS's single-threaded
+/// event loop guaranteed it (a per-submit `tokio::spawn` would schedule
+/// the writes independently and could reorder two rapid submits).
+pub(crate) struct PromptOrder {
+    /// The connection the request travels on (captured per submit: the
+    /// reconnect driver can replace the client between submits, and a
+    /// long-lived worker must never hold the superseded connection).
+    pub(crate) client: DaemonClient,
+    pub(crate) active_session_id: String,
+    pub(crate) session_id: String,
+    pub(crate) text: String,
+    pub(crate) behavior: SubmitBehavior,
+    pub(crate) images: Option<serde_json::Value>,
+    pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
+    pub(crate) turn_was_active: bool,
+    pub(crate) expected_turn_end: u64,
+    pub(crate) generation: u64,
+    pub(crate) rebind_available: bool,
+}
 
 /// One backgrounded compaction-abort outcome (the abort supervision's UI
 /// recovery): a failed abort request surfaces as the transcript note and
@@ -337,6 +414,9 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+    /// The ban-risk warning's once-per-session gate (TS
+    /// `anthropicSubscriptionWarningShown`).
+    anthropic_subscription_warning_shown: bool,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,
@@ -379,6 +459,9 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot tray effort suffix for the next rebuild (the attach
+    /// state's level; `None` clears it).
+    pending_thinking_suffix: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -387,9 +470,18 @@ pub(crate) struct SessionUi {
     /// Context usage + cost refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
     cost_usd: Option<f64>,
+    /// The aggregate descendant-subagent spend from the same stats (the
+    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
+    /// split fields).
+    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// Completed turns observed on this connection. A prompt ACK may arrive
+    /// after its entire streamed turn; it must not restart the loader then.
+    turn_ends_seen: u64,
+    /// The last submitted prompt's expected completion in wire order.
+    last_prompt_turn_end: u64,
     /// The session's queue delivery mode (TS `steeringMode`, the state's
     /// `steeringMode`): `all` delivers the queued steering prefix as one
     /// batched turn at the boundary; `one-at-a-time` one per turn. The
@@ -532,6 +624,21 @@ pub(crate) struct SessionUi {
     /// Compaction-abort outcomes from the backgrounded request (the abort
     /// supervision's UI recovery): a failed abort clears the stuck loader.
     compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
+    /// The ordered inbox the single submit worker drains (see
+    /// [`PromptOrder`]): one in-flight request at a time keeps the wire
+    /// in submit order while the key path stays free of the round trip.
+    /// The outcome channel is not held here — the worker (spawned in
+    /// [`Self::open`]) owns its sender, and the run loop owns the
+    /// receiving side.
+    prompt_orders: mpsc::UnboundedSender<PromptOrder>,
+    /// Monotonic submit generation (TS `inputSubmissionGeneration`): every
+    /// submit bumps it, and a failed one's draft-restore right dies under
+    /// any newer submit.
+    input_submission_generation: u64,
+    /// Armed prompt round trips (one per spawned request): the headless
+    /// idle and exit gates treat an in-flight submit as busy — the inline
+    /// submit held those gates by blocking the loop until the ack landed.
+    prompt_in_flight: usize,
     /// A succeeded compaction replaced the durable transcript (TS
     /// `rebuildChatFromMessages`): the next loop pass re-fetches it.
     pub(crate) transcript_stale: bool,
@@ -545,6 +652,12 @@ pub(crate) struct SessionUi {
     /// The §10 reattach contract: set when a `daemon_closing` update frame
     /// arrived; the interactive loop drives the reconnect from it.
     pub(crate) reconnect: Option<crate::daemon_client::DaemonClosingUpdate>,
+    /// TS #2458 `daemonClosingNotice`: the reason the daemon last
+    /// announced itself closing; cleared once a fresh attach
+    /// (re)establishes the connection. An announced `shutdown` arms the
+    /// bounded shutdown recovery, so a bare session stop without a notice
+    /// never routes into a reconnect.
+    pub(crate) daemon_closing_notice: Option<String>,
     /// The session whose direct worker link just died; the interactive
     /// loop arms the re-attach driver from it (TS `connection_status:
     /// "reconnecting"`).
@@ -615,12 +728,21 @@ pub(crate) struct SessionUi {
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
+    /// TS `fullscreenPressedHyperlink`: the link under the last plain left
+    /// press; a release without a drag opens it.
+    pressed_hyperlink: Option<String>,
+    /// TS `fullscreenLeftMouseDragged`: the left press turned into a drag,
+    /// so its release ends the selection instead of opening the link.
+    left_mouse_dragged: bool,
+    /// Links opened by clicks this run (headless runs have no terminal to
+    /// hand a browser to; the verifier reads these).
+    pub(crate) opened_urls: Vec<String>,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
 /// `renderCurrentSessionState`, a same-session resync through
 /// `renderResyncedSession` — the bash slot survives only the resync).
-/// The reattach outcome for `reattach_after_update`: the budget expiry
+/// The reattach outcome for `reattach_after_recovery`: the budget expiry
 /// (a queued attach waiting out a slow restore, §10.4) is a RETRY
 /// outcome — the reconnect driver schedules its next attempt; only a
 /// true attach error is an `Err`.
@@ -637,6 +759,39 @@ pub(crate) enum RebuildKind {
     /// held cards stay mounted and the `bashFinished` edge settles a run
     /// that ended behind the dead link.
     Resync,
+}
+
+/// Where a compact-dock focus hand-off comes from (TS
+/// `focusSubagentSummary`, shared by `app.subagents.focus` and the
+/// editor's move-below-prompt hook): the selectability gate differs per
+/// caller.
+enum DockFocusSource {
+    /// The editor's Down at the prompt's end (TS `onMoveBelowPrompt`
+    /// -> `focusSubagentSummary`): the subagents box's affordance.
+    PromptDown,
+    /// The `app.subagents.focus` key: any rendered dock group.
+    Shortcut,
+}
+
+/// How the attach settles the dock's data before the rebuild renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockFold {
+    /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
+    /// responses into the session before the attach returns: the dock
+    /// (the panel and its divider under the prompt bar) is first-frame
+    /// geometry — its visibility must be final when the first content
+    /// frame renders (open, switch, rebind), never a late layout shift.
+    FirstFrame,
+    /// Clear and hand the dock to the background refreshes: a brand-new
+    /// session (`/new`) owns nothing, so its dock is deterministically
+    /// empty — the fold cannot change geometry, and waiting on two
+    /// registry reads would only delay the new chat's first frame.
+    Fresh,
+    /// Hold the dock's data and let the background refreshes update it: a
+    /// same-session re-attach of an already-up surface (the §10.4
+    /// recovery, the session reconnect) must not flicker its dock away,
+    /// and the attach's budget must cover the attach alone.
+    Held,
 }
 
 /// The attached snapshot's bash slot state, captured by `attach_session`
@@ -681,6 +836,7 @@ impl SessionUi {
         options: &InteractiveOptions,
         notes: mpsc::UnboundedSender<String>,
         compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
+        prompt_notes: mpsc::UnboundedSender<PromptSubmitNote>,
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
@@ -695,6 +851,15 @@ impl SessionUi {
                 create_session(&client, options, Some(&options.session)).await?
             }
         };
+        // The single prompt-submit worker (see [`PromptOrder`]): it owns
+        // the ordered drain, so submit order on the wire is submit order
+        // at the channel, and no per-submit task can reorder two rapid
+        // submissions. The worker lives with the orders channel — the
+        // session drops its sender and the worker's recv() ends, so the
+        // task never outlives the run (the agents-view handoff and the
+        // exit both drop the session).
+        let (orders_tx, orders_rx) = mpsc::unbounded_channel::<PromptOrder>();
+        tokio::spawn(Self::prompt_submit_worker(orders_rx, prompt_notes.clone()));
         let mut session = SessionUi {
             client,
             active_session_id: String::new(),
@@ -726,6 +891,7 @@ impl SessionUi {
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
+            anthropic_subscription_warning_shown: false,
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -740,12 +906,16 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
             cost_usd: None,
+            subagents_cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
+            turn_ends_seen: 0,
+            last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
@@ -791,11 +961,15 @@ impl SessionUi {
             goal_view: GoalView::new(),
             notes,
             compaction_abort_notes,
+            prompt_orders: orders_tx,
+            input_submission_generation: 0,
+            prompt_in_flight: 0,
             transcript_stale: false,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
             reconnect: None,
+            daemon_closing_notice: None,
             transport_lost: None,
             pending_rebind: None,
             reconnection_failed: None,
@@ -817,30 +991,33 @@ impl SessionUi {
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
             copies: Vec::new(),
+            pressed_hyperlink: None,
+            left_mouse_dragged: false,
+            opened_urls: Vec::new(),
         };
         session
-            .attach_session(&active_session_id)
+            .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
         Ok(session)
     }
 
-    /// Spec §10.2-§10.5: reattach after an update restart. The fresh client
+    /// Spec §10.2-§10.5: reattach after a restart. The fresh client
     /// (connected to the successor supervisor) replaces the dead one; the
     /// attach goes by DURABLE session id, so the slice-5 queued-attach
     /// contract absorbs any restore still in flight (the §10.3 hello's
     /// `update_resume.complete` is surfaced as a banner line). The
     /// transcript rebuilds from the attach snapshot - the same machinery
-    /// `/switch` uses - and the resumed-work banner lands after it.
+    /// `/switch` uses - and the recovery's row lands after it.
     ///
-    /// `lost` marks the unexpected-loss recovery path (not an update
-    /// restart): no update banner is painted — the caller's single
-    /// recovery row is the note.
-    pub(crate) async fn reattach_after_update(
+    /// `kind` names the driver that owns the recovery: the update restart
+    /// paints its §10.5 banner, while a lost or announced-shutdown window
+    /// (TS #2458) reports the restart version-honestly instead.
+    pub(crate) async fn reattach_after_recovery(
         &mut self,
         client: DaemonClient,
         view: &mut AgentView,
-        lost: bool,
+        kind: RecoveryKind,
     ) -> Result<ReattachOutcome> {
         // One reattach attempt's budget (§10.4: a queued attach can
         // legitimately wait out a slow restore — the budget's expiry is a
@@ -870,7 +1047,11 @@ impl SessionUi {
             self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        let attach = tokio::time::timeout(
+            REATTACH_BUDGET,
+            self.attach_session(&durable, DockFold::Held),
+        )
+        .await;
         match attach {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -880,9 +1061,11 @@ impl SessionUi {
                 // socket shuts down, the reader EOFs), and the reconnect
                 // driver installs a fresh one on its next attempt.
                 self.client.hard_close();
-                return Err(
-                    error.context(format!("reattaching session {durable} after the update"))
-                );
+                let what = match kind {
+                    RecoveryKind::Update => "after the update",
+                    RecoveryKind::Lost | RecoveryKind::Shutdown => "after the restart",
+                };
+                return Err(error.context(format!("reattaching session {durable} {what}")));
             }
             Err(_) => {
                 // A wedged attach outlived the budget (§10.4: a queued
@@ -898,8 +1081,8 @@ impl SessionUi {
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
         self.rebuild_view(view, RebuildKind::Resync);
-        if !lost {
-            match complete {
+        match kind {
+            RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
                     text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
                     kind: crate::chat::StatusKind::Info,
@@ -910,6 +1093,24 @@ impl SessionUi {
                     ),
                     kind: crate::chat::StatusKind::Info,
                 }),
+            },
+            RecoveryKind::Lost | RecoveryKind::Shutdown => {
+                // TS #2458 `formatDaemonReconnectBanner`: the recovered
+                // window reports the restart version-honestly.
+                let daemon_version = self
+                    .client
+                    .hello()
+                    .get("appVersion")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let (text, status_kind) = crate::daemon_reconnect::reconnect_banner(
+                    daemon_version.as_deref(),
+                    env!("CARGO_PKG_VERSION"),
+                );
+                view.push_entry(crate::chat::ChatEntry::Status {
+                    text,
+                    kind: status_kind,
+                });
             }
         }
         self.dirty = true;
@@ -929,7 +1130,11 @@ impl SessionUi {
     /// locally bound but server-detached - the previous subscription stays
     /// until the new one exists, and the next supersede notice or the
     /// submit-path retry re-attaches when a worker can serve the session.
-    pub(crate) async fn attach_session(&mut self, active_session_id: &str) -> Result<()> {
+    pub(crate) async fn attach_session(
+        &mut self,
+        active_session_id: &str,
+        dock_fold: DockFold,
+    ) -> Result<()> {
         let previous = self.active_session_id.clone();
         // A direct link is bound to one session: drop it when switching.
         if self
@@ -976,7 +1181,7 @@ impl SessionUi {
             }
         };
         let data = attached;
-        let attach = attach_data_from_response(&data)?;
+        let attach = attach_data_from_response(data)?;
         // The bash slot follows the attached session's live state (TS
         // `applyConnectionStateSnapshot` patches `isBashRunning`): the
         // captured state drives the next rebuild's resync edge. The
@@ -1016,6 +1221,10 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
+        // The closing notice is per-connection (TS #2458: it clears on
+        // every attach): a later bare session stop must not route into a
+        // stale shutdown recovery's reconnect hang.
+        self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.session_file = attach
@@ -1031,22 +1240,50 @@ impl SessionUi {
         self.roster.clear();
         self.subagents_focused = false;
         self.subscribe_roster().await;
-        // The heartbeat catalog is scoped to the session: drop the old
-        // session's rows and fetch fresh ones in the background (TS
-        // refreshes the catalog on every chat open).
-        self.heartbeat_catalog.clear();
-        self.spawn_heartbeat_refresh();
+        // The dock's heartbeat rows follow `dock_fold` (the enum's
+        // contract): a first-content-frame attach folds the fresh fetch
+        // BEFORE the attach returns — the dock's visibility (the panel
+        // and its divider under the prompt bar) is first-frame geometry,
+        // never a late layout shift (the operator's 2026-09-26
+        // zero-shift ruling). TS guarantees the same for its dock: the
+        // counts seed from the attach snapshot (`seedSubagentSummary`)
+        // and the roster subscription is awaited before the first
+        // content render; TS's own heartbeat fetch stays fire-and-forget
+        // only because its summary line renders no heartbeat rows.
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
+            // The held dock keeps its data: an already-up surface's dock
+            // must not flicker away while the background refresh runs.
+            DockFold::Held => {}
+        }
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_heartbeat_catalog().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_heartbeat_refresh(),
+        }
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
-        // The bash registry is kernel-owned and session-scoped: the previous
-        // session's rows are not this one's (the next poll refills).
-        self.bash_activities = serde_json::json!({"activities": []});
+        // The dock's bash rows follow the same `dock_fold` contract; the
+        // capability gate matches the background refresh (older daemons
+        // never see the request), and a failed fold fetch leaves the
+        // cleared registry (the 2s poll refills).
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => {
+                self.bash_activities = serde_json::json!({"activities": []});
+            }
+            // The held dock keeps its registry for the same reason it
+            // keeps the heartbeat catalog above.
+            DockFold::Held => {}
+        }
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
-        self.spawn_bash_activity_refresh();
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_bash_activities().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
+        }
         self.pending_model = reconstructed.model_id;
+        self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1081,6 +1318,11 @@ impl SessionUi {
         // images into the paste registry.
         let stash_session_id = self.session_id.clone();
         self.bind_prompt_stash_session(&stash_session_id);
+        // The attach fold held the wire frame, its decoded tree, and the
+        // folded transcript together; the frame and tree drop here, so
+        // return their freed heap to the OS instead of keeping the load's
+        // peak resident for the TUI's lifetime.
+        pa_types::memory_release::trim_freed_heap();
         Ok(())
     }
 
@@ -1143,10 +1385,38 @@ impl SessionUi {
             (!self.session_id.is_empty()).then(|| self.session_id.clone()),
             self.session_file.clone(),
         );
-        let counts = crate::subagents::count_descendants(&self.roster, &identity);
-        self.subagent_counts = counts;
+        self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
+        let dock = self.activity_dock_state();
+        // A focused selection must stay on a rendered group: the arrows
+        // visit every group an empty one included, so the selection
+        // only moves when its group leaves the row (the goal row ends
+        // with the goal) — and a dock that unmounts entirely (nothing
+        // left to show) returns the focus to the editor.
+        if self.subagents_focused {
+            if !dock.visible() {
+                self.subagents_focused = false;
+            } else if !dock.groups().contains(&self.activity_group) {
+                self.activity_group =
+                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+            }
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+            ..dock
+        });
+        if let Some(bash_view) = view.bash_view.as_mut() {
+            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
+                &self.bash_activities,
+            ));
+        }
+    }
 
-        let goal = &self.goal_view.goal;
+    /// The dock's feed state: the live counts, the goal row's label, and
+    /// the selection/focus the caller owns. The row render, the focus
+    /// hand-off, and the arrows' traversal all read this one mapping —
+    /// a group renders exactly when it stays traversable.
+    fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
         // The dock is the goal's one chrome surface (the operator's
         // 2026-09-24 directive moved it off the line below the prompt
         // bar): every live state renders its row — pursuing reads the
@@ -1155,7 +1425,7 @@ impl SessionUi {
         // here too (the tray's TS cluster no longer exists to carry
         // them; terminal states carry no row). The token budget lives
         // inside the goal panel the row opens, not on the bar.
-        let goal_label = tray_goal_label(goal);
+        let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1171,10 +1441,10 @@ impl SessionUi {
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
-        let dock = crate::chrome::ActivityDock {
-            subagents_running_direct: counts.running_direct,
-            subagents_running_nested: counts.running_nested,
-            subagents_total: counts.total,
+        crate::chrome::ActivityDock {
+            subagents_running_direct: self.subagent_counts.running_direct,
+            subagents_running_nested: self.subagent_counts.running_nested,
+            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1182,62 +1452,11 @@ impl SessionUi {
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
-        };
-        // A focused selection must stay actionable: when its feed empties
-        // (or never had rows), move to the first selectable group; with
-        // nothing selectable the dock stays a read-only indicator and
-        // releases the focus.
-        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
-            self.activity_group = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group))
-            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
-            if !self.activity_selectable(self.activity_group) {
-                self.subagents_focused = false;
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
-            selected: self.activity_group,
-            focused: self.subagents_focused,
-            ..dock
-        });
-        if let Some(bash_view) = view.bash_view.as_mut() {
-            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
-                &self.bash_activities,
-            ));
-        }
-    }
-
-    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
-        match group {
-            crate::chrome::ActivityGroup::Subagents => {
-                // The group stays openable while any descendant exists
-                // (finished subagents are browsable history in the agents
-                // view); the dock's rendered count is live-only.
-                self.return_to_agents_view && self.subagent_counts.total > 0
-            }
-            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
-            // Any catalogued bash row keeps the dock's bash group
-            // reachable — the dock stays mounted (bash_total) whenever a
-            // row exists, so a selected group never binds to a hidden
-            // surface, and the bash view lists the finished rows.
-            crate::chrome::ActivityGroup::Bash => {
-                !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
-            }
-            // The goal group rides the dock's goal row: it stays
-            // selectable exactly while that row renders — every live
-            // state (the same gate as the row itself).
-            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 
     /// The editor's Down and Alt+A hand focus to the compact dock.
-    fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
+    fn focus_subagents_summary(&mut self, source: DockFocusSource, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
         // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
         // armed Ctrl+C exit hint, or the streaming follow-up hint over a
@@ -1246,18 +1465,39 @@ impl SessionUi {
         if self.tray_override(view).is_some() {
             return false;
         }
-        if !self.activity_selectable(self.activity_group) {
-            let Some(group) = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group)) else {
-                return false;
-            };
-            self.activity_group = group;
+        match source {
+            DockFocusSource::PromptDown => {
+                // TS `SubagentSummaryLine.isSelectable()`: the prompt's
+                // Down is the subagents box's own affordance — subagents
+                // must exist, and the grab selects that group. The dock's
+                // other groups (heartbeats, shells, the goal row) never
+                // take this Down; their shortcut stays
+                // `app.subagents.focus`, so the prompt's arrows keep the
+                // input-history recall in every session shape.
+                if !(self.return_to_agents_view && self.subagent_counts.total > 0) {
+                    return false;
+                }
+                self.activity_group = crate::chrome::ActivityGroup::Subagents;
+            }
+            DockFocusSource::Shortcut => {
+                // The dock owns the hand-off exactly while it renders: a
+                // session with nothing to show (no subagent history,
+                // heartbeats, shells, or live goal) keeps the dock
+                // unmounted and the focus in the editor. Every group the
+                // row renders is traversable, empty ones included, so no
+                // feed gate remains here.
+                let dock = self.activity_dock_state();
+                if !dock.visible() {
+                    return false;
+                }
+                if !dock.groups().contains(&self.activity_group) {
+                    // Only the goal group leaves with its row: the
+                    // selection steps back to the group that now ends the
+                    // row.
+                    self.activity_group =
+                        dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+                }
+            }
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -1307,12 +1547,15 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
-            view.runs_view = None;
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
+            // The read-only info panel dies the same death: it holds the
+            // previous session's fetched document, and a stale panel
+            // would keep consuming keys over the new session.
+            view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -1343,6 +1586,10 @@ impl SessionUi {
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
         }
+        // The tray's effort suffix moves with the same snapshot: an
+        // attach's state either carries the session's level or reports a
+        // model without reasoning, and the bare name wins in both cases.
+        view.chrome.thinking_suffix = self.pending_thinking_suffix.take();
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -1352,6 +1599,7 @@ impl SessionUi {
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
@@ -1412,21 +1660,6 @@ impl SessionUi {
                 }
             }
         }
-        // A resync rebuild replaces the transcript wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no run
-        // survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
-        }
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
@@ -1437,6 +1670,24 @@ impl SessionUi {
         }
         view.follow();
         self.update_fast_filter(view);
+        // An open `/heartbeats` picker follows the rebuilt session's
+        // catalog (the channel fold's `apply_catalog` path, which the
+        // attach-time inline fold replaced): without this, a rebind
+        // leaves the picker showing the previous session's rows, and
+        // its Manage actions would target the stale active session.
+        if let Some(picker) = view.heartbeats_picker.as_mut() {
+            picker.apply_catalog(self.heartbeat_catalog.clone(), None);
+        }
+        // The brand splash is the EMPTY chat's header (TS mounts
+        // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
+        // non-empty transcript suppresses it — the chat opened or
+        // switched directly into content, where TS's own direct opens
+        // attach before mount and the tail-anchored viewport scrolls the
+        // splash out of reach — while every rebuild into an empty chat
+        // keeps it (a new session shows its header; the incremental
+        // first-turn growth never passes through here, so a new chat's
+        // splash scrolls away exactly like TS).
+        view.splash_suppressed = !view.chat.is_empty();
         self.dirty = true;
     }
 
@@ -1551,15 +1802,24 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        // The top bar's spend is the FULL session+subagents total
-        // (`totalCost`, the /context root totalUsage's fold): the TS
-        // active-region `cost` drops pre-compaction spend, which reads
-        // as an inaccurate title after every compaction. Older daemons
-        // without the field fall back to the TS shape.
-        self.cost_usd = data
-            .get("totalCost")
-            .and_then(Value::as_f64)
-            .or_else(|| data.get("cost").and_then(Value::as_f64));
+        // The title shows the session's own spend plus the aggregate of
+        // its subagents (`ownCost`/`subagentsCost`, the split of the
+        // full session+subagents total): the TS active-region `cost`
+        // drops pre-compaction spend, which reads as an inaccurate
+        // title after every compaction. The split lands together; a
+        // daemon without `ownCost` serves the combined `totalCost`
+        // (or the TS `cost`), and a subagent suffix next to that would
+        // double-count — the suffix only rides the split's own half.
+        if let Some(own) = data.get("ownCost").and_then(Value::as_f64) {
+            self.cost_usd = Some(own);
+            self.subagents_cost_usd = data.get("subagentsCost").and_then(Value::as_f64);
+        } else {
+            self.cost_usd = data
+                .get("totalCost")
+                .and_then(Value::as_f64)
+                .or_else(|| data.get("cost").and_then(Value::as_f64));
+            self.subagents_cost_usd = None;
+        }
         self.dirty = true;
     }
 
@@ -1567,6 +1827,7 @@ impl SessionUi {
     pub(crate) fn rebuild_tray(&mut self, view: &mut AgentView) {
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         view.chrome.chat_name = self.session_display();
         self.dirty = true;
     }
@@ -1617,6 +1878,29 @@ impl SessionUi {
             self.last_status_index = Some(view.chat_len() - 1);
         }
         self.dirty = true;
+    }
+
+    /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
+    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// login draws the ban-risk warning once per session, gated by the
+    /// settings toggle (`warnings.anthropicExtraUsage`, TS default
+    /// true — an absent settings seam keeps the default).
+    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
+        if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
+            || self.anthropic_subscription_warning_shown
+            || self
+                .client_settings
+                .as_ref()
+                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+        {
+            return;
+        }
+        self.anthropic_subscription_warning_shown = true;
+        self.note_as(
+            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+            StatusKind::Warning,
+            view,
+        );
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to
@@ -2026,9 +2310,6 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
-        // TS `clearShortcutGuide`: every prompt submission dismisses the
-        // `?` quick-shortcut guide (slash commands keep it).
-        view.shortcut_guide = None;
         self.send_prompt(text, behavior, view).await
     }
 
@@ -2288,9 +2569,6 @@ impl SessionUi {
         shortcut: &crate::bash_bang::BashShortcut,
         view: &mut AgentView,
     ) -> Result<()> {
-        // Every prompt submission dismisses the `?` shortcut guide (TS
-        // `clearShortcutGuide` at onSubmit's top).
-        view.shortcut_guide = None;
         // A running user command blocks a second one (TS `isBashRunning`
         // guard); the editor buffer already cleared on submit, so the
         // draft is not restored.
@@ -2402,141 +2680,368 @@ impl SessionUi {
             return Ok(());
         }
         let images = self.collect_images_for(text, view);
-        // One rebind attempt per submit (never a loop): a prompt refused
-        // with the unknown-session error - the held active id was
-        // superseded by a worker replacement and the supervisor could not
-        // rebind it either - re-attaches by the DURABLE session id and
-        // replays the prompt ONCE. The failed attempt never reached a
-        // worker (the unknown-session refusal precedes any routing), so
-        // the replay is exactly-once by construction.
-        let mut rebind_available = true;
-        loop {
-            let result = self
-                .bounded_request(
-                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                    DaemonCommand::Prompt {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        message: text.to_string(),
-                        input: pa_types::daemon::PromptInput {
-                            content: None,
-                            images: images.clone(),
-                            streaming_behavior: Some(match behavior {
-                                SubmitBehavior::Steer => pa_types::daemon::StreamingBehavior::Steer,
-                                SubmitBehavior::FollowUp => {
-                                    pa_types::daemon::StreamingBehavior::FollowUp
-                                }
-                            }),
-                            queue_if_busy: Some(true),
-                            expand_prompt_templates: None,
-                            source: None,
-                            agent_message_id: None,
-                            custom_message: None,
-                            queue_key: None,
-                            prefix_messages: None,
-                            admission_id: None,
-                            rlm_notice_nonce: None,
-                        },
-                        rest: Map::default(),
-                    },
-                )
-                .await;
-            match result {
-                Ok(_) => break,
-                Err(error) => {
-                    let rendered = format!("{error:#}");
-                    if rebind_available
-                        && rendered.contains("Unknown active session")
-                        && !self.session_id.is_empty()
-                    {
-                        rebind_available = false;
-                        let durable = self.session_id.clone();
-                        if self.attach_session(&durable).await.is_ok() {
-                            // The fresh attach snapshot owns the transcript;
-                            // the replayed prompt renders on top of it.
-                            self.rebuild_view(view, RebuildKind::Rebind);
-                            continue;
-                        }
-                    }
-                    if crate::daemon_client::is_daemon_timeout(&error) {
-                        // Sent but unanswered: the submission was on the
-                        // wire, so the turn may already be admitted and
-                        // running — restoring the draft would invite a
-                        // duplicate submission. The error row names the
-                        // uncertainty; the transcript's live turn (or the
-                        // next daemon answer) settles the truth.
-                        self.error_row(
-                            &format!(
-                                "{rendered} — the request was sent; the turn may still be in flight"
-                            ),
-                            view,
-                        );
-                        return Ok(());
-                    }
-                    // A DIRECT-link transport failure happened after the
-                    // frame was queued (`request_direct` sent it, the link
-                    // died answering): the daemon may have admitted the
-                    // turn — restoring the draft would invite a duplicate
-                    // submission, so the draft stays consumed (the timeout
-                    // arm's contract).
-                    let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
-                        && rendered
-                            .to_lowercase()
-                            .contains("session connection closed");
-                    if direct_sent {
-                        self.error_row(
-                            &format!(
-                                "{rendered} — the request may have been sent; the turn may still start"
-                            ),
-                            view,
-                        );
-                        return Ok(());
-                    }
-                    if crate::daemon_client::is_daemon_rejection(&error)
-                        || crate::daemon_client::is_daemon_unreachable(&error)
-                    {
-                        // TS `onSubmit`'s prompt catch: the daemon answered
-                        // with a refusal for THIS request (admission, queue
-                        // capacity, a superseded session the rebind could
-                        // not recover), or the connection refused the send
-                        // (nothing reached the daemon) — the `⚠ Error` row
-                        // surfaces it and the draft returns to the editor
-                        // (the submission never landed); a failed prompt
-                        // never exits the UI (the reconnect driver owns
-                        // the connection's recovery).
-                        self.error_row(&rendered, view);
-                        view.editor.set_text(text);
-                        return Ok(());
-                    }
-                    return Err(anyhow!("{rendered}"));
-                }
-            }
-        }
-        // A submission while a turn runs parks in the queue behind it: the
-        // queue strip shows the message until the session delivers it
-        // (adoption telemetry for the follow-up queue).
-        if self.turn_active {
-            if let Some(telemetry) = self.telemetry.clone() {
-                let lane = match behavior {
-                    SubmitBehavior::Steer => "steering",
-                    SubmitBehavior::FollowUp => "follow_up",
-                };
-                // The queued-input adoption event carries the session's
-                // queue delivery mode (`tui input queued`'s
-                // `steering_mode`): exposure under batched delivery is
-                // the multi-steer batch feature's adoption signal.
-                let steering_mode = self.steering_mode.clone();
-                tokio::spawn(async move {
-                    telemetry.queued_input(lane, steering_mode).await;
-                });
-            }
-        }
-        if !self.turn_active {
-            self.turn_active = true;
-        }
-        self.start_loader(view);
+        // TS `onSubmit` resolves the submit off the render path: the
+        // cleared editor paints THIS iteration's frame — the submit's
+        // daemon round trip never gates the first frame after Enter — and
+        // the request settles in the background, its outcome folding back
+        // through [`Self::apply_prompt_outcome`] with the same
+        // bookkeeping and error ladder the inline await ran on the key
+        // path.
+        // TS snapshots the submitted draft (with its image markers) at
+        // submit (`snapshotPromptStash`): the refusal's retention keeps
+        // the attachments rehydratable even after the editor cleared and
+        // a later paste-heavy submit could evict them from the registry.
+        let stashed_images: Vec<(u64, LoadedImage)> =
+            collect_marked_images(&self.pasted_images, text)
+                .into_iter()
+                .map(|(id, image)| (id, image.clone()))
+                .collect();
+        self.input_submission_generation += 1;
+        let generation = self.input_submission_generation;
+        self.order_prompt_request(
+            text.to_string(),
+            behavior,
+            images,
+            stashed_images,
+            true,
+            generation,
+        );
         self.dirty = true;
         Ok(())
+    }
+
+    /// Queue one prompt round trip on the ordered submit channel (TS
+    /// `onSubmit`'s `agentConnection.prompt` await runs off the render
+    /// path): the request carries the same envelope the inline await
+    /// sent, and the single worker (see [`PromptOrder`]) settles them
+    /// strictly in submit order — the frame after Enter paints without
+    /// gating on the daemon, and cross-submit wire order never depends on
+    /// task scheduling. `rebind_available` is the inline path's
+    /// one-rebind budget: the first attempt may re-attach and replay on
+    /// the unknown-session refusal, a replay may not rebind again (the
+    /// replay is the second and last attempt).
+    fn order_prompt_request(
+        &mut self,
+        text: String,
+        behavior: SubmitBehavior,
+        images: Option<serde_json::Value>,
+        stashed_images: Vec<(u64, LoadedImage)>,
+        rebind_available: bool,
+        generation: u64,
+    ) {
+        // The queued-input telemetry gates on the turn state at submit
+        // time (the inline path read the same flag right after its
+        // await, with the loop blocked so no event could move it); an
+        // earlier submit still in flight held `turn_active` true on the
+        // inline path too, so it counts here.
+        let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
+        let expected_turn_end = self.last_prompt_turn_end.max(self.turn_ends_seen) + 1;
+        self.last_prompt_turn_end = expected_turn_end;
+        self.prompt_in_flight += 1;
+        let _ = self.prompt_orders.send(PromptOrder {
+            client: self.client.clone(),
+            active_session_id: self.active_session_id.clone(),
+            session_id: self.session_id.clone(),
+            text,
+            behavior,
+            images,
+            stashed_images,
+            turn_was_active,
+            expected_turn_end,
+            generation,
+            rebind_available,
+        });
+    }
+
+    /// The single prompt-submit worker (the ordered channel's drain side):
+    /// one request in flight at a time, submit N+1's wire write only after
+    /// submit N's round trip settles. TS's single-threaded event loop
+    /// serializes its submit writes the same way — the async handler's
+    /// `await` never reorders two submissions (interactive-mode.ts's
+    /// `handleSubmit`), and the port's old blocked loop enforced the same
+    /// order by construction. The outcome folds back through the
+    /// prompt-submit channel; the worker exits when the orders channel
+    /// closes (the session dropped its sender).
+    async fn prompt_submit_worker(
+        mut orders: mpsc::UnboundedReceiver<PromptOrder>,
+        notes: mpsc::UnboundedSender<PromptSubmitNote>,
+    ) {
+        while let Some(order) = orders.recv().await {
+            let command = DaemonCommand::Prompt {
+                id: None,
+                active_session_id: order.active_session_id.clone(),
+                message: order.text.clone(),
+                input: pa_types::daemon::PromptInput {
+                    content: None,
+                    images: order.images.clone(),
+                    streaming_behavior: Some(match order.behavior {
+                        SubmitBehavior::Steer => pa_types::daemon::StreamingBehavior::Steer,
+                        SubmitBehavior::FollowUp => pa_types::daemon::StreamingBehavior::FollowUp,
+                    }),
+                    queue_if_busy: Some(true),
+                    expand_prompt_templates: None,
+                    source: None,
+                    agent_message_id: None,
+                    custom_message: None,
+                    queue_key: None,
+                    prefix_messages: None,
+                    admission_id: None,
+                    rlm_notice_nonce: None,
+                },
+                rest: Map::default(),
+            };
+            let result = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                order.client.request_ok(command),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "timed out after {UI_REQUEST_TIMEOUT_MS}ms waiting for the Prime Agent daemon response"
+                )
+            })
+            .and_then(|result| result.map(|_| ()));
+            let _ = notes.send(PromptSubmitNote {
+                active_session_id: order.active_session_id,
+                session_id: order.session_id,
+                text: order.text,
+                behavior: order.behavior,
+                images: order.images,
+                stashed_images: order.stashed_images,
+                turn_was_active: order.turn_was_active,
+                expected_turn_end: order.expected_turn_end,
+                generation: order.generation,
+                rebind_available: order.rebind_available,
+                result,
+            });
+        }
+    }
+
+    /// How many prompt round trips are armed (see
+    /// [`Self::prompt_in_flight`]): the headless idle and exit gates read
+    /// it so a submit whose ack has not landed never reads as idle.
+    pub(crate) fn prompt_submits_in_flight(&self) -> usize {
+        self.prompt_in_flight
+    }
+
+    /// Whether user work is in flight for the busy guards (TS's
+    /// `isStreaming`-gated commands — `/update`, `/nightly`, `/reload`):
+    /// a live turn OR a prompt round trip still traveling. The inline
+    /// submit held the guards by blocking until the ack set
+    /// `turn_active`; the backgrounded submit makes that pre-ack window
+    /// visible, and a package update or reload landing inside it would
+    /// interrupt work the user just submitted, so the guards wait it out
+    /// (the same class of busy the old blocked loop enforced).
+    fn work_in_flight(&self) -> bool {
+        self.prompt_in_flight > 0
+    }
+
+    /// Fold a backgrounded prompt outcome back into the session (the run
+    /// loop's channel arm): the admission bookkeeping and the error
+    /// ladder are the inline await's, moved off the key path — only the
+    /// timing changed.
+    pub(crate) async fn apply_prompt_outcome(
+        &mut self,
+        note: PromptSubmitNote,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        self.prompt_in_flight = self.prompt_in_flight.saturating_sub(1);
+        // The submit's session is no longer the mounted one (a switch, a
+        // supersede rebind, or a `/new` replaced it — TS's staleness
+        // guard for a submit that outlived its session): the outcome
+        // never applies bookkeeping to the new session, and never
+        // restores a draft into another session's editor. A FAILED
+        // outlived submit still shows its error row and retains its
+        // rejected draft into the session it was typed for — TS
+        // `handleSubmit`'s catch (interactive-mode.ts:5743 showError runs
+        // regardless of the generation guard, and 5741 retains into the
+        // submit-time stash state); a succeeded one stays silent (the
+        // admitted turn belongs to the detached session, which the
+        // daemon keeps serving).
+        if note.active_session_id != self.active_session_id {
+            // Borrow the settled result here: the ladder below owns it.
+            if let Some(error) = note.result.as_ref().err() {
+                let rendered = format!("{error:#}");
+                self.error_row(&rendered, view);
+                self.retain_rejected_draft(
+                    &note.text,
+                    &note.session_id,
+                    note.generation,
+                    note.stashed_images.clone(),
+                    view,
+                );
+            }
+            return Ok(());
+        }
+        match note.result {
+            Ok(()) => {
+                // A submission while a turn runs parks in the queue behind
+                // it: the queue strip shows the message until the session
+                // delivers it (adoption telemetry for the follow-up queue).
+                if note.turn_was_active {
+                    if let Some(telemetry) = self.telemetry.clone() {
+                        let lane = match note.behavior {
+                            SubmitBehavior::Steer => "steering",
+                            SubmitBehavior::FollowUp => "follow_up",
+                        };
+                        // The queued-input adoption event carries the session's
+                        // queue delivery mode (`tui input queued`'s
+                        // `steering_mode`): exposure under batched delivery is
+                        // the multi-steer batch feature's adoption signal.
+                        let steering_mode = self.steering_mode.clone();
+                        tokio::spawn(async move {
+                            telemetry.queued_input(lane, steering_mode).await;
+                        });
+                    }
+                }
+                // The daemon can stream the complete turn before the ACK
+                // reaches this channel. In that case turn_end already owns
+                // the idle state; re-arming it would strand WaitIdle until
+                // timeout. The per-submit end watermark also keeps a prior
+                // turn's end from settling a queued later prompt.
+                if self.turn_ends_seen < note.expected_turn_end {
+                    self.turn_active = true;
+                    self.start_loader(view);
+                    self.dirty = true;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                // One rebind attempt per submit (never a loop): a prompt
+                // refused with the unknown-session error - the held active
+                // id was superseded by a worker replacement and the
+                // supervisor could not rebind it either - re-attaches by
+                // the DURABLE session id and replays the prompt ONCE.
+                // The failed attempt never reached a worker (the
+                // unknown-session refusal precedes any routing), so the
+                // replay is exactly-once by construction.
+                if note.rebind_available
+                    && rendered.contains("Unknown active session")
+                    && !self.session_id.is_empty()
+                {
+                    let durable = self.session_id.clone();
+                    if self
+                        .attach_session(&durable, DockFold::FirstFrame)
+                        .await
+                        .is_ok()
+                    {
+                        // The fresh attach snapshot owns the transcript;
+                        // the replayed prompt renders on top of it. The
+                        // replay keeps the submit's generation and spends
+                        // the rebind budget.
+                        self.rebuild_view(view, RebuildKind::Rebind);
+                        self.order_prompt_request(
+                            note.text.clone(),
+                            note.behavior,
+                            note.images.clone(),
+                            note.stashed_images.clone(),
+                            false,
+                            note.generation,
+                        );
+                        return Ok(());
+                    }
+                }
+                if crate::daemon_client::is_daemon_timeout(&error) {
+                    // Sent but unanswered: the submission was on the
+                    // wire, so the turn may already be admitted and
+                    // running — restoring the draft would invite a
+                    // duplicate submission. The error row names the
+                    // uncertainty; the transcript's live turn (or the
+                    // next daemon answer) settles the truth.
+                    self.error_row(
+                        &format!(
+                            "{rendered} — the request was sent; the turn may still be in flight"
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                // A DIRECT-link transport failure happened after the
+                // frame was queued (`request_direct` sent it, the link
+                // died answering): the daemon may have admitted the
+                // turn — restoring the draft would invite a duplicate
+                // submission, so the draft stays consumed (the timeout
+                // arm's contract).
+                let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                    && rendered
+                        .to_lowercase()
+                        .contains("session connection closed");
+                if direct_sent {
+                    self.error_row(
+                        &format!(
+                            "{rendered} — the request may have been sent; the turn may still start"
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if crate::daemon_client::is_daemon_rejection(&error)
+                    || crate::daemon_client::is_daemon_unreachable(&error)
+                {
+                    // TS `onSubmit`'s prompt catch: the daemon answered
+                    // with a refusal for THIS request (admission, queue
+                    // capacity, a superseded session the rebind could
+                    // not recover), or the connection refused the send
+                    // (nothing reached the daemon) — the `⚠ Error` row
+                    // surfaces it and the draft returns to the editor
+                    // (the submission never landed); a failed prompt
+                    // never exits the UI (the reconnect driver owns
+                    // the connection's recovery).
+                    self.error_row(&rendered, view);
+                    self.retain_rejected_draft(
+                        &note.text,
+                        &self.stash_session_id.clone(),
+                        note.generation,
+                        note.stashed_images.clone(),
+                        view,
+                    );
+                    return Ok(());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retain a refused prompt's draft (TS `onSubmit`'s catch ->
+    /// `retainSubmittedDraft`, interactive-mode.ts:5741): the empty editor
+    /// under the submit's own session and generation takes the text back
+    /// into the editor; anything else — the user typed a fresh draft, a
+    /// newer submit superseded this one, or the submit outlived its
+    /// session — keeps the fresh text by retaining the rejected prompt as
+    /// the session's restore-on-open head instead of clobbering it.
+    fn retain_rejected_draft(
+        &mut self,
+        text: &str,
+        stash_session_id: &str,
+        generation: u64,
+        stashed_images: Vec<(u64, LoadedImage)>,
+        view: &mut AgentView,
+    ) {
+        if view.editor.get_text().trim().is_empty()
+            && stash_session_id == self.stash_session_id
+            && generation == self.input_submission_generation
+        {
+            view.editor.set_text(text);
+            return;
+        }
+        // The retained-draft stash write: the rejected prompt becomes the
+        // session's restore-on-open head with its submit-time image
+        // snapshot (TS `snapshotPromptStash` at submit), so nothing the
+        // user typed is lost and the draft returns the next time the
+        // session opens with an empty editor (TS
+        // `restorePromptStashIfEditorEmpty`).
+        let stash = PromptStash {
+            text: text.to_string(),
+            paste_snapshot: None,
+            images: stashed_images,
+            restore_on_open: true,
+        };
+        let mut store = self
+            .prompt_stash
+            .lock()
+            .expect("prompt stash store poisoned");
+        store.for_session(stash_session_id).stash_draft_head(stash);
     }
 
     /// The working loader starts with a `Waiting` activity and a zero
@@ -2763,7 +3268,12 @@ impl SessionUi {
             }
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id).await?;
+                self.attach_session(&id, DockFold::Fresh).await?;
+                // The title's pair is session-scoped: fetch the new
+                // session's stats before the rebuild copies them into
+                // the chrome, or the rebind would ride the session being
+                // left's own cost and subagent aggregate.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
             }
@@ -3016,7 +3526,7 @@ impl SessionUi {
                 // carries the streaming and compaction arms, and the
                 // user-bash slot (`!` runs) is its own state — a relaunch
                 // mid-run would interrupt either.
-                if self.turn_active || self.user_bash_running {
+                if self.turn_active || self.user_bash_running || self.work_in_flight() {
                     self.note_as(
                         "Wait for the current work to finish before updating.",
                         StatusKind::Warning,
@@ -3048,7 +3558,7 @@ impl SessionUi {
                 // TS: the guard applies when the run does not update the
                 // binary (package updates wait for the turn; the self path
                 // tears the session down anyway).
-                if !plan.includes_self && self.turn_active {
+                if !plan.includes_self && (self.turn_active || self.work_in_flight()) {
                     self.note_as(
                         "Wait for the current work to finish before updating.",
                         StatusKind::Warning,
@@ -3115,17 +3625,22 @@ impl SessionUi {
                     self.error_row("Usage: /hotkeys", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: "/hotkeys".to_string(),
-                });
-                view.push_entry(ChatEntry::ClientMarkdown {
-                    text: crate::hotkeys::hotkeys_guide(view.editor.keybindings()),
-                });
-                self.dirty = true;
+                // The operator's 2026-09-26 directive: the full guide
+                // renders as the read-only info panel instead of the
+                // multi-screen markdown flood in the transcript (the
+                // content itself is unchanged).
+                self.open_info_panel(
+                    view,
+                    Some("Hotkeys".to_string()),
+                    InfoContent::Markdown(crate::hotkeys::hotkeys_guide(view.editor.keybindings())),
+                );
+                self.track_menu_opened("hotkeys", "command");
             }
 
-            // `/session` (TS `handleSessionCommand`): the daemon's session
-            // stats as the `Session Info` block after the command echo.
+            // `/session` (TS `handleSessionCommand`): the daemon's
+            // session stats as the `Session Info` rows — rendered in the
+            // read-only info panel (the operator's 2026-09-26
+            // directive), not as transcript rows.
             "session" => {
                 self.track_command_used("session");
                 if !resolved.args.is_empty() {
@@ -3133,9 +3648,6 @@ impl SessionUi {
                     self.error_row("Usage: /session", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let stats = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3149,10 +3661,17 @@ impl SessionUi {
                 match stats {
                     Ok(stats) => {
                         let name = self.session_name.clone();
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::session_info_rows(&stats, name.as_deref()),
-                        });
-                        self.dirty = true;
+                        // The content's own `Session Info` header row is
+                        // the panel's head (no title duplication).
+                        self.open_info_panel(
+                            view,
+                            None,
+                            InfoContent::Rows(info_commands::session_info_rows(
+                                &stats,
+                                name.as_deref(),
+                            )),
+                        );
+                        self.track_menu_opened("session", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3161,17 +3680,24 @@ impl SessionUi {
             }
             // `/context` and its `/usage` alias (TS
             // `handleContextCommand` over `formatContextTree`): the agent
-            // tree with own token/cost columns and context utilization.
+            // tree with own token/cost columns and context utilization —
+            // rendered in the scrollable read-only info panel (the
+            // operator's 2026-09-26 directive), not as transcript rows.
+            // The optional `all` argument is #2842's deliberate TS delta
+            // (TS takes none): over the row budget the default view
+            // collapses to the highest-usage agents plus a summary row
+            // and the expand hint, and `all` renders the whole tree.
             "context" => {
                 self.track_command_used("context");
-                if !resolved.args.is_empty() {
-                    view.editor.set_text(text);
-                    self.error_row("Usage: /context", view);
-                    return Ok(());
-                }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
+                let scope = match resolved.args.as_str() {
+                    "" => info_commands::ContextTreeScope::Collapsed,
+                    "all" => info_commands::ContextTreeScope::EveryAgent,
+                    _ => {
+                        view.editor.set_text(text);
+                        self.error_row("Usage: /context [all]", view);
+                        return Ok(());
+                    }
+                };
                 let tree = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3186,10 +3712,16 @@ impl SessionUi {
                     Ok(tree) => {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::context_tree_rows(&tree, width),
-                        });
-                        self.dirty = true;
+                        // The content's own `Context` header row is the
+                        // panel's head (no title duplication).
+                        self.open_info_panel(
+                            view,
+                            None,
+                            InfoContent::Rows(info_commands::context_tree_rows(
+                                &tree, width, scope,
+                            )),
+                        );
+                        self.track_menu_opened("context", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3197,7 +3729,10 @@ impl SessionUi {
                 }
             }
             // `/system-prompt` (TS `handleSystemPromptCommand`): the header
-            // with the char count, then the exact assembled prompt.
+            // with the char count, then the exact assembled prompt — a
+            // document of unbounded size, so it renders in the
+            // scrollable read-only info panel (the operator's 2026-09-26
+            // directive) instead of flooding the transcript.
             "system-prompt" => {
                 self.track_command_used("system-prompt");
                 if !resolved.args.is_empty() {
@@ -3205,9 +3740,6 @@ impl SessionUi {
                     self.error_row("Usage: /system-prompt", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let prompt = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -3224,13 +3756,13 @@ impl SessionUi {
                             .get("systemPrompt")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::system_prompt_header_rows(prompt),
-                        });
-                        view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::system_prompt_body_rows(prompt),
-                        });
-                        self.dirty = true;
+                        let mut rows = info_commands::system_prompt_header_rows(prompt);
+                        rows.push(Vec::new());
+                        rows.extend(info_commands::system_prompt_body_rows(prompt));
+                        // The header row (`System Prompt (N chars)`) is
+                        // the panel's head.
+                        self.open_info_panel(view, None, InfoContent::Rows(rows));
+                        self.track_menu_opened("system-prompt", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -3238,7 +3770,9 @@ impl SessionUi {
                 }
             }
             // `/logs` (TS `handleLogsCommand`): a client-side read of the
-            // logs directory (the daemon writes it, this client lists it).
+            // logs directory (the daemon writes it, this client lists
+            // it), rendered in the read-only info panel (the operator's
+            // 2026-09-26 directive).
             "logs" => {
                 self.track_command_used("logs");
                 if !resolved.args.is_empty() {
@@ -3246,9 +3780,6 @@ impl SessionUi {
                     self.error_row("Usage: /logs", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
                 let Some(agent_dir) = pa_types::platform::agent_dir() else {
                     self.error_row(
                         "home directory not found: set HOME (or USERPROFILE on Windows)",
@@ -3256,14 +3787,19 @@ impl SessionUi {
                     );
                     return Ok(());
                 };
-                view.push_entry(ChatEntry::ClientText {
-                    rows: info_commands::logs_rows(&agent_dir.join("logs")),
-                });
-                self.dirty = true;
+                // The content's own `Logs` header row is the panel's
+                // head.
+                self.open_info_panel(
+                    view,
+                    None,
+                    InfoContent::Rows(info_commands::logs_rows(&agent_dir.join("logs"))),
+                );
+                self.track_menu_opened("logs", "command");
             }
             // `/changelog` (TS `handleChangelogCommand`): the shipped
-            // CHANGELOG.md entries, newest first, between the panel
-            // borders.
+            // CHANGELOG.md entries, newest first, in the read-only info
+            // panel (the operator's 2026-09-26 directive; the TS accent
+            // `What's New` title is the panel's title).
             "changelog" => {
                 self.track_command_used("changelog");
                 if !resolved.args.is_empty() {
@@ -3271,13 +3807,14 @@ impl SessionUi {
                     self.error_row("Usage: /changelog", view);
                     return Ok(());
                 }
-                view.push_entry(ChatEntry::User {
-                    text: text.to_string(),
-                });
-                view.push_entry(ChatEntry::ChangelogPanel {
-                    markdown: info_commands::changelog_markdown(&Self::changelog_path()),
-                });
-                self.dirty = true;
+                self.open_info_panel(
+                    view,
+                    Some("What's New".to_string()),
+                    InfoContent::Markdown(info_commands::changelog_markdown(
+                        &Self::changelog_path(),
+                    )),
+                );
+                self.track_menu_opened("changelog", "command");
             }
             // `/settings` (TS `showSettingsSelector`): the inline settings
             // menu; the rows read the daemon state and the settings seam.
@@ -3404,7 +3941,7 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.track_command_used("reload");
-                if self.turn_active || view.working.is_some() {
+                if self.turn_active || view.working.is_some() || self.work_in_flight() {
                     self.note_as(
                         "Wait for the current response to finish before reloading.",
                         StatusKind::Warning,
@@ -3596,6 +4133,11 @@ impl SessionUi {
         // renders from scratch, then the status row lands.
         self.rebuild_transcript(view).await;
         self.refresh_stats().await;
+        // The transcript rebuild ran before the refresh, so the refreshed
+        // pair rides the chrome through this tray rebuild — without it
+        // the title keeps the pre-import own cost and subagent aggregate
+        // until the next settled turn.
+        self.rebuild_tray(view);
         self.note(&format!("Session imported from: {input_path}"), view);
         Ok(())
     }
@@ -3689,7 +4231,8 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
+                        || crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+                            .contains(&provider.id.as_str())
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
@@ -3749,7 +4292,8 @@ impl SessionUi {
         if let Some(previous) = self.auth_panel_cancel.take() {
             previous.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+        self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+            .contains(&provider.id.as_str())
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
@@ -3784,7 +4328,7 @@ impl SessionUi {
         }
         let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_key(&id, kb);
+            panel.handle_key(&id, kb, &mut self.osc_sink);
         }
         // A cancel key on an armed panel flow ends it cooperatively
         // (#2770): the flag marks the blocking body (no credential write
@@ -3823,6 +4367,13 @@ impl SessionUi {
                 if let Some(pending) = parked {
                     self.finish_model_sign_in(pending, view).await;
                 }
+                // A landed login or logout may change the auth scope the
+                // daemon's catalog refreshes under: re-fetch now so the
+                // next open serves the new account's view. The parked
+                // sign-in arm already fires one (both are harmless: the
+                // daemon's AuthChange detector forces the same gated,
+                // idempotent refresh).
+                self.spawn_model_catalog_refresh();
             }
             // The failed and cancelled flows drop the park above (the
             // `take`); their own rows render as usual.
@@ -3873,10 +4424,11 @@ impl SessionUi {
             AuthPanelRequest::PastePrompt {
                 prompt,
                 style,
+                allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, reply);
+                    panel.mount_paste(prompt, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -3892,6 +4444,7 @@ impl SessionUi {
                 self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, &provider, view).await;
+                self.maybe_warn_anthropic_subscription_auth(&provider, view);
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
@@ -4030,11 +4583,11 @@ impl SessionUi {
                     session_file.as_deref(),
                     &crate::traces::traces_base_url(),
                 );
-                // TS `chatContainer.addChild(new Spacer(1))` then
-                // `new Text(info, 1, 0)`: the info-display block the
-                // `/session`-style commands share.
-                view.push_entry(ChatEntry::ClientText { rows });
-                self.dirty = true;
+                // The info-display rows the `/session`-style commands
+                // share — in the read-only info panel (the operator's
+                // 2026-09-26 directive), never as transcript rows.
+                self.open_info_panel(view, None, InfoContent::Rows(rows));
+                self.track_menu_opened("traces", "command");
             }
             "off" | "disable" => {
                 // TS `setAgentTracesEnabled(false)` + `flush()`, then the
@@ -4066,8 +4619,10 @@ impl SessionUi {
                 match traces.0.preview(session_file.as_deref()).await {
                     crate::traces::TracePreviewOutcome::Ready(info) => {
                         let rows = crate::traces::preview_block(&info);
-                        view.push_entry(ChatEntry::ClientText { rows });
-                        self.dirty = true;
+                        // The preview block's own `Trace Preview`
+                        // header row is the panel's head.
+                        self.open_info_panel(view, None, InfoContent::Rows(rows));
+                        self.track_menu_opened("traces", "command");
                     }
                     crate::traces::TracePreviewOutcome::NoSessionFile => {
                         self.note(
@@ -4454,6 +5009,7 @@ impl SessionUi {
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
+        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
@@ -4953,6 +5509,17 @@ impl SessionUi {
             "Fullscreen rendering off".to_string()
         };
         self.note(&status, view);
+    }
+
+    /// TS #2709: the Ctrl+O cycle saves the new level as the global
+    /// `chatDetail` setting (`settingsManager.setChatDetail`), so every
+    /// later chat opens at it. A failed save only lands in the settings
+    /// store's own diagnostics (TS `save` -> `recordError`): the chat
+    /// keeps the applied level either way, so the keybind shows no error.
+    fn save_chat_detail(&self, view: &AgentView) {
+        if let Some(settings) = &self.client_settings {
+            let _ = settings.set_chat_detail(view.detail.wire_name());
+        }
     }
 
     /// `/speed on/off`: toggles the footer tok/sec readout for this
@@ -5888,9 +6455,15 @@ impl SessionUi {
             .unwrap_or_default();
         self.list_rows = sorted_session_rows(sessions);
         let sessions = &self.list_rows;
-        let mut lines = String::from("live sessions:");
+        // The listing renders in the read-only info panel (the
+        // operator's 2026-09-26 directive): it no longer lands in the
+        // transcript as a multi-line status row. The row content is
+        // unchanged — `/switch <n|id>` still resolves against the same
+        // cached rows.
+        let raw = |text: String| vec![info_commands::ClientSpan { text, color: None }];
+        let mut rows = vec![raw("live sessions:".to_string())];
         if sessions.is_empty() {
-            lines.push_str("\n  (none)");
+            rows.push(raw("  (none)".to_string()));
         }
         for (index, row) in sessions.iter().enumerate() {
             let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -5909,14 +6482,14 @@ impl SessionUi {
                 .and_then(Value::as_str)
                 .unwrap_or("idle");
             let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or_default();
-            let _ = write!(
-                lines,
-                "\n{current} {}. {name} ({id}) {activity} {cwd}",
+            rows.push(raw(format!(
+                "{current} {}. {name} ({id}) {activity} {cwd}",
                 index + 1
-            );
+            )));
         }
-        lines.push_str("\nswitch with /switch <n|id>");
-        self.note(&lines, view);
+        rows.push(raw("switch with /switch <n|id>".to_string()));
+        self.open_info_panel(view, Some("Sessions".to_string()), InfoContent::Rows(rows));
+        self.track_menu_opened("list", "command");
         Ok(())
     }
 
@@ -5940,8 +6513,11 @@ impl SessionUi {
         // so the switch lands on an empty prompt (the draft returns on a
         // switch back).
         self.stash_draft_for_switch(view);
-        match self.attach_session(&id).await {
+        match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
+                // Session-scoped stats again: the rebuilt title must show
+                // the switched-to session's pair, not the one being left.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head (if one was
@@ -6078,38 +6654,53 @@ impl SessionUi {
         Ok(())
     }
 
-    /// A mouse report (TS `handleFullscreenInput`'s selection branches):
+    /// A mouse report (TS `handleFullscreenInput`'s mouse branches):
     /// wheel turns scroll the transcript window by three lines; a left
-    /// press starts a selection (transcript, or the dock's frame surface
-    /// when the press is outside the window), a drag extends it with
-    /// edge auto-scroll, and a release copies the spanned text out
-    /// through OSC 52. Reports are consumed even while a picker, selector,
-    /// or loader owns the frame (the TS overlay-focus gate) — the wheel
-    /// never scrolls behind one, but its rows select; while tracking is
-    /// inactive every report is consumed without a dispatch. The onboarding
-    /// pane replaces the whole frame, so its runs consume reports without
-    /// a selection surface (a known deviation from the TS inline block).
+    /// press starts a selection (transcript, or the frame surface when the
+    /// press is outside the window), a drag extends it with edge
+    /// auto-scroll, and a release copies the spanned text out through OSC
+    /// 52. A release without a drag opens the link under the press
+    /// position (TS `fullscreenPressedHyperlink`: terminals gate native
+    /// link handling while mouse reporting is active, so clicks the TUI
+    /// consumes must open their OSC 8 targets themselves). Reports are
+    /// consumed even while a picker, selector, or loader owns the frame
+    /// (the TS overlay-focus gate) — the wheel never scrolls behind one,
+    /// but its rows select; while tracking is inactive every report is
+    /// consumed without a dispatch. The onboarding pane owns the frame the
+    /// same way (TS's splash is a 100% overlay): its rows select as frame
+    /// regions and its links open, but no transcript scrolls behind it.
     pub(crate) fn handle_mouse(&mut self, event: crate::mouse::MouseEvent, view: &mut AgentView) {
         if !crate::mouse_tracking::active() {
             return;
         }
-        if view.onboarding.is_some() {
-            return;
-        }
         // TS `isFullscreenOverlayFocused`: the `/model` and `/effort`
         // pickers, the `/tree` and `/fork` selectors, the `/mcp`
-        // connections view, and the `/share` loader own the frame like the
-        // TS overlays.
+        // connections view, the `/share` loader, and the onboarding splash
+        // own the frame like the TS overlays.
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
-            || view.runs_view.is_some()
+            || view.info_panel.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
-            || view.mcp_view.is_some();
+            || view.mcp_view.is_some()
+            || view.onboarding.is_some();
+        // TS records the press state before the dispatch: a drag report
+        // marks the press, a plain press remembers the link under it.
+        let left = event.button == crate::mouse::BUTTON_LEFT;
+        let release_was_drag = left && !event.press && self.left_mouse_dragged;
+        // Screen cells are one-based in the report (TS passes `event.y - 1`).
+        let row = event.y.saturating_sub(1) as usize;
+        let col = event.x.saturating_sub(1) as usize;
+        if left && event.press {
+            self.left_mouse_dragged = event.motion;
+            if !event.motion {
+                self.pressed_hyperlink = view.hyperlink_at(row, col);
+            }
+        }
         // Wheel turns scroll only on the session surface; a pane owns the
         // frame, the turn is consumed without scrolling.
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
@@ -6119,10 +6710,8 @@ impl SessionUi {
             }
             return;
         }
-        // Screen cells are one-based in the report (TS passes `event.y - 1`).
-        let row = event.y.saturating_sub(1) as usize;
-        let col = event.x.saturating_sub(1) as usize;
-        let left_press = event.press && event.button == crate::mouse::BUTTON_LEFT;
+        let left_press = event.press && left;
+        let mut open_pressed_link = false;
         if overlay_focused {
             // TS tries the frame surface first while an overlay owns the
             // frame (its rows are the selectable spans), then the window.
@@ -6143,10 +6732,9 @@ impl SessionUi {
                 self.dirty = true;
             } else if !event.press {
                 view.clear_selection();
+                open_pressed_link = left && !event.motion && !release_was_drag;
             }
-            return;
-        }
-        if left_press && !event.motion {
+        } else if left_press && !event.motion {
             self.stop_selection_auto_scroll();
             // TS `beginSelection` then the `beginFrameSelection` fallback.
             if !view.begin_selection(row, col) {
@@ -6167,6 +6755,40 @@ impl SessionUi {
         } else if !event.press {
             self.stop_selection_auto_scroll();
             view.clear_selection();
+            open_pressed_link = left && !event.motion && !release_was_drag;
+        }
+        // TS opens `fullscreenPressedHyperlink ?? hyperlinkAt(release)`
+        // on a plain left release: the pressed position wins, and a
+        // release over another link still opens that link (a plain click
+        // moves no cells).
+        if open_pressed_link {
+            let url = self
+                .pressed_hyperlink
+                .take()
+                .or_else(|| view.hyperlink_at(row, col));
+            if let Some(url) = url {
+                self.open_hyperlink(&url);
+            }
+        }
+        // TS clears the press state after every left release, so a later
+        // release can never open a stale press.
+        if left && !event.press {
+            self.left_mouse_dragged = false;
+            self.pressed_hyperlink = None;
+        }
+    }
+
+    /// Open one clicked link (TS `openHyperlink`): the href guard admits
+    /// only web and file locations, then the platform opener launches it
+    /// fire-and-forget. A headless run has no terminal — and no browser to
+    /// hand one to — so it records the URL for its verifier instead.
+    fn open_hyperlink(&mut self, url: &str) {
+        let Some(href) = crate::hyperlinks::openable_href(url) else {
+            return;
+        };
+        self.opened_urls.push(href.clone());
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            crate::browser::open_in_browser(&href);
         }
     }
 
@@ -6266,10 +6888,9 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited. The runs view
-        // owns the frame the same way, and the read-only goal panel
-        // consumes it the same way.
-        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
+        // where a later Enter would submit it unedited. The read-only
+        // goal panel and info panel consume it the same way.
+        if view.bash_view.is_some() || view.goal_panel.is_some() || view.info_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -6310,9 +6931,41 @@ impl SessionUi {
         Ok(())
     }
 
-    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
-        if !self
-            .client
+    /// The open-time kernel-bash fold: the first `list_kernel_bash`
+    /// response lands in the registry synchronously with the attach
+    /// (capability-gated and bounded like the background refresh), so
+    /// the dock's bash rows ride the first content frame instead of
+    /// popping in late. A failed fetch leaves the just-cleared registry
+    /// — the 2s poll refills.
+    async fn fetch_bash_activities(&mut self) {
+        if !self.kernel_bash_supported() {
+            return;
+        }
+        // Advance the epoch so a poll still in flight from before the
+        // attach (the 2s cadence's spawned list) never overwrites this
+        // fold with its older registry: the epoch check drops it at
+        // fold time.
+        self.bash_list_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        self.bash_activities = data;
+    }
+
+    /// Whether the daemon advertises the kernel-bash registry (older
+    /// daemons never see the list requests).
+    fn kernel_bash_supported(&self) -> bool {
+        self.client
             .hello()
             .get("serverCapabilities")
             .and_then(Value::as_array)
@@ -6320,7 +6973,10 @@ impl SessionUi {
                 caps.iter()
                     .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
             })
-        {
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
+        if !self.kernel_bash_supported() {
             return;
         }
         // The 2s poll, the view open, and the post-kill refresh can
@@ -6496,61 +7152,6 @@ impl SessionUi {
         }
     }
 
-    /// Open the condensed tool runs view (the drill-in pane for the
-    /// collapsed transcript's condensed blocks): the pane reads the
-    /// view's own transcript - no wire requests, no state beyond the
-    /// cursor and the scroll.
-    fn open_runs_view(&mut self, view: &mut AgentView) {
-        let runs = view.condensed_runs();
-        view.runs_view = Some(RunsView::new(
-            picker_viewport_rows(view.terminal_rows()),
-            &view.chat,
-            &runs,
-        ));
-        self.dirty = true;
-    }
-
-    /// One key press while the condensed tool runs view is open: the view
-    /// owns the frame the same way as the bash view; its only action is
-    /// closing (the pane is pure presentation).
-    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let runs = view.condensed_runs();
-        // The runs change live under the open pane: reconcile BEFORE the
-        // key acts (the cursor and the open detail can point at a run
-        // that grew, split, or vanished since the last look), closing
-        // the pane when no run survives.
-        if view
-            .runs_view
-            .as_mut()
-            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
-        {
-            view.runs_view = None;
-            self.dirty = true;
-            return Ok(());
-        }
-        let kb = view.editor.keybindings().clone();
-        let action = view
-            .runs_view
-            .as_mut()
-            .map_or(RunsViewAction::None, |runs_view| {
-                runs_view.handle_key(&id, &kb, &view.chat, &runs)
-            });
-        match action {
-            RunsViewAction::Close => {
-                view.runs_view = None;
-            }
-            RunsViewAction::None => {}
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
     /// The dock's goal row opens the read-only goal panel (the
     /// operator's 2026-09-24 directive: selecting the `Pursuing goal`
     /// row shows "what the goal prompt is").
@@ -6564,6 +7165,24 @@ impl SessionUi {
         });
         self.subagents_focused = false;
         self.update_subagent_summary(view);
+        self.dirty = true;
+    }
+
+    /// Open the read-only info panel over the editor dock (the
+    /// operator's 2026-09-26 directive: the client info displays —
+    /// `/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
+    /// `/hotkeys`, the `/traces` blocks, and `/list` — render as the
+    /// docked popup panel, the `/mcp` and `/model` panel grammar,
+    /// instead of flooding the transcript with rows that persist). The
+    /// content is whatever the command already built; ESC closes and
+    /// returns focus to the chat with the transcript untouched.
+    fn open_info_panel(
+        &mut self,
+        view: &mut AgentView,
+        title: Option<String>,
+        content: InfoContent,
+    ) {
+        view.info_panel = Some(crate::info_panel::InfoPanel::new(title, content));
         self.dirty = true;
     }
 
@@ -6587,6 +7206,30 @@ impl SessionUi {
             view.goal_panel = None;
             self.dirty = true;
         }
+        Ok(())
+    }
+
+    /// The info panel owns the frame while open: the navigation keys
+    /// scroll its window, the close keys dismiss it, and every other key
+    /// is consumed — the read-only document never leaks a key back to
+    /// the editor, and the transcript gains nothing while it is open.
+    async fn handle_info_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (close, not exit): report the handled
+        // press so the force-quit guard can disarm once the whole pair was
+        // consumed with TS semantics (the same discipline as the other
+        // modal handlers).
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if view.info_panel.as_mut().is_some_and(|panel| {
+            panel.handle_key(&id, view.editor.keybindings()) == InfoPanelAction::Close
+        }) {
+            view.info_panel = None;
+        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -6837,6 +7480,37 @@ impl SessionUi {
             (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
+    }
+
+    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
+    /// response scopes and sorts into the catalog synchronously with the
+    /// attach (bounded like every UI request), so the dock's heartbeat
+    /// rows ride the first content frame instead of popping in late. A
+    /// failed or timed-out fetch leaves the just-cleared catalog — the
+    /// same empty-open state the background refresh's failure arm
+    /// produces, and the next `heartbeats_changed` event refills.
+    async fn fetch_heartbeat_catalog(&mut self) {
+        // Advance the epoch so a refresh still in flight from before the
+        // attach (a `heartbeats_changed` burst's spawned fetch) never
+        // overwrites this fold with its older catalog: the epoch's
+        // staleness check drops it at fold time.
+        self.heartbeat_refresh_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::HeartbeatsList {
+                    id: None,
+                    active_session_id: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
+        sort_heartbeats(&mut heartbeats);
+        self.heartbeat_catalog = heartbeats;
     }
 
     /// Fire a background heartbeat-catalog refresh (TS
@@ -7321,7 +7995,8 @@ impl SessionUi {
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
     /// `set_thinking_level` command switches the session's level (durable
     /// row and settings default included), then the client records the
-    /// `Thinking level: <level>` status row.
+    /// `Thinking level: <level>` status row and the tray's `model:effort`
+    /// label follows the effective level.
     async fn apply_thinking_level(&mut self, level: &str, view: &mut AgentView) {
         let switched = self
             .bounded_request(
@@ -7335,7 +8010,39 @@ impl SessionUi {
             )
             .await;
         match switched {
-            Ok(_) => self.note(&format!("Thinking level: {level}"), view),
+            Ok(_) => {
+                // The tray's effort suffix follows the level the switch
+                // wrote: the daemon clamps the request (TS `setThinkingLevel`
+                // emits the effective level; the Rust daemon answers no such
+                // event, so the client re-reads the state `/effort` targets).
+                // A failed read falls back to the requested level, never the
+                // previous model's stale suffix.
+                let state = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::GetState {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await;
+                match state {
+                    Ok(data) => {
+                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                    }
+                    // The switch succeeded; the state read did not. TS
+                    // `applyThinkingLevel` patches the requested level into
+                    // the connection state (the `thinking_level_changed`
+                    // event corrects it later), so render the requested
+                    // level — never the previous model's stale suffix.
+                    Err(_) => {
+                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
+                            .map(|parsed| parsed.wire_name().to_string());
+                    }
+                }
+                self.note(&format!("Thinking level: {level}"), view);
+            }
             Err(error) => {
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
@@ -7348,13 +8055,16 @@ impl SessionUi {
     }
 
     /// The session's connection state (TS `AgentConnectionState`): the
-    /// worker's `get_state` response. `None` surfaces the failure as a
-    /// note; callers keep the transcript unchanged then.
+    /// worker's `get_connection_state` response, which carries the
+    /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
+    /// `steeringMode`, `serviceTier`, ...) — `get_state` serves the
+    /// roster summary instead. `None` surfaces the failure as a note;
+    /// callers keep the transcript unchanged then.
     async fn connection_state(&mut self, view: &mut AgentView) -> Option<Value> {
         match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetState {
+                DaemonCommand::GetConnectionState {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     rest: Map::default(),
@@ -7385,6 +8095,9 @@ impl SessionUi {
     /// that omits it falls back to the picked model (`state.model ??
     /// fallbackModel`) — the switch already succeeded, so the label must
     /// move even when the worker's summary cannot re-resolve the model.
+    /// The tray's effort suffix follows the same read: a switch clamps
+    /// the level (a model without the old level re-resolves it), and a
+    /// model without reasoning renders the bare id.
     async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
         let state = self
             .bounded_request(
@@ -7396,15 +8109,22 @@ impl SessionUi {
                 },
             )
             .await;
-        let model_id = match state {
-            Ok(data) => data
+        if let Ok(data) = state {
+            let model_id = data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string),
-            Err(_) => picked_model_id.to_string(),
-        };
-        view.chrome.model_id = Some(model_id);
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            view.chrome.model_id = Some(model_id);
+            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+        } else {
+            // The picked model's effort is unknown when the read fails:
+            // a stale suffix would pair the new model with the old
+            // model's level (a combination TS never renders), so the
+            // bare id wins.
+            view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.thinking_suffix = None;
+        }
         self.dirty = true;
     }
 
@@ -7549,25 +8269,6 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
-        // The rebuilt transcript replaces the chat wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no
-        // run survives) - compaction sets `transcript_stale` and this
-        // rebuild lands after the update path already reconciled
-        // against the pre-rebuild chat, so without this seam the pane
-        // rides stale start indices and identity keys until the next
-        // key press.
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
-        }
         view.follow();
         self.dirty = true;
     }
@@ -7668,13 +8369,13 @@ impl SessionUi {
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
         }
-        // The condensed tool runs view owns the frame the same way.
-        if view.runs_view.is_some() {
-            return self.handle_runs_view_key(key, view).await;
-        }
         // The read-only goal panel owns the frame the same way.
         if view.goal_panel.is_some() {
             return self.handle_goal_panel_key(key, view).await;
+        }
+        // The read-only info panel owns the frame the same way.
+        if view.info_panel.is_some() {
+            return self.handle_info_panel_key(key, view).await;
         }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
@@ -7765,8 +8466,8 @@ impl SessionUi {
         }
         // The activity dock owns focus while focused: Enter (and a second
         // Alt+A) opens the focused group's own view directly (the
-        // operator's direct-navigation redesign), left/right move the
-        // dock's group, up/cancel/back returns to the editor, expand
+        // operator's direct-navigation redesign), left/right step the
+        // dock's groups, up/cancel/back returns to the editor, expand
         // cycles the conversation detail and KEEPS the focus, and every
         // other key falls through after releasing the focus (TS
         // `onChatAction` -> `focusEditor` -> the editor handles it).
@@ -7780,29 +8481,22 @@ impl SessionUi {
                 return Ok(());
             }
             if id == "left" || id == "right" {
-                let groups = [
-                    crate::chrome::ActivityGroup::Subagents,
-                    crate::chrome::ActivityGroup::Heartbeats,
-                    crate::chrome::ActivityGroup::Bash,
-                    crate::chrome::ActivityGroup::Goal,
-                ];
-                let current = groups
-                    .iter()
-                    .position(|group| *group == self.activity_group)
-                    .unwrap_or(0);
-                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
-                    Box::new(groups[..current].iter().rev())
+                // One press, one group: the step lands on the
+                // neighboring rendered group and wraps at the row's
+                // ends, so an empty group is still visited (the
+                // operator's 2026-09-26 muscle-memory directive — an
+                // empty group never skips) and N groups take N
+                // presses to cycle.
+                let direction = if id == "left" {
+                    crate::chrome::ActivityDirection::Prev
                 } else {
-                    Box::new(groups[current + 1..].iter())
+                    crate::chrome::ActivityDirection::Next
                 };
-                if let Some(next) = candidates
-                    .copied()
-                    .find(|group| self.activity_selectable(*group))
-                {
-                    self.activity_group = next;
-                    self.update_subagent_summary(view);
-                    self.dirty = true;
-                }
+                self.activity_group = self
+                    .activity_dock_state()
+                    .step(self.activity_group, direction);
+                self.update_subagent_summary(view);
+                self.dirty = true;
                 return Ok(());
             }
             if kb.matches(&id, "tui.select.up")
@@ -7816,6 +8510,7 @@ impl SessionUi {
             }
             if kb.matches(&id, "app.tools.expand") {
                 view.detail = view.detail.next();
+                self.save_chat_detail(view);
                 self.dirty = true;
                 return Ok(());
             }
@@ -7960,16 +8655,6 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // TS `app.shortcuts` (default `?`, empty editor only — the action
-        // loop's `getText().length === 0` gate): mount the quick-shortcut
-        // guide above the dock until the next submission.
-        if view.editor.keybindings().matches(&id, "app.shortcuts")
-            && view.editor.get_text().is_empty()
-        {
-            view.shortcut_guide = Some(crate::hotkeys::shortcut_guide(view.editor.keybindings()));
-            self.dirty = true;
-            return Ok(());
-        }
         // TS `app.suspend` (default ctrl+z, `handleCtrlZ`): hand the
         // terminal to the shell and stop the process group; the loop
         // performs the cycle right after dispatch, and the SIGCONT
@@ -7987,8 +8672,10 @@ impl SessionUi {
         }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
-            // detail: overview -> details -> all -> overview.
+            // detail: overview -> details -> all -> overview, and #2709
+            // saves the new level as the `chatDetail` setting.
             view.detail = view.detail.next();
+            self.save_chat_detail(view);
             // TS `applyChatExpansion` also re-flags the side-question pane
             // (the pane has no bash rows here, so the flag is the only
             // carried state).
@@ -7998,29 +8685,14 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // `app.transcript.runs` (default alt+t): the condensed tool runs
-        // view opens over the editor dock (the drill-in pane for the
-        // collapsed transcript's condensed blocks); with no condensed
-        // runs the key opens the same pane with its empty note - the
-        // affordance stays discoverable.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.transcript.runs")
-        {
-            self.emit_activity_opened("runs");
-            self.open_runs_view(view);
-            self.dirty = true;
-            return Ok(());
-        }
-        // TS `app.subagents.focus` (default alt+a): the summary line takes
-        // focus when it is selectable.
+        // TS `app.subagents.focus` (default alt+a): the dock takes focus
+        // while it renders (an unmounted dock keeps the editor's focus).
         if view
             .editor
             .keybindings()
             .matches(&id, "app.subagents.focus")
         {
-            self.focus_subagents_summary(view);
+            self.focus_subagents_summary(DockFocusSource::Shortcut, view);
             self.dirty = true;
             return Ok(());
         }
@@ -8212,7 +8884,10 @@ impl SessionUi {
         // cursor at the last line's end — hands the focus to the subagent
         // summary line when it is selectable; every other Down falls
         // through to the editor's cursor motion (a non-selectable line
-        // never takes it).
+        // never takes it). TS `SubagentSummaryLine.isSelectable()` grants
+        // the grab only when subagents exist — the dock's other groups
+        // keep their `app.subagents.focus` shortcut, so the prompt's
+        // arrows stay the input-history recall in every session shape.
         if view
             .editor
             .keybindings()
@@ -8220,7 +8895,7 @@ impl SessionUi {
             && !view.editor.is_showing_autocomplete()
             && !view.editor.is_history_navigation_active()
             && view.editor.is_cursor_at_end()
-            && self.focus_subagents_summary(view)
+            && self.focus_subagents_summary(DockFocusSource::PromptDown, view)
         {
             // The focus leaves the editor with the selection active: a
             // later keystroke would fall back through to the editor and
@@ -8515,6 +9190,10 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {
+                // TS #2458 `daemonClosingNotice`: the announcement is the
+                // discriminator the interactive loop's shutdown recovery
+                // arms on (a bare session stop without it stays stopped).
+                self.daemon_closing_notice = Some(reason.clone());
                 match update {
                     Some(update) => {
                         // Spec §10: reattach is the default end state. The
@@ -8572,6 +9251,15 @@ impl SessionUi {
             // (another client's pause/resume reaches the dock at once).
             DaemonClientEvent::HeartbeatsChanged => {
                 self.spawn_heartbeat_refresh();
+            }
+            // A background daemon-side catalog refresh changed the served
+            // snapshot (the Rust-only no-stall picker-open extension):
+            // every client re-fetches instantly — the daemon answers from
+            // the warm caches, no stall — and an open `/model` picker
+            // folds the fresh catalog through its stable update path
+            // (`apply_model_catalog` keeps the selection), no flicker.
+            DaemonClientEvent::ModelCatalogChanged => {
+                self.spawn_model_catalog_refresh();
             }
             // A worker replacement superseded the id this client holds:
             // the interactive loop re-attaches to the session's current id
@@ -8705,6 +9393,7 @@ impl SessionUi {
                 // trailing `agent_end` frames from the previous turn must
                 // not cancel a turn admitted in between (prompt queueing).
                 self.streaming_index = None;
+                self.turn_ends_seen += 1;
                 self.turn_active = false;
                 view.working = None;
                 view.working_since = None;
@@ -8938,20 +9627,6 @@ impl SessionUi {
                 self.sync_queue_selection(view);
             }
             TurnUpdate::StatusUpdate => {}
-        }
-        // A transcript mutation reshaped the condensed runs: reconcile an
-        // open runs pane now (the cursor and the open detail can point at
-        // a run that grew, split, or vanished; the pane closes when no
-        // run survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
         }
         self.dirty = true;
     }
@@ -9656,7 +10331,7 @@ fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
         .count()
 }
 
-fn picker_viewport_rows(terminal_rows: u16) -> usize {
+pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
     menu_rows.saturating_sub(1).max(1)

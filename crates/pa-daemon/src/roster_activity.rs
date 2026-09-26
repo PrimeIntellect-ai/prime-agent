@@ -277,6 +277,7 @@ mod tests {
     /// One pending flag bounds the backlog: a burst of requests behind a
     /// slow supervisor collapses into a couple of flushes with the latest
     /// state — an unbounded queue would drain every request one by one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_burst_collapses_behind_a_slow_supervisor() {
         let dir = tempfile::TempDir::new().unwrap();

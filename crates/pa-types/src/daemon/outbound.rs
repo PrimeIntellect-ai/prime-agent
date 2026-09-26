@@ -62,6 +62,12 @@ pub enum DaemonErrorInfo {
     ModelProviderUnauthenticated {
         provider: String,
     },
+    /// The supervisor refused to enqueue a request-shaped client command
+    /// because the target worker is at its in-flight bound: the request
+    /// never left the supervisor, so a retry cannot duplicate it. The
+    /// supervisor's answer to a saturated route (the Codex
+    /// `-32001 "Server overloaded; retry later."` analog on our wire).
+    WorkerOverloaded,
 }
 
 /// Saved-session row pushed by `session_list_item` progress events.
@@ -262,6 +268,14 @@ pub enum DaemonOutbound {
         rest: JsonMap,
     },
     HeartbeatsChanged {
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// The Rust-only no-stall picker-open extension: a background
+    /// daemon-side catalog refresh changed the served snapshot, so every
+    /// client re-fetches. Mirrors the wire shape of the worker's
+    /// `model_catalog_changed` broadcast frame.
+    ModelCatalogChanged {
         #[serde(flatten)]
         rest: JsonMap,
     },

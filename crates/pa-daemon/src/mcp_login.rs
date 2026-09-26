@@ -456,6 +456,7 @@ mod tests {
             client_id: Some("fixture-client".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let value = serde_json::to_value(&credential).unwrap();
         assert_eq!(value["type"], "oauth");

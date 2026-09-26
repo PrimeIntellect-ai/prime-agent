@@ -157,6 +157,7 @@ fn test_options() -> Option<pa_core::kernel::shared::KernelManagerOptions> {
         session_id: Some("teardown-test".to_string()),
         host_handlers: pa_core::kernel::shared::HostRequestHandlers::default(),
         python_skills: Vec::new(),
+        on_background_work_settled: None,
         snapshot: None,
         bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[])),
         stderr_log_path: None,

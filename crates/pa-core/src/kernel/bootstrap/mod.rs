@@ -17,14 +17,19 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context};
 
 use dir_lock::acquire_bootstrap_lock;
-pub use runtime_code::build_rlm_bootstrap_code;
+pub use runtime_code::{
+    build_rlm_bootstrap_code, parse_unavailable_python_skills, UnavailablePythonSkills,
+    PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
+};
 use venv::{
     bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
     resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
 };
+pub use venv::{
+    invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python, resolve_runtime_identity,
+};
 use venv::{kernel_base_ready, kernel_ready};
-pub use venv::{kernel_venv_dir, kernel_venv_python, resolve_runtime_identity};
 
 /// One Python skill the kernel should import at bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]

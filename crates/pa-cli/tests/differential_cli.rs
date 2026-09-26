@@ -30,6 +30,7 @@ const CORPUS: &[&[&str]] = &[
     &["help", "help"],
     &["help", "agents"],
     &["help", "list"],
+    &["help", "sessions"],
     &["help", "attach"],
     &["help", "stop"],
     &["help", "rename"],
@@ -100,6 +101,18 @@ const CORPUS: &[&[&str]] = &[
         "--daemon-socket",
         "/nonexistent-pa-daemon-differential.sock",
         "list",
+        "--json",
+    ],
+    &[
+        "--daemon-socket",
+        "/nonexistent-pa-daemon-differential.sock",
+        "sessions",
+    ],
+    &[
+        "--daemon-socket",
+        "/nonexistent-pa-daemon-differential.sock",
+        "sessions",
+        "--all",
         "--json",
     ],
     &[

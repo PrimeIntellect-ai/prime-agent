@@ -621,3 +621,81 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
         "a fresh fetch ran after the abandoned one"
     );
 }
+
+/// The hourly loop (the supervisor's arm on the process-shared catalog)
+/// refreshes through the credentials closure: the first tick fires the
+/// gated Hourly trigger immediately (tokio interval semantics — a
+/// supervisor boot warms the caches without waiting an hour) and the
+/// closure's credentials ride the credentialed fetch; the tick's own
+/// fetch arms the hourly gate, so an immediate second attempt stays
+/// inside the window (one fetch per layer per hour).
+#[tokio::test]
+async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let compiled = pa_models::transports::prime_inference_offline_entries();
+    let ids: Vec<String> = compiled.iter().map(|m| m.id.clone()).take(60).collect();
+    let entry = |id: &str| {
+        json!({
+            "id": id,
+            "display_name": id,
+            "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+            "specs": {
+                "context_window": 200_000, "max_output_tokens": 32_768,
+                "supports_reasoning": true,
+                "modalities": {"input": ["text"], "output": ["text"]},
+            },
+        })
+    };
+    let data: Vec<Value> = ids.iter().map(|id| entry(id)).collect();
+    let pi_payload = json!({"data": data}).to_string();
+    let server = common::MockServer::start(vec![
+        common::ok_json(catalog_json(&["hourly-model"]), None),
+        common::ok_json(pi_payload, None),
+    ])
+    .await;
+    let catalog = Arc::new(pa_models::ModelCatalog::with_urls(
+        Some(dir.path().join("models")),
+        Some(dir.path().to_path_buf()),
+        &server.url("/catalog"),
+        &server.url("/api/v1"),
+    ));
+    let credentials = pa_models::PrimeCredentials {
+        api_key: "sk-hourly".into(),
+        team_id: Some("team-hourly".into()),
+    };
+    let hourly = Arc::clone(&catalog);
+    hourly.spawn_hourly_refresh(move || Some(credentials.clone()));
+    // The first tick fires immediately: both fetch layers ran, the
+    // credentialed one carrying the closure's current credentials.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.request_count() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hourly loop's first tick never fetched"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let heads = server.recorded_requests();
+    assert!(
+        heads.iter().any(|head| head.contains("/catalog")),
+        "the provider catalog layer refreshed"
+    );
+    let pi_fetch = heads
+        .iter()
+        .find(|head| head.contains("/models"))
+        .expect("the credentialed layer refreshed");
+    assert!(
+        pi_fetch.contains("authorization: Bearer sk-hourly"),
+        "{pi_fetch}"
+    );
+    assert!(
+        pi_fetch.contains("x-prime-team-id: team-hourly"),
+        "{pi_fetch}"
+    );
+    // The hourly gate: an immediate second attempt serves the cached
+    // snapshot with no fetch (the awaited call is the gate's own path, so
+    // the count is settled at the assert, not raced).
+    let gated = catalog.refresh(false).await;
+    assert!(gated.is_some_and(|models| { models.iter().any(|model| model.id == "hourly-model") }));
+    assert_eq!(server.request_count(), 2, "one fetch per layer per window");
+}

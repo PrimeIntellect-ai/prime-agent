@@ -51,6 +51,28 @@ impl Detail {
     pub fn edit_diffs_expanded(self) -> bool {
         !matches!(self, Detail::Overview)
     }
+
+    /// The stored wire name (TS `ChatDetail`): "overview" | "details" |
+    /// "all".
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Detail::Overview => "overview",
+            Detail::Details => "details",
+            Detail::All => "all",
+        }
+    }
+
+    /// The level for a stored wire name (TS #2709 `getChatDetail`):
+    /// an unset or unknown value reads as the `details` startup level.
+    #[must_use]
+    pub fn from_wire_name(name: &str) -> Self {
+        match name {
+            "overview" => Detail::Overview,
+            "all" => Detail::All,
+            _ => Detail::Details,
+        }
+    }
 }
 
 /// One rendered chat component.
@@ -111,21 +133,6 @@ pub enum ChatEntry {
     RefinementOutcome(Box<crate::custom_message::RefinementOutcomeRow>),
     /// One generic custom row (TS `CustomMessageComponent` box).
     CustomPanel(Box<crate::custom_message::CustomPanelRow>),
-    /// A client-side markdown block appended to the chat (TS
-    /// `chatContainer.addChild(new Markdown(...))`, e.g. the `/hotkeys`
-    /// guide): not a durable session row.
-    ClientMarkdown { text: String },
-    /// A client-side info block (TS `chatContainer.addChild(new
-    /// Spacer(1))` + `new Text(info, 1, 0)`, e.g. the `/session`,
-    /// `/context`, `/system-prompt`, and `/logs` displays): not a durable
-    /// session row.
-    ClientText {
-        rows: Vec<crate::info_commands::ClientLine>,
-    },
-    /// The `/changelog` panel (TS `handleChangelogCommand`): the border,
-    /// `What's New` title, and the entries markdown. Not a durable
-    /// session row.
-    ChangelogPanel { markdown: String },
 }
 
 // The card types live in `tool_card`; re-exported here because the
@@ -675,6 +682,17 @@ mod tests {
         assert!(detail.edit_diffs_expanded());
         detail = detail.next();
         assert_eq!(detail, Detail::Overview);
+    }
+
+    #[test]
+    fn detail_wire_names_round_trip_with_ts_fallback() {
+        // TS #2709: the Ctrl+O level persists as the `chatDetail` wire
+        // string and reads back; anything unknown is the startup level.
+        for detail in [Detail::Overview, Detail::Details, Detail::All] {
+            assert_eq!(Detail::from_wire_name(detail.wire_name()), detail);
+        }
+        assert_eq!(Detail::from_wire_name(""), Detail::Details);
+        assert_eq!(Detail::from_wire_name("verbose"), Detail::Details);
     }
 
     #[test]

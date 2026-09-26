@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;
 use crate::daemon_client::DaemonClientEvent;
+use crate::daemon_reconnect::RecoveryKind;
 use crate::exit_guard::ExitGuard;
 use crate::keybindings::KeybindingsManager;
 use crate::session_ui::SessionUi;
@@ -109,8 +110,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A menu surface opened (event `tui menu opened`): `menu` names the
-    /// surface (`model`, `mcp`), `source` how it opened (`command` — the
-    /// bare slash submission, `tab` — a typed partial + Tab).
+    /// surface (`model`, `mcp`, `settings`, or a read-only info panel
+    /// command — `context`, `session`, `system-prompt`, `logs`,
+    /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
+    /// (`command` — the bare slash submission, `tab` — a typed partial +
+    /// Tab).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -582,6 +586,7 @@ async fn drive_onboarding_pane(
     drive: &mut PaneDrive<'_>,
     mut screen: crate::onboarding::OnboardingScreen,
     mut flow: Option<OnboardingFlowTask>,
+    osc_sink: &mut crate::clipboard::OscSink,
 ) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
     // The armed render barrier holds the input batch behind it (the
     // loop's post-draw check pops it on satisfy or timeout).
@@ -669,7 +674,7 @@ async fn drive_onboarding_pane(
                     if key_id == "ctrl+c" {
                         drive.exit_guard.note_ctrl_c_handled();
                     }
-                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
+                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
                         // A decision tears the pane down mid-drive: end
                         // a still-running login flow with it (TS the
                         // dialog's abort signal) — the cooperative
@@ -798,7 +803,8 @@ async fn run_onboarding_phase(
         // The model-ready branch (TS `runOnboardingFlow`'s ready case):
         // the immediate splash mounts the trace question alone.
         let screen = crate::onboarding::OnboardingScreen::new();
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -838,7 +844,8 @@ async fn run_onboarding_phase(
     // questions. A flow that aborts (a cancelled or failed sign-in,
     // the exit keys) leaves the marker unset — the next launch retries.
     let screen = crate::onboarding::OnboardingScreen::welcome();
-    let (mut screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+    let (mut screen, outcome) =
+        drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
@@ -892,8 +899,14 @@ async fn run_onboarding_phase(
         },
         prime_cancel,
     );
-    let (mut screen, outcome) =
-        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow)).await?;
+    let (mut screen, outcome) = drive_onboarding_pane(
+        view,
+        &mut *drive,
+        screen,
+        Some(prime_flow),
+        &mut session.osc_sink,
+    )
+    .await?;
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
@@ -986,7 +999,7 @@ async fn run_onboarding_phase(
             crate::onboarding_flow::ProviderPicker::new(options),
         ));
         let (picked_screen, outcome) =
-            drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         screen = picked_screen;
         let pick = match outcome {
             PaneOutcome::InputClosed => return Ok(false),
@@ -1054,8 +1067,14 @@ async fn run_onboarding_phase(
                 },
                 prompt_cancel,
             );
-            let (prompted_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
+            let (prompted_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(prompt_flow),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = prompted_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1099,8 +1118,14 @@ async fn run_onboarding_phase(
                 async move { service_auth.0.login_on_panel(&row, panel).await },
                 service_cancel,
             );
-            let (login_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login)).await?;
+            let (login_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(provider_login),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = login_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1139,7 +1164,8 @@ async fn run_onboarding_phase(
                 crate::onboarding::trace_question_config(),
             ),
         ));
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -1215,6 +1241,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// Links opened by mouse clicks (headless runs have no terminal to
+    /// hand a browser to; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -1270,6 +1299,16 @@ const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
 /// The reconnect backoff cap.
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
+/// TS #2458 `DAEMON_RECONNECT_TIMEOUT_MS`: the announced non-update
+/// closing's recovery window — an explicit stop stays stopped, so the
+/// pane waits for the daemon to come back bounded instead of retrying
+/// through the §10.2 resume window.
+const DAEMON_SHUTDOWN_RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+
+/// TS #2458 `SHUTDOWN_RECONNECT_RETRY_MS`: the shutdown recovery's poll
+/// cadence (fixed, unlike the doubling hiccup backoff).
+const SHUTDOWN_RECONNECT_RETRY: Duration = Duration::from_millis(100);
+
 /// TS `DAEMON_RECONNECT_TIMEOUT_MS`: the bounded session-plane reconnect
 /// window after the direct worker link dies.
 const SESSION_RECONNECT_WINDOW: Duration = Duration::from_mins(1);
@@ -1312,21 +1351,23 @@ impl SessionReconnect {
     }
 }
 
-/// The interactive loop's reconnect driver (spec §10.2): attempts with
-/// doubling backoff inside the 10-minute window; the user can leave with
-/// Ctrl+C at any point (UI input keeps flowing through the same loop).
-/// The same driver also serves an UNEXPECTED connection loss (the
-/// supervisor connection died mid-run with no update in flight — a daemon
-/// hiccup at load, 2026-09-24: the one-shot path exited the operator's
-/// TUI with "the daemon connection closed"): the pane keeps its
-/// transcript and editor and retries instead of dying.
+/// The interactive loop's full reconnect driver (spec §10.2): attempts
+/// with backoff inside the window; the user can leave with Ctrl+C at any
+/// point (UI input keeps flowing through the same loop). Three closings arm
+/// it — an update restart's resume contract, an UNEXPECTED connection loss
+/// (the supervisor connection died mid-run with no update in flight — a
+/// daemon hiccup at load, 2026-09-24: the one-shot path exited the
+/// operator's TUI with "the daemon connection closed"), and an ANNOUNCED
+/// non-update closing (TS #2458: the operator's own shutdown used to kill
+/// every attached window) — the pane keeps its transcript and editor and
+/// retries instead of dying.
 struct ReconnectLoop {
     deadline: tokio::time::Instant,
     next_attempt: tokio::time::Instant,
     delay: Duration,
-    /// Whether this driver serves an unexpected loss (the expiry and
-    /// failure notes name it, not an update restart).
-    lost: bool,
+    /// The closing that armed this driver: the reattach banner and the
+    /// expiry row follow it.
+    kind: RecoveryKind,
 }
 
 impl ReconnectLoop {
@@ -1336,28 +1377,74 @@ impl ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: false,
+            kind: RecoveryKind::Update,
         }
     }
 
     /// The unexpected-loss variant: same window, same backoff, its own
-    /// expiry note.
+    /// expiry row.
     fn start_lost() -> Self {
         let delay = Duration::from_secs(1);
         ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: true,
+            kind: RecoveryKind::Lost,
         }
     }
 
-    /// The next attempt with doubling backoff (capped).
+    /// TS #2458 `reconnectAfterShutdown`: the announced non-update
+    /// closing. The window is the TS reconnect timeout (not the §10.2
+    /// resume window — an explicit stop stays stopped), the cadence is
+    /// the TS fixed poll, and the expiry is the saved-transcript close.
+    fn start_shutdown() -> Self {
+        ReconnectLoop {
+            deadline: tokio::time::Instant::now() + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            next_attempt: tokio::time::Instant::now() + SHUTDOWN_RECONNECT_RETRY,
+            delay: SHUTDOWN_RECONNECT_RETRY,
+            kind: RecoveryKind::Shutdown,
+        }
+    }
+
+    /// The next attempt: doubling backoff (capped) for the resume and
+    /// hiccup windows; the shutdown recovery keeps the TS fixed poll.
     fn next_attempt(mut self) -> Self {
-        self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        if !matches!(self.kind, RecoveryKind::Shutdown) {
+            self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        }
         self.next_attempt = tokio::time::Instant::now() + self.delay;
         self
     }
+}
+
+/// TS #2458 `reconnectAfterShutdown`'s arming: an announced non-update
+/// closing (`daemon_closing` with no update) keeps the pane mounted while
+/// it waits bounded for the daemon to come back on the same socket path
+/// (the recovery never relaunches the daemon — an explicit stop stays
+/// stopped). No-op when the notice is absent (a bare session stop stays
+/// stopped) or a driver already owns the recovery; `true` when it armed.
+fn arm_shutdown_recovery(
+    session: &mut SessionUi,
+    view: &mut AgentView,
+    reconnect: &mut Option<ReconnectLoop>,
+    session_reconnect: &mut Option<SessionReconnect>,
+) -> bool {
+    if reconnect.is_some() || session.daemon_closing_notice.as_deref() != Some("shutdown") {
+        return false;
+    }
+    session.note_as(
+        "the Prime Agent daemon shut down; waiting for it to come back…",
+        crate::chat::StatusKind::Warning,
+        view,
+    );
+    // TS #2458's yield rule: the shutdown recovery owns the run — a
+    // session-plane retry armed by an earlier direct-link loss would race
+    // it through a dying supervisor, and its expiry would block submits
+    // after a later reconnect lands.
+    *session_reconnect = None;
+    *reconnect = Some(ReconnectLoop::start_shutdown());
+    session.dirty = true;
+    true
 }
 
 /// Run the interactive UI until the user exits (terminal) or the plan
@@ -1433,6 +1520,12 @@ async fn run_interactive_surface(
     // failed abort into the transcript note and clears the stuck loader.
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
+    // A backgrounded prompt round trip reports here (TS `onSubmit`
+    // resolves `agentConnection.prompt` off the render path — the
+    // cleared editor paints before the daemon answers); the loop folds
+    // the settled outcome into the session.
+    let (prompt_tx, mut prompt_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::PromptSubmitNote>();
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
@@ -1505,6 +1598,10 @@ async fn run_interactive_surface(
         // value (interactive-mode.ts `new TUI(..., getShowHardwareCursor())`);
         // the settings menu's toggle updates it in place.
         view.show_hardware_cursor = settings.show_hardware_cursor();
+        // TS #2709: the interactive-mode constructor assigns the persisted
+        // `chatDetail` level (`assignChatDetail(getChatDetail())`), so a
+        // chat opens at the level the last Ctrl+O pick saved.
+        view.detail = crate::chat::Detail::from_wire_name(&settings.chat_detail());
     }
     apply_startup_chrome(&mut view, &options);
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
@@ -1524,11 +1621,18 @@ async fn run_interactive_surface(
         options.fullscreen_mouse,
         &surface_mounted,
     )?;
-    if !headless {
-        // TS `ui.start()` renders once before the session loads: the first
-        // frame is the startup chrome (banner, editor, tray). The model
-        // and session labels are placeholders until the attach's
-        // `rebuild_view` repaints with the snapshot.
+    // The startup chrome paints before the session loads only for a NEW
+    // chat (TS `ui.start()` renders the banner once before the session
+    // loads): a fresh session's dock is deterministically empty, so the
+    // placeholder frame never reflows when the attach lands. A direct
+    // open into an existing session holds the previous surface instead
+    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
+    // construct the chat over an already-attached connection whose
+    // `getInitialSnapshot` is cached, so the first visible frame is the
+    // content): the queued clear rides the first draw's single flush,
+    // which carries the complete frame — no splash flash, no panel
+    // appearing late over a half-open view.
+    if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
@@ -1543,6 +1647,7 @@ async fn run_interactive_surface(
         &options,
         notes_tx,
         compaction_abort_tx,
+        prompt_tx,
         share_tx,
         reload_tx,
         traces_upload_tx,
@@ -1646,10 +1751,6 @@ async fn run_interactive_surface(
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
-    // The scoped heartbeat catalog seeds the tray heartbeat label (TS
-    // refreshes the catalog on chat open; failures stay silent).
-    session.spawn_heartbeat_refresh();
-    session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
@@ -1707,6 +1808,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -1830,8 +1932,16 @@ async fn run_interactive_surface(
                 let timeout_ms = *timeout_ms;
                 // A parked follow-up/steering message keeps the barrier waiting
                 // until the session delivers it (the queue strip must clear
-                // before the next step observes the frames).
-                if session.turn_active || !view.queued.is_empty() {
+                // before the next step observes the frames). A submit whose
+                // round trip is still armed holds the barrier too: the async
+                // submit resolves off the render path (the inline submit
+                // held the barrier by blocking the loop until its ack
+                // landed), so the outcome must land before the barrier can
+                // read idle.
+                if session.turn_active
+                    || !view.queued.is_empty()
+                    || session.prompt_submits_in_flight() > 0
+                {
                     if wait_idle_deadline.is_none() {
                         wait_idle_deadline =
                             Some(Instant::now() + Duration::from_millis(timeout_ms));
@@ -2134,8 +2244,8 @@ async fn run_interactive_surface(
                 // next applies (a plan step is not a terminal burst, and the
                 // captured frame sequence IS the verifier evidence — a
                 // batched drain would collapse intermediate states like the
-                // quick-shortcut guide or the expanded compaction block out
-                // of the capture). The terminal path keeps the full batch
+                // expanded compaction block or an open panel out of the
+                // capture). The terminal path keeps the full batch
                 // drain, the input-starvation fix.
                 if !renderer.is_terminal() {
                     inputs_pending = false;
@@ -2156,6 +2266,7 @@ async fn run_interactive_surface(
         if headless_done
             && pending.is_empty()
             && !session.turn_active
+            && session.prompt_submits_in_flight() == 0
             && view.queued.is_empty()
             && wait_idle_deadline.is_none()
             && !session.dirty
@@ -2224,7 +2335,10 @@ async fn run_interactive_surface(
                     // supersede notice or the submit-path retry
                     // re-attaches once a worker can serve the session.
                     if let Some(current) = session.pending_rebind.take() {
-                        match session.attach_session(&current).await {
+                        match session
+                            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
+                            .await
+                        {
                             Ok(()) => session.rebuild_view(
                                 &mut view,
                                 crate::session_ui::RebuildKind::Rebind,
@@ -2240,19 +2354,29 @@ async fn run_interactive_surface(
                     // gone, but the client struct retains an event
                     // sender, so the channel itself never closes - the
                     // frame, not the EOF, is the trigger (spec §10.2).
-                    if reconnect.is_none() {
-                        if let Some(update) = session.reconnect.take() {
-                            session.note(
-                                &format!(
-                                    "the daemon is restarting for an update (about {}s) — reconnecting…",
-                                    update.est_seconds.max(1)
-                                ),
-                                &mut view,
-                            );
-                            reconnect = Some(ReconnectLoop::start(&update));
-                            session.dirty = true;
-                        }
+                    // An update closing outranks a shutdown recovery in
+                    // flight (TS #2458): the §10.2 resume contract replaces
+                    // it.
+                    if let Some(update) = session.reconnect.take() {
+                        session.note(
+                            &format!(
+                                "the daemon is restarting for an update (about {}s) — reconnecting…",
+                                update.est_seconds.max(1)
+                            ),
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start(&update));
+                        session.dirty = true;
                     }
+                    // An announced non-update closing arms the bounded
+                    // shutdown recovery instead (TS #2458): no-op unless
+                    // the notice says the daemon itself is going down.
+                    arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    );
                     // A dead direct worker link arms the session
                     // re-attach driver (TS `connection_status:
                     // "reconnecting"`): the warning row rides the chat
@@ -2272,6 +2396,13 @@ async fn run_interactive_surface(
                                 );
                                 reconnect = Some(ReconnectLoop::start_lost());
                                 supervisor_lost = false;
+                            } else if reconnect.is_some() {
+                                // TS #2458: a full reconnect driver (an
+                                // update restart, or the announced
+                                // shutdown's recovery) owns the run — the
+                                // dead direct link joins it instead of
+                                // racing a session-plane retry through a
+                                // supervisor it cannot reach.
                             } else {
                                 session.note_as(
                                     "Daemon connection lost; reconnecting…",
@@ -2297,6 +2428,14 @@ async fn run_interactive_surface(
                         );
                         reconnect = Some(ReconnectLoop::start(&update));
                         session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // TS #2458: the announced non-update closing owns
+                        // the recovery, not the hiccup loop.
                     } else if reconnect.is_some() {
                         // Already reconnecting: the dead channel's
                         // terminal None frames are expected.
@@ -2341,6 +2480,16 @@ async fn run_interactive_surface(
                     }
                     if session.reconnect.is_some() {
                         session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // The announced non-update closing owns the
+                        // recovery (TS #2458): the supervisor socket's
+                        // death joins its driver — the direct link below
+                        // must not retain the loss behind it.
                     } else if session.client.direct_session_id().is_some() {
                         // A supervisor socket loss while a live direct link
                         // still serves the session is not a pane-level loss
@@ -2375,7 +2524,16 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            maybe_input = ui_rx.recv() => {
+            maybe_input = async {
+                // The headless driver drops its sender after HeadlessDone.
+                // A closed recv is always ready and would starve turn events
+                // while the final submitted prompt is still settling.
+                if headless_done {
+                    std::future::pending::<Option<UiInput>>().await
+                } else {
+                    ui_rx.recv().await
+                }
+            } => {
                 if let Some(input) = maybe_input {
                     pending.push_back(input);
                 }
@@ -2430,6 +2588,14 @@ async fn run_interactive_surface(
                     session.apply_command_catalog(update, &mut view);
                 }
             }
+            maybe_prompt = prompt_rx.recv() => {
+                if let Some(note) = maybe_prompt {
+                    // Protocol corruption stays fatal exactly like the
+                    // inline submit's ladder (the handle-key catch's
+                    // "everything else" arm).
+                    session.apply_prompt_outcome(note, &mut view).await?;
+                }
+            }
             _reconnect_tick = async {
                 // Park the tick while an attempt is in flight: the armed
                 // `next_attempt` is in the past (the attempt consumed it),
@@ -2446,23 +2612,36 @@ async fn run_interactive_surface(
                 if reconnect_connect.is_some() {
                     continue;
                 }
-                let (deadline, lost) = match reconnect.as_ref() {
-                    Some(state) => (state.deadline, state.lost),
+                let (deadline, kind) = match reconnect.as_ref() {
+                    Some(state) => (state.deadline, state.kind),
                     None => continue,
                 };
                 if tokio::time::Instant::now() > deadline {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -2477,6 +2656,13 @@ async fn run_interactive_surface(
                 let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
                 reconnect_connect = Some(attempt_rx);
                 reconnect_attempt_in_flight = true;
+                // TS #2458: the shutdown recovery's discovery waits no
+                // longer than the bound — one bounded connect+hello per
+                // poll (the fixed 100ms cadence re-arms faster than the
+                // retry helper's own backoff, and a single leg bounds the
+                // window's over-run; the resume/hiccup windows keep the
+                // retrying helper).
+                let shutdown = matches!(kind, RecoveryKind::Shutdown);
                 tokio::spawn(async move {
                     // No outer timeout: dropping the future mid-attempt
                     // would cancel an in-flight handshake without its
@@ -2484,7 +2670,11 @@ async fn run_interactive_surface(
                     // an accepting-but-silent daemon). The leg self-bounds
                     // — every attempt's connect and hello carry their own
                     // budgets and abort their own reader on failure.
-                    let attempt = DaemonClient::connect_with_retry(&socket_path).await;
+                    let attempt = if shutdown {
+                        DaemonClient::connect(&socket_path).await
+                    } else {
+                        DaemonClient::connect_with_retry(&socket_path).await
+                    };
                     let _ = attempt_tx.send(attempt);
                 });
             }
@@ -2508,23 +2698,36 @@ async fn run_interactive_surface(
                     Some(state) => tokio::time::Instant::now() > state.deadline,
                     None => continue,
                 };
-                let lost = match reconnect.as_ref() {
-                    Some(state) => state.lost,
+                let kind = match reconnect.as_ref() {
+                    Some(state) => state.kind,
                     None => continue,
                 };
                 if expired {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -2539,7 +2742,7 @@ async fn run_interactive_surface(
                         // is a RETRY outcome, never a fatal one (§10.4: a
                         // queued attach can legitimately wait out a slow
                         // restore).
-                        match session.reattach_after_update(client, &mut view, lost).await {
+                        match session.reattach_after_recovery(client, &mut view, kind).await {
                             Ok(crate::session_ui::ReattachOutcome::Attached) => {
                                 events = fresh_events;
                                 events_closed = false;
@@ -2558,13 +2761,6 @@ async fn run_interactive_surface(
                                 reader_loss_handled = false;
                                 session.reconnect = None;
                                 reconnect = None;
-                                if lost {
-                                    session.note_as(
-                                        "reconnected to the daemon",
-                                        crate::chat::StatusKind::Info,
-                                        &mut view,
-                                    );
-                                }
                                 session.dirty = true;
                             }
                             Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
@@ -2584,12 +2780,14 @@ async fn run_interactive_surface(
                             Err(error) => {
                                 // An unexpected-loss reattach failure is a
                                 // hiccup like any other (the worker still
-                                // respawning): keep retrying through the
-                                // window instead of exiting — the pane never
-                                // dies to it (the operator's kicked-out
-                                // class). The update path keeps its exit
-                                // semantics.
-                                if lost {
+                                // respawning), and a shutdown recovery
+                                // retries until its own bound lands the
+                                // saved-transcript close (TS #2458): keep
+                                // retrying through the window instead of
+                                // exiting — the pane never dies to it (the
+                                // operator's kicked-out class). The update
+                                // path keeps its exit semantics.
+                                if matches!(kind, RecoveryKind::Lost | RecoveryKind::Shutdown) {
                                     session.note_as(
                                         &format!("reattach failed: {error:#} — retrying…"),
                                         crate::chat::StatusKind::Warning,
@@ -2636,9 +2834,17 @@ async fn run_interactive_surface(
                 if state.active_session_id != session.active_session_id {
                     continue;
                 }
+                // The reconnect attempt's budget covers the attach
+                // alone: the surface is already up and its dock holds
+                // (the background refreshes update it), so the
+                // first-frame fold's bounded fetches cannot eat the 10s
+                // attempt budget on a slow daemon.
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
-                    session.attach_session(&state.active_session_id),
+                    session.attach_session(
+                        &state.active_session_id,
+                        crate::session_ui::DockFold::Held,
+                    ),
                 )
                 .await;
                 match attempt {
@@ -2929,6 +3135,7 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        opened_urls: std::mem::take(&mut session.opened_urls),
         agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now
@@ -3049,8 +3256,13 @@ impl Renderer {
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
-                // flashes the primary screen.
-                crate::altscreen::enter()?;
+                // flashes the primary screen. The enter itself is ARMED,
+                // not written: it rides the first draw's flush (see
+                // `altscreen::arm_first_draw_mount`), so a direct open —
+                // which paints nothing until its first content frame —
+                // holds the shell (a fresh process) or the handed-off
+                // surface through the attach.
+                crate::altscreen::arm_first_draw_mount();
                 // SGR mouse tracking follows the fullscreen surface in and
                 // out (TS `enterFullscreen` enables it blind — probing is
                 // not viable under tmux and unsupporting terminals ignore
@@ -3123,22 +3335,14 @@ impl Renderer {
                 // the first draw repaints the same buffer (a fresh alt
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
-                // never reach the pane on its own: queue it with the
-                // cursor hide and let the first draw's single flush carry
-                // clear + frame together — a separate clear-and-flush
-                // here shows a blank pane for the whole render gap, a
-                // visible flicker on every surface switch (the chat's own
-                // first frame is the tail render on the first event).
-                // The cursor hides with the mount (TS `TUI.start`
-                // writes hideCursor, never a show): a shown cursor at a
-                // stale position here would be dragged across the clear
-                // and the first repaint — the cursor-glitch window
-                // between surfaces.
-                crossterm::queue!(
-                    std::io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Hide
-                )?;
+                // never reach the pane on its own: the armed mount's
+                // clear and cursor hide ride the first draw's single
+                // flush (see `altscreen::take_first_draw_mount`) — a
+                // clear queued HERE would let any mid-gap flush (the
+                // kitty probe, a mode enable) carry it out early, wiping
+                // the shell or the held surface during a direct open's
+                // attach wait. The cursor hides with the mount (TS
+                // `TUI.start` writes hideCursor, never a show).
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,
@@ -3549,6 +3753,41 @@ mod tests {
             before,
             "the headless error return did not attempt a restore"
         );
+    }
+
+    /// TS #2458's shutdown recovery constants: the announced non-update
+    /// closing waits the TS reconnect timeout (60s) on the TS fixed poll
+    /// (100ms, never doubling) — not the §10.2 resume window or the
+    /// hiccup loop's doubling backoff.
+    #[test]
+    fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
+        let before = tokio::time::Instant::now();
+        let state = ReconnectLoop::start_shutdown();
+        let after = tokio::time::Instant::now();
+        assert_eq!(state.kind, RecoveryKind::Shutdown);
+        // The window is 60s off the arming instant: the deadline sits
+        // inside [before + 60s, after + 60s] (the arming ran between the
+        // two clock reads — a single `now + 60s` bound can miss by the
+        // nanoseconds between the reads).
+        assert!(
+            state.deadline >= before + DAEMON_SHUTDOWN_RECONNECT_WINDOW
+                && state.deadline <= after + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            "the window is TS #2458's 60s reconnect timeout"
+        );
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The first poll is the TS 100ms cadence off the same arming
+        // instant, inside the same two clock reads.
+        assert!(
+            state.next_attempt >= before + SHUTDOWN_RECONNECT_RETRY
+                && state.next_attempt <= after + SHUTDOWN_RECONNECT_RETRY,
+            "the first poll is the TS 100ms cadence"
+        );
+        // The fixed poll never doubles.
+        let state = state.next_attempt();
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The hiccup loop doubles: 1s -> 2s.
+        let lost = ReconnectLoop::start_lost().next_attempt();
+        assert_eq!(lost.delay, Duration::from_secs(2));
     }
 
     #[test]

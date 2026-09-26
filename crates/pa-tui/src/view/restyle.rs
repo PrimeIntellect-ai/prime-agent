@@ -3,7 +3,10 @@
 //! inside the selection range's diff — the rows the previous frame
 //! already styled (and the untouched rows around them) reuse the cached
 //! styled copies verbatim, so extending a drag by one row styles one row,
-//! not the window. Rebuilt rows re-style from the cached window rows
+//! not the window. Frames with no selection armed skip the pass entirely,
+//! so a drag's first styled frame is a cold rebuild and the diff below owns
+//! every frame after it; an armed selection — degenerate or not — keeps the
+//! pass and its warm cache. Rebuilt rows re-style from the cached window rows
 //! (the per-entry line cache), never from the raw entries.
 
 use super::AgentView;
@@ -45,6 +48,15 @@ impl AgentView {
         {
             RESTYLE_ROWS.with(|count| count.set(0));
             RESTYLE_REBUILDS.with(|count| count.set(0));
+        }
+        // No selection anchor is armed, so every span below is `None`
+        // and no drag can extend into one without a fresh begin: the
+        // styled window is the base rows themselves, and a scroll frame
+        // (whose window always changed) skips the whole-window clone and
+        // the cache churn it feeds. An armed selection — degenerate or
+        // not — keeps the pass and its warm cache.
+        if !self.has_selection() && !self.selection.is_dragging() {
+            return base;
         }
         let spans: Vec<Option<(usize, usize)>> = (0..base.len())
             .map(|index| self.transcript_highlight_span(start + index))
@@ -140,6 +152,31 @@ mod tests {
     }
 
     #[test]
+    fn frames_without_a_selection_restyle_nothing() {
+        let mut view = view();
+        for index in 0..40 {
+            view.push_entry(ChatEntry::User {
+                text: format!("scroll body {index}"),
+            });
+        }
+        view.render_frame(100, 30);
+        view.scroll_by(-5);
+        // The scrolled frame's window changed: without a selection the
+        // styled window is the base rows themselves, so the restyle
+        // neither rebuilds nor re-styles a row.
+        view.render_frame(100, 30);
+        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), 0));
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
+        // A live drag still restyles: the fast path never covers one.
+        let (base, start) = base_rows(&mut view);
+        let row = row_of(&mut view, "scroll body");
+        view.begin_selection(row, 2);
+        view.extend_active_selection(row + 2, 6);
+        view.selection_styled_window(base, start);
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 1));
+    }
+
+    #[test]
     fn a_drag_extension_restyles_only_the_changed_rows() {
         let mut view = view();
         // One composed frame mounts the transcript window (the selection
@@ -148,14 +185,17 @@ mod tests {
         let (base, start) = base_rows(&mut view);
         let row = row_of(&mut view, "row zero");
         // Drag across three window rows, then extend by one more: the
-        // second frame styles only the newly covered row.
+        // first styled frame is a cold rebuild (the composed frame skipped
+        // the restyle without a selection), the extension's frame styles
+        // only the newly covered row.
         view.begin_selection(row, 2);
         view.extend_active_selection(row + 3, 6);
         let styled = view.selection_styled_window(base.clone(), start);
-        // The composed frame already cached the unselected rows: the drag
-        // styles only its four covered rows.
-        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), 4, "the drag styles its rows"));
-        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
+        // The drag's first styled frame rebuilds the whole window (the
+        // no-selection frame before it cached nothing); the extension
+        // below proves the steady-state diff takes over from there.
+        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), base.len()));
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 1));
         view.extend_active_selection(row + 4, 6);
         let base_len = base.len();
         let styled_rows = view.selection_styled_window(base, start);

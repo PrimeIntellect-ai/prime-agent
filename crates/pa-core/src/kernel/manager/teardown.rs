@@ -142,7 +142,7 @@ impl Inner {
     /// Tear the child down: stop timers, fail pending work, close pipes, kill
     /// the process, and reap any `bash()` process groups it journaled.
     pub(crate) fn cleanup_resources(&self, kill_signal: Signal) {
-        {
+        let had_background_work = {
             let mut g = lock(&self.guarded);
             // Any teardown invalidates in-flight starts.
             g.start_generation += 1;
@@ -152,11 +152,18 @@ impl Inner {
             g.late_handlers.clear();
             g.pending_done_waiters.clear();
             g.bash_activity_waiters.clear();
+            let had_background_work = !g.background_bash_handles.is_empty();
             g.background_bash_handles.clear();
             // Stale pre-teardown background output must not surface after a restart.
             g.pending_background_output.clear();
             g.pending_background_output_chars = 0;
             g.pending_background_output_truncated = false;
+            had_background_work
+        };
+        // Teardown kills the handles with the kernel, so owed continuations
+        // waiting on them must hear the settlement once before it is lost.
+        if had_background_work {
+            self.notify_background_work_settled();
         }
         self.reject_active_execution("Kernel has been shut down");
         *lock(&self.stderr_log) = None;

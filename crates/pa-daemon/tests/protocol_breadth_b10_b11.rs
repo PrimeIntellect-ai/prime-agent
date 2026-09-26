@@ -3,6 +3,7 @@
 //! rides the real supervisor + worker over the socket and answers the
 //! exact TS wire shape (success and error paths), the same harness the
 //! supervisor e2e suite uses.
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

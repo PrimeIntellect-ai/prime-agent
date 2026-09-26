@@ -1062,6 +1062,7 @@ mod tombstone_usage_tests {
     /// the link exists; the post-unlink phase 2 must reuse that key (the
     /// link is gone, so re-canonicalizing the caller's path answers the
     /// fallback form and would miss the edge entirely).
+    #[cfg(unix)]
     #[test]
     fn symlink_delete_tombstones_the_edge_keyed_at_the_target() {
         let root = temp_dir("symlink-del");
@@ -1114,6 +1115,7 @@ mod tombstone_usage_tests {
     /// A non-regular session path (a FIFO) is never a session: the
     /// capture reads nothing there - the blocking open would hang a
     /// FIFO's read forever - and the tombstone still lands bare.
+    #[cfg(unix)]
     #[test]
     fn a_non_regular_session_path_captures_nothing() {
         let root = temp_dir("fifo-del");

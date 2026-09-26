@@ -24,14 +24,26 @@ impl Inner {
                         && pid > 0
                         && matches!(active, Some(true | false))
                     {
-                        let mut g = lock(&self.guarded);
-                        if active == Some(true) {
-                            g.background_bash_handles
-                                .entry(activity_id.to_string())
-                                .or_insert(pid as i32);
-                        } else if g.background_bash_handles.get(activity_id) == Some(&(pid as i32))
+                        let mut settled = false;
                         {
-                            g.background_bash_handles.remove(activity_id);
+                            let mut g = lock(&self.guarded);
+                            if active == Some(true) {
+                                g.background_bash_handles
+                                    .entry(activity_id.to_string())
+                                    .or_insert(pid as i32);
+                            } else if g.background_bash_handles.get(activity_id)
+                                == Some(&(pid as i32))
+                            {
+                                g.background_bash_handles.remove(activity_id);
+                                // The last live handle settled: the completion
+                                // notice for it is already admitted, so owed
+                                // continuations may resume. The settlement is
+                                // recorded on the map before the callback runs.
+                                settled = g.background_bash_handles.is_empty();
+                            }
+                        }
+                        if settled {
+                            self.notify_background_work_settled();
                         }
                     }
                     return;
@@ -264,6 +276,9 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -278,5 +293,129 @@ mod tests {
         assert_eq!(pending.pending_background_output, "new🍁");
         assert_eq!(pending.pending_background_output_chars, 4);
         assert!(!pending.pending_background_output_truncated);
+    }
+
+    /// Deliver one bash-activity display event into the manager (the
+    /// kernel's activity track).
+    fn deliver_activity(manager: &ReplKernelManager, activity: serde_json::Value) {
+        let mut data = serde_json::Map::new();
+        data.insert(BASH_ACTIVITY_DISPLAY_MIME.to_string(), activity);
+        manager.inner.handle_event(Event::Display {
+            id: None,
+            data: Value::Object(data),
+        });
+    }
+
+    /// One settlement counter wired as the manager's
+    /// `on_background_work_settled` callback.
+    fn settlement_counter() -> (Arc<AtomicUsize>, BackgroundWorkSettledCallback) {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&fired);
+        (
+            fired,
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+    }
+
+    #[test]
+    fn background_work_settlement_fires_once_and_ignores_malformed_releases() {
+        let (fired, on_settled) = settlement_counter();
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            on_background_work_settled: Some(on_settled),
+            ..Default::default()
+        });
+        let activity = json!({ "id": "a".repeat(32), "pid": 42, "active": true });
+        deliver_activity(&manager, activity);
+        assert!(manager.has_background_work());
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        // Malformed or mismatched releases never settle the track (the
+        // TS validation rows): a zero/negative pid, a missing active flag,
+        // an unknown id, and an unrelated display payload all leave the
+        // handle live.
+        for release in [
+            json!({ "id": "a".repeat(32), "pid": 0, "active": false }),
+            json!({ "id": "a".repeat(32), "pid": -1, "active": false }),
+            json!({ "id": "a".repeat(32), "pid": 42 }),
+            json!({ "id": "b".repeat(32), "pid": 42, "active": false }),
+            json!({ "id": "a".repeat(32), "pid": 7, "active": false }),
+        ] {
+            deliver_activity(&manager, release);
+            assert!(manager.has_background_work());
+            assert_eq!(fired.load(Ordering::SeqCst), 0);
+        }
+        manager.inner.handle_event(Event::Display {
+            id: None,
+            data: json!({ "application/vnd.prime-agent.diff+json": { "path": "p" } }),
+        });
+        assert!(manager.has_background_work());
+        // The matching release settles the track exactly once.
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": false }),
+        );
+        assert!(!manager.has_background_work());
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        // An already-empty track never re-fires, teardown included.
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": false }),
+        );
+        manager.inner.cleanup_resources(Signal::Term);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn teardown_with_live_handles_settles_once() {
+        let (fired, on_settled) = settlement_counter();
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            on_background_work_settled: Some(on_settled),
+            ..Default::default()
+        });
+        for (id, pid) in [("a", 42), ("b", 43)] {
+            deliver_activity(
+                &manager,
+                json!({ "id": id.repeat(32), "pid": pid, "active": true }),
+            );
+        }
+        assert!(manager.has_background_work());
+        // Teardown kills the handles with the kernel, so owed continuations
+        // waiting on them must hear the settlement once before it is lost.
+        manager.inner.cleanup_resources(Signal::Term);
+        assert!(!manager.has_background_work());
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        // A second teardown over the already-empty track fires nothing.
+        manager.inner.cleanup_resources(Signal::Kill);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panic_in_the_settlement_callback_neither_breaks_the_event_path_nor_the_teardown() {
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            on_background_work_settled: Some(Arc::new(|| panic!("settlement callback failed"))),
+            ..Default::default()
+        });
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": true }),
+        );
+        assert!(manager.has_background_work());
+        // The settlement is recorded on the map either way; the callback's
+        // panic lands in the diagnostics tail instead of unwinding through
+        // the event path or the teardown.
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": false }),
+        );
+        assert!(!manager.has_background_work());
+        deliver_activity(
+            &manager,
+            json!({ "id": "b".repeat(32), "pid": 43, "active": true }),
+        );
+        manager.inner.cleanup_resources(Signal::Term);
+        assert!(manager
+            .kernel_stderr()
+            .contains("background work settled callback failed"));
     }
 }

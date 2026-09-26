@@ -1,24 +1,49 @@
-//! The AI library's OAuth flows (TS `packages/ai/src/utils/oauth`): the
-//! `ChatGPT` Plus/Pro (Codex Subscription) provider — the PKCE
+//! The AI library's OAuth flows (TS `packages/ai/src/utils/oauth`):
+//! the `ChatGPT` Plus/Pro (Codex Subscription) provider — the PKCE
 //! authorization request, the localhost callback server, the token
-//! exchange, the JWT account-id claim, and the token refresh. The other
-//! subscription providers (TS `anthropic.ts`, `github-copilot.ts`,
-//! `xai.ts`) are not ported yet; the login menu marks their rows
-//! unavailable before selection (the composition root's rule — no row
-//! dead-ends in an after-selection error wall).
+//! exchange, the JWT account-id claim, and the token refresh — plus the
+//! Anthropic (Claude Pro/Max) PKCE flow with its own localhost
+//! callback, the GitHub Copilot device flow with the client
+//! impersonation headers and the post-login model-policy pass, and the
+//! xAI (Grok) device flow with strict response validation.
 //!
-//! The flows are transport-agnostic: every token request is issued
-//! through the [`CodexHttp`] seam, so tests script the endpoints (the TS
-//! suite stubs `fetch` the same way) and the product plugs in one
-//! reqwest client.
+//! The flows are transport-agnostic: the Codex flow issues its token
+//! requests through the [`CodexHttp`] seam, the other three through
+//! [`ProviderHttp`] (the JSON bodies, the GETs, and the custom
+//! headers their TS `fetch` shapes carry), so tests script the
+//! endpoints (the TS suite stubs `fetch` the same way) and the
+//! product plugs in one reqwest client.
 
+mod anthropic;
+mod anthropic_callback;
 mod callback;
+mod github_copilot;
 mod openai_codex;
+mod pkce;
+mod provider_http;
+mod types;
+mod xai;
 
+pub use anthropic::{
+    login_anthropic, refresh_anthropic_token, AnthropicCredentials,
+    LOGIN_CANCELLED as ANTHROPIC_LOGIN_CANCELLED,
+};
 pub use callback::CodexCallbackServer;
+pub use github_copilot::{
+    get_github_copilot_base_url, login_github_copilot, refresh_github_copilot_token,
+    CopilotCredentials, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
+};
 pub use openai_codex::{
     login_openai_codex, refresh_openai_codex_token, CodexLoginUi, OAuthCredentials,
     DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
+};
+pub use provider_http::{
+    ProviderHttp, ProviderHttpMethod, ProviderHttpRequest, ProviderHttpResponse,
+    ReqwestProviderHttp,
+};
+pub use types::{OAuthLoginUi, OAuthPrompt};
+pub use xai::{
+    login_xai, refresh_xai_token, XaiCredentials, LOGIN_CANCELLED as XAI_LOGIN_CANCELLED,
 };
 
 use std::future::Future;

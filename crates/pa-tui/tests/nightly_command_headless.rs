@@ -271,6 +271,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
         Ok(())
     }
+    fn chat_detail(&self) -> String {
+        "details".to_string()
+    }
+    fn set_chat_detail(&self, _detail: &str) -> Result<()> {
+        Ok(())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         true
     }

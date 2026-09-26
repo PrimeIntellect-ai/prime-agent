@@ -26,7 +26,10 @@ pub use prime_traces::{
     PrimeAgentTracesCallbacks, PrimeAgentTracesLoginOptions, PrimeAgentTracesLoginSource,
     PrimeAuthInfo, PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_AGENT_TRACES_PROVIDER_NAME,
 };
-pub use provider_oauth::{ProviderOAuth, OPENAI_CODEX_PROVIDER_ID};
+pub use provider_oauth::{
+    ProviderOAuth, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID,
+    XAI_PROVIDER_ID,
+};
 pub use storage::{
     parse_storage_data, AuthStorageBackend, FileAuthStorageBackend, InMemoryAuthStorageBackend,
 };

@@ -102,6 +102,11 @@ pub struct SessionEngineConfig {
     /// surface on the next `ensure()`), and the lazy first-call start
     /// stays intact.
     pub prewarm_ipython_kernel: Option<bool>,
+    /// Fires when the session kernel's last live background `bash()`
+    /// handle settles (its activity track empties or the kernel tears
+    /// down): TS `AgentSession` wires its owed-continuation resume pair
+    /// here. `None` (embeddings without continuations) installs nothing.
+    pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     /// An externally owned MCP manager (the daemon worker's session store):
     /// the engine adopts it instead of building its own, so ACP-admitted
     /// servers reach the prompt's MCP gating through the same store the
@@ -261,6 +266,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
     let auto_refine_gates =
         super::refine::AutoRefineGates::from_settings(settings.settings().auto_refine.as_ref());
+    // Request timing (TS #2462): the settings half of the flag is read once
+    // here — `settings` moves into the resource loader below and its merged
+    // snapshot is fixed for the session anyway — while the `PI_REQUEST_TIMING`
+    // env half stays live inside the wrappers' per-request check.
+    let request_timing_settings = settings.get_request_timing();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -415,16 +425,16 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let has_snapshot = session_artifact_dir
         .as_ref()
         .is_some_and(|dir| crate::kernel::state_snapshot::snapshot_path_in(dir).exists());
-    // The restore-notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
-    // `onRestore` fires from a background task that can settle before
-    // the AgentSession exists (the resume prewarm starts at build), so
-    // the row parks in a mailbox the session adopts once constructed and
-    // shares afterwards.
-    let restore_rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+    // The boot-notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
+    // `onRestore`/`onUnavailableSkills` fires from a background task that
+    // can settle before the AgentSession exists (the resume prewarm starts
+    // at build), so the rows park in a mailbox the session adopts once
+    // constructed and shares afterwards.
+    let boot_notice_rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
         pa_types::session::CustomMessage,
     >::new()));
     let on_restore = {
-        let restore_rows = std::sync::Arc::clone(&restore_rows);
+        let boot_notice_rows = std::sync::Arc::clone(&boot_notice_rows);
         Some(std::sync::Arc::new(
             move |result: &crate::kernel::state_snapshot::RestoreResult| {
                 // TS `_onIpythonStateRestored`: the notice only fires
@@ -432,12 +442,29 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 // callback when no snapshot existed), and it rides the
                 // next admitted turn ahead of its prompt.
                 let row = super::state_restore_notice::notice_message(result);
-                restore_rows
+                boot_notice_rows
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(row);
             },
         ) as crate::kernel::provisioner::RestoreCallback)
+    };
+    let on_unavailable_skills = {
+        let boot_notice_rows = std::sync::Arc::clone(&boot_notice_rows);
+        Some(std::sync::Arc::new(
+            move |errors: &crate::kernel::bootstrap::UnavailablePythonSkills| {
+                // TS `_onPythonSkillsUnavailable` (PR #2381): the broken
+                // skills and their import errors ride the next admitted
+                // turn, so the model learns before its first call
+                // instead of from the placeholder's error.
+                let row = super::skills_unavailable_notice::notice_message(errors);
+                boot_notice_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(row);
+            },
+        )
+            as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
@@ -447,6 +474,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         session_artifact_dir,
         on_restore,
+        config.on_background_work_settled.clone(),
+        on_unavailable_skills,
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
@@ -627,6 +656,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         )
     };
 
+    // Request timing (TS #2462, `sdk.ts` `requestTimingEnabled` + the
+    // instrumented seams): one wiring per session owns the flag probe, the
+    // JSONL log, and the prompt-build correlation state. The wrappers pass
+    // straight through while the flag is off — no timestamps, no payload
+    // serialization, no entries.
+    let request_timing_wiring =
+        std::sync::Arc::new(super::request_timing::RequestTimingWiring::new(
+            std::sync::Arc::new(move || {
+                super::request_timing::is_request_timing_enabled(request_timing_settings)
+            }),
+            super::request_timing::RequestTimingLog::new(&config.agent_dir),
+        ));
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
@@ -635,11 +676,28 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             tools: Some(tools),
             messages: initial_messages,
         },
-        stream_fn: Some(stream_fn),
+        stream_fn: Some(super::request_timing::instrument_stream_fn(
+            std::sync::Arc::clone(&request_timing_wiring),
+            stream_fn,
+        )),
         // The session conversion rules apply at the loop's LLM boundary
         // (TS `convertToLlm`): bookkeeping custom rows drop, everything
         // else (the harness digest included) becomes a user turn.
-        convert_to_llm: Some(super::messages::engine_convert_to_llm()),
+        convert_to_llm: Some(super::request_timing::instrument_convert_to_llm(
+            std::sync::Arc::clone(&request_timing_wiring),
+            super::messages::engine_convert_to_llm(),
+        )),
+        // TS wires the instrumented `transformContext` seam over the
+        // extension context transform; the Rust engine has no transform
+        // yet, so the instrumented seam wraps a pass-through that exists
+        // to mark the turn's dispatch moment. Always wired like TS — the
+        // wrapper's own per-request check keeps the disabled path free of
+        // timestamps and entries, and a flag flipped on mid-session still
+        // gets its dispatch timestamp.
+        transform_context: Some(super::request_timing::instrument_transform_context(
+            std::sync::Arc::clone(&request_timing_wiring),
+            super::request_timing::pass_through_transform(),
+        )),
         // TS `_steeringStopPending`: both the after-turn and the
         // before-turn hooks consult the same probe (a queued steer stops
         // the run at the boundary; the pump delivers it next).
@@ -711,11 +769,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // reads the resource loader at expansion time; the session snapshots
     // the engine's loaded list).
     session.set_skills(resources.skills.clone());
-    // The restore-notice mailbox becomes the session's next-turn queue:
+    // The boot-notice mailbox becomes the session's next-turn queue:
     // rows parked by a boot that settled mid-build merge in, and later
-    // restores (a lazy first-call boot) push straight into the live
+    // boots (a lazy first-call start) push straight into the live
     // session's queue.
-    session.adopt_next_turn_rows(restore_rows);
+    session.adopt_next_turn_rows(boot_notice_rows);
 
     // Bind the turn-boundary runtime the `compact.*`/`refine.*` handlers
     // probe (turn-active state, usage estimate, compaction preparation).
@@ -777,6 +835,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 }
 
 impl SessionEngine {
+    /// The session's kernel provisioner as a weak reference (TS
+    /// `AgentSession._ipythonKernelProvisioner`): embeddings mirror it for
+    /// lock-free kernel liveness probes (TS `hasBackgroundWork`) without
+    /// joining the strong ownership graph — the same weak discipline the
+    /// `ipython` tool and the compaction kernel-state probe follow.
+    pub fn kernel_provisioner_weak(
+        &self,
+    ) -> std::sync::Weak<crate::kernel::provisioner::IpythonKernelProvisioner> {
+        std::sync::Arc::downgrade(&self.provisioner)
+    }
+
     /// Expand a `/skill:<name>` submission into its `<skill>` block for
     /// the accepted-turn row (TS `_expandSkillCommand`; the row the daemon
     /// emits before admission must match the text the model turn
@@ -927,6 +996,7 @@ mod tests {
             model_info: None,
             cli_extension_sources: vec![],
             extension_tool_allow_list: None,
+            on_background_work_settled: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         })
@@ -1030,6 +1100,7 @@ mod tests {
             model_info: None,
             cli_extension_sources: vec![],
             extension_tool_allow_list: None,
+            on_background_work_settled: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         })
@@ -1096,6 +1167,7 @@ mod tests {
                 model_info: None,
                 cli_extension_sources: vec![],
                 extension_tool_allow_list: None,
+                on_background_work_settled: None,
                 prewarm_ipython_kernel: None,
                 queued_goal_context_purge: None,
             }

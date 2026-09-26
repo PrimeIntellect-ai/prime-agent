@@ -46,6 +46,9 @@ pub struct Reconstructed {
     pub chat: Vec<ChatEntry>,
     /// Current model id (`state.model.id`), when the session reports one.
     pub model_id: Option<String>,
+    /// The tray effort suffix for that model (TS `getModelContextLabel`),
+    /// when the state's model carries its reasoning level.
+    pub thinking_suffix: Option<String>,
     /// Session display name.
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
@@ -351,6 +354,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     let model_id = state
         .and_then(|state| state.get("model"))
         .and_then(model_id_value);
+    let thinking_suffix = state.and_then(crate::chrome::tray_thinking_suffix);
     let session_name = state
         .and_then(|state| state.get("sessionName"))
         .and_then(Value::as_str)
@@ -392,6 +396,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     Reconstructed {
         chat: messages,
         model_id,
+        thinking_suffix,
         session_name,
         session_id,
         goal,
@@ -477,8 +482,8 @@ fn model_id_value(model: &Value) -> Option<String> {
 ///
 /// Returns `Err` when the payload does not decode into `AttachData`
 /// (an unrecognizable daemon attach result).
-pub fn attach_data_from_response(data: &Value) -> anyhow::Result<AttachData> {
-    serde_json::from_value(data.clone()).map_err(|error| {
+pub fn attach_data_from_response(data: Value) -> anyhow::Result<AttachData> {
+    serde_json::from_value(data).map_err(|error| {
         anyhow::anyhow!("the daemon returned an unrecognizable attach result: {error}")
     })
 }
@@ -2060,7 +2065,7 @@ mod tests {
 
     #[test]
     fn reconstructs_slim_attach() {
-        let data = attach_data_from_response(&slim_attach()).unwrap();
+        let data = attach_data_from_response(slim_attach()).unwrap();
         assert_eq!(data.active_session_id, "abc123def456");
         let view = reconstruct(&data);
         assert_eq!(view.chat.len(), 2);
@@ -2072,6 +2077,36 @@ mod tests {
         assert_eq!(view.last_event_sequence, 9);
     }
 
+    /// TS `getModelContextLabel`: the attach snapshot's state carries the
+    /// tray effort suffix with the model (reasoning + level), and a model
+    /// without reasoning reconstructs bare.
+    #[test]
+    fn reconstructs_the_tray_effort_suffix() {
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["model"] = json!({
+            "id": "faux-1", "provider": "faux", "reasoning": true
+        });
+        attach["snapshot"]["state"]["thinkingLevel"] = json!("high");
+        let data = attach_data_from_response(attach.clone()).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(view.model_id.as_deref(), Some("faux-1"));
+        assert_eq!(
+            view.thinking_suffix,
+            Some("high".to_string()),
+            "the attach state's level rides the reconstructed tray label"
+        );
+        attach["snapshot"]["state"]["model"] = json!({
+            "id": "faux-plain", "provider": "faux", "reasoning": false
+        });
+        attach["snapshot"]["state"]["thinkingLevel"] = json!("off");
+        let data = attach_data_from_response(attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(
+            view.thinking_suffix, None,
+            "a model without reasoning reconstructs the bare id's label"
+        );
+    }
+
     #[test]
     fn reconstructs_the_queue_from_session_actions() {
         let mut attach = slim_attach();
@@ -2080,7 +2115,7 @@ mod tests {
             "steering": ["turn right"],
             "followUps": ["then summarize"],
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued,
@@ -2111,7 +2146,7 @@ mod tests {
             ],
             "rlmChildStatus": { "steering": [], "followUp": [0, 2] },
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued.rlm_child_status,
@@ -2139,7 +2174,7 @@ mod tests {
                 "label": "queued before compaction",
             },
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued.starting,
@@ -3231,7 +3266,7 @@ mod tests {
             },
             "lastEventSequence": 3
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let reconstructed = reconstruct(&data);
         let goal = reconstructed.goal.expect("snapshot goal");
         assert_eq!(goal.status, pa_types::goal::GoalStatus::Active);
