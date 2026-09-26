@@ -1236,6 +1236,14 @@ pub struct SessionInfo {
 /// TS `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`: the transcript search-text cap.
 pub const SESSION_LIST_SEARCH_TEXT_MAX_CHARS: usize = 64 * 1024;
 
+/// The roster fold's read-buffer size: the default 8 KiB chunks a grown
+/// session file into one read syscall per 8 KiB (a 1,000-file cold scan
+/// paid thousands of extra reads); one 64 KiB fill reads the typical
+/// session in a single syscall. Line semantics are `BufRead::read_line`'s
+/// either way - only the syscall chunking changes, never the folded
+/// bytes or the resume cursor.
+const SESSION_SCAN_READ_BUF_BYTES: usize = 64 * 1024;
+
 /// TS `appendCappedSearchText`: space-join the texts, cut the final
 /// addition so the corpus never grows past the cap. `used` is the corpus's
 /// char count before this append; the returned count is the corpus's char
@@ -1636,7 +1644,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
         return None;
     }
-    let mut reader = std::io::BufReader::new(&mut file);
+    let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut file);
     let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
     // `modified`, captured from the open file like TS captures it at
