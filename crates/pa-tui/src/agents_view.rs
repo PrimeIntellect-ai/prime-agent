@@ -598,7 +598,7 @@ struct AgentsViewMode {
 }
 
 impl AgentsViewMode {
-    fn new(options: AgentsViewOptions) -> Self {
+    fn new(mut options: AgentsViewOptions) -> Self {
         let theme = crate::app::load_theme(&options.theme);
         let query = options.query.clone().unwrap_or_default();
         // A notice with lines to show (the refusal families) renders as

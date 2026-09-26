@@ -119,13 +119,12 @@ impl IncidentNoticeState {
 /// UTC end-to-end (the daemon logs UTC and has no timezone layer), so
 /// the Rust notice reads UTC.
 pub fn format_incident_notice_time(time_ms: i64, now_ms: i64) -> String {
-    let (time, then) = notice_parts(time_ms);
-    let (_, now) = notice_parts(now_ms);
-    if then.year == now.year && then.month == now.month && then.day == now.day {
+    let (time, (year, month, day)) = notice_parts(time_ms);
+    let (_, (now_year, now_month, now_day)) = notice_parts(now_ms);
+    if year == now_year && month == now_month && day == now_day {
         return time;
     }
-    let (year, month, day) = (then.year, then.month, then.day);
-    if then.year == now.year {
+    if year == now_year {
         return format!("{month}/{day} {time}");
     }
     format!("{}/{month}/{day} {time}", year % 100)
