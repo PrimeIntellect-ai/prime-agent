@@ -4236,6 +4236,95 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
     );
 }
 
+/// A headless run whose plan completes while the submitted turn is still
+/// settling: the driver drops its input sender after `HeadlessDone`, and a
+/// closed `ui_rx` is select-ready forever. The loop must park the closed arm
+/// (the run's exit gate waits on the turn's events) — an unparked
+/// always-ready arm hot-spins the select and starves the very turn events the
+/// gate needs (the outlived-submit stall), while the pending streamed reply
+/// still lands and the run ends on its own.
+#[tokio::test]
+async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The reply lands well after the plan's only step, so `HeadlessDone`
+    // arrives while the turn is provably still active.
+    let script = serde_json::json!({ "responses": [
+        { "text": "slow scripted reply", "delayMs": 400 },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::New,
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        client_settings: None,
+    };
+    // No trailing WaitIdle: the plan ends at the submit, and the run's
+    // exit gate must hold on its own until the turn settles.
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![pa_tui::interactive::HeadlessStep::Submit(
+            "hello there".to_string(),
+        )],
+        width: 100,
+        height: 30,
+    };
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(120),
+        pa_tui::interactive::run_interactive(
+            options,
+            pa_tui::interactive::UiMode::Headless(plan),
+        ),
+    )
+    .await
+    .expect("the parked loop still services events and ends on its own")
+    .expect("interactive run");
+    let elapsed = started.elapsed();
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("slow scripted reply"),
+        "the pending turn's events proceeded and rendered:\n{rendered}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the parked closed channel never hot-spins the loop: {elapsed:?}"
+    );
+    drop(supervisor);
+}
+
 /// A refused submit restores the draft through the backgrounded outcome:
 /// killing the session's worker (and removing its file, so the durable-id
 /// rebind cannot resurrect it) makes the prompt's round trip settle as a

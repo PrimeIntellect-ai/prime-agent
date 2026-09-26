@@ -2489,7 +2489,16 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            maybe_input = ui_rx.recv() => {
+            maybe_input = async {
+                // The headless driver drops its sender after HeadlessDone.
+                // A closed recv is always ready and would starve turn events
+                // while the final submitted prompt is still settling.
+                if headless_done {
+                    std::future::pending::<Option<UiInput>>().await
+                } else {
+                    ui_rx.recv().await
+                }
+            } => {
                 if let Some(input) = maybe_input {
                     pending.push_back(input);
                 }
