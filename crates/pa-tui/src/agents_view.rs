@@ -82,6 +82,13 @@ pub struct AgentsViewOptions {
     /// hardware cursor is positioned at the search caret for IME every
     /// frame, but only shown when this is set.
     pub show_hardware_cursor: bool,
+    /// The incident notice state carried across view runs (TS
+    /// `AgentsViewPersistentState.incidentNoticeState`): the windowed log
+    /// entries, the consumed log offset, and the dismissal horizons
+    /// survive leaving and re-entering the view, so a dismissed incident
+    /// never comes back and the poll does not re-read consumed bytes.
+    /// `None` on the first run creates a fresh state.
+    pub incident_notice_state: Option<crate::incident_notices::IncidentNoticeState>,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -169,6 +176,10 @@ pub struct AgentsViewOutcome {
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
     pub status_message: Option<String>,
+    /// The incident notice state this run ended with, for the caller to
+    /// restore on re-entry (TS `persistentState.incidentNoticeState`):
+    /// dismissal horizons and the consumed log offset survive.
+    pub incident_notice_state: crate::incident_notices::IncidentNoticeState,
 }
 
 /// TS `WORKING_ICON_INTERVAL_MS`: the running-row icon frame cadence.
@@ -562,6 +573,11 @@ struct AgentsViewMode {
     /// anchor's wait ended with it, and the next query change re-arms one
     /// retry (TS `rearmSavedSearchFetch`).
     saved_fetch_failed: bool,
+    /// The incident notice state (TS `persistentState.incidentNoticeState`
+    /// — `??=` lazily initialized on first access, materialized here):
+    /// windowed log entries, the consumed log offset, dismissal horizons,
+    /// and the collapsed notice line.
+    incident_notice_state: crate::incident_notices::IncidentNoticeState,
     /// A failed saved-catalog fetch wants re-arming on the query's next
     /// change (the loop owns the client, so the mode records the intent).
     saved_query_rearm: bool,
@@ -614,6 +630,12 @@ impl AgentsViewMode {
                 .anchor_session_id
                 .as_deref()
                 .is_some_and(|anchor| !anchor.is_empty());
+        // TS `persistentState.incidentNoticeState ??= createIncidentNoticeState()`:
+        // the first run starts fresh; later runs continue the carried state.
+        let incident_notice_state = options
+            .incident_notice_state
+            .take()
+            .unwrap_or_else(crate::incident_notices::IncidentNoticeState::new);
         AgentsViewMode {
             options,
             theme,
@@ -649,6 +671,7 @@ impl AgentsViewMode {
             saved_query_rearm: false,
             saved_stream: Vec::new(),
             saved_catalog_loaded: false,
+            incident_notice_state,
         }
     }
 
@@ -1489,6 +1512,63 @@ impl AgentsViewMode {
         self.last_height.saturating_sub(9).max(4).max(1)
     }
 
+    /// TS `refreshIncidentNotices`: one best-effort poll of the structured
+    /// agent log (a missing or unreadable log simply retries a bounded
+    /// tail on the next poll and never breaks the view). `true` when the
+    /// collapsed notice line changed, so the caller re-renders.
+    fn refresh_incident_notices(&mut self) -> bool {
+        let Some(agent_dir) = pa_types::platform::agent_dir() else {
+            return false;
+        };
+        let log_path = agent_dir.join("logs").join("agent.jsonl");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as i64);
+        crate::incident_notices::refresh_incident_notice_state(
+            &mut self.incident_notice_state,
+            &log_path,
+            now_ms,
+        )
+    }
+
+    /// Dismiss the collapsed incident notice (TS `dismissIncidentNotice`):
+    /// `false` when none is showing; the dismissal status line confirms it.
+    fn dismiss_incident_notice(&mut self) -> bool {
+        if !crate::incident_notices::dismiss_incident_notice_state(&mut self.incident_notice_state)
+        {
+            return false;
+        }
+        self.status = Some("Incident notice dismissed".to_string());
+        true
+    }
+
+    /// The incident notice lines for the header (TS `renderIncidentNotice`):
+    /// the styled warning line wrapped over the pane width, each wrapped row
+    /// prefixed with the one-column gutter like the startup notices.
+    fn render_incident_notice(&self, width: usize) -> Vec<Line> {
+        let Some(notice) = self.incident_notice_state.notice.as_ref() else {
+            return Vec::new();
+        };
+        let styled = self.theme.fg(
+            crate::theme::ThemeColor::Warning,
+            format!(
+                "⚠ {} {}",
+                notice.text,
+                crate::incident_notices::INCIDENT_NOTICE_POINTER
+            ),
+        );
+        // Wrap instead of truncating, so the pointer to the incident CLI
+        // stays readable; `Math.max(1, width - 1)`.
+        let wrap_width = width.saturating_sub(1).max(1);
+        crate::width::wrap_line(&vec![styled], wrap_width)
+            .into_iter()
+            .map(|mut line| {
+                line.insert(0, crate::Span::raw(" "));
+                line
+            })
+            .collect()
+    }
+
     /// Handle one key id. Every action dispatches through the effective
     /// keybindings in TS dispatch order (`AgentsViewMode.handleInput`,
     /// then `CustomEditor.handleInput`/`Editor.handleInput`), so a user
@@ -1527,6 +1607,22 @@ impl AgentsViewMode {
             } else {
                 self.exit_armed = true;
             }
+            return;
+        }
+        // Esc (tui.select.cancel) dismisses the incident notice while it is
+        // the only thing to cancel: an empty search prompt (the TS gate also
+        // requires no armed reply and no autocomplete popup; this view's
+        // search editor has neither). An armed delete confirmation is the
+        // more dangerous state: Esc cancels it (the take() above) and keeps
+        // the notice instead of dismissing the notice and leaving the
+        // delete armed to fire on the next press without a fresh
+        // confirmation. Without a visible notice, Esc keeps its back/exit
+        // meaning.
+        if was_delete_armed.is_none()
+            && !has_query
+            && self.keybindings.matches(key, "tui.select.cancel")
+            && self.dismiss_incident_notice()
+        {
             return;
         }
         // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
@@ -1716,8 +1812,12 @@ impl AgentsViewMode {
             ..Default::default()
         };
         // `render_splash` already trails one blank row (TS renderContent's
-        // `headerLines.push("")`).
+        // `headerLines.push("")`), so the incident notice rides directly
+        // under it (TS `renderContent`'s `headerLines.push("",
+        // ...noticeLines)`): the warning line and its pointer stay above
+        // the scope label and the search prompt.
         lines.extend(crate::chrome::render_splash(&chrome, theme, width));
+        lines.extend(self.render_incident_notice(width));
         // The scoped view's back label (TS `<back> back · <title> ›
         // subagents`), dim, over the full width under the splash.
         if self.scope_active {
@@ -2705,6 +2805,10 @@ async fn run_agents_view_surface(
     mode.saved = saved_sessions;
     mode.saved_catalog_loaded = saved_catalog_loaded;
     mode.rebuild_rows();
+    // TS `start()`'s `this.refreshIncidentNotices()`: the notice from the
+    // log's bounded tail paints on the FIRST frame, before the 30s
+    // interval's first tick.
+    mode.refresh_incident_notices();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
     // A panic anywhere between the mount below and the deliberate
@@ -2758,6 +2862,12 @@ async fn run_agents_view_surface(
     }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
+    // TS `setInterval(refreshIncidentNotices, INCIDENT_NOTICE_POLL_INTERVAL_MS)`:
+    // the re-read of appended agent.jsonl bytes, re-derived and re-rendered
+    // only when the collapsed line changed (`.unref()` — it never keeps the
+    // app alive; here the deadline simply stops firing with the loop).
+    let mut incident_poll_at = tokio::time::Instant::now()
+        + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
     // The saved-catalog stream's open batch window: the first buffered row
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
@@ -2946,10 +3056,21 @@ async fn run_agents_view_surface(
                     }
                     saved_flush = None;
                 }
+                // The incident-notice poll's wake-up: the deadline drain
+                // below the select does the refresh, so the arm only ends
+                // the wait (the pulse arm's shape).
+                () = tokio::time::sleep_until(incident_poll_at) => {}
             }
         }
-        // Coalesce a due animation pulse with the input or roster frame.
+        // Coalesce a due animation pulse with the input or roster frame,
+        // and a due incident poll behind a busy input stream (the TS
+        // interval fires between turns regardless).
         redraw |= advance_running_pulse(&mut mode, &mut last_pulse, tokio::time::Instant::now());
+        if tokio::time::Instant::now() >= incident_poll_at {
+            incident_poll_at = tokio::time::Instant::now()
+                + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
+            redraw |= mode.refresh_incident_notices();
+        }
         if redraw {
             renderer.draw(&mut mode);
         }
@@ -3071,6 +3192,7 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
+            incident_notice_state: mode.incident_notice_state,
         },
     })
 }
@@ -3124,6 +3246,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -3322,6 +3445,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3829,6 +3953,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -3852,6 +3977,7 @@ mod tests {
             status_message: Some(notice.to_string()),
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.rebuild_rows();
         mode
@@ -4193,6 +4319,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -4227,6 +4354,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4308,6 +4436,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4492,6 +4621,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4696,6 +4826,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4730,6 +4861,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4840,6 +4972,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = roster;
         mode.rebuild_rows();
