@@ -18,6 +18,7 @@ use crate::chat::{
     ToolResultView, WorkingState,
 };
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
+use crate::daemon_reconnect::RecoveryKind;
 use crate::effort_picker::{self, EffortPickerAction};
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
 use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
@@ -38,7 +39,6 @@ use crate::model_picker::{
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
-use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };
@@ -74,6 +74,12 @@ const ESCAPE_REPEAT_WINDOW_MS: std::time::Duration = std::time::Duration::from_m
 /// Cap on the exit-path session-stats fetch (TS `formatResumeHint` inputs):
 /// best-effort like the detach, never able to hold the exit open.
 const EXIT_STATS_TIMEOUT_MS: u64 = 500;
+
+/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (auth-flows.ts, #2645): the
+/// ban-risk warning a completed Anthropic subscription login shows once
+/// per session (the settings toggle `warnings.anthropicExtraUsage`
+/// gates it).
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
 
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +343,9 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+    /// The ban-risk warning's once-per-session gate (TS
+    /// `anthropicSubscriptionWarningShown`).
+    anthropic_subscription_warning_shown: bool,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,
@@ -545,6 +554,12 @@ pub(crate) struct SessionUi {
     /// The §10 reattach contract: set when a `daemon_closing` update frame
     /// arrived; the interactive loop drives the reconnect from it.
     pub(crate) reconnect: Option<crate::daemon_client::DaemonClosingUpdate>,
+    /// TS #2458 `daemonClosingNotice`: the reason the daemon last
+    /// announced itself closing; cleared once a fresh attach
+    /// (re)establishes the connection. An announced `shutdown` arms the
+    /// bounded shutdown recovery, so a bare session stop without a notice
+    /// never routes into a reconnect.
+    pub(crate) daemon_closing_notice: Option<String>,
     /// The session whose direct worker link just died; the interactive
     /// loop arms the re-attach driver from it (TS `connection_status:
     /// "reconnecting"`).
@@ -620,7 +635,7 @@ pub(crate) struct SessionUi {
 /// Why one transcript rebuild runs (TS: a session rebind renders through
 /// `renderCurrentSessionState`, a same-session resync through
 /// `renderResyncedSession` — the bash slot survives only the resync).
-/// The reattach outcome for `reattach_after_update`: the budget expiry
+/// The reattach outcome for `reattach_after_recovery`: the budget expiry
 /// (a queued attach waiting out a slow restore, §10.4) is a RETRY
 /// outcome — the reconnect driver schedules its next attempt; only a
 /// true attach error is an `Err`.
@@ -726,6 +741,7 @@ impl SessionUi {
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
+            anthropic_subscription_warning_shown: false,
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -796,6 +812,7 @@ impl SessionUi {
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
             reconnect: None,
+            daemon_closing_notice: None,
             transport_lost: None,
             pending_rebind: None,
             reconnection_failed: None,
@@ -825,22 +842,22 @@ impl SessionUi {
         Ok(session)
     }
 
-    /// Spec §10.2-§10.5: reattach after an update restart. The fresh client
+    /// Spec §10.2-§10.5: reattach after a restart. The fresh client
     /// (connected to the successor supervisor) replaces the dead one; the
     /// attach goes by DURABLE session id, so the slice-5 queued-attach
     /// contract absorbs any restore still in flight (the §10.3 hello's
     /// `update_resume.complete` is surfaced as a banner line). The
     /// transcript rebuilds from the attach snapshot - the same machinery
-    /// `/switch` uses - and the resumed-work banner lands after it.
+    /// `/switch` uses - and the recovery's row lands after it.
     ///
-    /// `lost` marks the unexpected-loss recovery path (not an update
-    /// restart): no update banner is painted — the caller's single
-    /// recovery row is the note.
-    pub(crate) async fn reattach_after_update(
+    /// `kind` names the driver that owns the recovery: the update restart
+    /// paints its §10.5 banner, while a lost or announced-shutdown window
+    /// (TS #2458) reports the restart version-honestly instead.
+    pub(crate) async fn reattach_after_recovery(
         &mut self,
         client: DaemonClient,
         view: &mut AgentView,
-        lost: bool,
+        kind: RecoveryKind,
     ) -> Result<ReattachOutcome> {
         // One reattach attempt's budget (§10.4: a queued attach can
         // legitimately wait out a slow restore — the budget's expiry is a
@@ -880,9 +897,11 @@ impl SessionUi {
                 // socket shuts down, the reader EOFs), and the reconnect
                 // driver installs a fresh one on its next attempt.
                 self.client.hard_close();
-                return Err(
-                    error.context(format!("reattaching session {durable} after the update"))
-                );
+                let what = match kind {
+                    RecoveryKind::Update => "after the update",
+                    RecoveryKind::Lost | RecoveryKind::Shutdown => "after the restart",
+                };
+                return Err(error.context(format!("reattaching session {durable} {what}")));
             }
             Err(_) => {
                 // A wedged attach outlived the budget (§10.4: a queued
@@ -898,8 +917,8 @@ impl SessionUi {
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
         self.rebuild_view(view, RebuildKind::Resync);
-        if !lost {
-            match complete {
+        match kind {
+            RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
                     text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
                     kind: crate::chat::StatusKind::Info,
@@ -910,6 +929,24 @@ impl SessionUi {
                     ),
                     kind: crate::chat::StatusKind::Info,
                 }),
+            },
+            RecoveryKind::Lost | RecoveryKind::Shutdown => {
+                // TS #2458 `formatDaemonReconnectBanner`: the recovered
+                // window reports the restart version-honestly.
+                let daemon_version = self
+                    .client
+                    .hello()
+                    .get("appVersion")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let (text, status_kind) = crate::daemon_reconnect::reconnect_banner(
+                    daemon_version.as_deref(),
+                    env!("CARGO_PKG_VERSION"),
+                );
+                view.push_entry(crate::chat::ChatEntry::Status {
+                    text,
+                    kind: status_kind,
+                });
             }
         }
         self.dirty = true;
@@ -1016,6 +1053,10 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
+        // The closing notice is per-connection (TS #2458: it clears on
+        // every attach): a later bare session stop must not route into a
+        // stale shutdown recovery's reconnect hang.
+        self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.session_file = attach
@@ -1307,7 +1348,6 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
-            view.runs_view = None;
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
@@ -1410,21 +1450,6 @@ impl SessionUi {
                         self.side_bash_discarded = None;
                     }
                 }
-            }
-        }
-        // A resync rebuild replaces the transcript wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no run
-        // survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
             }
         }
         // The rebuilt chat follows the session's live state: an attached
@@ -1617,6 +1642,29 @@ impl SessionUi {
             self.last_status_index = Some(view.chat_len() - 1);
         }
         self.dirty = true;
+    }
+
+    /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
+    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// login draws the ban-risk warning once per session, gated by the
+    /// settings toggle (`warnings.anthropicExtraUsage`, TS default
+    /// true — an absent settings seam keeps the default).
+    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
+        if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
+            || self.anthropic_subscription_warning_shown
+            || self
+                .client_settings
+                .as_ref()
+                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+        {
+            return;
+        }
+        self.anthropic_subscription_warning_shown = true;
+        self.note_as(
+            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+            StatusKind::Warning,
+            view,
+        );
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to
@@ -3689,7 +3737,8 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
+                        || crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+                            .contains(&provider.id.as_str())
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
@@ -3749,7 +3798,8 @@ impl SessionUi {
         if let Some(previous) = self.auth_panel_cancel.take() {
             previous.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+        self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+            .contains(&provider.id.as_str())
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
@@ -3873,10 +3923,11 @@ impl SessionUi {
             AuthPanelRequest::PastePrompt {
                 prompt,
                 style,
+                allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, reply);
+                    panel.mount_paste(prompt, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -3892,6 +3943,7 @@ impl SessionUi {
                 self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, &provider, view).await;
+                self.maybe_warn_anthropic_subscription_auth(&provider, view);
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
@@ -6105,7 +6157,6 @@ impl SessionUi {
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
-            || view.runs_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -6266,10 +6317,9 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited. The runs view
-        // owns the frame the same way, and the read-only goal panel
-        // consumes it the same way.
-        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
+        // where a later Enter would submit it unedited. The read-only
+        // goal panel consumes it the same way.
+        if view.bash_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -6494,61 +6544,6 @@ impl SessionUi {
                 self.open_goal_panel(view);
             }
         }
-    }
-
-    /// Open the condensed tool runs view (the drill-in pane for the
-    /// collapsed transcript's condensed blocks): the pane reads the
-    /// view's own transcript - no wire requests, no state beyond the
-    /// cursor and the scroll.
-    fn open_runs_view(&mut self, view: &mut AgentView) {
-        let runs = view.condensed_runs();
-        view.runs_view = Some(RunsView::new(
-            picker_viewport_rows(view.terminal_rows()),
-            &view.chat,
-            &runs,
-        ));
-        self.dirty = true;
-    }
-
-    /// One key press while the condensed tool runs view is open: the view
-    /// owns the frame the same way as the bash view; its only action is
-    /// closing (the pane is pure presentation).
-    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let runs = view.condensed_runs();
-        // The runs change live under the open pane: reconcile BEFORE the
-        // key acts (the cursor and the open detail can point at a run
-        // that grew, split, or vanished since the last look), closing
-        // the pane when no run survives.
-        if view
-            .runs_view
-            .as_mut()
-            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
-        {
-            view.runs_view = None;
-            self.dirty = true;
-            return Ok(());
-        }
-        let kb = view.editor.keybindings().clone();
-        let action = view
-            .runs_view
-            .as_mut()
-            .map_or(RunsViewAction::None, |runs_view| {
-                runs_view.handle_key(&id, &kb, &view.chat, &runs)
-            });
-        match action {
-            RunsViewAction::Close => {
-                view.runs_view = None;
-            }
-            RunsViewAction::None => {}
-        }
-        self.dirty = true;
-        Ok(())
     }
 
     /// The dock's goal row opens the read-only goal panel (the
@@ -7549,25 +7544,6 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
-        // The rebuilt transcript replaces the chat wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no
-        // run survives) - compaction sets `transcript_stale` and this
-        // rebuild lands after the update path already reconciled
-        // against the pre-rebuild chat, so without this seam the pane
-        // rides stale start indices and identity keys until the next
-        // key press.
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
-        }
         view.follow();
         self.dirty = true;
     }
@@ -7667,10 +7643,6 @@ impl SessionUi {
         // The bash view owns the frame the same way.
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
-        }
-        // The condensed tool runs view owns the frame the same way.
-        if view.runs_view.is_some() {
-            return self.handle_runs_view_key(key, view).await;
         }
         // The read-only goal panel owns the frame the same way.
         if view.goal_panel.is_some() {
@@ -7995,21 +7967,6 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
-            self.dirty = true;
-            return Ok(());
-        }
-        // `app.transcript.runs` (default alt+t): the condensed tool runs
-        // view opens over the editor dock (the drill-in pane for the
-        // collapsed transcript's condensed blocks); with no condensed
-        // runs the key opens the same pane with its empty note - the
-        // affordance stays discoverable.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.transcript.runs")
-        {
-            self.emit_activity_opened("runs");
-            self.open_runs_view(view);
             self.dirty = true;
             return Ok(());
         }
@@ -8515,6 +8472,10 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {
+                // TS #2458 `daemonClosingNotice`: the announcement is the
+                // discriminator the interactive loop's shutdown recovery
+                // arms on (a bare session stop without it stays stopped).
+                self.daemon_closing_notice = Some(reason.clone());
                 match update {
                     Some(update) => {
                         // Spec §10: reattach is the default end state. The
@@ -8938,20 +8899,6 @@ impl SessionUi {
                 self.sync_queue_selection(view);
             }
             TurnUpdate::StatusUpdate => {}
-        }
-        // A transcript mutation reshaped the condensed runs: reconcile an
-        // open runs pane now (the cursor and the open detail can point at
-        // a run that grew, split, or vanished; the pane closes when no
-        // run survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
         }
         self.dirty = true;
     }

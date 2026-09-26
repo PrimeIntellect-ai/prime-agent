@@ -579,6 +579,7 @@ mod tests {
                 client_id: Some("fixture-client".to_string()),
                 resource: None,
                 issuer: None,
+                enterprise_url: None,
             },
         );
         let api_key = auth.get_api_key("mcp:fixture");
@@ -634,6 +635,7 @@ mod tests {
                 client_id: Some("fixture-client".to_string()),
                 resource: None,
                 issuer: None,
+                enterprise_url: None,
             },
         );
 
