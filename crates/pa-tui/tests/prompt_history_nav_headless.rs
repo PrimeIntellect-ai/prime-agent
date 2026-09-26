@@ -36,9 +36,9 @@ impl MockSupervisor {
     /// Serve one connection: attach an empty session, list one heartbeat
     /// (the dock's heartbeats group is selectable while no subagents
     /// exist — the session shape that must not steal the prompt's Down),
-    /// and ack every prompt with no turn events, so the transcript never
-    /// echoes the prompts and the recalled text renders only in the
-    /// prompt box.
+    /// and answer every prompt with the ack plus the turn's bookend
+    /// events, so the transcript never echoes the prompts and the
+    /// recalled text renders only in the prompt box.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let writer = stream.try_clone().expect("clone mock socket");
@@ -123,8 +123,15 @@ impl MockSupervisor {
                     );
                 }
                 "prompt" => {
-                    // An admitted prompt with no turn events: the turn
-                    // never starts and the transcript keeps nothing.
+                    // An admitted prompt: the ack, then the turn's bookend
+                    // events (`turn_start` + `turn_end`, no message rows —
+                    // the transcript keeps nothing of the prompt, so the
+                    // recalled text renders only in the prompt box). The
+                    // client optimistically marks the turn active on the
+                    // ack and only `turn_end` clears it; the headless
+                    // harness's idle gate requires the turn settled before
+                    // the run can finish, so a turn-less ack would hang
+                    // the plan's run forever.
                     write_json(
                         &mut writer,
                         &json!({
@@ -134,6 +141,8 @@ impl MockSupervisor {
                             "success": true,
                         }),
                     );
+                    write_session_event(&mut writer, &json!({ "type": "turn_start" }));
+                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
                 }
                 _ => {
                     write_json(
@@ -150,6 +159,19 @@ impl MockSupervisor {
             }
         }
     }
+}
+
+/// One daemon session event (the pushed frame the client's event stream
+/// reads): scoped to the mock session like the real supervisor's.
+fn write_session_event(writer: &mut UnixStream, event: &Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": event,
+        }),
+    );
 }
 
 fn write_json(writer: &mut UnixStream, value: &Value) {
