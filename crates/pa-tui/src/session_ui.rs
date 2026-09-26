@@ -6399,15 +6399,19 @@ impl SessionUi {
                 .or_else(|| view.hyperlink_at(row, col));
             if let Some(url) = url {
                 self.open_hyperlink(&url);
-            } else {
+            } else if !event.shift && !event.alt && !event.ctrl {
+                // TS gates the click dispatch on the release's
+                // modifiers too: modified clicks stay selection-only.
                 self.dispatch_plain_click(view, row);
             }
         }
         // TS clears the press state after every left release, so a later
-        // release can never open a stale press.
+        // release can never open a stale press — the click target rides
+        // the same cleanup (a drag-selection release consumes nothing).
         if left && !event.press {
             self.left_mouse_dragged = false;
             self.pressed_hyperlink = None;
+            self.pressed_click = None;
         }
     }
 

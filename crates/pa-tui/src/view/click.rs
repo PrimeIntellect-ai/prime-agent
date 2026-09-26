@@ -109,6 +109,10 @@ pub(crate) const EFFORT_PICKER_CHROME_ROWS: usize = 6;
 pub(crate) struct ClickSurface {
     /// The visible window's chat entries, in window-row order.
     pub(super) window_sections: Vec<WindowSection>,
+    /// Screen-row spans the compose later covered with transient
+    /// overlays (the action toasts, the paused-viewport follow hint):
+    /// their rows no longer read as the content beneath them.
+    pub(super) masked_rows: Vec<(usize, usize)>,
     /// Screen row the transcript window starts at (the pinned top bar).
     pub(super) window_screen_start: usize,
     /// Screen row of the dock's first visible row.
@@ -124,6 +128,14 @@ impl ClickSurface {
     /// Reset for a fresh frame composition.
     pub(super) fn clear(&mut self) {
         *self = ClickSurface::default();
+    }
+
+    /// Mask screen rows `[from, to)` as overlay-covered: a click there
+    /// must not fire the hidden row's target.
+    pub(super) fn mask_rows(&mut self, from: usize, to: usize) {
+        if from < to {
+            self.masked_rows.push((from, to));
+        }
     }
 
     /// Record one chat entry's visible window span.
@@ -168,6 +180,15 @@ impl AgentView {
     ) -> Option<ClickAction> {
         let click = &self.click;
         if screen_row < click.window_screen_start {
+            return None;
+        }
+        // An overlay-covered row (a transient toast pill, the follow
+        // hint) never reads as the content beneath it.
+        if click
+            .masked_rows
+            .iter()
+            .any(|(from, to)| screen_row >= *from && screen_row < *to)
+        {
             return None;
         }
         let window_row = screen_row - click.window_screen_start;
@@ -346,6 +367,37 @@ mod tests {
         assert_eq!(content_width, surface.content_width);
         // The surface's border rows are not content rows.
         assert_eq!(view.click_target_at(content_row.saturating_sub(1), 4), None);
+    }
+
+    #[test]
+    fn a_toast_covered_row_never_fires_the_hidden_target() {
+        let mut view = frame_with_a_card();
+        let card_row = section_screen_row(&view, 1);
+        assert!(
+            view.click_target_at(card_row, 2).is_some(),
+            "the card row is clickable without the toast"
+        );
+        // An action ack overlays the window's top rows; with a short
+        // transcript the card's rows sit right under it.
+        view.toasts.push("Copied selection to clipboard");
+        view.render_frame(40, 20);
+        // The mask covers the window's first toast row: a click on the
+        // visible pill is inert.
+        let masked = view
+            .click
+            .masked_rows
+            .first()
+            .copied()
+            .expect("the toast masked its rows");
+        assert_eq!(
+            view.click_target_at(masked.0, 2),
+            None,
+            "the toast-covered row never reads as the content beneath it"
+        );
+        assert!(
+            masked.1 <= view.click.window_screen_start + view.window_rows,
+            "the mask stays inside the window"
+        );
     }
 
     #[test]

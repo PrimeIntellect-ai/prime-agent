@@ -1746,6 +1746,8 @@ impl AgentView {
                     .unwrap_or_else(|| "ctrl+shift+down".to_string());
                 let label = format!(" {key} to follow ");
                 *row = composite_follow_hint(row, &label, width);
+                // The hint's row never reads as the content beneath it.
+                self.click.mask_rows(window_height, window_height + 1);
             }
         }
         self.frame_rows = frame.len();
@@ -1787,6 +1789,11 @@ impl AgentView {
                 width,
                 style,
             );
+            // The covered rows no longer read as the transcript content
+            // beneath them: a click on the transient pill must not fire
+            // the hidden row's target.
+            let covered = toasts.len().min(window_height);
+            self.click.mask_rows(top_rows, top_rows + covered);
         }
         frame
     }

@@ -22,10 +22,12 @@ pub(crate) struct PressedClick {
 }
 
 impl SessionUi {
-    /// Record the click target under a plain left press (TS
-    /// `fullscreenPressedClick`): a hyperlink wins over component
-    /// regions at the press position (the press-state block recorded
-    /// one), and shift/alt/ctrl presses stay selection-only.
+    /// Record the click target under a left press (TS
+    /// `fullscreenPressedClick`, which always assigns): a hyperlink
+    /// wins over component regions at the press position (the
+    /// press-state block recorded one), and shift/alt/ctrl presses
+    /// stay selection-only — both clear any stale target, so a later
+    /// gated release can never fire an earlier press's action.
     pub(crate) fn record_pressed_click(
         &mut self,
         view: &AgentView,
@@ -33,16 +35,15 @@ impl SessionUi {
     ) {
         let row = event.y.saturating_sub(1) as usize;
         let col = event.x.saturating_sub(1) as usize;
-        if !event.motion
+        let plain = !event.motion
             && !event.shift
             && !event.alt
             && !event.ctrl
-            && self.pressed_hyperlink.is_none()
-        {
-            self.pressed_click = view
-                .click_target_at(row, col)
-                .map(|action| PressedClick { row, action });
-        }
+            && self.pressed_hyperlink.is_none();
+        self.pressed_click = plain
+            .then(|| view.click_target_at(row, col))
+            .flatten()
+            .map(|action| PressedClick { row, action });
     }
 
     /// Fire the click recorded at the press (TS `dispatchFullscreenClick`):

@@ -69,6 +69,10 @@ impl Editor {
         // which can sit inside an atomic marker split across rows: snap
         // onto the marker's nearest boundary.
         placed = snap_cursor_offset(&segments, placed);
+        // A caret placement is a selection cancel: a stale
+        // selection_anchor would make the next typed character replace
+        // the old anchor-to-cursor range instead of inserting here.
+        self.selection_anchor = None;
         self.last_action = None;
         self.cursor_line = line.source_line;
         self.set_cursor_col(placed);
@@ -147,6 +151,19 @@ mod tests {
         assert_eq!(editor.get_cursor(), (0, 10));
         editor.place_cursor_from_click(10, 1, 5);
         assert_eq!(editor.get_cursor(), (0, 15));
+    }
+
+    #[test]
+    fn a_click_cancels_a_shift_arrow_selection() {
+        let mut editor = editor("hello world");
+        // Shift+right extends the selection: the anchor sits at the
+        // line's start with the caret after `h`.
+        editor.set_cursor_for_tests(0, 0);
+        editor.handle_input("shift+right");
+        assert!(editor.selection_range().is_some(), "the selection opened");
+        editor.place_cursor_from_click(40, 0, 5);
+        assert_eq!(editor.selection_range(), None, "the click cancelled it");
+        assert_eq!(editor.get_cursor(), (0, 5));
     }
 
     #[test]

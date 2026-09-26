@@ -1725,6 +1725,13 @@ impl AgentsViewMode {
         if event.button != crate::mouse::BUTTON_LEFT {
             return;
         }
+        // Modifier presses stay inert — the session surface treats them
+        // as selection-only, and this view has no selection surface to
+        // offer (a stale pending click dies with them).
+        if event.shift || event.alt || event.ctrl {
+            self.pressed_click = None;
+            return;
+        }
         let row = event.y.saturating_sub(1) as usize;
         if event.press {
             if let Some(pressed) = self.pressed_click.as_mut() {
@@ -3352,6 +3359,36 @@ mod tests {
             "the click opened the row (the Enter action)"
         );
         assert!(!mode.running, "an open ends the view run");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    #[test]
+    fn a_modified_press_never_opens_the_row() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("shift over me", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "shift over me",
+            "activeSessionId": "s-shift",
+        });
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        // A shift-press plus a plain release: the modifier press stays
+        // selection-only, so nothing opens.
+        let mut shifted = mouse_report(row, true, false);
+        shifted.shift = true;
+        mode.handle_mouse(&shifted);
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(mode.opened.is_none(), "the modified press never opened");
+        assert!(mode.running, "the view keeps running");
         crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 

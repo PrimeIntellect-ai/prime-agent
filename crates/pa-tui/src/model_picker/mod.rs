@@ -465,10 +465,13 @@ impl ModelPicker {
     /// Move the selection to one filtered position (the click grammar's
     /// row select — the arrow keys' exact movement, no apply): a
     /// position past the filtered list keeps the selection where it
-    /// was.
+    /// was. A click lands the user in the list, so the arrow keys
+    /// adjust the clicked row's effort instead of editing the search
+    /// (the same flag the arrow paths set).
     pub(crate) fn select_filtered(&mut self, position: usize) {
         if position < self.filtered.len() {
             self.selected = position;
+            self.navigated_into_list = true;
         }
     }
 
@@ -1267,6 +1270,28 @@ mod tests {
 
     /// The Tab-intercepted partial keeps the caret at its end, so typing
     /// extends the filter instead of inserting before it.
+    #[test]
+    fn a_row_click_lands_the_arrows_on_the_clicked_rows_effort() {
+        let kb = kb();
+        let mut picker = ModelPicker::new(picker_options(battery_catalog()));
+        // A nonempty search keeps Left/Right on the search field until
+        // the user enters the list (an arrow move) — a row click is the
+        // same entry.
+        picker.set_query("fable");
+        assert!(
+            picker.search.value().contains("fable"),
+            "the query prefilled"
+        );
+        picker.select_filtered(0);
+        let before = picker.search.value().to_string();
+        picker.handle_key("left", &kb);
+        assert_eq!(
+            picker.search.value(),
+            before,
+            "Left adjusted the clicked row's effort, not the search"
+        );
+    }
+
     #[test]
     fn set_query_prefill_leaves_the_caret_at_the_end() {
         let mut picker = ModelPicker::new(picker_options(battery_catalog()));
