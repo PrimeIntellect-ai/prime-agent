@@ -609,6 +609,10 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    fn kb() -> crate::keybindings::KeybindingsManager {
+        crate::keybindings::KeybindingsManager::new()
+    }
+
     use super::*;
     use crate::theme::{ColorMode, Theme, ThemeJson};
 
@@ -702,7 +706,7 @@ mod tests {
             chatter: true,
         });
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let rows = screen.render(&theme, 80, 24);
+        let rows = screen.render(&theme, 80, 24, &kb());
         let text = rows
             .iter()
             .map(|line| {
@@ -727,7 +731,7 @@ mod tests {
             message: "Browser sign-in unavailable (mock).".to_string(),
             chatter: false,
         });
-        let rows = screen.render(&theme, 80, 24);
+        let rows = screen.render(&theme, 80, 24, &kb());
         let text = rows
             .iter()
             .map(|line| {
@@ -780,7 +784,7 @@ mod tests {
             reply,
         });
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let rows = screen.render(&theme, 80, 24);
+        let rows = screen.render(&theme, 80, 24, &kb());
         let text = rows
             .iter()
             .map(|line| {
