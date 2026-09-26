@@ -1144,18 +1144,39 @@ impl AgentView {
             ChatEntry::Assistant(message) => {
                 // The per-entry block cache (TS's per-component
                 // `blockCache`): settled blocks of the streaming message
-                // replay instead of re-rendering on every frame.
-                let mut caches = self.md_caches.borrow_mut();
-                let cache = caches.entry(index).or_default();
-                render_assistant(
-                    message,
-                    detail,
-                    &self.theme,
-                    &self.code_block_indent,
-                    width,
-                    preceded_by_tool_activity,
-                    cache,
-                )
+                // replay instead of re-rendering on every frame — the
+                // cache exists for the streaming case. A settled
+                // message's blocks are final, so its rendered rows live
+                // once in the entry layout and the block-cache copy is
+                // dropped (a resumed large session's duplicate copy was
+                // the TUI's biggest single retained allocation in the
+                // tui-memory census); any later re-render rebuilds the
+                // same rows from the message's own text.
+                if message.streaming {
+                    let mut caches = self.md_caches.borrow_mut();
+                    let cache = caches.entry(index).or_default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        cache,
+                    )
+                } else {
+                    self.md_caches.borrow_mut().remove(&index);
+                    let mut settled = crate::markdown::MarkdownBlockCache::default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        &mut settled,
+                    )
+                }
             }
             ChatEntry::Tool(card) => {
                 // TS `ToolExecutionComponent`: the leading spacer rides on

@@ -3022,6 +3022,16 @@ async fn run_interactive_surface(
                     last_render_at = Some(Instant::now());
                     last_pulse_phase = view.pulse_frame;
                     render_deadline = None;
+                    // The attach fold arms this once: the first frame
+                    // that renders the rebuilt transcript materializes
+                    // its visible window (the wrap/render churn on top
+                    // of the fold's parse churn), so return that freed
+                    // heap right after the frame paints instead of
+                    // keeping the resume's peak resident for the
+                    // process lifetime.
+                    if session.take_trim_after_frame() {
+                        pa_types::memory_release::trim_freed_heap();
+                    }
                 } else {
                     render_deadline = Some(last_render_at.unwrap() + MIN_RENDER_INTERVAL);
                 }
