@@ -1077,21 +1077,35 @@ impl SessionUi {
         self.roster.clear();
         self.subagents_focused = false;
         self.subscribe_roster().await;
-        // The heartbeat catalog is scoped to the session: drop the old
-        // session's rows and fetch fresh ones in the background (TS
-        // refreshes the catalog on every chat open).
+        // The heartbeat catalog is scoped to the session: the old rows
+        // drop and the fresh fetch folds BEFORE the attach returns. The
+        // dock's visibility (the panel and its divider under the prompt
+        // bar) is first-frame geometry — it must be final when the first
+        // content frame renders, never a late layout shift (the
+        // operator's 2026-09-26 zero-shift ruling). TS guarantees the
+        // same for its dock: the counts seed from the attach snapshot
+        // (`seedSubagentSummary`) and the roster subscription is awaited
+        // before the first content render; TS's own heartbeat fetch stays
+        // fire-and-forget only because its summary line renders no
+        // heartbeat rows. A failed fetch leaves the cleared catalog (the
+        // next `heartbeats_changed` event refills).
         self.heartbeat_catalog.clear();
-        self.spawn_heartbeat_refresh();
+        self.fetch_heartbeat_catalog().await;
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
-        // The bash registry is kernel-owned and session-scoped: the previous
-        // session's rows are not this one's (the next poll refills).
+        // The bash registry is kernel-owned and session-scoped: the
+        // previous session's rows are not this one's, and the fresh list
+        // folds before the attach returns (the dock's bash rows are
+        // first-frame geometry like the heartbeat rows above). The
+        // capability gate matches the background refresh (older daemons
+        // never see the request), and a failed fetch leaves the cleared
+        // registry (the 2s poll refills).
         self.bash_activities = serde_json::json!({"activities": []});
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
-        self.spawn_bash_activity_refresh();
+        self.fetch_bash_activities().await;
         self.pending_model = reconstructed.model_id;
         self.last_assistant_text = reconstructed
             .chat
@@ -1468,6 +1482,16 @@ impl SessionUi {
         }
         view.follow();
         self.update_fast_filter(view);
+        // The brand splash is the EMPTY chat's header (TS mounts
+        // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
+        // non-empty transcript suppresses it — the chat opened or
+        // switched directly into content, where TS's own direct opens
+        // attach before mount and the tail-anchored viewport scrolls the
+        // splash out of reach — while every rebuild into an empty chat
+        // keeps it (a new session shows its header; the incremental
+        // first-turn growth never passes through here, so a new chat's
+        // splash scrolls away exactly like TS).
+        view.splash_suppressed = !view.chat.is_empty();
         self.dirty = true;
     }
 
@@ -6415,9 +6439,36 @@ impl SessionUi {
         Ok(())
     }
 
-    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
-        if !self
-            .client
+    /// The open-time kernel-bash fold: the first `list_kernel_bash`
+    /// response lands in the registry synchronously with the attach
+    /// (capability-gated and bounded like the background refresh), so
+    /// the dock's bash rows ride the first content frame instead of
+    /// popping in late. A failed fetch leaves the just-cleared registry
+    /// — the 2s poll refills.
+    async fn fetch_bash_activities(&mut self) {
+        if !self.kernel_bash_supported() {
+            return;
+        }
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        self.bash_activities = data;
+    }
+
+    /// Whether the daemon advertises the kernel-bash registry (older
+    /// daemons never see the list requests).
+    fn kernel_bash_supported(&self) -> bool {
+        self.client
             .hello()
             .get("serverCapabilities")
             .and_then(Value::as_array)
@@ -6425,7 +6476,10 @@ impl SessionUi {
                 caps.iter()
                     .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
             })
-        {
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
+        if !self.kernel_bash_supported() {
             return;
         }
         // The 2s poll, the view open, and the post-kill refresh can
@@ -6887,6 +6941,32 @@ impl SessionUi {
             (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
+    }
+
+    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
+    /// response scopes and sorts into the catalog synchronously with the
+    /// attach (bounded like every UI request), so the dock's heartbeat
+    /// rows ride the first content frame instead of popping in late. A
+    /// failed or timed-out fetch leaves the just-cleared catalog — the
+    /// same empty-open state the background refresh's failure arm
+    /// produces, and the next `heartbeats_changed` event refills.
+    async fn fetch_heartbeat_catalog(&mut self) {
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::HeartbeatsList {
+                    id: None,
+                    active_session_id: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
+        sort_heartbeats(&mut heartbeats);
+        self.heartbeat_catalog = heartbeats;
     }
 
     /// Fire a background heartbeat-catalog refresh (TS

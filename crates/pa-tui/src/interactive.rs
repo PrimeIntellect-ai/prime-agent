@@ -1587,11 +1587,18 @@ async fn run_interactive_surface(
         options.fullscreen_mouse,
         &surface_mounted,
     )?;
-    if !headless {
-        // TS `ui.start()` renders once before the session loads: the first
-        // frame is the startup chrome (banner, editor, tray). The model
-        // and session labels are placeholders until the attach's
-        // `rebuild_view` repaints with the snapshot.
+    // The startup chrome paints before the session loads only for a NEW
+    // chat (TS `ui.start()` renders the banner once before the session
+    // loads): a fresh session's dock is deterministically empty, so the
+    // placeholder frame never reflows when the attach lands. A direct
+    // open into an existing session holds the previous surface instead
+    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
+    // construct the chat over an already-attached connection whose
+    // `getInitialSnapshot` is cached, so the first visible frame is the
+    // content): the queued clear rides the first draw's single flush,
+    // which carries the complete frame — no splash flash, no panel
+    // appearing late over a half-open view.
+    if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
@@ -1709,10 +1716,6 @@ async fn run_interactive_surface(
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
-    // The scoped heartbeat catalog seeds the tray heartbeat label (TS
-    // refreshes the catalog on chat open; failures stay silent).
-    session.spawn_heartbeat_refresh();
-    session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
