@@ -654,6 +654,18 @@ pub(crate) enum RebuildKind {
     Resync,
 }
 
+/// Where a compact-dock focus hand-off comes from (TS
+/// `focusSubagentSummary`, shared by `app.subagents.focus` and the
+/// editor's move-below-prompt hook): the selectability gate differs per
+/// caller.
+enum DockFocusSource {
+    /// The editor's Down at the prompt's end (TS `onMoveBelowPrompt`
+    /// -> `focusSubagentSummary`): the subagents box's affordance.
+    PromptDown,
+    /// The `app.subagents.focus` key: any selectable dock group.
+    Shortcut,
+}
+
 /// The attached snapshot's bash slot state, captured by `attach_session`
 /// while the client's pre-attach belief is still readable.
 #[derive(Debug, Clone, Copy)]
@@ -1278,7 +1290,7 @@ impl SessionUi {
     }
 
     /// The editor's Down and Alt+A hand focus to the compact dock.
-    fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
+    fn focus_subagents_summary(&mut self, source: DockFocusSource, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
         // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
         // armed Ctrl+C exit hint, or the streaming follow-up hint over a
@@ -1286,6 +1298,22 @@ impl SessionUi {
         // separate draft check is needed.
         if self.tray_override(view).is_some() {
             return false;
+        }
+        match source {
+            DockFocusSource::PromptDown => {
+                // TS `SubagentSummaryLine.isSelectable()`: the prompt's
+                // Down is the subagents box's own affordance — subagents
+                // must exist, and the grab selects that group. The dock's
+                // other groups (heartbeats, shells, the goal row) never
+                // take this Down; their shortcut stays
+                // `app.subagents.focus`, so the prompt's arrows keep the
+                // input-history recall in every session shape.
+                if !self.activity_selectable(crate::chrome::ActivityGroup::Subagents) {
+                    return false;
+                }
+                self.activity_group = crate::chrome::ActivityGroup::Subagents;
+            }
+            DockFocusSource::Shortcut => {}
         }
         if !self.activity_selectable(self.activity_group) {
             let Some(group) = [
@@ -7998,7 +8026,7 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.subagents.focus")
         {
-            self.focus_subagents_summary(view);
+            self.focus_subagents_summary(DockFocusSource::Shortcut, view);
             self.dirty = true;
             return Ok(());
         }
@@ -8190,7 +8218,10 @@ impl SessionUi {
         // cursor at the last line's end — hands the focus to the subagent
         // summary line when it is selectable; every other Down falls
         // through to the editor's cursor motion (a non-selectable line
-        // never takes it).
+        // never takes it). TS `SubagentSummaryLine.isSelectable()` grants
+        // the grab only when subagents exist — the dock's other groups
+        // keep their `app.subagents.focus` shortcut, so the prompt's
+        // arrows stay the input-history recall in every session shape.
         if view
             .editor
             .keybindings()
@@ -8198,7 +8229,7 @@ impl SessionUi {
             && !view.editor.is_showing_autocomplete()
             && !view.editor.is_history_navigation_active()
             && view.editor.is_cursor_at_end()
-            && self.focus_subagents_summary(view)
+            && self.focus_subagents_summary(DockFocusSource::PromptDown, view)
         {
             // The focus leaves the editor with the selection active: a
             // later keystroke would fall back through to the editor and
