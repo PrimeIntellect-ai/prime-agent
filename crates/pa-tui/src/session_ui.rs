@@ -38,7 +38,6 @@ use crate::model_picker::{
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
-use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };
@@ -1307,7 +1306,6 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
-            view.runs_view = None;
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
@@ -1410,21 +1408,6 @@ impl SessionUi {
                         self.side_bash_discarded = None;
                     }
                 }
-            }
-        }
-        // A resync rebuild replaces the transcript wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no run
-        // survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
             }
         }
         // The rebuilt chat follows the session's live state: an attached
@@ -6105,7 +6088,6 @@ impl SessionUi {
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
-            || view.runs_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -6266,10 +6248,9 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited. The runs view
-        // owns the frame the same way, and the read-only goal panel
-        // consumes it the same way.
-        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
+        // where a later Enter would submit it unedited. The read-only
+        // goal panel consumes it the same way.
+        if view.bash_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -6494,61 +6475,6 @@ impl SessionUi {
                 self.open_goal_panel(view);
             }
         }
-    }
-
-    /// Open the condensed tool runs view (the drill-in pane for the
-    /// collapsed transcript's condensed blocks): the pane reads the
-    /// view's own transcript - no wire requests, no state beyond the
-    /// cursor and the scroll.
-    fn open_runs_view(&mut self, view: &mut AgentView) {
-        let runs = view.condensed_runs();
-        view.runs_view = Some(RunsView::new(
-            picker_viewport_rows(view.terminal_rows()),
-            &view.chat,
-            &runs,
-        ));
-        self.dirty = true;
-    }
-
-    /// One key press while the condensed tool runs view is open: the view
-    /// owns the frame the same way as the bash view; its only action is
-    /// closing (the pane is pure presentation).
-    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let runs = view.condensed_runs();
-        // The runs change live under the open pane: reconcile BEFORE the
-        // key acts (the cursor and the open detail can point at a run
-        // that grew, split, or vanished since the last look), closing
-        // the pane when no run survives.
-        if view
-            .runs_view
-            .as_mut()
-            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
-        {
-            view.runs_view = None;
-            self.dirty = true;
-            return Ok(());
-        }
-        let kb = view.editor.keybindings().clone();
-        let action = view
-            .runs_view
-            .as_mut()
-            .map_or(RunsViewAction::None, |runs_view| {
-                runs_view.handle_key(&id, &kb, &view.chat, &runs)
-            });
-        match action {
-            RunsViewAction::Close => {
-                view.runs_view = None;
-            }
-            RunsViewAction::None => {}
-        }
-        self.dirty = true;
-        Ok(())
     }
 
     /// The dock's goal row opens the read-only goal panel (the
@@ -7549,25 +7475,6 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
-        // The rebuilt transcript replaces the chat wholesale while an
-        // open runs pane survives it: reconcile the pane against the
-        // rebuilt runs (the cursor and the open detail can point at a
-        // run that vanished in the rebuild; the pane closes when no
-        // run survives) - compaction sets `transcript_stale` and this
-        // rebuild lands after the update path already reconciled
-        // against the pre-rebuild chat, so without this seam the pane
-        // rides stale start indices and identity keys until the next
-        // key press.
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
-        }
         view.follow();
         self.dirty = true;
     }
@@ -7667,10 +7574,6 @@ impl SessionUi {
         // The bash view owns the frame the same way.
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
-        }
-        // The condensed tool runs view owns the frame the same way.
-        if view.runs_view.is_some() {
-            return self.handle_runs_view_key(key, view).await;
         }
         // The read-only goal panel owns the frame the same way.
         if view.goal_panel.is_some() {
@@ -7995,21 +7898,6 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
-            self.dirty = true;
-            return Ok(());
-        }
-        // `app.transcript.runs` (default alt+t): the condensed tool runs
-        // view opens over the editor dock (the drill-in pane for the
-        // collapsed transcript's condensed blocks); with no condensed
-        // runs the key opens the same pane with its empty note - the
-        // affordance stays discoverable.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.transcript.runs")
-        {
-            self.emit_activity_opened("runs");
-            self.open_runs_view(view);
             self.dirty = true;
             return Ok(());
         }
@@ -8938,20 +8826,6 @@ impl SessionUi {
                 self.sync_queue_selection(view);
             }
             TurnUpdate::StatusUpdate => {}
-        }
-        // A transcript mutation reshaped the condensed runs: reconcile an
-        // open runs pane now (the cursor and the open detail can point at
-        // a run that grew, split, or vanished; the pane closes when no
-        // run survives).
-        if view.runs_view.is_some() {
-            let runs = view.condensed_runs();
-            let closed = view
-                .runs_view
-                .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
-            if closed {
-                view.runs_view = None;
-            }
         }
         self.dirty = true;
     }
