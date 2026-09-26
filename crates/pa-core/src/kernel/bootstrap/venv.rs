@@ -1284,12 +1284,7 @@ mod tests {
 
         std::fs::remove_dir_all(&rlm).unwrap();
         assert!(
-            !kernel_ready(
-                &python.to_string_lossy(),
-                &fake,
-                &identity,
-                &[]
-            ),
+            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
             "an uninstalled rlm must be detected, not masked"
         );
         assert_eq!(probe_count(), 2, "the out-of-band uninstall re-probed");
