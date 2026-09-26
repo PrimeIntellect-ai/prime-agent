@@ -261,9 +261,10 @@ pub(crate) fn draw(
     // first frame is ready — TS attaches before the chat mounts), and a
     // mid-gap flush can never carry the clear out early over it.
     if crate::altscreen::take_first_draw_mount() {
-        crate::altscreen::enter()?;
+        let mut out = std::io::stdout();
+        crate::altscreen::enter_queued(&mut out)?;
         crossterm::queue!(
-            std::io::stdout(),
+            out,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
             crossterm::cursor::Hide
         )?;

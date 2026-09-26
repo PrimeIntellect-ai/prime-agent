@@ -658,20 +658,25 @@ pub(crate) enum RebuildKind {
     Resync,
 }
 
-/// Whether the attach folds the dock's data before returning or leaves
-/// it to the background refreshes.
+/// How the attach settles the dock's data before the rebuild renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DockFold {
-    /// Fold the first `heartbeats_list` and `list_kernel_bash` responses
-    /// into the session before the attach returns: the dock (the panel
-    /// and its divider under the prompt bar) is first-frame geometry —
-    /// its visibility must be final when the first content frame
-    /// renders (open, switch, rebind), never a late layout shift.
+    /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
+    /// responses into the session before the attach returns: the dock
+    /// (the panel and its divider under the prompt bar) is first-frame
+    /// geometry — its visibility must be final when the first content
+    /// frame renders (open, switch, rebind), never a late layout shift.
     FirstFrame,
-    /// Leave the dock to the background refreshes: a surface that is
-    /// already up cannot shift, and the §10.4 recovery budget must cover
-    /// the attach alone (a dock fetch would eat into it).
-    Background,
+    /// Clear and hand the dock to the background refreshes: a brand-new
+    /// session (`/new`) owns nothing, so its dock is deterministically
+    /// empty — the fold cannot change geometry, and waiting on two
+    /// registry reads would only delay the new chat's first frame.
+    Fresh,
+    /// Hold the dock's data and let the background refreshes update it: a
+    /// same-session re-attach of an already-up surface (the §10.4
+    /// recovery, the session reconnect) must not flicker its dock away,
+    /// and the attach's budget must cover the attach alone.
+    Held,
 }
 
 /// The attached snapshot's bash slot state, captured by `attach_session`
@@ -910,7 +915,7 @@ impl SessionUi {
         }
         let attach = tokio::time::timeout(
             REATTACH_BUDGET,
-            self.attach_session(&durable, DockFold::Background),
+            self.attach_session(&durable, DockFold::Held),
         )
         .await;
         match attach {
@@ -1101,43 +1106,47 @@ impl SessionUi {
         self.roster.clear();
         self.subagents_focused = false;
         self.subscribe_roster().await;
-        // The heartbeat catalog is scoped to the session: the old rows
-        // drop. A first-content-frame attach (open, switch, rebind)
-        // folds the fresh fetch BEFORE the attach returns — the dock's
-        // visibility (the panel and its divider under the prompt bar) is
-        // first-frame geometry, never a late layout shift (the
-        // operator's 2026-09-26 zero-shift ruling). TS guarantees the
-        // same for its dock: the counts seed from the attach snapshot
-        // (`seedSubagentSummary`) and the roster subscription is awaited
-        // before the first content render; TS's own heartbeat fetch stays
-        // fire-and-forget only because its summary line renders no
-        // heartbeat rows. An already-up surface (the §10.4 recovery)
-        // cannot shift and its budget must cover the attach alone: the
-        // background refresh owns the fold there.
-        self.heartbeat_catalog.clear();
+        // The dock's heartbeat rows follow `dock_fold` (the enum's
+        // contract): a first-content-frame attach folds the fresh fetch
+        // BEFORE the attach returns — the dock's visibility (the panel
+        // and its divider under the prompt bar) is first-frame geometry,
+        // never a late layout shift (the operator's 2026-09-26
+        // zero-shift ruling). TS guarantees the same for its dock: the
+        // counts seed from the attach snapshot (`seedSubagentSummary`)
+        // and the roster subscription is awaited before the first
+        // content render; TS's own heartbeat fetch stays fire-and-forget
+        // only because its summary line renders no heartbeat rows.
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
+            // The held dock keeps its data: an already-up surface's dock
+            // must not flicker away while the background refresh runs.
+            DockFold::Held => {}
+        }
         match dock_fold {
             DockFold::FirstFrame => self.fetch_heartbeat_catalog().await,
-            DockFold::Background => self.spawn_heartbeat_refresh(),
+            DockFold::Fresh | DockFold::Held => self.spawn_heartbeat_refresh(),
         }
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
-        // The bash registry is kernel-owned and session-scoped: the
-        // previous session's rows are not this one's, and a
-        // first-content-frame attach folds the fresh list before the
-        // attach returns (the dock's bash rows are first-frame geometry
-        // like the heartbeat rows above); an already-up surface leaves
-        // the fold to the background refresh. The capability gate
-        // matches the background refresh (older daemons never see the
-        // request), and a failed fetch leaves the cleared registry (the
-        // 2s poll refills).
-        self.bash_activities = serde_json::json!({"activities": []});
+        // The dock's bash rows follow the same `dock_fold` contract; the
+        // capability gate matches the background refresh (older daemons
+        // never see the request), and a failed fold fetch leaves the
+        // cleared registry (the 2s poll refills).
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => {
+                self.bash_activities = serde_json::json!({"activities": []});
+            }
+            // The held dock keeps its registry for the same reason it
+            // keeps the heartbeat catalog above.
+            DockFold::Held => {}
+        }
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
         match dock_fold {
             DockFold::FirstFrame => self.fetch_bash_activities().await,
-            DockFold::Background => self.spawn_bash_activity_refresh(),
+            DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
         }
         self.pending_model = reconstructed.model_id;
         self.last_assistant_text = reconstructed
@@ -1515,6 +1524,14 @@ impl SessionUi {
         }
         view.follow();
         self.update_fast_filter(view);
+        // An open `/heartbeats` picker follows the rebuilt session's
+        // catalog (the channel fold's `apply_catalog` path, which the
+        // attach-time inline fold replaced): without this, a rebind
+        // leaves the picker showing the previous session's rows, and
+        // its Manage actions would target the stale active session.
+        if let Some(picker) = view.heartbeats_picker.as_mut() {
+            picker.apply_catalog(self.heartbeat_catalog.clone(), None);
+        }
         // The brand splash is the EMPTY chat's header (TS mounts
         // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
         // non-empty transcript suppresses it — the chat opened or
@@ -2888,7 +2905,7 @@ impl SessionUi {
             }
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id, DockFold::FirstFrame).await?;
+                self.attach_session(&id, DockFold::Fresh).await?;
                 // The title's pair is session-scoped: fetch the new
                 // session's stats before the rebuild copies them into
                 // the chrome, or the rebind would ride the session being

@@ -2772,16 +2772,16 @@ async fn run_interactive_surface(
                 if state.active_session_id != session.active_session_id {
                     continue;
                 }
-                // The reconnect attempt's budget covers the attach alone:
-                // the surface is already up (its dock is established), so
-                // the dock stays with the background refreshes — the
-                // first-frame fold's bounded fetches would eat the whole
-                // 10s attempt budget on a slow daemon.
+                // The reconnect attempt's budget covers the attach
+                // alone: the surface is already up and its dock holds
+                // (the background refreshes update it), so the
+                // first-frame fold's bounded fetches cannot eat the 10s
+                // attempt budget on a slow daemon.
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
                     session.attach_session(
                         &state.active_session_id,
-                        crate::session_ui::DockFold::Background,
+                        crate::session_ui::DockFold::Held,
                     ),
                 )
                 .await;
