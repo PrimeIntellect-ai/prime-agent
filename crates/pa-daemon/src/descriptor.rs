@@ -213,12 +213,11 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
 /// leaves unsynced: `persistSupervisorConfig` passes no `fsync` option
 /// (`daemon-supervisor.ts` `persistSupervisorConfig`; `atomic-file.ts`
 /// syncs only `if (options.fsync)`). Atomicity (temp + rename) and the
-/// 0600 restriction are unchanged; only the pre-rename `fsync` — a
-/// durability extra TS does not have — is skipped, so a supervisor-boot
-/// cost TS never pays stays off the daemon's accept critical path. The
-/// durable variant ([`write_file_atomic`]) stays the default: worker
-/// descriptors and update-prepare artifacts genuinely need crash
-/// durability (crash-restart adoption and transactional update state).
+/// 0600 restriction are unchanged; only the pre-rename `fsync` is skipped.
+/// The durable variant ([`write_file_atomic`]) remains the default for
+/// worker descriptors and update-prepare artifacts. Unlike Rust, TS reads
+/// its persisted default session config on restart; this writer matches
+/// TS's unsynced write, but does not close that existing port gap.
 ///
 /// # Errors
 ///
@@ -340,10 +339,11 @@ pub fn load_supervisor_config(
 
 /// Persist the supervisor config atomically, without the temp-file fsync
 /// (TS parity: the TS supervisor's own persist passes no `fsync` option —
-/// see [`crate::descriptor::write_file_atomic_unsynced`]). The file has no
-/// serving-path reader (descriptor sweeps skip it by extension), so the
-/// boot's write matches the TS product exactly instead of paying an fsync
-/// TS never pays on the daemon's accept critical path.
+/// see [`crate::descriptor::write_file_atomic_unsynced`]). The Rust loader
+/// currently has no callers; descriptor sweeps skip this file. TS does read
+/// its own persisted default session config at restart (existing port gap).
+/// On power loss the latest config may be lost without the fsync, though
+/// atomic replacement remains preserved.
 ///
 /// # Errors
 ///
