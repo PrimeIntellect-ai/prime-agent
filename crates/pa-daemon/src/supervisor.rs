@@ -1395,14 +1395,6 @@ impl Supervisor {
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
         }
-        // The spawn identity lands on the live descriptor synchronously (the
-        // worker's self-registration and the liveness checks read pid and
-        // start id from it within milliseconds of the spawn); only the
-        // durable write is independent of the worker-socket probe below
-        // (a read-only connect check), so the persist runs concurrently
-        // with the probe and is joined before this function returns - the
-        // connect handshake and the create route observe the persisted
-        // descriptor exactly as the sequential version gave.
         {
             let mut descriptor = resident.descriptor.lock().await;
             // Capture the child's start identity alongside its pid (TS
@@ -1413,14 +1405,8 @@ impl Supervisor {
             descriptor.pid = child_pid as u64;
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
+            let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
-        let persist_identity = {
-            let resident = Arc::clone(resident);
-            tokio::spawn(async move {
-                let descriptor = resident.descriptor.lock().await;
-                let _ = persist_worker(&resident.descriptor_path, &descriptor);
-            })
-        };
 
         // Probe the worker socket until it accepts connections. A worker that
         // never comes up inside the connect budget is killed here so a stuck
@@ -1434,12 +1420,6 @@ impl Supervisor {
             let _ = child.kill().await;
             return Err(error);
         }
-        // The probe only watches the socket; the durable spawn identity must
-        // still land before the launch hands the resident to the connect
-        // handshake. A probe failure detaches the task (the persist completes
-        // on its own), so a failed launch leaves the same Starting-state
-        // descriptor the sequential version wrote.
-        let _ = persist_identity.await;
         Ok(child)
     }
 
