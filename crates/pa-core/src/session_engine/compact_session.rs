@@ -2827,9 +2827,9 @@ mod tests {
             content: vec![pa_types::ai::AssistantContentBlock::Text(pa_types::ai::TextContent {
                 text: "answer".to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
-            api: Default::default(),
+            api: String::default(),
             provider: "test".to_string(),
             model: "m".to_string(),
             response_model: None,
@@ -2841,13 +2841,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 150,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 20,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }));
         messages.push(user_message("trailing user turn, estimated by chars"));
         let borrowed: Vec<&AgentMessage> = messages.iter().collect();

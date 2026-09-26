@@ -418,7 +418,7 @@ pub enum ContextMessageRef<'a> {
     Converted(Box<AgentMessage>),
 }
 
-impl<'a> ContextMessageRef<'a> {
+impl ContextMessageRef<'_> {
     /// The context message (either arm).
     pub fn message(&self) -> &AgentMessage {
         match self {

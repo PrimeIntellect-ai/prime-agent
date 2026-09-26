@@ -515,8 +515,10 @@ mod tests {
     fn wire_cross_matches_value_crossing() {
         use pa_types::ai::{
             AssistantContentBlock, AssistantMessage, Message, TextContent, ThinkingContent,
-            ToolCall, ToolResultMessage, Usage, UserContent, UserContentBlock, UserMessage,
+            ToolCall, ToolResultMessage, Usage, UsageCost, UserContent, UserContentBlock,
+            UserMessage,
         };
+        use serde_json::Map;
         use pa_types::JsonMap;
 
         fn rest(pairs: &[(&str, serde_json::Value)]) -> JsonMap {
@@ -537,7 +539,7 @@ mod tests {
                     thinking: "thinking hard".to_string(),
                     thinking_signature: None,
                     redacted: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 AssistantContentBlock::ToolCall(ToolCall {
                     id: "call-1".to_string(),
@@ -547,10 +549,10 @@ mod tests {
                         ("flags", serde_json::json!([true, false])),
                     ]),
                     thought_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             ],
-            api: Default::default(),
+            api: String::default(),
             provider: "test".to_string(),
             model: "m".to_string(),
             response_model: None,
@@ -562,7 +564,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 12,
-                cost: Default::default(),
+                cost: UsageCost::default(),
             },
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
@@ -575,19 +577,19 @@ mod tests {
             Message::User(UserMessage {
                 content: UserContent::Text("plain".to_string()),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             Message::User(UserMessage {
                 content: UserContent::Blocks(vec![
                     UserContentBlock::Text(TextContent {
                         text: "block".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                     UserContentBlock::Image(pa_types::ai::ImageContent {
                         data: "aGk=".to_string(),
                         mime_type: "image/png".to_string(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                     UserContentBlock::Raw(serde_json::json!({"type": "mystery"})),
                 ]),
@@ -601,7 +603,7 @@ mod tests {
                 content: vec![UserContentBlock::Text(TextContent {
                     text: "result".to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })],
                 details: None,
                 is_error: false,
@@ -631,9 +633,10 @@ mod tests {
     #[test]
     fn wire_cross_keeps_colliding_rest_keys_like_the_value_crossing() {
         use pa_types::ai::{
-            AssistantMessage, Message, TextContent, ToolResultMessage, UserContent,
-            UserContentBlock, UserMessage,
+            AssistantMessage, Message, TextContent, ToolResultMessage, Usage, UsageCost,
+            UserContent, UserContentBlock, UserMessage,
         };
+        use serde_json::Map;
         use pa_types::JsonMap;
 
         fn rest(value: serde_json::Value) -> JsonMap {
@@ -663,15 +666,15 @@ mod tests {
             content: vec![pa_types::ai::AssistantContentBlock::Text(TextContent {
                 text: "kept".to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
-            api: Default::default(),
+            api: String::default(),
             provider: "test".to_string(),
             model: "m".to_string(),
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
@@ -684,7 +687,7 @@ mod tests {
             content: vec![UserContentBlock::Text(TextContent {
                 text: "kept".to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             details: None,
             is_error: false,
@@ -725,7 +728,7 @@ mod tests {
                 UserContentBlock::Text(TextContent {
                     text: text.to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 UserContentBlock::Raw(serde_json::json!({"type": "mystery", "keep": [1]})),
             ]),
@@ -752,7 +755,7 @@ mod tests {
             SessionMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text("plain".to_string()),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             SessionMessage::Custom(pa_types::session::CustomMessage {
                 custom_type: "note".to_string(),
@@ -760,7 +763,7 @@ mod tests {
                 display: true,
                 details: None,
                 timestamp: 2,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             SessionMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
                 summary: "branch story".to_string(),
