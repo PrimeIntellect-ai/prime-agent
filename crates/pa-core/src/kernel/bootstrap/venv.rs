@@ -1299,7 +1299,7 @@ mod tests {
             &identity,
             &[]
         ));
-        assert_eq!(probe_count(), 1, "cold call runs the real probe");
+        assert_eq!(probe_count(), 2, "cold call probes runtime and dill");
 
         assert!(kernel_ready(
             &python.to_string_lossy(),
@@ -1307,14 +1307,18 @@ mod tests {
             &identity,
             &[]
         ));
-        assert_eq!(probe_count(), 1, "unchanged venv hits the memo");
+        assert_eq!(probe_count(), 2, "unchanged venv hits the memo");
 
         std::fs::remove_dir_all(&rlm).unwrap();
         assert!(
             !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
             "an uninstalled rlm must be detected, not masked"
         );
-        assert_eq!(probe_count(), 2, "the out-of-band uninstall re-probed");
+        assert_eq!(
+            probe_count(),
+            3,
+            "the out-of-band rlm uninstall re-probed the runtime (the dill probe short-circuits)"
+        );
 
         let mut files = Vec::new();
         collect_python_files(&real_rlm, &mut files).unwrap();
@@ -1332,8 +1336,8 @@ mod tests {
         ));
         assert_eq!(
             probe_count(),
-            3,
-            "the restored runtime re-probed after invalidation"
+            5,
+            "the restored runtime re-probed runtime and dill after invalidation"
         );
 
         std::fs::remove_dir_all(&dill).unwrap();
@@ -1341,7 +1345,11 @@ mod tests {
             !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
             "a removed dill import must not be hidden by the memo"
         );
-        assert_eq!(probe_count(), 4, "the removed dependency re-probed");
+        assert_eq!(
+            probe_count(),
+            7,
+            "the removed dill re-probed runtime and dill"
+        );
     }
 
     #[test]
