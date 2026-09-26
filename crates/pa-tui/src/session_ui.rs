@@ -75,6 +75,12 @@ const ESCAPE_REPEAT_WINDOW_MS: std::time::Duration = std::time::Duration::from_m
 /// best-effort like the detach, never able to hold the exit open.
 const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 
+/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (auth-flows.ts, #2645): the
+/// ban-risk warning a completed Anthropic subscription login shows once
+/// per session (the settings toggle `warnings.anthropicExtraUsage`
+/// gates it).
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
+
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
@@ -405,6 +411,9 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+    /// The ban-risk warning's once-per-session gate (TS
+    /// `anthropicSubscriptionWarningShown`).
+    anthropic_subscription_warning_shown: bool,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,
@@ -825,6 +834,7 @@ impl SessionUi {
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
+            anthropic_subscription_warning_shown: false,
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -1728,6 +1738,29 @@ impl SessionUi {
             self.last_status_index = Some(view.chat_len() - 1);
         }
         self.dirty = true;
+    }
+
+    /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
+    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// login draws the ban-risk warning once per session, gated by the
+    /// settings toggle (`warnings.anthropicExtraUsage`, TS default
+    /// true — an absent settings seam keeps the default).
+    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
+        if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
+            || self.anthropic_subscription_warning_shown
+            || self
+                .client_settings
+                .as_ref()
+                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+        {
+            return;
+        }
+        self.anthropic_subscription_warning_shown = true;
+        self.note_as(
+            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+            StatusKind::Warning,
+            view,
+        );
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to
@@ -4014,7 +4047,8 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
+                        || crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+                            .contains(&provider.id.as_str())
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
@@ -4074,7 +4108,8 @@ impl SessionUi {
         if let Some(previous) = self.auth_panel_cancel.take() {
             previous.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+        self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+            .contains(&provider.id.as_str())
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
@@ -4148,6 +4183,13 @@ impl SessionUi {
                 if let Some(pending) = parked {
                     self.finish_model_sign_in(pending, view).await;
                 }
+                // A landed login or logout may change the auth scope the
+                // daemon's catalog refreshes under: re-fetch now so the
+                // next open serves the new account's view. The parked
+                // sign-in arm already fires one (both are harmless: the
+                // daemon's AuthChange detector forces the same gated,
+                // idempotent refresh).
+                self.spawn_model_catalog_refresh();
             }
             // The failed and cancelled flows drop the park above (the
             // `take`); their own rows render as usual.
@@ -4198,10 +4240,11 @@ impl SessionUi {
             AuthPanelRequest::PastePrompt {
                 prompt,
                 style,
+                allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, reply);
+                    panel.mount_paste(prompt, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -4217,6 +4260,7 @@ impl SessionUi {
                 self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, &provider, view).await;
+                self.maybe_warn_anthropic_subscription_auth(&provider, view);
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
@@ -8806,6 +8850,15 @@ impl SessionUi {
             // (another client's pause/resume reaches the dock at once).
             DaemonClientEvent::HeartbeatsChanged => {
                 self.spawn_heartbeat_refresh();
+            }
+            // A background daemon-side catalog refresh changed the served
+            // snapshot (the Rust-only no-stall picker-open extension):
+            // every client re-fetches instantly — the daemon answers from
+            // the warm caches, no stall — and an open `/model` picker
+            // folds the fresh catalog through its stable update path
+            // (`apply_model_catalog` keeps the selection), no flicker.
+            DaemonClientEvent::ModelCatalogChanged => {
+                self.spawn_model_catalog_refresh();
             }
             // A worker replacement superseded the id this client holds:
             // the interactive loop re-attaches to the session's current id
