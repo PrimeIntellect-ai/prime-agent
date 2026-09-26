@@ -18,6 +18,18 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   (the TUI dispatch + autocomplete, the session engine's command admission,
   CLI suggestion help) plus its pure parse/suggestion helpers — the TS
   product keeps the same single table in core and imports it from its TUI.
+- `incident`: the daemon incident classifier shared by the incident CLI
+  (pa-cli's `prime-agent incident`, TS `src/cli/incident.ts`) and the
+  agents-view incident notice (pa-tui's `incident_notices`, TS
+  `src/modes/agents-view/incident-notices.ts`) — pa-tui depends on
+  pa-types alone, and the TS product keeps the same single classifier in
+  `cli/incident.ts` with both halves importing it. Pure log-line parsing
+  (`agent.jsonl` records, per-daemon plain-text lines), worker pid
+  attribution, event classification, and the stall/burst/gap anomaly
+  computation — the message shapes are the TS regexes kept 1:1. The CLI's
+  log-file discovery, `--since`/`--until` window parsing, and report
+  rendering belong to pa-cli; the notice polling, rotation-safe
+  incremental reads, and dismissal horizons belong to pa-tui.
 - `themes`: the bundled theme definition files (`prime`/`dark`/`light`) as
   pure data, shared by the TUI's theme loader (pa-tui renders terminal
   colors from them) and the session HTML exporter (pa-core resolves them
@@ -48,4 +60,4 @@ No provider logic, no session logic, no UI. Beyond pure data helpers and the pla
 Everything in this crate is deliberately `pub` - it is the cross-crate contract. Unknown fields survive round-trips via catch-all maps so schema revisions stay compatible.
 
 ## Depends on
-serde, serde_json, thiserror, anyhow, tokio. No workspace crates.
+serde, serde_json, thiserror, anyhow, tokio, regex (the incident classifier's TS log-message patterns; see the `incident` scope entry). No workspace crates.
