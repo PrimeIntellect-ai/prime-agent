@@ -111,6 +111,13 @@ pub enum DaemonClientEvent {
     /// when the heartbeat catalog changes (TS `broadcastGlobal`). The
     /// session view refreshes its open `/heartbeats` picker on it.
     HeartbeatsChanged,
+    /// `model_catalog_changed`: a background daemon-side catalog refresh
+    /// changed the served snapshot (the Rust-only no-stall picker-open
+    /// extension; TS has no counterpart event — it awaits the refresh on
+    /// the request path). Every client re-fetches instantly; an open
+    /// `/model` picker folds the fresh catalog through its stable update
+    /// path.
+    ModelCatalogChanged,
     /// `session_binding`: the supervisor rebound a session to a new active
     /// id (a worker replacement) and the id this client holds is
     /// superseded. The session view re-attaches to the current id so its
@@ -215,6 +222,7 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
             resync: value.get("resync") == Some(&Value::Bool(true)),
         }),
         "heartbeats_changed" => Some(DaemonClientEvent::HeartbeatsChanged),
+        "model_catalog_changed" => Some(DaemonClientEvent::ModelCatalogChanged),
         "session_binding" => Some(DaemonClientEvent::SessionBinding {
             previous_active_session_id: value
                 .get("previousActiveSessionId")
@@ -1172,6 +1180,17 @@ mod tests {
             rejection.to_string(),
             "the daemon rejected the prompt request: Prompt cannot be empty"
         );
+    }
+
+    #[test]
+    fn model_catalog_changed_parses_to_the_refresh_event() {
+        // The worker's broadcast frame parses into the refresh event:
+        // unknown payloads stay None, this one never drops silently.
+        let value = json!({"type": "model_catalog_changed"});
+        assert!(matches!(
+            client_event_from_value(&value),
+            Some(DaemonClientEvent::ModelCatalogChanged)
+        ));
     }
 
     #[test]
