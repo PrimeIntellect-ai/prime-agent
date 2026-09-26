@@ -5860,7 +5860,8 @@ mod tests {
     /// follow-up lane drains too, once the session goes idle. The aborted
     /// turn's row surfaces with the aborted shape.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    // the faux registry is process-global: the guard must span the async flow
+    #[allow(clippy::await_holding_lock)]
     async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
