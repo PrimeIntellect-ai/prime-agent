@@ -87,7 +87,7 @@ pub(crate) fn grouped(value: u64) -> String {
 /// exact rational value: `value = mantissa / 2^exponent` and
 /// `value * 10^digits = mantissa * 5^digits / 2^(exponent - digits)`
 /// reduce to one integer divide with a half-away tie on the remainder.
-pub(crate) fn js_to_fixed(value: f64, digits: usize) -> String {
+pub fn js_to_fixed(value: f64, digits: usize) -> String {
     let bits = value.to_bits();
     let biased = ((bits >> 52) & 0x7ff) as i64;
     let (mantissa, exponent) = if biased == 0 {
