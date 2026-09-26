@@ -507,7 +507,7 @@ pub fn filter_unified_sessions(
 }
 
 /// Epoch milliseconds from an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS.sssZ`).
-fn iso_to_unix_ms(iso: &str) -> Option<i64> {
+pub(crate) fn iso_to_unix_ms(iso: &str) -> Option<i64> {
     let bytes = iso.as_bytes();
     if bytes.len() < 19
         || bytes[4] != b'-'
