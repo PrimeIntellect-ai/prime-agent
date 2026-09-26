@@ -77,10 +77,7 @@ fn written_session_file(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-fn recording_worker(
-    dir: &Path,
-    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) -> Worker {
+fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> Worker {
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
         supervisor_socket_path: PathBuf::new(),
@@ -93,8 +90,7 @@ fn recording_worker(
         script: Some(json!({ "responses": ["ack"] })),
     };
     let mut worker = Worker::new(config, None);
-    let engine: std::sync::Arc<dyn SessionEngine> =
-        std::sync::Arc::new(RecordingEngine { events });
+    let engine: std::sync::Arc<dyn SessionEngine> = std::sync::Arc::new(RecordingEngine { events });
     let core = std::sync::Arc::clone(&worker.core);
     worker.engine = std::sync::Arc::clone(&engine);
     worker.navigation = crate::session_navigation::SessionNavigation::new(engine, core);
