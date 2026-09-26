@@ -266,6 +266,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
     let auto_refine_gates =
         super::refine::AutoRefineGates::from_settings(settings.settings().auto_refine.as_ref());
+    // Request timing (TS #2462): the settings half of the flag is read once
+    // here — `settings` moves into the resource loader below and its merged
+    // snapshot is fixed for the session anyway — while the `PI_REQUEST_TIMING`
+    // env half stays live inside the wrappers' per-request check.
+    let request_timing_settings = settings.get_request_timing();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -651,6 +656,26 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         )
     };
 
+    // Request timing (TS #2462, `sdk.ts` `requestTimingEnabled` + the
+    // instrumented seams): one wiring per session owns the flag probe, the
+    // JSONL log, and the prompt-build correlation state. The wrappers pass
+    // straight through while the flag is off — no timestamps, no payload
+    // serialization, no entries.
+    let request_timing_wiring =
+        std::sync::Arc::new(super::request_timing::RequestTimingWiring::new(
+            std::sync::Arc::new(move || {
+                super::request_timing::is_request_timing_enabled(request_timing_settings)
+            }),
+            super::request_timing::RequestTimingLog::new(&config.agent_dir),
+        ));
+    // The dispatch-marking transform seam exists only while timing is on:
+    // TS always wires `transformContext` (the extension context
+    // transform); the Rust engine has no transform yet, so wiring a
+    // pass-through seam unconditionally would spend a boxed closure per
+    // turn on every session, timing or not. Off = the loop's seam stays
+    // unset, bit-identical to before this port.
+    let request_timing_on =
+        super::request_timing::is_request_timing_enabled(request_timing_settings);
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
@@ -659,11 +684,23 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             tools: Some(tools),
             messages: initial_messages,
         },
-        stream_fn: Some(stream_fn),
+        stream_fn: Some(super::request_timing::instrument_stream_fn(
+            std::sync::Arc::clone(&request_timing_wiring),
+            stream_fn,
+        )),
         // The session conversion rules apply at the loop's LLM boundary
         // (TS `convertToLlm`): bookkeeping custom rows drop, everything
         // else (the harness digest included) becomes a user turn.
-        convert_to_llm: Some(super::messages::engine_convert_to_llm()),
+        convert_to_llm: Some(super::request_timing::instrument_convert_to_llm(
+            std::sync::Arc::clone(&request_timing_wiring),
+            super::messages::engine_convert_to_llm(),
+        )),
+        transform_context: request_timing_on.then(|| {
+            super::request_timing::instrument_transform_context(
+                std::sync::Arc::clone(&request_timing_wiring),
+                super::request_timing::pass_through_transform(),
+            )
+        }),
         // TS `_steeringStopPending`: both the after-turn and the
         // before-turn hooks consult the same probe (a queued steer stops
         // the run at the boundary; the pump delivers it next).
