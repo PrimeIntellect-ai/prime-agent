@@ -113,10 +113,23 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                         }
                     }
                     // TS `allMessagesText`: user and assistant text
-                    // content feeds the full-transcript search.
+                    // content feeds the full-transcript search. The legacy
+                    // reference inlines the append (the product's helper
+                    // takes the fold's running char counter now), so the
+                    // oracle stays independent of the perf reshape.
                     if matches!(role, Some("user" | "assistant")) {
                         let text = message_text(message);
-                        append_capped_search_text(&mut all_messages_text, &text);
+                        if !text.is_empty() {
+                            let used = all_messages_text.chars().count();
+                            if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                                if used > 0 {
+                                    all_messages_text.push(' ');
+                                }
+                                let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+                                    - all_messages_text.chars().count();
+                                all_messages_text.extend(text.chars().take(remaining));
+                            }
+                        }
                     }
                 }
             }
