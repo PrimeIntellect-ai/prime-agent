@@ -150,13 +150,12 @@ mod tests {
                 // match scrutinee's temporary lives for the whole match,
                 // and the parked arm would hold it across the await.
                 let next = self.results.lock().unwrap().pop_front();
-                match next {
-                    Some(result) => result,
-                    None => {
-                        self.supervisor.accept_exit.store(true, Ordering::SeqCst);
-                        self.supervisor.shutdown_notify.notify_one();
-                        std::future::pending::<io::Result<Box<dyn TransportStream>>>().await
-                    }
+                if let Some(result) = next {
+                    result
+                } else {
+                    self.supervisor.accept_exit.store(true, Ordering::SeqCst);
+                    self.supervisor.shutdown_notify.notify_one();
+                    std::future::pending::<io::Result<Box<dyn TransportStream>>>().await
                 }
             })
         }
