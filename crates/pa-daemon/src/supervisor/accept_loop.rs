@@ -125,7 +125,11 @@ mod tests {
     impl TransportListener for ScriptedAccepts {
         fn accept(&self) -> AcceptFuture<'_> {
             Box::pin(async move {
-                match self.results.lock().unwrap().pop_front() {
+                // The guard must drop before the drained arm's await: a
+                // match scrutinee's temporary lives for the whole match,
+                // and the parked arm would hold it across the await.
+                let next = self.results.lock().unwrap().pop_front();
+                match next {
                     Some(result) => result,
                     None => {
                         self.supervisor.accept_exit.store(true, Ordering::SeqCst);
