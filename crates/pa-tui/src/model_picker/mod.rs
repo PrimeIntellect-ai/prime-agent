@@ -234,7 +234,7 @@ pub struct ModelPicker {
     /// alike (the search sort's recency tier: the catalog carries no
     /// release-date metadata, so the id's version stands in for release
     /// recency).
-    version_keys: Vec<Vec<u64>>,
+    version_keys: Vec<Vec<String>>,
 }
 
 impl ModelPicker {
@@ -912,25 +912,33 @@ impl ModelPicker {
 }
 
 /// The version run parsed from a model id: every digit group of the id,
-/// in order. Covers the catalog's id formats — hyphen-joined
-/// (`claude-opus-5-5` -> `[5, 5]`), dot-joined (`glm-5.3` -> `[5, 3]`),
-/// letter-glued (`qwen3`, `m2.7`, `glm-5p2` -> `[5, 2]`), dated snapshots
-/// (`claude-opus-4-5-20251101` -> `[4, 5, 20251101]`), and namespaced ids
-/// (`anthropic/claude-opus-4.7` -> `[4, 7]`). Ids without digits
-/// (`claude-opus-latest`) parse to an empty run.
-fn version_key(id: &str) -> Vec<u64> {
+/// in order, kept as text so components longer than `u64` still compare
+/// by numeric value. Covers the catalog's id formats — hyphen-joined
+/// (`claude-opus-5-5` -> `["5", "5"]`), dot-joined (`glm-5.3` ->
+/// `["5", "3"]`), letter-glued (`qwen3`, `m2.7`, `glm-5p2` -> `["5", "2"]`),
+/// dated snapshots (`claude-opus-4-5-20251101` -> `["4", "5", "20251101"]`),
+/// and namespaced ids (`anthropic/claude-opus-4.7` -> `["4", "7"]`). Ids
+/// without digits (`claude-opus-latest`) parse to an empty run.
+fn version_key(id: &str) -> Vec<String> {
     id.split(|character: char| !character.is_ascii_digit())
         .filter(|run| !run.is_empty())
-        .filter_map(|run| run.parse::<u64>().ok())
+        .map(str::to_string)
         .collect()
 }
 
 /// Version-descending order for the search sort's recency tier: higher
 /// versions first, over an equal prefix the longer, more specific run
 /// (the dated snapshot over its alias) first, ids without a version last.
-fn version_desc(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+/// Components compare by numeric value — leading zeros aside, digit
+/// length first, then text — so no `u64` bound applies.
+fn version_desc(a: &[String], b: &[String]) -> std::cmp::Ordering {
     for (a_part, b_part) in a.iter().zip(b.iter()) {
-        let order = a_part.cmp(b_part);
+        let a_part = a_part.trim_start_matches('0');
+        let b_part = b_part.trim_start_matches('0');
+        let order = match a_part.len().cmp(&b_part.len()) {
+            std::cmp::Ordering::Equal => a_part.cmp(b_part),
+            other => other,
+        };
         if order != std::cmp::Ordering::Equal {
             return order.reverse();
         }
@@ -1511,43 +1519,80 @@ mod tests {
     fn version_key_parses_the_catalog_id_formats() {
         // Hyphen- and dot-joined releases, letter-glued versions, dated
         // snapshots, namespaced ids, and digit-free ids.
-        assert_eq!(version_key("claude-opus-5-5"), vec![5, 5]);
-        assert_eq!(version_key("claude-opus-5.5"), vec![5, 5]);
-        assert_eq!(version_key("glm-5.3"), vec![5, 3]);
-        assert_eq!(version_key("glm-5p2"), vec![5, 2]);
-        assert_eq!(version_key("qwen3.5-plus"), vec![3, 5]);
-        assert_eq!(version_key("deepseek-v4"), vec![4]);
-        assert_eq!(version_key("minimax-m2.7"), vec![2, 7]);
-        assert_eq!(version_key("mimo-v2.5"), vec![2, 5]);
-        assert_eq!(version_key("kimi-k2.7-code"), vec![2, 7]);
-        assert_eq!(version_key("o3-mini"), vec![3]);
-        assert_eq!(version_key("x-ai/grok-4.20"), vec![4, 20]);
-        assert_eq!(version_key("gpt-4o-2024-05-13"), vec![4, 2024, 5, 13]);
+        assert_eq!(version_key("claude-opus-5-5"), vec!["5", "5"]);
+        assert_eq!(version_key("claude-opus-5.5"), vec!["5", "5"]);
+        assert_eq!(version_key("glm-5.3"), vec!["5", "3"]);
+        assert_eq!(version_key("glm-5p2"), vec!["5", "2"]);
+        assert_eq!(version_key("qwen3.5-plus"), vec!["3", "5"]);
+        assert_eq!(version_key("deepseek-v4"), vec!["4"]);
+        assert_eq!(version_key("minimax-m2.7"), vec!["2", "7"]);
+        assert_eq!(version_key("mimo-v2.5"), vec!["2", "5"]);
+        assert_eq!(version_key("kimi-k2.7-code"), vec!["2", "7"]);
+        assert_eq!(version_key("o3-mini"), vec!["3"]);
+        assert_eq!(version_key("x-ai/grok-4.20"), vec!["4", "20"]);
+        assert_eq!(
+            version_key("gpt-4o-2024-05-13"),
+            vec!["4", "2024", "05", "13"]
+        );
         assert_eq!(
             version_key("claude-opus-4-5-20251101"),
-            vec![4, 5, 20_251_101]
+            vec!["4", "5", "20251101"]
         );
-        assert_eq!(version_key("anthropic/claude-opus-4.7"), vec![4, 7]);
+        assert_eq!(version_key("anthropic/claude-opus-4.7"), vec!["4", "7"]);
         assert_eq!(
             version_key("us.anthropic.claude-opus-4-6-v1:0"),
-            vec![4, 6, 1, 0]
+            vec!["4", "6", "1", "0"]
         );
-        assert_eq!(version_key("claude-opus-latest"), Vec::<u64>::new());
-        assert_eq!(version_key("auto-beta"), Vec::<u64>::new());
+        assert_eq!(version_key("claude-opus-latest"), Vec::<String>::new());
+        assert_eq!(version_key("auto-beta"), Vec::<String>::new());
+        // Overlong digit runs (beyond `u64`) are preserved, not dropped.
+        assert_eq!(
+            version_key("model-18446744073709551616"),
+            vec!["18446744073709551616"]
+        );
     }
 
     #[test]
     fn version_desc_orders_runs_newest_first() {
-        assert_eq!(version_desc(&[5, 5], &[4, 7]), std::cmp::Ordering::Less);
-        assert_eq!(version_desc(&[2], &[10]), std::cmp::Ordering::Greater);
+        // Higher versions first; digit value, not text.
+        assert_eq!(
+            version_desc(&version_key("model-5.5"), &version_key("model-4.7")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            version_desc(&version_key("model-2"), &version_key("model-10")),
+            std::cmp::Ordering::Greater
+        );
         // The dated snapshot of a release leads its undated alias.
         assert_eq!(
-            version_desc(&[4, 5, 20_251_101], &[4, 5]),
+            version_desc(
+                &version_key("model-4-5-20251101"),
+                &version_key("model-4-5")
+            ),
             std::cmp::Ordering::Less
         );
         // Ids without a version trail every versioned match.
-        assert_eq!(version_desc(&[], &[3, 8]), std::cmp::Ordering::Greater);
-        assert_eq!(version_desc(&[4, 7], &[4, 7]), std::cmp::Ordering::Equal);
+        assert_eq!(
+            version_desc(&version_key("model-latest"), &version_key("model-3-8")),
+            std::cmp::Ordering::Greater
+        );
+        // Leading zeros compare by value.
+        assert_eq!(
+            version_desc(&version_key("model-05"), &version_key("model-5")),
+            std::cmp::Ordering::Equal
+        );
+        // Digit runs beyond `u64` keep their numeric order.
+        assert_eq!(
+            version_desc(
+                &version_key("model-18446744073709551616"),
+                &version_key("model-2")
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            version_desc(&version_key("model-4-7"), &version_key("model-4-7")),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
@@ -1729,6 +1774,28 @@ mod tests {
         assert_eq!(
             filtered_ids(&picker),
             vec!["tencent/hy4-preview", "tencent/hy3"]
+        );
+    }
+
+    #[test]
+    fn search_preserves_overlong_version_runs() {
+        // A digit run beyond `u64` is a version like any other: the
+        // oversized newer release leads, not trails, when text scores tie.
+        let catalog = vec![
+            model("prime-inference", "model-2", "Model Two", false, None),
+            model(
+                "prime-inference",
+                "model-18446744073709551616",
+                "Model Oversized",
+                false,
+                None,
+            ),
+        ];
+        let mut picker = ModelPicker::new(picker_options(catalog));
+        picker.set_query("model");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["model-18446744073709551616", "model-2"]
         );
     }
 }
