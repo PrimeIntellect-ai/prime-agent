@@ -354,7 +354,13 @@ impl AgentView {
                 break;
             }
             let source = self.sparse_entry_rows(index, self.layout_width);
+            let from = rows.len();
             Self::slice_rows(&source, &mut rows, offset, start, end);
+            // The entry's visible span feeds the click surface's window
+            // map (view/click.rs) — bounded by the rows on screen.
+            if from < rows.len() {
+                self.click.record_window_section(index, from, rows.len());
+            }
         }
         Self::slice_rows(
             &layout.tail,

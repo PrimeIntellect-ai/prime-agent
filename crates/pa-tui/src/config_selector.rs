@@ -158,6 +158,29 @@ impl ConfigSelector {
         }
     }
 
+    /// Move the selection to one filtered position when it holds an item
+    /// row (the click grammar's row select — the arrow keys' exact
+    /// movement, no toggle): group and subgroup rows keep the selection
+    /// where it was.
+    pub fn select_position(&mut self, position: usize) {
+        if self.is_item(position) {
+            self.selected = position;
+        }
+    }
+
+    /// The filtered positions the list window renders (`list_rows` walks
+    /// exactly this window; the click surface's item-row span).
+    pub fn visible_window(&self) -> (usize, usize) {
+        if self.filtered.is_empty() {
+            return (0, 0);
+        }
+        let start = self
+            .selected
+            .saturating_sub(MAX_VISIBLE / 2)
+            .min(self.filtered.len().saturating_sub(MAX_VISIBLE));
+        (start, (start + MAX_VISIBLE).min(self.filtered.len()))
+    }
+
     /// One key id, TS `ResourceList.handleInput`.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> Option<SelectorAction> {
         if kb.matches(key, "tui.select.up") {
@@ -354,11 +377,7 @@ impl ConfigSelector {
             ));
             return lines;
         }
-        let start = self
-            .selected
-            .saturating_sub(MAX_VISIBLE / 2)
-            .min(self.filtered.len().saturating_sub(MAX_VISIBLE));
-        let end = (start + MAX_VISIBLE).min(self.filtered.len());
+        let (start, end) = self.visible_window();
         for (position, row_index) in self.filtered[start..end].iter().enumerate() {
             let position = start + position;
             let row = &self.rows[*row_index];

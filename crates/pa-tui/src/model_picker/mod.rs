@@ -462,6 +462,16 @@ impl ModelPicker {
         self.selected.min(self.filtered.len().saturating_sub(1))
     }
 
+    /// Move the selection to one filtered position (the click grammar's
+    /// row select — the arrow keys' exact movement, no apply): a
+    /// position past the filtered list keeps the selection where it
+    /// was.
+    pub(crate) fn select_filtered(&mut self, position: usize) {
+        if position < self.filtered.len() {
+            self.selected = position;
+        }
+    }
+
     /// The provider-sorted catalog (TS `sortModels`): configured providers
     /// first, signed-in Prime Inference pinned, the current model leading,
     /// then the recent-use rank, the provider name, `featured`, and the
