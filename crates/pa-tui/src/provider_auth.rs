@@ -472,7 +472,8 @@ impl ProviderAuthSelector {
             Mode::Prompt { input, .. } => {
                 lines.push(Vec::new());
                 lines.push(vec![
-                    theme.fg_span(ThemeColor::Text, "Enter API key:".to_string())
+                    crate::Span::raw(" ".to_string()),
+                    theme.fg_span(ThemeColor::Text, "Enter API key:".to_string()),
                 ]);
                 lines.push(crate::menu_panel::login_field_row(
                     theme,

@@ -1373,7 +1373,14 @@ mod tests {
             .iter()
             .filter(|row| !row.is_empty() && row.chars().all(|c| c == '\u{2500}'))
             .count();
-        assert_eq!(rules, 0, "the login field renders no rules: {rows:?}");
+        assert_eq!(
+            rules, 1,
+            "the session panel's top rule alone rides; the field adds none: {rows:?}"
+        );
+        assert!(
+            rows[0].chars().all(|c| c == '\u{2500}'),
+            "the rule opens the panel"
+        );
         // The actions row: submit while the field is visible, the copy key
         // filtered to its non-text-entry arm, the cancel keys (TS
         // `getAuthActionsText`).
