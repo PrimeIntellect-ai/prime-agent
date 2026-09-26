@@ -629,10 +629,15 @@ impl AuthPanel {
     /// TS `copyAuthUrl`: copy the shown URL through the platform
     /// clipboard chain and remember the outcome for the actions row (the
     /// status text replaces the hint until the next URL replaces both).
+    /// The payload carries exactly what the row renders — the same
+    /// control-byte scrub and single-line fold the render applies — so a
+    /// provider-supplied URL cannot ride the clipboard channel as a
+    /// second input source.
     fn copy_auth_url(&mut self, sink: &mut crate::clipboard::OscSink) {
         let Some(url) = self.auth_url.clone() else {
             return;
         };
+        let url = scrub_controls(&url).replace('\n', "");
         self.copy_status = match crate::clipboard::copy_to_clipboard(&url, sink) {
             Ok(()) => Some(CopyStatus::Copied),
             Err(_) => Some(CopyStatus::Failed),
