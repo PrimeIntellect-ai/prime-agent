@@ -29,9 +29,7 @@ use supervision::STABLE_LIFETIME_MS;
 pub(crate) use options::ClientRouting;
 pub use options::SupervisorOptions;
 
-pub(crate) use clients::{
-    client_command_payload,
-};
+pub(crate) use clients::client_command_payload;
 
 // The routing consts and refusal string keep their crate::supervisor::* paths stable
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
@@ -1340,8 +1338,6 @@ impl Supervisor {
     // ------------------------------------------------------------------
     // Client connections (JSONL transport)
     // ------------------------------------------------------------------
-
-
 
 
     /// `prepare_update_restart`: accept or poll the prepare transaction.

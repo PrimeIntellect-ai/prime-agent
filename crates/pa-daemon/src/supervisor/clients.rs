@@ -42,7 +42,10 @@ pub(crate) fn client_command_payload(
 }
 
 impl Supervisor {
-    pub(super) async fn handle_client(self: Arc<Self>, stream: Box<dyn TransportStream>) -> Result<()> {
+    pub(super) async fn handle_client(
+        self: Arc<Self>,
+        stream: Box<dyn TransportStream>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let client_id = util::new_display_id();
         let hello = DaemonOutbound::DaemonHello {
