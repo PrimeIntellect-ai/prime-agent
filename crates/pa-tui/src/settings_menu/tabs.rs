@@ -106,7 +106,7 @@ pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<us
             )
         })
         .collect();
-    if let Some((index, row)) = rows.iter().enumerate().find(|(index, _)| !covered[*index]) {
+    if let Some((_, row)) = rows.iter().enumerate().find(|(index, _)| !covered[*index]) {
         panic!("the settings row {} rides no tab", row.id);
     }
     tabs
