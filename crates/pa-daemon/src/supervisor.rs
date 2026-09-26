@@ -18,8 +18,7 @@ use launch_budget::{
 };
 mod supervision;
 
-use supervision::{STABLE_LIFETIME_MS, connect_worker, next_failure_count, spawn_monitor,
-    spawn_worker_process};
+use supervision::STABLE_LIFETIME_MS;
 
 pub(crate) use options::ClientRouting;
 pub use options::SupervisorOptions;
