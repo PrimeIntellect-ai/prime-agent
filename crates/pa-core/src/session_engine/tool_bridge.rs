@@ -83,16 +83,14 @@ impl AgentTool for ToolDefinitionBridge {
                 let abort = abort.clone();
                 let signal = signal.clone();
                 tokio::spawn(async move {
-                    // Poll at a coarse granularity: tools observe the shared
-                    // token, and abort latency of a few ms is within the loop
-                    // contract.
-                    loop {
-                        if signal.is_aborted() {
-                            abort.cancel();
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
+                    // Park on the signal's watch channel: an abort fires the
+                    // cancellation token immediately (tighter than the loop's
+                    // old few-ms poll contract), and an uninterrupted call
+                    // leaves no wake-up work behind — a completed tool call
+                    // must not keep a 10 ms polling task alive for the
+                    // session's lifetime.
+                    signal.aborted().await;
+                    abort.cancel();
                 });
             }
             // Streamed tool updates become `tool_execution_update` events:
