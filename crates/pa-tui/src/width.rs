@@ -595,6 +595,8 @@ mod tests {
 /// AM, zero-width, wide box-drawing, halfwidth/fullwidth forms, east-
 /// asian ambiguous, jamo, and tabs (3 columns, TS-measured).
 #[test]
+// deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+#[allow(clippy::unicode_not_nfc)]
 fn str_width_matches_ts_golden_corpus() {
     let cases: Vec<(&str, usize)> = vec![
         ("你好世界，这是一段很长的中文文本", 32),

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::diagnostics::ResourceDiagnostic;
 use super::frontmatter::parse_frontmatter;
+use super::skill_markdown_name;
 use super::{
     create_synthetic_source_info, validate_skill_description, validate_skill_name, Skill,
     SkillKind, SkillPythonMetadata, SourceScope,
@@ -334,7 +335,7 @@ fn load_skills_from_dir_internal(
             diagnostics.extend(sub.diagnostics);
             continue;
         }
-        if !is_file || !include_root_files || !name.ends_with(".md") {
+        if !is_file || !include_root_files || !skill_markdown_name(&name) {
             continue;
         }
         let (skill, file_diagnostics) = load_skill_from_file(&path, source);

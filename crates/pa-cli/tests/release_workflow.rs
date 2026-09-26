@@ -22,6 +22,7 @@
 //! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it),
 //! mirroring the extension-host tests' node guard.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -247,11 +248,12 @@ fn expected_merged_sums(rows: &[serde_json::Value]) -> String {
     rows.sort_by(|a, b| a["file"].as_str().cmp(&b["file"].as_str()));
     let mut sums = String::new();
     for row in rows {
-        sums.push_str(&format!(
-            "{}  {}\n",
+        let _ = writeln!(
+            sums,
+            "{}  {}",
             row["sha256"].as_str().unwrap(),
             row["file"].as_str().unwrap()
-        ));
+        );
     }
     sums
 }

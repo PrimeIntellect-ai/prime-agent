@@ -169,7 +169,7 @@ impl MemoSlot {
                 let wait = self.wait();
                 tokio::select! {
                     r = wait => r,
-                    _ = signal.cancelled() => Err(anyhow!("{message}")),
+                    () = signal.cancelled() => Err(anyhow!("{message}")),
                 }
             }
         }
@@ -440,7 +440,7 @@ impl ReplKernelManager {
                         let _ = task.await;
                         r
                     }
-                    _ = signal.cancelled() => {
+                    () = signal.cancelled() => {
                         // The startup keeps running for other callers.
                         Err(anyhow!("Kernel startup aborted"))
                     }
@@ -532,10 +532,7 @@ impl ReplKernelManager {
                 .remove(&request_id);
             return Err(error);
         }
-        let fields = if let Ok(Ok(fields)) = tokio::time::timeout(Duration::from_secs(3), rx).await
-        {
-            fields
-        } else {
+        let Ok(Ok(fields)) = tokio::time::timeout(Duration::from_secs(3), rx).await else {
             lock(&self.inner.guarded)
                 .bash_activity_waiters
                 .remove(&request_id);

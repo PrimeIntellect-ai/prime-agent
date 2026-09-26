@@ -267,7 +267,7 @@ impl LockDir {
                 if Self::legacy_flock_held(path)? {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {path:?}"),
+                        format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
             }
@@ -296,7 +296,7 @@ impl LockDir {
         // Live lock: contention.
         Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            format!("Lock file is already being held: {path:?}"),
+            format!("Lock file is already being held: {}", path.display()),
         ))
     }
 

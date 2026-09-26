@@ -302,19 +302,21 @@ mod tests {
     fn selected_seed_clamps_into_the_options() {
         let options = || vec![option("a", None), option("b", None), option("c", None)];
         assert_eq!(
-            OnboardingChoice::new(options(), Some(2), Default::default()).selected(),
+            OnboardingChoice::new(options(), Some(2), OnboardingChoiceOptions::default())
+                .selected(),
             2
         );
         assert_eq!(
-            OnboardingChoice::new(options(), Some(99), Default::default()).selected(),
+            OnboardingChoice::new(options(), Some(99), OnboardingChoiceOptions::default())
+                .selected(),
             2
         );
         assert_eq!(
-            OnboardingChoice::new(options(), None, Default::default()).selected(),
+            OnboardingChoice::new(options(), None, OnboardingChoiceOptions::default()).selected(),
             0
         );
         assert_eq!(
-            OnboardingChoice::new(vec![], Some(3), Default::default()).selected(),
+            OnboardingChoice::new(vec![], Some(3), OnboardingChoiceOptions::default()).selected(),
             0
         );
     }
@@ -324,7 +326,7 @@ mod tests {
         let mut choice = OnboardingChoice::new(
             vec![option("a", None), option("b", None)],
             None,
-            Default::default(),
+            OnboardingChoiceOptions::default(),
         );
         assert!(choice.move_selection(1));
         assert!(!choice.move_selection(1));

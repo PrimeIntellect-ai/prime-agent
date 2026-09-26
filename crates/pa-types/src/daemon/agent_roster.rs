@@ -263,7 +263,7 @@ mod tests {
             status_label: None,
             last_heard_from_at: None,
             worker_id: Some("w1".to_string()),
-            rest: Default::default(),
+            rest: JsonMap::default(),
         };
         let value = serde_json::to_value(&entry).unwrap();
         assert_eq!(value["agentId"], "s1");

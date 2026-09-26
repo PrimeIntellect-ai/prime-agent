@@ -89,15 +89,14 @@ impl Env {
 /// timeout; the pipe write plus process wait are quick enough that a
 /// synchronous call matches the TS behavior).
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
-    let mut child = match Command::new(program)
+    let Ok(mut child) = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
+    else {
+        return false;
     };
     let wrote = child
         .stdin

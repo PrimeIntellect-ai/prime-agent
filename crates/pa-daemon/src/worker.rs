@@ -18,8 +18,8 @@ pub use env::{
     WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
     WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
+use serde_json::Map;
 pub(crate) use session_core::SessionCore;
-
 use std::collections::VecDeque;
 // PathBuf is read only by this facade's in-file test modules (via `use super::*`); the
 // lib-target import is flagged unused since the lib users moved out, so allow it deliberately.
@@ -416,11 +416,11 @@ impl ConnectionSink {
         writer: Arc<tokio::sync::Mutex<Box<dyn pa_types::platform::transport::AsyncWriteHalf>>>,
         entry_seq: u64,
     ) -> Self {
-        let (flushed, _flushed_anchor) = tokio::sync::watch::channel(0);
+        let (flushed, flushed_anchor) = tokio::sync::watch::channel(0);
         ConnectionSink {
             writer,
             flushed,
-            _flushed_anchor,
+            _flushed_anchor: flushed_anchor,
             entry_seq,
         }
     }
@@ -1175,7 +1175,7 @@ impl Worker {
             update_resume: None,
             client_id: crate::util::new_display_id(),
             server_capabilities: worker_server_capabilities(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let hello_bytes = serde_json::to_vec(&hello)?;
         // A supervisor liveness probe may connect and drop immediately; that
@@ -3397,7 +3397,7 @@ impl Worker {
             return false;
         }
         core.forced_all_steering = true;
-        for item in core.steering.iter_mut() {
+        for item in &mut core.steering {
             if armable(item) {
                 item.forced_batch = true;
             }
@@ -4294,7 +4294,7 @@ impl Worker {
             active_session_id: core.active_session_id.clone(),
             event: json!({ "type": "session_action_update", "actions": snapshot }),
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);
@@ -4320,7 +4320,7 @@ impl Worker {
             active_session_id: active_session_id.to_string(),
             reason,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);
@@ -4760,7 +4760,7 @@ pub(crate) fn emit_worker_event_with(
         active_session_id,
         event,
         meta: Some(meta),
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
     drop(core);
@@ -4908,7 +4908,7 @@ pub(crate) fn admit_bash_completion_notice(
     );
     let content = match &row.content {
         pa_types::ai::UserContent::Text(text) => text.clone(),
-        _ => String::new(),
+        pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
     // TS `queueVisible: visibleQueued` + the schedule's execution policy:
     // busy sessions queue a visible row, idle sessions wake on an
@@ -5830,7 +5830,7 @@ impl TurnRunner {
                         active_session_id: core.active_session_id.clone(),
                         event: event_json,
                         meta: Some(meta),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     };
                     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
                     direct_payloads.push(payload);
@@ -6038,7 +6038,7 @@ impl TurnRunner {
             active_session_id: core.active_session_id.clone(),
             event: json!({ "type": "session_action_update", "actions": snapshot }),
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);
@@ -6064,7 +6064,7 @@ impl TurnRunner {
             active_session_id: self.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound).unwrap_or_default();
         drop(core);
@@ -10107,7 +10107,7 @@ mod turn_stream_tests {
             core.steering
                 .push_back(queued_prompt("armed two", TurnPolicy::Queued));
             core.forced_all_steering = true;
-            for item in core.steering.iter_mut() {
+            for item in &mut core.steering {
                 item.forced_batch = true;
             }
             // An un-armed steer queued behind the armed prefix (a steer

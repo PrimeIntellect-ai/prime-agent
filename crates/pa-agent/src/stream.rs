@@ -298,7 +298,7 @@ impl ModelStream for AssistantMessageEventStream {
                 let notified = self.shared.notify.notified();
                 tokio::select! {
                     event = self.rx.recv() => return event,
-                    _ = notified => {
+                    () = notified => {
                         if *self.shared.closed.lock().unwrap() {
                             self.closed = true;
                             return self.try_next();
