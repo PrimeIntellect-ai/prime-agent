@@ -51,6 +51,28 @@ impl Detail {
     pub fn edit_diffs_expanded(self) -> bool {
         !matches!(self, Detail::Overview)
     }
+
+    /// The stored wire name (TS `ChatDetail`): "overview" | "details" |
+    /// "all".
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Detail::Overview => "overview",
+            Detail::Details => "details",
+            Detail::All => "all",
+        }
+    }
+
+    /// The level for a stored wire name (TS #2709 `getChatDetail`):
+    /// an unset or unknown value reads as the `details` startup level.
+    #[must_use]
+    pub fn from_wire_name(name: &str) -> Self {
+        match name {
+            "overview" => Detail::Overview,
+            "all" => Detail::All,
+            _ => Detail::Details,
+        }
+    }
 }
 
 /// One rendered chat component.
@@ -675,6 +697,17 @@ mod tests {
         assert!(detail.edit_diffs_expanded());
         detail = detail.next();
         assert_eq!(detail, Detail::Overview);
+    }
+
+    #[test]
+    fn detail_wire_names_round_trip_with_ts_fallback() {
+        // TS #2709: the Ctrl+O level persists as the `chatDetail` wire
+        // string and reads back; anything unknown is the startup level.
+        for detail in [Detail::Overview, Detail::Details, Detail::All] {
+            assert_eq!(Detail::from_wire_name(detail.wire_name()), detail);
+        }
+        assert_eq!(Detail::from_wire_name(""), Detail::Details);
+        assert_eq!(Detail::from_wire_name("verbose"), Detail::Details);
     }
 
     #[test]
