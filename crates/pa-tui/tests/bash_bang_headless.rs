@@ -521,7 +521,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -543,7 +543,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: Arc::default(),
         session_has_children: false,
         client_settings: None,
     }
@@ -598,12 +598,14 @@ fn run_plan_with(
     let _ = handle.join();
     RunOutcome {
         frames: outcome.frames,
-        bash_requests: Arc::try_unwrap(bash_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
-        side_question_requests: Arc::try_unwrap(side_question_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        bash_requests: Arc::try_unwrap(bash_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
+        side_question_requests: Arc::try_unwrap(side_question_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
     }
 }
 
@@ -813,7 +815,19 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
 fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     let steps = vec![
         HeadlessStep::Submit("run a turn".to_string()),
-        HeadlessStep::WaitMs(400),
+        // The bang must land while the client has APPLIED the turn's
+        // admission: the working loader's streaming label ("Writing") is
+        // on screen only after the backgrounded submit's outcome armed
+        // the loader (the streamed text alone can render first — the
+        // outcome and the stream are two channels, so the CI/battery
+        // load could order them apart, which a fixed WaitMs and even a
+        // text barrier raced). The loader row is the deterministic
+        // pending-regime signal; the assertions on the frames stay
+        // byte-identical.
+        HeadlessStep::WaitRender {
+            needle: "Writing".to_string(),
+            timeout_ms: 30_000,
+        },
         HeadlessStep::Submit("!echo mid".to_string()),
         HeadlessStep::WaitMs(400),
         HeadlessStep::WaitMs(1000),

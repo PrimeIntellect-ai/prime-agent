@@ -2,6 +2,8 @@
 //! iteration, chunk handling, and stream-state accumulation.
 //! Section of the port of `packages/ai/src/providers/mistral.ts`.
 
+use std::fmt::Write as _;
+
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};
@@ -57,7 +59,7 @@ pub fn stream_mistral(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -107,12 +109,10 @@ fn json_object(value: Value) -> Map<String, Value> {
 /// Port of `mapChatStopReason`.
 fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
     match reason {
-        None => StopReason::Stop,
-        Some("stop") => StopReason::Stop,
         Some("length" | "model_length") => StopReason::Length,
         Some("tool_calls") => StopReason::ToolUse,
         Some("error") => StopReason::Error,
-        Some(_) => StopReason::Stop,
+        None | Some(_) => StopReason::Stop,
     }
 }
 
@@ -162,7 +162,7 @@ fn mistral_sdk_error_message(status: u16, content_type: Option<&str>, body: &str
         } else {
             content_type.to_string()
         };
-        message.push_str(&format!(" Content-Type {quoted}"));
+        let _ = write!(message, " Content-Type {quoted}");
     }
     let body_utf16_len: usize = body.chars().map(char::len_utf16).sum();
     let body_display = if body_utf16_len > 10_000 {
@@ -189,7 +189,7 @@ fn mistral_sdk_error_message(status: u16, content_type: Option<&str>, body: &str
         body.to_string()
     };
     message.push_str(if body_utf16_len > 100 { "\n" } else { ". " });
-    message.push_str(&format!("Body: {body_display}"));
+    let _ = write!(message, "Body: {body_display}");
     message.trim().to_string()
 }
 
@@ -248,8 +248,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -321,9 +320,8 @@ async fn run_stream(
     let mut state = MistralStreamState::new();
     let mut decoder = SseDecoder::new();
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         for sse in decoder.push_text(&chunk) {
             if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
@@ -350,8 +348,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -429,7 +426,7 @@ impl MistralStreamState {
         output.content.push(AssistantContent::Text(TextContent {
             text: String::new(),
             text_signature: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }));
         let index = output.content.len() - 1;
         self.current_block = Some(CurrentBlock::Text { index });
@@ -455,7 +452,7 @@ impl MistralStreamState {
                 thinking: String::new(),
                 thinking_signature: None,
                 redacted: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = output.content.len() - 1;
         self.current_block = Some(CurrentBlock::Thinking { index });
@@ -543,7 +540,6 @@ impl MistralStreamState {
                             delta: text_delta,
                             partial: output.clone(),
                         });
-                        continue;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("thinking") =>
@@ -571,7 +567,6 @@ impl MistralStreamState {
                             delta: thinking_delta,
                             partial: output.clone(),
                         });
-                        continue;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("text") =>
@@ -635,9 +630,9 @@ impl MistralStreamState {
                     output.content.push(AssistantContent::ToolCall(ToolCall {
                         id: call_id.clone(),
                         name,
-                        arguments: Default::default(),
+                        arguments: Map::default(),
                         thought_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                     let index = output.content.len() - 1;
                     self.tool_blocks_by_key.insert(key.clone(), index);
@@ -658,7 +653,7 @@ impl MistralStreamState {
                 .tool_partial_args
                 .entry(block_index)
                 .or_default()
-                .to_string();
+                .clone();
             let partial = format!("{partial}{args_delta}");
             self.tool_partial_args.insert(block_index, partial.clone());
             let parsed = parse_streaming_json(Some(&partial));

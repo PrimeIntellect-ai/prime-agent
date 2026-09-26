@@ -10,10 +10,11 @@
 //!    lifecycle stays reachable via its resume selector, TS parity) and
 //!    the woken worker runs the turn against the mock provider.
 //!
-//! Unix-only e2e (AF_UNIX sockets): compiles to nothing elsewhere, like the
+//! Unix-only e2e (`AF_UNIX` sockets): compiles to nothing elsewhere, like the
 //! other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -89,7 +90,7 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
         chunk(json!({"role": "assistant", "content": answer}), None),
         chunk(json!({}), Some("stop")),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -176,7 +177,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -283,11 +284,10 @@ fn log_mentions(agent_dir: &Path, needle: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(agent_dir.join("logs")) else {
         return false;
     };
-    entries.flatten().map(|entry| entry.path()).any(|path| {
-        std::fs::read_to_string(&path)
-            .map(|content| content.contains(needle))
-            .unwrap_or(false)
-    })
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .any(|path| std::fs::read_to_string(&path).is_ok_and(|content| content.contains(needle)))
 }
 
 #[test]

@@ -136,6 +136,11 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     /// Serve the last-good snapshot for `scope`, loading and re-validating the
     /// disk snapshot on first access. A scope change discards the previous
     /// account's view entirely.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock).
     pub fn get(&self, scope: &str) -> Option<T> {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() == Some(scope) {
@@ -161,8 +166,26 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         }
     }
 
+    /// The scope recorded in the disk snapshot, when one exists (the stored
+    /// header only — no validation, no in-memory promotion): a fresh
+    /// process's first auth-scope observation seeds its comparison from
+    /// it, so a credential change that predates the process is detected.
+    /// `None` when no snapshot is stored, or it belongs to another source
+    /// URL.
+    pub fn stored_scope(&self) -> Option<String> {
+        let path = self.cache_path.as_ref()?;
+        let bytes = std::fs::read(path).ok()?;
+        let stored: SnapshotFile = serde_json::from_slice(&bytes).ok()?;
+        (stored.url == self.url.as_ref()).then_some(stored.scope)
+    }
+
     /// Drop the snapshot for `scope` (401/403 revocation); other scopes keep
     /// their own snapshots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock).
     pub fn clear(&self, scope: &str) {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() != Some(scope) {
@@ -180,18 +203,24 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     /// Refresh the snapshot for `scope`: coalesces with an in-flight refresh,
     /// skips fetches attempted less than an hour ago unless forced, and
     /// returns the last-good value on every failure path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned (another thread panicked while
+    /// holding the lock). In debug builds, also panics if a refresh
+    /// settles its shared result twice, which the current code never does.
     pub async fn refresh(&self, scope: &str, opts: RefreshOptions) -> Option<T> {
+        enum Gate<T> {
+            Coalesced(Arc<InFlight<T>>),
+            Gated,
+            Start(Arc<InFlight<T>>, Option<Snapshot<T>>, u64),
+        }
         let cached = self.get(scope);
         if is_catalog_offline() {
             return cached;
         }
         // The mutex guard must never live across an await: decide under the
         // lock, then act outside it.
-        enum Gate<T> {
-            Coalesced(Arc<InFlight<T>>),
-            Gated,
-            Start(Arc<InFlight<T>>, Option<Snapshot<T>>, u64),
-        }
         let gate = {
             let mut state = self.state.lock().unwrap();
             let coalesced = state
@@ -287,9 +316,8 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
                     Ok(payload) => payload,
                     Err(_) => return self.keep_last_good(scope, generation, opts),
                 };
-                let models = match (self.parse)(&payload, scope) {
-                    Ok(models) => models,
-                    Err(_) => return self.keep_last_good(scope, generation, opts),
+                let Ok(models) = (self.parse)(&payload, scope) else {
+                    return self.keep_last_good(scope, generation, opts);
                 };
                 if !self.is_current(scope, generation, opts) {
                     return None;
@@ -438,10 +466,10 @@ async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
 /// TS single-process reference never races here; the multi-process port
 /// must).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp = path.with_extension(format!(
         "{}-{}.tmp",
         std::process::id(),

@@ -531,6 +531,7 @@ pub(crate) mod tests {
     use crate::rlm_ledger::RlmLedgerEdge;
     use crate::supervisor::ClientRouting;
     use pa_types::daemon::agent_roster::AgentRosterStatus;
+    use serde_json::Map;
 
     fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
         RlmLedgerEdge {
@@ -771,14 +772,14 @@ pub(crate) mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -827,12 +828,14 @@ pub(crate) mod tests {
         loop {
             match events.try_recv() {
                 Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
                     panic!("roster push subscriber lagged by {missed}; drain per push");
                 }
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
             }
         }
         pushes
@@ -883,7 +886,7 @@ pub(crate) mod tests {
         );
         assert_eq!(row.summary["thinkingLevel"], json!("high"));
         assert_eq!(row.worker_id, None);
-        assert!(row.status == AgentRosterStatus::Inactive);
+        assert_eq!(row.status, AgentRosterStatus::Inactive);
 
         // The seed is once-per-boot: a second run never re-reads the
         // transcripts (the present rows skip first) and never pushes.

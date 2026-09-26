@@ -37,14 +37,7 @@ impl crate::mode::Runtime for PrintRuntime {
         match options.app_mode {
             // Runtime failures print themselves and exit non-zero; the typed
             // MissingSubsystem channel stays reserved for unwired subsystems.
-            AppMode::Print => match run_print_mode(options) {
-                Ok(code) => Ok(code),
-                Err(message) => {
-                    eprintln!("Error: {message}");
-                    Ok(1)
-                }
-            },
-            AppMode::Json => match run_print_mode(options) {
+            AppMode::Print | AppMode::Json => match run_print_mode(options) {
                 Ok(code) => Ok(code),
                 Err(message) => {
                     eprintln!("Error: {message}");
@@ -325,6 +318,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             // true), so the kernel boots in the background at creation;
             // the engine's depth-0 gate matches the TS session's.
             prewarm_ipython_kernel: Some(true),
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
@@ -511,7 +505,7 @@ fn thinking_block_text(
         .unwrap_or_default()
 }
 
-/// Serialize one loop event to the TS session_event wire shape.
+/// Serialize one loop event to the TS `session_event` wire shape.
 fn agent_event_json(event: &pa_agent::types::AgentEvent) -> Option<String> {
     use pa_agent::types::AgentEvent;
     fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {
@@ -656,11 +650,16 @@ fn build_session_manager(
     // project's session copied into this cwd) — with no daemon-active
     // guard: the copy writes a fresh file, never the hosted source.
     if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
         let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
-            ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
-            ResolvedSession::Global { path, .. } => path,
+            ResolvedSession::Path(path)
+            | ResolvedSession::Local(path)
+            | ResolvedSession::Global { path, .. } => path,
         };
         return SessionManager::fork_from(&source, &cwd, &session_dir);
     }
@@ -722,7 +721,7 @@ fn assert_session_not_active_in_daemon(
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
         if list.success {
@@ -812,15 +811,16 @@ fn open_session_file(
     fallback_cwd: &std::path::Path,
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
-    let session_cwd = explicit_cwd_override
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| {
+    let session_cwd = explicit_cwd_override.map_or_else(
+        || {
             let header = pa_core::session::manager::read_session_header(path);
-            header
-                .filter(|header| !header.cwd.is_empty())
-                .map(|header| std::path::PathBuf::from(&header.cwd))
-                .unwrap_or_else(|| fallback_cwd.to_path_buf())
-        });
+            header.filter(|header| !header.cwd.is_empty()).map_or_else(
+                || fallback_cwd.to_path_buf(),
+                |header| std::path::PathBuf::from(&header.cwd),
+            )
+        },
+        std::path::Path::to_path_buf,
+    );
     let manager = pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path);
     // main.ts getMissingSessionCwdIssue: a session stored against a deleted
     // directory must not silently continue somewhere else.
@@ -840,7 +840,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),
@@ -1001,7 +1001,11 @@ async fn run_prompts_and_emit(
             .await?;
         engine
             .session
-            .prompt_with_images(prompt, images, Default::default())
+            .prompt_with_images(
+                prompt,
+                images,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
@@ -1256,6 +1260,7 @@ async fn build_faux_engine_parts(
             // The faux engine is a Rust-only verification harness, not a
             // product surface: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },

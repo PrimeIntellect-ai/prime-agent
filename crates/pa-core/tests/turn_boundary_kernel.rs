@@ -33,19 +33,22 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel test",
+        candidate.display()
+    );
     None
 }
 
@@ -57,17 +60,20 @@ fn release_dir() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {explicit:?} has no prime-agent-runtime"
+            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let releases = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
@@ -78,7 +84,8 @@ fn release_dir() -> Option<PathBuf> {
     candidates.sort();
     let Some(latest) = candidates.pop() else {
         eprintln!(
-            "no release with prime-agent-runtime under {releases:?}; skipping live kernel test"
+            "no release with prime-agent-runtime under {}; skipping live kernel test",
+            releases.display()
         );
         return None;
     };
@@ -209,7 +216,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
                     cache_read: 0,
                     cache_write: 0,
                     total_tokens: 120,
-                    cost: Default::default(),
+                    cost: pa_agent::types::UsageCost::default(),
                 };
             }
         }
@@ -246,6 +253,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         extension_tool_allow_list: None,
         mcp_manager: None,
         prewarm_ipython_kernel: None,
+        on_background_work_settled: None,
         queued_goal_context_purge: None,
     })
     .await

@@ -83,6 +83,10 @@ impl CatalogFetcher {
     }
 
     /// A client with explicit bounds (tests; the Prime Inference 2 MiB cap).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reqwest client fails to build.
     pub fn with_limits(timeout: Duration, max_bytes: usize) -> Self {
         let client = reqwest::Client::builder()
             // A moved catalog must be a client change, never a silent hop.
@@ -97,12 +101,26 @@ impl CatalogFetcher {
     }
 
     /// GET `url` with catalog headers and the optional cached `ETag`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FetchError::Transport` on request failure, refused
+    /// redirects (any 3xx besides 304), or a body over the byte cap;
+    /// `FetchError::Status` on any other non-2xx status (304 returns
+    /// `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch(&self, url: &str, etag: Option<&str>) -> Result<FetchOutcome, FetchError> {
         self.fetch_with(url, etag, &[]).await
     }
 
     /// [`CatalogFetcher::fetch`] plus extra request headers (credentials for
     /// the credentialed Prime Inference fetch).
+    ///
+    /// # Errors
+    ///
+    /// Returns `FetchError::Transport` on request failure, refused
+    /// redirects (any 3xx besides 304), or a body over the byte cap;
+    /// `FetchError::Status` on any other non-2xx status (304 returns
+    /// `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch_with(
         &self,
         url: &str,

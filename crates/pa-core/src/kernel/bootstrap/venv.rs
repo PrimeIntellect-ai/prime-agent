@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, Context};
 use sha2::Digest;
@@ -170,7 +171,6 @@ pub(crate) fn to_bootstrap_skill(skill: &KernelPythonSkill) -> BootstrapPythonSk
 pub(crate) fn normalize_python_skills(
     python_skills: &[KernelPythonSkill],
 ) -> Vec<BootstrapPythonSkill> {
-    let mut by_key: Vec<(String, BootstrapPythonSkill)> = Vec::new();
     fn add_skill(by_key: &mut Vec<(String, BootstrapPythonSkill)>, skill: BootstrapPythonSkill) {
         let key = format!("{}\u{0}{}", skill.import_name, skill.package_path);
         if by_key.iter().any(|(existing, _)| *existing == key) {
@@ -184,6 +184,7 @@ pub(crate) fn normalize_python_skills(
         }
         by_key.push((key, skill));
     }
+    let mut by_key: Vec<(String, BootstrapPythonSkill)> = Vec::new();
     for skill in python_skills {
         add_skill(&mut by_key, to_bootstrap_skill(skill));
     }
@@ -251,10 +252,7 @@ pub(crate) fn resolve_writable_kernel_venv_dir() -> anyhow::Result<PathBuf> {
     if std::fs::create_dir_all(primary.parent().unwrap_or(Path::new("/"))).is_ok() {
         return Ok(primary);
     }
-    if std::env::var("PRIME_AGENT_KERNEL_VENV")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
+    if std::env::var("PRIME_AGENT_KERNEL_VENV").is_ok_and(|v| !v.is_empty()) {
         return Err(anyhow!(
             "couldn't create kernel venv parent directories for {}",
             primary.display()
@@ -568,6 +566,11 @@ fn resolve_runtime_source_dir() -> Option<PathBuf> {
 /// `pyproject.toml`, so any runtime change invalidates an existing venv.
 /// Falls back to the bare package name when the runtime resolves to a
 /// registry install (no local source).
+///
+/// # Panics
+///
+/// Panics when hashing the resolved local runtime source fails (unreadable
+/// or missing runtime files).
 pub fn resolve_runtime_identity() -> String {
     let Some(source_dir) = resolve_runtime_source_dir() else {
         return RUNTIME_REQUIREMENT.to_string();
@@ -635,10 +638,10 @@ pub(crate) async fn bootstrap_venv(
     let uv = ensure_uv()?;
     let python = kernel_venv_python(venv);
     let source_dir = resolve_runtime_source_dir();
-    let runtime_requirement = source_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| RUNTIME_REQUIREMENT.to_string());
+    let runtime_requirement = source_dir.as_ref().map_or_else(
+        || RUNTIME_REQUIREMENT.to_string(),
+        |p| p.to_string_lossy().to_string(),
+    );
     let runtime_identity = resolve_runtime_identity();
 
     let venv_str = venv.to_string_lossy().to_string();
@@ -716,6 +719,7 @@ pub(crate) async fn sync_python_skills(
         .collect();
     let python_str = python.to_string_lossy().to_string();
     let mut installed: HashMap<String, BootstrapPythonSkill> = current_python_skills;
+    let mut missing: Vec<&BootstrapPythonSkill> = Vec::new();
     for skill in python_skills {
         let key = bootstrap_skill_key(skill);
         if installed.get(&key).is_some_and(|existing| {
@@ -724,27 +728,54 @@ pub(crate) async fn sync_python_skills(
         }) {
             continue;
         }
-        let result = run_async(
-            uv,
-            &[
-                "pip".to_string(),
-                "install".to_string(),
-                "--python".to_string(),
-                python_str.clone(),
-                "--editable".to_string(),
-                skill.package_path.clone(),
-            ],
-        )
-        .await;
-        match result {
+        missing.push(skill);
+    }
+    if !missing.is_empty() {
+        // One uv invocation installs the whole batch of missing skills: a
+        // fresh kernel bootstrap otherwise pays one process plus build-backend
+        // startup per metadata-only editable install (measured: nine serial
+        // installs ~1.9s, one batched invocation ~0.4s, warm uv cache). A
+        // batch failure falls back to the per-skill loop so one broken skill
+        // still costs only its own warning and never blocks the rest.
+        let mut install_args = vec![
+            "pip".to_string(),
+            "install".to_string(),
+            "--python".to_string(),
+            python_str.clone(),
+        ];
+        for skill in &missing {
+            install_args.push("--editable".to_string());
+            install_args.push(skill.package_path.clone());
+        }
+        if run_async(uv, &install_args).await.is_ok() {
             // A changed pyproject (hash moved) replaces the stale record.
-            Ok(()) => {
-                installed.insert(key, skill.clone());
+            for skill in &missing {
+                installed.insert(bootstrap_skill_key(skill), (*skill).clone());
             }
-            Err(error) => options.report(&format!(
-                "Warning: Python skill {} failed to install and will be unavailable: {error}",
-                skill.import_name
-            )),
+        } else {
+            for skill in &missing {
+                let result = run_async(
+                    uv,
+                    &[
+                        "pip".to_string(),
+                        "install".to_string(),
+                        "--python".to_string(),
+                        python_str.clone(),
+                        "--editable".to_string(),
+                        skill.package_path.clone(),
+                    ],
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        installed.insert(bootstrap_skill_key(skill), (*skill).clone());
+                    }
+                    Err(error) => options.report(&format!(
+                        "Warning: Python skill {} failed to install and will be unavailable: {error}",
+                        skill.import_name
+                    )),
+                }
+            }
         }
     }
     let mut merged: Vec<BootstrapPythonSkill> = installed.into_values().collect();
@@ -756,9 +787,168 @@ pub(crate) async fn sync_python_skills(
     write_bootstrap_version(venv, runtime_identity, &merged)
 }
 
+/// Process-global memo of a successful runtime-ready probe: the probe is a
+/// full interpreter start (the `import rlm` chain), and re-running it
+/// before every kernel start re-pays a cost the kernel spawn itself is
+/// about to pay. Memoized on success only: the key carries every input the
+/// probe observes (interpreter identity, runtime identity, the venv's
+/// recorded bootstrap state, and the installed runtime's content), so a
+/// venv rebuilt by anyone — a newer concurrent daemon rewrites
+/// `.bootstrap-version` — or damaged out of band — an uninstalled or
+/// overwritten `rlm`, a replaced interpreter — misses the memo and
+/// revalidates. A failed kernel start drops the memo
+/// ([`invalidate_runtime_probe_cache`]), so the startup retry re-probes
+/// and rebuilds exactly like the uncached flow.
+static RUNTIME_PROBE_MEMO: Mutex<Option<HashMap<String, ()>>> = Mutex::new(None);
+
+fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, ()>>> {
+    RUNTIME_PROBE_MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Identity of the runtime as installed in the venv — the state the probe
+/// observes beyond its key inputs: the interpreter binary's stat plus a
+/// content hash of the installed `rlm` package tree under the venv's
+/// site-packages. Out-of-band damage (a package uninstall or overwrite, a
+/// replaced or deleted interpreter) changes this identity, so a memoized
+/// probe result can never mask a mutated install: the next
+/// [`kernel_ready`] re-probes and rebuilds like the uncached flow.
+fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
+    let mut hasher = sha2::Sha256::new();
+    match std::fs::metadata(python) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .map_or_else(|_| "no-mtime".to_string(), |time| format!("{time:?}"));
+            hasher.update(format!("py:{}:{}:{modified}", python.display(), meta.len()).as_bytes());
+        }
+        Err(error) => hasher.update(format!("py-error:{}:{error}", python.display()).as_bytes()),
+    }
+    for package in ["rlm", "dill"] {
+        match installed_package_dir(venv, package) {
+            Some(dir) => match hash_python_tree(&dir) {
+                Ok(hash) => hasher.update(format!("{package}:{hash}").as_bytes()),
+                Err(error) => hasher.update(format!("{package}-error:{error}").as_bytes()),
+            },
+            None => hasher.update(format!("{package}-missing").as_bytes()),
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// The installed `rlm` package under the venv's site-packages: the
+/// Windows layout `<venv>/Lib/site-packages/rlm` (no python-version
+/// layer) or the Unix layout `<venv>/lib/python*/site-packages/rlm`.
+#[cfg(test)]
+fn installed_rlm_dir(venv: &Path) -> Option<PathBuf> {
+    installed_package_dir(venv, "rlm")
+}
+
+fn installed_package_dir(venv: &Path, package: &str) -> Option<PathBuf> {
+    let lib = venv.join("lib");
+    let windows_layout = lib.join("site-packages").join(package);
+    if windows_layout.is_dir() {
+        return Some(windows_layout);
+    }
+    let entries = std::fs::read_dir(&lib).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().starts_with("python") {
+            continue;
+        }
+        let installed = entry.path().join("site-packages").join(package);
+        if installed.is_dir() {
+            return Some(installed);
+        }
+    }
+    None
+}
+
+/// Content hash of a python tree: every `.py` file's relative path and
+/// bytes, in sorted order (same witness shape as [`hash_runtime_source`]).
+fn hash_python_tree(dir: &Path) -> anyhow::Result<String> {
+    let mut files = Vec::new();
+    collect_python_files(dir, &mut files)?;
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for file in &files {
+        let relative = file.strip_prefix(dir)?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(&std::fs::read(file)?);
+        hasher.update([0]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The memo key: every input the runtime-ready probe observes.
+fn runtime_probe_key(
+    python: &str,
+    runtime_identity: &str,
+    version_raw: &str,
+    installed_identity: &str,
+) -> String {
+    format!(
+        "{python}\u{0}{runtime_identity}\u{0}{installed_identity}\u{0}sha256:{:x}",
+        sha2::Sha256::digest(version_raw.as_bytes())
+    )
+}
+
+/// The runtime-ready check, memoized on success. `version_raw` is the raw
+/// `.bootstrap-version` text the caller already read; `installed_identity`
+/// is the installed-runtime identity from
+/// [`installed_runtime_identity`].
+fn has_prime_agent_runtime_memoized(
+    python: &str,
+    runtime_identity: &str,
+    version_raw: &str,
+    installed_identity: &str,
+) -> bool {
+    let key = runtime_probe_key(python, runtime_identity, version_raw, installed_identity);
+    if lock_probe_memo()
+        .as_ref()
+        .is_some_and(|memo| memo.contains_key(&key))
+    {
+        return true;
+    }
+    if !has_prime_agent_runtime(python) || !python_imports(python, "dill") {
+        return false;
+    }
+    let mut memo = lock_probe_memo();
+    let entries = memo.get_or_insert_with(HashMap::new);
+    if entries.len() >= 16 {
+        entries.clear();
+    }
+    entries.insert(key, ());
+    true
+}
+
+/// Drop every memoized runtime-ready result: the next kernel start re-runs
+/// the probe (and rebuilds the venv when the probe finds it broken).
+pub fn invalidate_runtime_probe_cache() {
+    *lock_probe_memo() = None;
+}
+
+/// The parsed `.bootstrap-version` plus its raw text (the probe-memo key
+/// input), in one read.
+fn read_bootstrap_version_raw(venv: &Path) -> (Option<BootstrapVersion>, String) {
+    let raw = std::fs::read_to_string(venv.join(BOOTSTRAP_VERSION_FILE)).unwrap_or_default();
+    let parsed: Option<BootstrapVersion> = serde_json::from_str(&raw).ok();
+    (parsed.filter(|v| v.schema > 0), raw)
+}
+
 pub(crate) fn kernel_base_ready(python: &str, venv: &Path, runtime_identity: &str) -> bool {
-    has_prime_agent_runtime(python)
-        && bootstrap_base_version_current(read_bootstrap_version(venv), runtime_identity)
+    let (version, raw) = read_bootstrap_version_raw(venv);
+    bootstrap_base_version_current(version, runtime_identity)
+        && has_prime_agent_runtime_memoized(
+            python,
+            runtime_identity,
+            &raw,
+            &installed_runtime_identity(Path::new(python), venv),
+        )
 }
 
 pub(crate) fn kernel_ready(
@@ -767,11 +957,13 @@ pub(crate) fn kernel_ready(
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
-    has_prime_agent_runtime(python)
-        && bootstrap_version_current(
-            read_bootstrap_version(venv),
+    let (version, raw) = read_bootstrap_version_raw(venv);
+    bootstrap_version_current(version, runtime_identity, python_skills)
+        && has_prime_agent_runtime_memoized(
+            python,
             runtime_identity,
-            python_skills,
+            &raw,
+            &installed_runtime_identity(Path::new(python), venv),
         )
 }
 
@@ -878,6 +1070,317 @@ mod tests {
     }
 
     #[test]
+    fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
+        let key = runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed");
+        assert_eq!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/other-py", "sha256:runtime", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:other", "raw", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw2", "sha256:installed")
+        );
+        assert_ne!(
+            key,
+            runtime_probe_key("/py", "sha256:runtime", "raw", "sha256:installed2")
+        );
+
+        lock_probe_memo()
+            .get_or_insert_with(HashMap::new)
+            .insert(key.clone(), ());
+        assert!(lock_probe_memo()
+            .as_ref()
+            .is_some_and(|memo| memo.contains_key(&key)));
+        invalidate_runtime_probe_cache();
+        assert!(lock_probe_memo()
+            .as_ref()
+            .is_none_or(|memo| !memo.contains_key(&key)));
+    }
+
+    /// The out-of-band-detection trio, on a fake venv whose interpreter is
+    /// a shell script that counts its own invocations: the memo must hit on
+    /// an unchanged venv (the perf point), miss when the installed `rlm`
+    /// tree is mutated or the interpreter is replaced (the parity point:
+    /// the probe re-runs and detects the damage), and miss after
+    /// invalidation.
+    #[cfg(unix)]
+    #[test]
+    fn probe_memo_misses_on_out_of_band_venv_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("venv");
+        let rlm = venv.join("lib/python3.11/site-packages/rlm");
+        std::fs::create_dir_all(&rlm).unwrap();
+        std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
+
+        // The fake interpreter: records each invocation, then runs the probe
+        // verdict the control file asks for (empty = success).
+        let control = dir.path().join("verdict");
+        let counter = dir.path().join("count");
+        let python = dir.path().join("python");
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> {}\nif [ -s {} ]; then exit 1; fi\nexit 0\n",
+                counter.display(),
+                control.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        write_bootstrap_version(&venv, "sha256:runtime", &[]).unwrap();
+        let python_str = python.to_string_lossy().to_string();
+        let probe_count = || {
+            std::fs::read_to_string(&counter).map_or(0, |text| {
+                text.lines().filter(|l| !l.trim().is_empty()).count()
+            })
+        };
+
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 2, "cold call probes runtime and dill");
+
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 2, "unchanged venv hits the memo");
+
+        // Out-of-band mutation of the installed rlm: the memo must miss and
+        // the probe must re-run (the detection the parity review demands).
+        std::fs::write(rlm.join("core.py"), "y = 2\n").unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(
+            probe_count(),
+            4,
+            "installed-rlm mutation probes runtime and dill instead of masking"
+        );
+
+        // Out-of-band interpreter replacement: same detection.
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> {}\nif [ -s {} ]; then exit 1; fi\nexit 0\n# replaced\n",
+                counter.display(),
+                control.display()
+            ),
+        )
+        .unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(
+            probe_count(),
+            6,
+            "interpreter replacement probes runtime and dill"
+        );
+
+        // Fingerprint-invisible damage (the fake's verdict file, standing in
+        // for interpreter-internal breakage the witnesses cannot see): the
+        // memo still hits — the masked class, whose detection happens at
+        // kernel-START failure time (the manager invalidates the memo and
+        // the provisioner retry re-probes).
+        std::fs::write(&control, "broken\n").unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 6, "invisible damage alone does not re-probe");
+
+        // After a failed start (the invalidation it performs), the next
+        // readiness check re-probes and DETECTS the damage.
+        invalidate_runtime_probe_cache();
+        assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 7, "a failing probe is never memoized");
+
+        // Healing plus another invalidation restores readiness through a
+        // real probe, never a stale memo.
+        std::fs::remove_file(&control).unwrap();
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(probe_count(), 9, "invalidation probes runtime and dill");
+
+        // An uninstalled runtime (the out-of-band uninstall class) must
+        // re-probe rather than mask: the installed-rlm witness disappears,
+        // so the real probe runs again (this fake one still passes).
+        std::fs::remove_dir_all(&rlm).unwrap();
+        assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(
+            probe_count(),
+            11,
+            "an uninstalled rlm probes runtime and dill"
+        );
+
+        // A deleted interpreter must miss the memo without a probe
+        // invocation (the interpreter stat witness fails): readiness flips
+        // false because the probe cannot even run.
+        std::fs::remove_file(&python).unwrap();
+        assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
+        assert_eq!(
+            probe_count(),
+            11,
+            "a deleted interpreter misses on stat without running"
+        );
+    }
+
+    /// The Windows venv layout (`<venv>/Lib/site-packages/rlm`, no
+    /// python-version layer) is a fingerprint input: mutations under it
+    /// change the memo key, and removal drops to the missing marker.
+    #[test]
+    fn windows_layout_venv_rlm_is_witnessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("venv");
+        let rlm = venv.join("lib/site-packages/rlm");
+        std::fs::create_dir_all(&rlm).unwrap();
+        std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
+
+        assert_eq!(installed_rlm_dir(&venv), Some(rlm.clone()));
+        let python = dir.path().join("python");
+        let id_before = installed_runtime_identity(&python, &venv);
+        std::fs::write(rlm.join("__init__.py"), "x = 2\n").unwrap();
+        let id_after_mutation = installed_runtime_identity(&python, &venv);
+        assert_ne!(
+            id_before, id_after_mutation,
+            "a mutation under the Windows layout changes the fingerprint"
+        );
+        std::fs::remove_dir_all(&rlm).unwrap();
+        let id_after_removal = installed_runtime_identity(&python, &venv);
+        assert_ne!(
+            id_after_removal, id_before,
+            "the out-of-band uninstall changes the fingerprint"
+        );
+    }
+
+    /// Live (ignored by default; run with `--ignored` on a machine with a
+    /// kernel venv under `HOME`): the memo behavior against a REAL
+    /// interpreter and a REAL `rlm` import — the probe result on the
+    /// counting-wrapper venv must come from the memo while the installed
+    /// tree is unchanged, and must re-run (and fail) when the installed
+    /// `rlm` tree is removed out of band.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "live: needs a real kernel venv under HOME (bench VMs)"]
+    fn live_probe_memo_reprobes_when_installed_rlm_is_removed() {
+        let real_venv = kernel_venv_dir();
+        let real_python = kernel_venv_python(&real_venv);
+        if !real_python.is_file() {
+            eprintln!("kernel python {real_python:?} not found; skipping live probe test");
+            return;
+        }
+        let Some(real_rlm) = installed_rlm_dir(&real_venv) else {
+            eprintln!("installed rlm not found; skipping live probe test");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("venv");
+        let site = fake.join("lib/python3.11/site-packages");
+        let rlm = site.join("rlm");
+        let dill = site.join("dill");
+        let real_dill = installed_package_dir(&real_venv, "dill")
+            .expect("installed dill is required for the live runtime probe");
+        for (source, target_dir) in [(&real_rlm, &rlm), (&real_dill, &dill)] {
+            std::fs::create_dir_all(target_dir).unwrap();
+            let mut files = Vec::new();
+            collect_python_files(source, &mut files).unwrap();
+            for file in &files {
+                let target = target_dir.join(file.strip_prefix(source).unwrap());
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::copy(file, &target).unwrap();
+            }
+        }
+
+        let counter = dir.path().join("count");
+        let python = fake.join("bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> \"{}\"\nPYTHONPATH={:?} exec \"{}\" -S \"$@\"\n",
+                counter.display(),
+                site,
+                real_python.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let identity = resolve_runtime_identity();
+        write_bootstrap_version(&fake, &identity, &[]).unwrap();
+
+        let probe_count = || {
+            std::fs::read_to_string(&counter).map_or(0, |text| {
+                text.lines().filter(|l| !l.trim().is_empty()).count()
+            })
+        };
+
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
+        assert_eq!(probe_count(), 2, "cold call probes runtime and dill");
+
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
+        assert_eq!(probe_count(), 2, "unchanged venv hits the memo");
+
+        std::fs::remove_dir_all(&rlm).unwrap();
+        assert!(
+            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
+            "an uninstalled rlm must be detected, not masked"
+        );
+        assert_eq!(
+            probe_count(),
+            3,
+            "the out-of-band rlm uninstall re-probed the runtime (the dill probe short-circuits)"
+        );
+
+        let mut files = Vec::new();
+        collect_python_files(&real_rlm, &mut files).unwrap();
+        for file in &files {
+            let target = rlm.join(file.strip_prefix(&real_rlm).unwrap());
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(file, &target).unwrap();
+        }
+        invalidate_runtime_probe_cache();
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
+        assert_eq!(
+            probe_count(),
+            5,
+            "the restored runtime re-probed runtime and dill after invalidation"
+        );
+
+        std::fs::remove_dir_all(&dill).unwrap();
+        assert!(
+            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
+            "a removed dill import must not be hidden by the memo"
+        );
+        assert_eq!(
+            probe_count(),
+            7,
+            "the removed dill re-probed runtime and dill"
+        );
+    }
+
+    #[test]
     fn extra_recorded_skills_do_not_force_reinstall() {
         // A session's set ([edit]) must be served by a venv that also carries
         // records from other sessions ([websearch]): the file is a cache.
@@ -903,5 +1406,153 @@ mod tests {
         // No records at all: nothing is covered.
         assert!(!recorded_skills_cover(&None, &current));
         assert!(recorded_skills_cover(&None, &[]));
+    }
+
+    #[cfg(unix)]
+    fn fake_uv(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let uv = dir.join("uv");
+        std::fs::write(&uv, script).unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        uv
+    }
+
+    #[cfg(unix)]
+    fn uv_invocations(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("uv.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_sync_batches_missing_installs_into_one_uv_call() {
+        // A fake uv records its args: every missing skill must land in ONE
+        // invocation, and already-installed skills must stay out of it.
+        let dir = tempfile::tempdir().unwrap();
+        let uv = fake_uv(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                dir.path().join("uv.log").display()
+            ),
+        );
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/edit")).unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/goal")).unwrap();
+        write_bootstrap_version(
+            &venv,
+            "sha256:rt",
+            &[skill(
+                "edit",
+                dir.path().join("skills/edit").to_str().unwrap(),
+                "h1",
+            )],
+        )
+        .unwrap();
+        let skills = vec![
+            skill(
+                "edit",
+                dir.path().join("skills/edit").to_str().unwrap(),
+                "h1",
+            ),
+            skill(
+                "goal",
+                dir.path().join("skills/goal").to_str().unwrap(),
+                "h2",
+            ),
+        ];
+        sync_python_skills(
+            uv.to_str().unwrap(),
+            &venv,
+            dir.path().join("python").as_path(),
+            "sha256:rt",
+            &skills,
+            &EnsureKernelPythonOptions::default(),
+        )
+        .await
+        .unwrap();
+        let calls = uv_invocations(dir.path());
+        assert_eq!(calls.len(), 1, "one batched uv invocation: {calls:?}");
+        assert!(
+            calls[0].contains("goal"),
+            "the missing skill installs: {calls:?}"
+        );
+        assert!(
+            !calls[0].contains("skills/edit"),
+            "the installed skill is not reinstalled: {calls:?}"
+        );
+        assert_eq!(calls[0].matches("--editable").count(), 1);
+        let version = read_bootstrap_version(&venv).expect("version written");
+        assert_eq!(
+            version.python_skills.as_ref().map(Vec::len),
+            Some(2),
+            "both skills recorded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
+        // A batch covering several skills fails; the fallback retries each
+        // missing skill alone, so one broken skill still costs only its own
+        // warning and the healthy skills still install.
+        let dir = tempfile::tempdir().unwrap();
+        let uv = fake_uv(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in *broken*) exit 1;; esac\nexit 0\n",
+                dir.path().join("uv.log").display()
+            ),
+        );
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        let skills = vec![
+            skill("edit", "/skills/edit", "h1"),
+            skill("broken", "/skills/broken", "h2"),
+        ];
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut options = EnsureKernelPythonOptions::default();
+        let sink = warnings.clone();
+        options.on_progress = Some(std::sync::Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_string());
+        }));
+        sync_python_skills(
+            uv.to_str().unwrap(),
+            &venv,
+            dir.path().join("python").as_path(),
+            "sha256:rt",
+            &skills,
+            &options,
+        )
+        .await
+        .unwrap();
+        let calls = uv_invocations(dir.path());
+        assert_eq!(
+            calls.len(),
+            3,
+            "one failed batch then one call per skill: {calls:?}"
+        );
+        assert!(
+            calls[0].contains("edit") && calls[0].contains("broken"),
+            "the batch covers both skills: {calls:?}"
+        );
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("broken"),
+            "one warning naming the broken skill: {warnings:?}"
+        );
+        let version = read_bootstrap_version(&venv).expect("version written");
+        let recorded = version
+            .python_skills
+            .as_ref()
+            .expect("skills recorded")
+            .iter()
+            .map(|s| s.import_name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
     }
 }

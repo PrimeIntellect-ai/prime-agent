@@ -510,7 +510,6 @@ fn csi_key(payload: &[u8]) -> Option<Event> {
         b'O' => Some(Event::FocusLost),
         // Cursor position and device attributes: crossterm parks these as
         // internal events its `read()` never yields.
-        b'R' | b'c' => None,
         _ => None,
     }
 }
@@ -532,8 +531,7 @@ fn modifier_params(body: &[u8]) -> (KeyModifiers, KeyEventKind) {
             .bytes()
             .next_back()
             .filter(u8::is_ascii_digit)
-            .map(|b| b - b'0')
-            .unwrap_or(1);
+            .map_or(1, |b| b - b'0');
         return (parse_modifiers(mask), KeyEventKind::Press);
     };
     let mut parts = mods_field.split(':');
@@ -803,7 +801,7 @@ mod tests {
             .filter_map(|out| match out {
                 GuardOutput::Mouse(report) => Some(*report),
                 GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
-                _ => None,
+                GuardOutput::Event(_) => None,
             })
             .collect()
     }
@@ -1279,7 +1277,7 @@ mod tests {
         let now = Instant::now();
         assert!(guard.feed(esc_press(), now).is_empty());
         assert!(guard
-            .flush_expired(now + HOLD - Duration::from_millis(1))
+            .flush_expired((now + HOLD).checked_sub(Duration::from_millis(1)).unwrap())
             .is_empty());
         assert_eq!(
             guard.flush_expired(now + HOLD),

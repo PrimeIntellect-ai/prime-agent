@@ -69,9 +69,7 @@ impl SnapshotCredentials {
 }
 
 fn bearer_token_present(bearer_token_env_var: &str) -> bool {
-    std::env::var(bearer_token_env_var)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+    std::env::var(bearer_token_env_var).is_ok_and(|value| !value.trim().is_empty())
 }
 
 /// Options for [`http_connection_status`].

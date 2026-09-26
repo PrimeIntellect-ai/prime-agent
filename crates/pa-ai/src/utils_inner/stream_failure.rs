@@ -3,7 +3,10 @@
 //! into a generic string before it is logged and persisted.
 //! Ported from `packages/ai/src/utils/stream-failure.ts`.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
+use serde_json::Map;
 
 use crate::types::AssistantMessage;
 use crate::utils::diagnostics::{
@@ -29,7 +32,7 @@ pub enum StreamFailureKind {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StreamFailureInfo {
     pub kind: StreamFailureKind,
-    /// Provider's own error/stop identifier, e.g. "overloaded_error" or "SAFETY".
+    /// Provider's own error/stop identifier, e.g. "`overloaded_error`" or "SAFETY".
     #[serde(
         rename = "providerErrorType",
         default,
@@ -103,11 +106,11 @@ pub enum ConnectionErrorKind {
 
 /// The http2 transport failure detail, with the byte-exact user-facing text
 /// the TS bedrock client (bun's node:http2 behind the AWS SDK's
-/// NodeHttp2Handler) surfaces for it. Verified against the TS binary by the
+/// `NodeHttp2Handler`) surfaces for it. Verified against the TS binary by the
 /// provider-error probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum H2Failure {
-    /// A RST_STREAM received from the peer: "Stream closed with error code
+    /// A `RST_STREAM` received from the peer: "Stream closed with error code
     /// NGHTTP2_<NAME>" with the nghttp2 name of the carried code.
     StreamReset { nghttp2_code: String },
     /// A GOAWAY received from the peer: "Session closed with error code N"
@@ -143,7 +146,7 @@ pub enum ConnectionErrorProfile {
     /// A peer close before the response is node's `read ECONNRESET`
     /// (`TimeoutError` name, TS-binary verified).
     AwsHttp1 { host: String, port: u16 },
-    /// The AWS NodeHttp2Handler surface — the TS default bedrock transport
+    /// The AWS `NodeHttp2Handler` surface — the TS default bedrock transport
     /// (http2 with h2c prior knowledge over cleartext): the bun node:http2
     /// failure texts and `ERR_HTTP2_*` codes, TS-binary verified.
     AwsHttp2 { host: String, port: u16 },
@@ -188,11 +191,11 @@ pub struct ProviderHttpError {
     pub headers: std::collections::HashMap<String, String>,
     pub request_id: Option<String>,
     /// The TS SDK error class name recorded in the `provider_stream_failure`
-    /// diagnostic (e.g. "BadRequestError", "CodexApiError", "SDKError"); the
+    /// diagnostic (e.g. "`BadRequestError`", "`CodexApiError`", "`SDKError`"); the
     /// `ProviderHttpError` internal fallback when unset.
     pub sdk_name: Option<String>,
     /// Server-requested wait already resolved by the provider (Retry-After
-    /// header, resets_at body); overrides header re-parsing, like the TS
+    /// header, `resets_at` body); overrides header re-parsing, like the TS
     /// `err.retryAfterMs` field takes precedence over `parseRetryAfterMs`.
     pub retry_after_ms: Option<u64>,
     /// The provider error's own wire `code` (TS `err.code`), which the
@@ -236,41 +239,37 @@ impl ProviderConnectionError {
         match (&self.profile, &self.kind) {
             (
                 ConnectionErrorProfile::Sdk,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => "Connection error.".to_string(),
-            (ConnectionErrorProfile::Sdk, ConnectionErrorKind::Timeout) => {
-                "Request timed out.".to_string()
-            }
             (
-                ConnectionErrorProfile::Sdk,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
-            ) => "Connection error.".to_string(),
+                ConnectionErrorProfile::Sdk | ConnectionErrorProfile::AwsHttp1 { .. },
+                ConnectionErrorKind::Timeout,
+            ) => "Request timed out.".to_string(),
             // Raw `fetch` (bun) and the mistral `RequestTimeoutError` append
             // the raw cause to a fixed timeout prefix; the refused-connect
             // text is the runtime's own fixed message.
             (
                 ConnectionErrorProfile::RawFetch,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
-            ) => RUNTIME_CONNECT_REFUSED_MESSAGE.to_string(),
-            (ConnectionErrorProfile::RawFetch, ConnectionErrorKind::Timeout) => {
-                format!("Request timed out: {}", self.cause)
-            }
-            (
-                ConnectionErrorProfile::RawFetch,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => RUNTIME_CONNECT_REFUSED_MESSAGE.to_string(),
             (
-                ConnectionErrorProfile::MistralSdk,
-                ConnectionErrorKind::Connect | ConnectionErrorKind::Reset,
-            ) => format!(
-                "Unexpected HTTP client error: TypeError: {RUNTIME_CONNECT_REFUSED_MESSAGE}"
-            ),
-            (ConnectionErrorProfile::MistralSdk, ConnectionErrorKind::Timeout) => {
+                ConnectionErrorProfile::RawFetch | ConnectionErrorProfile::MistralSdk,
+                ConnectionErrorKind::Timeout,
+            ) => {
                 format!("Request timed out: {}", self.cause)
             }
             (
                 ConnectionErrorProfile::MistralSdk,
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
+                ConnectionErrorKind::Connect
+                | ConnectionErrorKind::Reset
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
             ) => format!(
                 "Unexpected HTTP client error: TypeError: {RUNTIME_CONNECT_REFUSED_MESSAGE}"
             ),
@@ -279,9 +278,6 @@ impl ProviderConnectionError {
             }
             (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Reset) => {
                 "read ECONNRESET".to_string()
-            }
-            (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Timeout) => {
-                "Request timed out.".to_string()
             }
             (
                 ConnectionErrorProfile::AwsHttp1 { .. },
@@ -341,7 +337,6 @@ impl ProviderConnectionError {
     /// SDK family records none).
     pub fn error_code(&self) -> Option<&'static str> {
         match (&self.profile, &self.kind) {
-            (ConnectionErrorProfile::Sdk, _) => None,
             (ConnectionErrorProfile::RawFetch, _) => Some("ConnectionRefused"),
             (ConnectionErrorProfile::MistralSdk, _) => Some("UnexpectedClientError"),
             (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Connect) => {
@@ -352,15 +347,17 @@ impl ProviderConnectionError {
             }
             // The TS client configures no AWS transport timeout, so there is
             // no ground-truth code; the classification records none.
-            (ConnectionErrorProfile::AwsHttp1 { .. }, ConnectionErrorKind::Timeout) => None,
-            (
+            (ConnectionErrorProfile::Sdk, _)
+            | (
                 ConnectionErrorProfile::AwsHttp1 { .. },
-                ConnectionErrorKind::H2Request(_) | ConnectionErrorKind::H2MidStream(_),
-            ) => None,
+                ConnectionErrorKind::Timeout
+                | ConnectionErrorKind::H2Request(_)
+                | ConnectionErrorKind::H2MidStream(_),
+            )
+            | (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Timeout) => None,
             (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Connect) => {
                 Some("ERR_HTTP2_STREAM_CANCEL")
             }
-            (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Timeout) => None,
             (ConnectionErrorProfile::AwsHttp2 { .. }, ConnectionErrorKind::Reset) => {
                 Some("ERR_HTTP2_ERROR")
             }
@@ -516,11 +513,10 @@ fn kind_message(kind: StreamFailureKind) -> &'static str {
     KIND_MESSAGES
         .iter()
         .find(|(candidate, _)| *candidate == kind)
-        .map(|(_, message)| *message)
-        .unwrap_or("Provider stream failed")
+        .map_or("Provider stream failed", |(_, message)| *message)
 }
 
-/// Build a user-facing message like "Provider overloaded (overloaded_error, 529) [request_id: req_abc]".
+/// Build a user-facing message like "Provider overloaded (`overloaded_error`, 529) [`request_id`: `req_abc`]".
 pub fn stream_failure_message(info: &StreamFailureInfo, detail: Option<&str>) -> String {
     let mut qualifiers: Vec<String> = Vec::new();
     if let Some(provider_error_type) = &info.provider_error_type {
@@ -531,17 +527,23 @@ pub fn stream_failure_message(info: &StreamFailureInfo, detail: Option<&str>) ->
     }
     let mut message = kind_message(info.kind).to_string();
     if !qualifiers.is_empty() {
-        message += &format!(" ({})", qualifiers.join(", "));
+        let _ = write!(message, " ({})", qualifiers.join(", "));
     }
     if let Some(detail) = detail {
-        message += &format!(": {detail}");
+        let _ = write!(message, ": {detail}");
     }
     if let Some(request_id) = &info.request_id {
-        message += &format!(" [request_id: {request_id}]");
+        let _ = write!(message, " [request_id: {request_id}]");
     }
     message
 }
 
+/// Classify a stream failure from the provider's error type and status code.
+///
+/// # Panics
+///
+/// Panics only if one of the built-in regex patterns fails to compile; the
+/// patterns are static literals, so this never fires in practice.
 pub fn classify_stream_failure(
     provider_error_type: Option<&str>,
     status: Option<u16>,
@@ -616,9 +618,7 @@ pub fn stream_failure_from_stop_reason(
         raw: None,
     };
     if info.kind == StreamFailureKind::Unknown
-        && raw_stop_reason
-            .map(|reason| reason.to_lowercase().contains("malformed"))
-            .unwrap_or(false)
+        && raw_stop_reason.is_some_and(|reason| reason.to_lowercase().contains("malformed"))
     {
         info.kind = StreamFailureKind::MalformedResponse;
     }
@@ -901,13 +901,13 @@ pub(crate) fn diagnostic_error_info(error: &ProviderError) -> DiagnosticErrorInf
         message,
         stack: None,
         code,
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
 /// Record a terminal stream failure on the message (structured diagnostic that
 /// persists to session JSONL) and emit one structured log line. Call from the
-/// provider's terminal catch after stop_reason/error_message are set; no-op for
+/// provider's terminal catch after `stop_reason/error_message` are set; no-op for
 /// user-initiated aborts.
 pub fn record_stream_failure(
     model: (&str, &str, &str),
@@ -952,6 +952,7 @@ pub fn record_stream_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn classifies_provider_error_types() {
@@ -1065,7 +1066,7 @@ mod tests {
     fn truncates_raw_payload() {
         let long = "x".repeat(2500);
         let truncated = truncate_raw_payload(&long);
-        assert!(truncated.chars().count() == 2001);
+        assert_eq!(truncated.chars().count(), 2001);
         assert!(truncated.ends_with('\u{2026}'));
     }
 
@@ -1262,7 +1263,7 @@ mod tests {
     }
 
     /// The AWS http1 handler's pre-response reset text (TS-binary verified):
-    /// node's `read ECONNRESET` recorded under a TimeoutError name with the
+    /// node's `read ECONNRESET` recorded under a `TimeoutError` name with the
     /// `ECONNRESET` code.
     #[test]
     fn aws_http1_reset_text() {
@@ -1309,7 +1310,7 @@ mod tests {
             message: "429 {\"error\":{\"code\":429}}".to_string(),
             status: Some(429),
             body: Some("{\"error\":{\"code\":429}}".to_string()),
-            headers: Default::default(),
+            headers: HashMap::default(),
             request_id: None,
             sdk_name: Some("ApiError".to_string()),
             retry_after_ms: None,
@@ -1362,7 +1363,7 @@ mod tests {
         let mut named = ProviderError::from_http_status_body(
             400,
             "{\"error\":{\"code\":400,\"message\":\"bad\"}}",
-            Default::default(),
+            HashMap::default(),
         );
         if let ProviderError::Http(http) = &mut named {
             http.sdk_name = Some("ApiError".to_string());
@@ -1380,7 +1381,7 @@ mod tests {
         let unnamed = ProviderError::from_http_status_body(
             400,
             "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}",
-            Default::default(),
+            HashMap::default(),
         );
         assert_eq!(
             diagnostic_error_info(&unnamed).name.as_deref(),

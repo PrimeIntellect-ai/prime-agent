@@ -21,10 +21,12 @@ use pa_types::daemon::{
     DaemonPeerTransportTicket, DaemonWorkerCommand, DaemonWorkerLifecycle, DaemonWorkerPeerGrant,
 };
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
 use crate::util;
+use serde_json::Map;
 
 /// TS `PEER_TRANSPORT_GRANT_TTL_MS`: how long a minted grant stays valid.
 pub(crate) const PEER_TRANSPORT_GRANT_TTL_MS: u64 = 10_000;
@@ -175,7 +177,7 @@ impl Supervisor {
         let registration = DaemonWorkerCommand::WorkerRegisterPeerTransport {
             id: None,
             grant: grant.clone(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_value(&registration)?;
         let response = self
@@ -184,6 +186,7 @@ impl Supervisor {
                 "worker_register_peer_transport",
                 payload,
                 GRANT_REGISTRATION_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
             )
             .await?;
         if !response.success {
@@ -302,7 +305,7 @@ mod tests {
     }
 
     /// The worker-peer ticket arm authenticates by worker token and refuses
-    /// self-targeting with the TS send_message string.
+    /// self-targeting with the TS `send_message` string.
     #[tokio::test]
     async fn worker_peer_ticket_auth_and_self_target() {
         use crate::registry::ResidentWorker;
@@ -336,14 +339,14 @@ mod tests {
                     create_command: DurableDaemonCreateCommand {
                         session_path: None,
                         no_session: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     consecutive_failures: 0,
                     stop_requested_at: None,
                     archive_on_stop: None,
                     last_failure_at: None,
                     last_error: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 std::path::PathBuf::from("/d.json"),
             )

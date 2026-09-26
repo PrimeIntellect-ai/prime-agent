@@ -95,6 +95,11 @@ struct SessionEntry {
 }
 
 /// Run the ACP stdio mode until stdin closes. Returns the process exit code.
+///
+/// # Errors
+///
+/// Never errors: parse failures answer on stdout and stdin close settles
+/// the loop (the `Result` return keeps the stdio entry points uniform).
 pub async fn run_acp_mode(options: AcpOptions) -> Result<i32> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
@@ -134,9 +139,8 @@ pub async fn run_acp_mode(options: AcpOptions) -> Result<i32> {
     loop {
         line.clear();
         match stdin.read_line(&mut line).await {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(_) => {}
-            Err(_) => break,
         }
         if line.trim().is_empty() {
             continue;

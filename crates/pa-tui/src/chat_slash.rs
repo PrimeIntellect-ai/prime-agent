@@ -162,9 +162,7 @@ mod tests {
     }
 
     fn spans_of(row: &Line) -> Vec<(String, Style)> {
-        row.iter()
-            .map(|s| (s.content.to_string(), s.style))
-            .collect()
+        row.iter().map(|s| (s.content.clone(), s.style)).collect()
     }
 
     /// The styled spans of one render at `Style` level: token colors on

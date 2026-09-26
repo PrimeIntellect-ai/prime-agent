@@ -336,9 +336,7 @@ fn prune_empty_git_parents(target_dir: &Path, install_root: &Path) {
             }
             continue;
         }
-        let empty = std::fs::read_dir(&current)
-            .map(|entries| entries.count() == 0)
-            .unwrap_or(false);
+        let empty = std::fs::read_dir(&current).is_ok_and(|entries| entries.count() == 0);
         if !empty {
             break;
         }

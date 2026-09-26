@@ -12,9 +12,9 @@ use std::path::Path;
 use pa_types::daemon::agent_roster::{
     classify_summary_value, roster_agent_id_for_summary, slim_roster_summary, AgentRosterEntry,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-/// The supervisor-owned roster. Write() classifies once and its file index
+/// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.
 pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,
@@ -75,10 +75,10 @@ impl AgentRoster {
             // delayed unsequenced frame must not overwrite the
             // replacement, whose registration pull already wrote its
             // state. No slot (an unstamped resident) accepts.
-            return !self
+            return self
                 .delta_watermarks
                 .get(worker_id)
-                .is_some_and(|slot| slot.instance != instance);
+                .is_none_or(|slot| slot.instance == instance);
         }
         match self.delta_watermarks.get_mut(worker_id) {
             Some(slot) if slot.instance == instance => {
@@ -253,7 +253,7 @@ impl AgentRoster {
             last_heard_from_at: None,
             worker_id: worker_id.map(str::to_string),
             summary: slim_roster_summary(summary),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         if let Some(previous) = self.entries.get(&agent_id).cloned() {
             self.drop_indexes(&previous);
@@ -370,10 +370,10 @@ impl AgentRoster {
 /// indexing): lexically normalized, falling back to the raw path when the
 /// file does not exist yet.
 fn canonical_roster_path(path: &str) -> String {
-    Path::new(path)
-        .canonicalize()
-        .map(|canonical| canonical.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string())
+    Path::new(path).canonicalize().map_or_else(
+        |_| path.to_string(),
+        |canonical| canonical.to_string_lossy().to_string(),
+    )
 }
 
 #[cfg(test)]

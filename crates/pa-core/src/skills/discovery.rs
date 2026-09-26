@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::diagnostics::ResourceDiagnostic;
 use super::frontmatter::parse_frontmatter;
+use super::skill_markdown_name;
 use super::{
     create_synthetic_source_info, validate_skill_description, validate_skill_name, Skill,
     SkillKind, SkillPythonMetadata, SourceScope,
@@ -101,8 +102,7 @@ pub(crate) fn load_skill_from_file(
     let name = frontmatter
         .get("name")
         .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| parent_dir_name.clone());
+        .map_or_else(|| parent_dir_name.clone(), str::to_string);
 
     for error in validate_skill_name(&name, &parent_dir_name) {
         diagnostics.push(ResourceDiagnostic::Warning {
@@ -115,11 +115,7 @@ pub(crate) fn load_skill_from_file(
         return (None, diagnostics);
     }
 
-    let python = if file_path
-        .file_name()
-        .map(|n| n == "SKILL.md")
-        .unwrap_or(false)
-    {
+    let python = if file_path.file_name().is_some_and(|n| n == "SKILL.md") {
         detect_python_skill(skill_dir, &name, &mut diagnostics)
     } else {
         None
@@ -271,10 +267,7 @@ fn load_skills_from_dir_internal(
         }
         let path = entry.path();
         let meta = std::fs::metadata(&path).ok();
-        let is_file = meta
-            .as_ref()
-            .map(std::fs::Metadata::is_file)
-            .unwrap_or(false);
+        let is_file = meta.as_ref().is_some_and(std::fs::Metadata::is_file);
         names.push((path, is_file, false));
     }
     // SKILL.md in this directory: stop after loading it.
@@ -342,7 +335,7 @@ fn load_skills_from_dir_internal(
             diagnostics.extend(sub.diagnostics);
             continue;
         }
-        if !is_file || !include_root_files || !name.ends_with(".md") {
+        if !is_file || !include_root_files || !skill_markdown_name(&name) {
             continue;
         }
         let (skill, file_diagnostics) = load_skill_from_file(&path, source);

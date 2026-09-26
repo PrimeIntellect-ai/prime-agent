@@ -198,8 +198,7 @@ fn user_text(content: &pa_types::ai::UserContent) -> String {
                 pa_types::ai::UserContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(""),
+            .collect::<String>(),
     }
 }
 
@@ -278,8 +277,7 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                         pa_types::ai::UserContentBlock::Text(text) => Some(text.text.clone()),
                         _ => None,
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
                 if !content.is_empty() {
                     // Label the tool name, error status, and the index of
                     // the paired call so the summarizer can match each
@@ -335,7 +333,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -347,14 +345,14 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(pa_types::ai::TextContent {
                     text: "doing it".to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
                 pa_types::ai::AssistantContentBlock::ToolCall(pa_types::ai::ToolCall {
                     id: "tc1".to_string(),
                     name: "edit".to_string(),
                     arguments,
                     thought_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ],
             api: "openai-completions".to_string(),
@@ -368,7 +366,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -397,7 +395,7 @@ mod tests {
             })),
             is_error: false,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         extract_file_ops_from_message(&result, &mut ops);
         assert!(ops.edited.contains("/pkg/lib.rs"));
@@ -428,13 +426,13 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: text.to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             )],
             details: None,
             is_error,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -450,7 +448,7 @@ mod tests {
                         name: name.to_string(),
                         arguments,
                         thought_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     })
                 })
                 .collect(),
@@ -465,7 +463,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -626,13 +624,13 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: long,
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             )],
             details: None,
             is_error: false,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         let text = serialize_conversation(std::slice::from_ref(&result));
         assert!(text.contains("characters truncated; first"));

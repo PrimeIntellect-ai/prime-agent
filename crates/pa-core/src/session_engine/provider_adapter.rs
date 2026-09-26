@@ -48,6 +48,38 @@ pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinking
     }
 }
 
+/// Adapt the loop-level payload hook to the pa-ai hook shape: the two
+/// crates' `Model` values cross by the shared wire shape. A model that
+/// fails the round-trip (a wire-shape mismatch bug) keeps the payload
+/// unchanged — hooks are advisory and must never fail the request.
+fn agent_payload_hook_to_ai(hook: pa_agent::stream::OnPayloadHook) -> pa_ai::types::OnPayloadHook {
+    std::sync::Arc::new(move |payload: serde_json::Value, model: &Model| {
+        match json_round_trip::<_, pa_agent::types::Model>(model) {
+            Some(agent_model) => hook(payload, &agent_model),
+            None => Some(payload),
+        }
+    })
+}
+
+/// Adapt the loop-level response hook to the pa-ai hook shape. The
+/// `{status, headers}` response converts field-by-field; a model that
+/// fails the round-trip drops the hook call (advisory, never fatal).
+fn agent_response_hook_to_ai(
+    hook: pa_agent::stream::OnResponseHook,
+) -> pa_ai::types::OnResponseHook {
+    std::sync::Arc::new(
+        move |response: pa_ai::types::ProviderResponse, model: &Model| {
+            let agent_response = pa_agent::stream::ProviderResponse {
+                status: response.status,
+                headers: response.headers,
+            };
+            if let Some(agent_model) = json_round_trip::<_, pa_agent::types::Model>(model) {
+                hook(agent_response, &agent_model);
+            }
+        },
+    )
+}
+
 /// The mutable provider target a live session's stream reads per call:
 /// daemon `set_model` swaps it without rebuilding the session, and the
 /// provider-failover switch swaps it for the switched-to provider.
@@ -62,6 +94,11 @@ pub struct ProviderTarget {
 /// target from a shared slot the host can swap live (`set_model`, provider
 /// failover). The slot is `None` only before the host sets the build-time
 /// target; the adapter never runs before that.
+///
+/// # Panics
+///
+/// Panics at stream time if the provider target lock is poisoned, or if the
+/// target slot was never set before the first stream.
 pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>>>) -> StreamFn {
     Arc::new(
         move |_requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
@@ -115,8 +152,12 @@ fn stream_once(
             service_tier,
             cache_retention: None,
             session_id: options.session_id.clone(),
-            on_payload: None,
-            on_response: None,
+            // The loop-level request hooks (TS `onPayload`/`onResponse`
+            // riding `SimpleStreamOptions` into the provider client) cross
+            // the crate boundary here: the payload hook may replace the
+            // wire payload, the response hook observes the headers.
+            on_payload: options.on_payload.map(agent_payload_hook_to_ai),
+            on_response: options.on_response.map(agent_response_hook_to_ai),
             headers: None,
             metadata: None,
             timeout_ms: None,
@@ -160,6 +201,11 @@ pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
 
 /// Convert one pa-ai stream event into the pa-agent loop's event enum.
 /// Payloads cross the boundary by wire-shape (JSON) round-trip.
+///
+/// # Panics
+///
+/// Panics when an assistant message cannot round-trip across the two
+/// crates' wire shapes (a structural shape-mismatch bug).
 pub fn convert_stream_event(
     event: &pa_types::ai::AssistantMessageEvent,
 ) -> Option<pa_agent::stream::AssistantMessageEvent> {
@@ -272,10 +318,10 @@ fn consumer_pump(
     })
 }
 
-/// A ModelStream whose lifetime keeps the pa-ai pump task alive and owns
+/// A `ModelStream` whose lifetime keeps the pa-ai pump task alive and owns
 /// the fetch's cancellation token (the transport half of the turn-abort:
 /// the token cancels the in-flight request exactly where TS's fetch
-/// AbortSignal fires).
+/// `AbortSignal` fires).
 struct PumpedStream {
     _forwarder: tokio::task::JoinHandle<()>,
     stream: pa_agent::stream::AssistantMessageEventStream,
@@ -340,7 +386,7 @@ mod tests {
                 ));
                 Ok(pa_ai::faux::faux_assistant_text_message(
                     "ok",
-                    Default::default(),
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
                 ))
             }));
         registration.set_responses(vec![factory.clone(), factory]);
@@ -393,11 +439,11 @@ mod tests {
                     pa_types::ai::UserContentBlock::Text(pa_types::ai::TextContent {
                         text: "reply with ok".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     }),
                 ]),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         );
     }
@@ -415,7 +461,7 @@ mod tests {
             thinking: "trace".into(),
             thinking_signature: Some("sig-1".into()),
             redacted: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         let wire = serde_json::to_value(&thinking).unwrap();
         assert_eq!(
@@ -437,7 +483,7 @@ mod tests {
             name: "bash".into(),
             arguments: serde_json::Map::new(),
             thought_signature: Some("sig-2".into()),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         let wire = serde_json::to_value(&tool_call).unwrap();
         assert_eq!(

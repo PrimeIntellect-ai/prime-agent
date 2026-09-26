@@ -13,7 +13,7 @@ use crate::packages::source::SourceScope;
 use crate::packages::{PackageManager, PackageManagerOptions, ResolveExtensionOptions};
 use crate::settings::SettingsManager;
 
-/// Environment mutations (HOME, PI_OFFLINE) are process-wide: tests that
+/// Environment mutations (HOME, `PI_OFFLINE`) are process-wide: tests that
 /// touch them, and tests that read the env-sensitive update flows,
 /// serialize through the shared packages lock.
 use crate::packages::test_support::ENV_MUTEX;
@@ -56,9 +56,10 @@ impl Fixture {
     fn set_user_packages(&mut self, packages: serde_json::Value) {
         std::fs::create_dir_all(&self.agent_dir).unwrap();
         let path = self.agent_dir.join("settings.json");
-        let mut settings = std::fs::read_to_string(&path)
-            .map(|content| serde_json::from_str::<serde_json::Value>(&content).unwrap())
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut settings = std::fs::read_to_string(&path).map_or_else(
+            |_| serde_json::json!({}),
+            |content| serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+        );
         settings["packages"] = packages;
         std::fs::write(&path, settings.to_string()).unwrap();
         self.reload();
@@ -67,9 +68,10 @@ impl Fixture {
     fn set_user_array(&mut self, field: &str, entries: serde_json::Value) {
         std::fs::create_dir_all(&self.agent_dir).unwrap();
         let path = self.agent_dir.join("settings.json");
-        let mut settings = std::fs::read_to_string(&path)
-            .map(|content| serde_json::from_str::<serde_json::Value>(&content).unwrap())
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut settings = std::fs::read_to_string(&path).map_or_else(
+            |_| serde_json::json!({}),
+            |content| serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+        );
         settings[field] = entries;
         std::fs::write(&path, settings.to_string()).unwrap();
         self.reload();
@@ -79,9 +81,10 @@ impl Fixture {
         let dir = self.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        let mut settings = std::fs::read_to_string(&path)
-            .map(|content| serde_json::from_str::<serde_json::Value>(&content).unwrap())
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut settings = std::fs::read_to_string(&path).map_or_else(
+            |_| serde_json::json!({}),
+            |content| serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+        );
         settings[field] = entries;
         std::fs::write(&path, settings.to_string()).unwrap();
         self.reload();

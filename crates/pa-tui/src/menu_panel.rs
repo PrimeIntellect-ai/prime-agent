@@ -323,6 +323,46 @@ fn render_input_field(
     line
 }
 
+/// The prompt-less field row (TS `MenuSearchInput`'s inline + plain +
+/// hidePrompt call: `" "` + the field, no `> ` prompt — the onboarding
+/// picker marks selection with its own caret): one full-width line for
+/// surfaces that own their selection language.
+pub(crate) fn search_field_plain_row(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) -> Line {
+    let input_width = width.saturating_sub(2).max(1);
+    let mut line: Line = vec![Span::raw(" ")];
+    if value.is_empty() {
+        // TS puts the caret on the first placeholder character, so the
+        // field keeps the same left edge as the text above it.
+        let mut characters = placeholder.chars();
+        match characters.next() {
+            Some(first) if focused => {
+                line.push(Span::styled(
+                    first.to_string(),
+                    ratatui::style::Style::default()
+                        .add_modifier(ratatui::style::Modifier::REVERSED),
+                ));
+                line.push(theme.fg_span(ThemeColor::Dim, characters.as_str()));
+            }
+            _ => line.push(theme.fg_span(ThemeColor::Dim, placeholder)),
+        }
+    } else {
+        line.extend(input_render(theme, input_width, value, cursor, focused));
+    }
+    let mut line = truncate_line(&line, width, "");
+    let used = crate::width::spans_width(&line);
+    if used < width {
+        line.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
 /// One input render (TS `Input.render`): prompt, the visible slice with the
 /// caret (a reversed cell) at the cursor, and trailing padding.
 fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused: bool) -> Line {
@@ -351,9 +391,7 @@ fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused
         } else {
             cursor_col.saturating_sub(scroll_width / 2)
         };
-        let visible = slice_by_chars(value, start_col, scroll_width);
-        let before_cursor = slice_by_chars(value, start_col, cursor_col.saturating_sub(start_col));
-        (visible, before_cursor.chars().count())
+        scroll_window(value, start_col, scroll_width, cursor_col)
     };
     let chars: Vec<char> = visible.chars().collect();
     let before: String = chars[..cursor_display.min(chars.len())].iter().collect();
@@ -378,10 +416,39 @@ fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused
     line
 }
 
-/// Slice a string by character count (TS `String.prototype.slice` here is
-/// column-based in the reference; both agree for the ASCII field content).
-fn slice_by_chars(text: &str, start_chars: usize, count: usize) -> String {
-    text.chars().skip(start_chars).take(count).collect()
+/// The input's visible window (TS `String.prototype.slice`, which is
+/// column-based in the reference): the window starts at the first
+/// character reaching the display-column offset — a wide character
+/// straddling the left edge renders whole, never split — ends before the
+/// first that would cross the right edge, and returns the caret's
+/// character index inside the window (the boundary's position). ASCII
+/// content reduces to the plain character slice.
+fn scroll_window(
+    value: &str,
+    start_col: usize,
+    width_cols: usize,
+    cursor_col: usize,
+) -> (String, usize) {
+    let mut window = String::new();
+    let mut caret = 0usize;
+    let mut col = 0usize;
+    for character in value.chars() {
+        let character_width = str_width(&character.to_string());
+        if window.is_empty() {
+            if col + character_width <= start_col {
+                col += character_width;
+                continue;
+            }
+        } else if col >= start_col + width_cols {
+            break;
+        }
+        if col < cursor_col {
+            caret += 1;
+        }
+        window.push(character);
+        col += character_width;
+    }
+    (window, caret)
 }
 
 /// The inline list's visible-row count (TS `getMenuListLayout`, inline
@@ -443,6 +510,25 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
+/// One hint segment: the resolved bindings' labels joined with `/` plus the
+/// action (TS `keyHint`). An action whose binding is unconfigured is
+/// omitted — the hint never advertises a key the surface does not handle.
+pub(crate) fn key_hint(
+    kb: &crate::keybindings::KeybindingsManager,
+    bindings: &[&str],
+    action: &str,
+) -> Option<String> {
+    let labels: Vec<String> = bindings
+        .iter()
+        .filter_map(|binding| kb.first_key(binding))
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    Some(format!("{} {action}", labels.join("/")))
+}
+
 /// One detail-block row: the selected item's metadata under the list,
 /// truncated to the frame width (marked) and padded to the full row; the
 /// content's own spans carry the color and leading indent.
@@ -459,6 +545,7 @@ pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::KeybindingsManager;
     use crate::theme::{ColorMode, Theme};
 
     fn theme() -> Theme {
@@ -467,6 +554,26 @@ mod tests {
 
     fn row_text(line: &Line) -> String {
         line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    /// The hint segment resolves the bound keys and omits an unbound
+    /// action entirely — a hint must never advertise a key the surface
+    /// does not handle (an empty user binding disables the action).
+    #[test]
+    fn key_hint_omits_unbound_actions() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            key_hint(&kb, &["tui.select.confirm"], "select").as_deref(),
+            Some("Enter select")
+        );
+        let mut bindings = crate::keybindings::KeybindingsConfig::new();
+        bindings.insert("tui.select.cancel".to_string(), Vec::new());
+        let unbound = KeybindingsManager::with_user_bindings(bindings);
+        assert_eq!(key_hint(&unbound, &["tui.select.cancel"], "close"), None);
+        assert_eq!(
+            key_hint(&unbound, &["tui.select.up", "tui.select.down"], "navigate").as_deref(),
+            Some("\u{2191}/\u{2193} navigate")
+        );
     }
 
     /// The table cell pads by GRAPHEME width: a multi-codepoint cluster

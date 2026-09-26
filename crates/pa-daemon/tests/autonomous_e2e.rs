@@ -96,7 +96,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -161,7 +161,7 @@ impl Client {
                     last_line = Instant::now();
                 }
                 Err(_) => {
-                    if Instant::now() - last_line >= quiet_ms {
+                    if last_line.elapsed() >= quiet_ms {
                         return;
                     }
                 }

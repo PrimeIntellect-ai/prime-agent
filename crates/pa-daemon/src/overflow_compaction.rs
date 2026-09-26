@@ -237,7 +237,7 @@ impl AgentSessionEngine {
                     engine
                         .session
                         .drop_trailing_assistant(TrailingAssistantFilter::Any)
-                        .await
+                        .await;
                 });
             }
         }
@@ -260,6 +260,10 @@ impl AgentSessionEngine {
         }) {
             return OverflowAttempt::Cancelled;
         }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.overflow_start_emitted",
+            serde_json::Value::Null,
+        );
         // TS `_runAutoCompaction` assigns `_autoCompactionAbortController`
         // for the overflow run too: an `abort_compaction` command lands in
         // the shared slot and cancels the in-flight summarizer.
@@ -338,6 +342,10 @@ impl AgentSessionEngine {
                 if !emit(EngineEvent::Compaction { entry, event }) {
                     return OverflowAttempt::Cancelled;
                 }
+                pa_core::session_engine::compaction_trace::trace(
+                    "auto.overflow_end_emitted",
+                    serde_json::Value::Null,
+                );
                 // The compaction rebuild re-adds the error turn from the
                 // kept tail: drop it again so the retried request is free
                 // of it (TS will-retry branch).
@@ -348,7 +356,7 @@ impl AgentSessionEngine {
                             engine
                                 .session
                                 .drop_trailing_assistant(TrailingAssistantFilter::ErrorOnly)
-                                .await
+                                .await;
                         });
                     }
                 }
@@ -929,7 +937,7 @@ mod tests {
             &mut seed_events,
         );
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Default::default();
+        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = std::sync::Arc::default();
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let admission = crate::agent_engine::tests::admit_parked(
             &engine,

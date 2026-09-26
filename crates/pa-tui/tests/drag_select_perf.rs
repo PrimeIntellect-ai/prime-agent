@@ -191,7 +191,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -214,7 +214,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     }
 }
@@ -247,17 +247,18 @@ fn run_plan(
 }
 
 /// The scroll-paused drag burst: mount the window at the transcript top,
-/// then press-drag-release across the first rows.
+/// then press-drag-release across the first rows. The chat opens directly
+/// into content, so the brand splash is suppressed (the operator's
+/// 2026-09-26 zero-shift directive) and the first user message's text
+/// row is row 3 in SGR coordinates (0-based 2): the burst presses the
+/// message's first text row and drags through its opening lines.
 fn drag_burst() -> Vec<HeadlessStep> {
     let mut steps = vec![HeadlessStep::ScrollTop];
-    steps.push(HeadlessStep::Mouse(press(3, 12)));
+    steps.push(HeadlessStep::Mouse(press(3, 3)));
     for index in 0..100 {
-        steps.push(HeadlessStep::Mouse(drag(
-            3 + (index % 40),
-            12 + (index % 6),
-        )));
+        steps.push(HeadlessStep::Mouse(drag(3 + (index % 40), 3 + (index % 6))));
     }
-    steps.push(HeadlessStep::Mouse(release(43, 17)));
+    steps.push(HeadlessStep::Mouse(release(43, 8)));
     steps
 }
 

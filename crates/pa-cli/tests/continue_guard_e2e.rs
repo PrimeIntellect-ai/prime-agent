@@ -110,7 +110,7 @@ fn make_session_active(socket: &Path, session_path: &Path, cwd: &Path) -> String
             .expect("timeout");
         match reader.read_line(&mut line) {
             Ok(0) => panic!("daemon closed during create"),
-            Ok(_) if line.trim().is_empty() => continue,
+            Ok(_) if line.trim().is_empty() => {}
             Ok(_) => {
                 let response: Value = serde_json::from_str(line.trim()).expect("parse");
                 assert_eq!(response["success"], true, "create failed: {response}");
@@ -120,7 +120,7 @@ fn make_session_active(socket: &Path, session_path: &Path, cwd: &Path) -> String
                     .expect("active session id")
                     .to_string();
             }
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 }

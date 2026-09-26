@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use futures::Stream;
+use serde_json::Map;
 
 pub use crate::types::{AssistantContent, AssistantMessage, AssistantMessageEvent, StopReason};
 
@@ -233,6 +234,14 @@ impl AssistantMessageEventStream {
         futures::future::poll_fn(|cx| self.poll_next_event(cx)).await
     }
 
+    /// Poll for the next queued event: `Ready` with one when queued, `None`
+    /// once the stream terminated, or `Pending` (after registering the waker)
+    /// until an event arrives.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state `Mutex` is poisoned (a thread panicked
+    /// while holding the lock).
     pub fn poll_next_event(
         &mut self,
         cx: &mut TaskContext<'_>,
@@ -249,6 +258,14 @@ impl AssistantMessageEventStream {
     }
 
     /// Await the final assistant message carried by the terminal event.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state `Mutex` is poisoned (a thread panicked
+    /// while holding the lock).
+    ///
+    /// A stream terminated without a resolved message (for example
+    /// `end(None)`) never resolves: this future hangs instead of panicking.
     pub async fn result(self) -> AssistantMessage {
         if let Some(message) = self.try_result() {
             return message;
@@ -314,9 +331,8 @@ pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> A
         error_message: None,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        rest: Default::default(),
+            .map_or(0, |d| d.as_millis() as u64),
+        rest: Map::default(),
     }
 }
 
@@ -336,7 +352,7 @@ mod tests {
             content: vec![AssistantContent::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             api: "test".into(),
             provider: "test".into(),
@@ -349,7 +365,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

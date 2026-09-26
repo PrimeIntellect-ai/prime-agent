@@ -1,6 +1,6 @@
 //! Process control: signals, process groups, detached spawns.
 //!
-//! Unix: libc `kill` / `process_group(0)`. Windows: TerminateProcess for
+//! Unix: libc `kill` / `process_group(0)`. Windows: `TerminateProcess` for
 //! single-pid signals (the libuv/Node win32 mapping), the absolute-System32
 //! `taskkill /F /T` for tree kills (the TS `killProcessTree` /
 //! `killOrphanProcess` precedent), and the Node `detached: true` /
@@ -106,7 +106,7 @@ pub fn kill_pid(_pid: i32, _signal: Signal) -> bool {
     false
 }
 
-/// Kill a process and all its children: the process group first (bash()
+/// Kill a process and all its children: the process group first (`bash()`
 /// children run detached in a new group), then the bare pid as fallback.
 /// Returns true when either signal was delivered (TS `killProcessTree`).
 #[cfg(unix)]

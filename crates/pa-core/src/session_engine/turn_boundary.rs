@@ -230,9 +230,9 @@ impl TurnBoundaryRequests {
                     let scheduled = requests.compaction_scheduled().await;
                     let (tokens, window, percent) = match usage {
                         Some(usage) => (
-                            usage.tokens.map(Value::from).unwrap_or(Value::Null),
+                            usage.tokens.map_or(Value::Null, Value::from),
                             Value::from(usage.context_window),
-                            usage.percent.map(Value::from).unwrap_or(Value::Null),
+                            usage.percent.map_or(Value::Null, Value::from),
                         ),
                         None => (Value::Null, Value::Null, Value::Null),
                     };
@@ -503,6 +503,11 @@ fn compaction_request_skip_reason(
 /// the estimate; messages after it are added with the chars/4 heuristic.
 /// `None` when the context window is unknown; `tokens`/`percent` `None`
 /// right after a compaction without a usable post-compaction usage.
+///
+/// # Panics
+///
+/// The `expect` on the anchoring usage cannot fire: the index came from a
+/// search restricted to messages with a valid usage.
 pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Option<ContextUsage> {
     let context_window = context_window.filter(|window| *window > 0)?;
 
@@ -517,9 +522,8 @@ pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Opti
             .iter()
             .filter_map(message_value)
             .find_map(|message| valid_assistant_usage(&message));
-        let usable = post_compaction_usage
-            .map(|usage| calculate_context_tokens(&usage) > 0)
-            .unwrap_or(false);
+        let usable =
+            post_compaction_usage.is_some_and(|usage| calculate_context_tokens(&usage) > 0);
         if !usable {
             return Some(ContextUsage {
                 tokens: None,
@@ -601,7 +605,7 @@ mod tests {
             provider: "faux".to_string(),
             base_url: "http://localhost".to_string(),
             reasoning: false,
-            cost: Default::default(),
+            cost: pa_agent::types::UsageCost::default(),
             context_window: 100_000,
             max_tokens: 1_000,
         }
@@ -611,7 +615,7 @@ mod tests {
         SessionMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -620,7 +624,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "test".to_string(),
             provider: "faux".to_string(),
@@ -634,13 +638,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 50,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -1150,7 +1154,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 130,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         session.append_message(assistant).unwrap();
         session

@@ -28,7 +28,7 @@ pub const KNOWN_PLATFORMS: &[&str] = &[
     "win32-x64",
 ];
 
-/// The TS release-platform alias of the running build (assemble_artifacts.py
+/// The TS release-platform alias of the running build (`assemble_artifacts.py`
 /// `TARGET_ALIASES`). Baseline/musl variants cannot be distinguished at
 /// runtime; the plain alias matches what the coordinator downloads.
 pub fn current_platform_alias() -> &'static str {
@@ -134,7 +134,10 @@ fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
     let target_text = std::fs::read_link(&launcher)
         .with_context(|| format!("read the {} launcher at {}", link, launcher.display()))?;
     let target = parse_release_link(&target_text).ok_or_else(|| {
-        anyhow!("launcher {link} does not target a managed release: {target_text:?}")
+        anyhow!(
+            "launcher {link} does not target a managed release: {}",
+            target_text.display()
+        )
     })?;
     let release_dir = root.join("releases").join(release_directory_name(&target));
     let executable = release_dir.join("prime-agent");
@@ -177,6 +180,13 @@ pub struct RunningRelease {
     pub version: String,
 }
 
+/// The running binary's release directory and version.
+///
+/// # Errors
+///
+/// Returns an error when the executable path cannot be resolved, does not
+/// live in a release directory, or its directory name is not a managed
+/// release name.
 pub fn running_release(executable: &Path) -> Result<RunningRelease> {
     let resolved = executable
         .canonicalize()
@@ -217,6 +227,11 @@ pub fn install_source_is_valid(source: &str) -> bool {
 /// fsync a directory so its entries survive a crash (staged releases and
 /// the launcher repoint must never reference an unwritten inode; a
 /// directory fd opened read-only accepts `sync_all` on POSIX platforms).
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be opened or its `sync_all`
+/// fails.
 pub fn sync_directory(path: &Path) -> Result<()> {
     let dir = std::fs::File::open(path)?;
     dir.sync_all()
@@ -304,6 +319,11 @@ pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> 
 /// Read the active installation (`bin/prime-agent`), TS
 /// `readNativeInstallation(root)`. Falls back to `bin/previous` when the
 /// active link is missing (the coordinator's rollback planning path).
+///
+/// # Errors
+///
+/// Returns an error when the launcher link cannot be read or validated, or
+/// the release's `.install-source` metadata cannot be read.
 pub fn read_installation(root: &Path, link: &str) -> Result<Installation> {
     let target = read_target(root, link)?;
     let base_url = std::fs::read_to_string(target.release_dir.join(".install-source"))
@@ -317,6 +337,12 @@ pub fn read_installation(root: &Path, link: &str) -> Result<Installation> {
 /// `.activation-state` record wins when present — it carries both link
 /// targets from the interrupted swap, and trusting the bare `previous` link
 /// alone would be ambiguous after a partial repoint.
+///
+/// # Errors
+///
+/// Returns an error when the `.activation-state` record cannot be read or is
+/// empty or truncated, or when the fallback `previous` installation cannot
+/// be read.
 pub fn read_rollback_installation(root: &Path) -> Result<Installation> {
     let state_path = root.join(".activation-state");
     if !state_path.exists() {

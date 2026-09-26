@@ -1,11 +1,11 @@
-//! OpenAI Completions streaming core.
+//! `OpenAI` Completions streaming core.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
-//! chunk-driven block state (text/thinking/toolcalls/reasoning_details), SSE
+//! chunk-driven block state (`text/thinking/toolcalls/reasoning_details`), SSE
 //! decoding, and the provider stream function.
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::cache_pricing::{get_anthropic_cache_write_cost, has_standard_anthropic_cache_pricing};
 use crate::env_api_keys::get_env_api_key;
@@ -69,7 +69,7 @@ impl StreamingState {
             .push(AssistantContent::Text(TextContent {
                 text: String::new(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         self.text_block = Some(index);
@@ -94,7 +94,7 @@ impl StreamingState {
                 thinking: String::new(),
                 thinking_signature: Some(thinking_signature.to_string()),
                 redacted: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         self.thinking_block = Some(index);
@@ -132,9 +132,9 @@ impl StreamingState {
             .push(AssistantContent::ToolCall(ToolCall {
                 id: id.unwrap_or("").to_string(),
                 name: String::new(),
-                arguments: Default::default(),
+                arguments: Map::default(),
                 thought_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         if let Some(stream_index) = stream_index {
@@ -165,14 +165,13 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
                     content_index: index as u64,
                     content: thinking.thinking.clone(),
                     partial: state.output.clone(),
-                })
+                });
             }
             AssistantContent::ToolCall(_) => {
                 let partial_args = state.tool_call_partial_args.remove(&index);
                 let arguments = partial_args
                     .as_deref()
-                    .map(|partial| parse_streaming_json(Some(partial)))
-                    .unwrap_or_else(|| json!({}));
+                    .map_or_else(|| json!({}), |partial| parse_streaming_json(Some(partial)));
                 let arguments = arguments.as_object().cloned().unwrap_or_default();
                 if let AssistantContent::ToolCall(tool_call) = &mut state.output.content[index] {
                     tool_call.arguments = arguments;
@@ -233,11 +232,7 @@ fn handle_chunk(
     };
 
     // Fallback: some providers (e.g., Moonshot) return usage in choice.usage.
-    if !chunk
-        .get("usage")
-        .map(serde_json::Value::is_object)
-        .unwrap_or(false)
-    {
+    if !chunk.get("usage").is_some_and(serde_json::Value::is_object) {
         if let Some(usage) = choice.get("usage") {
             if usage.is_object() {
                 state.output.usage = parse_chunk_usage(usage, model, cache_write_cost);
@@ -393,7 +388,7 @@ fn handle_chunk(
                     detail.get("data").filter(|value| !value.is_null()),
                 ) {
                     let _ = data;
-                    for block in state.output.content.iter_mut() {
+                    for block in &mut state.output.content {
                         if let AssistantContent::ToolCall(tool_call) = block {
                             if tool_call.id == id {
                                 tool_call.thought_signature = Some(detail.to_string());
@@ -412,7 +407,7 @@ fn handle_chunk(
                         thinking: String::new(),
                         thinking_signature: None,
                         redacted: Some(true),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                 let index = state.output.content.len() - 1;
                 state.reasoning_details_block = Some(index);
@@ -473,7 +468,7 @@ pub fn stream_openai_completions(
             stop_reason_raw: None,
             error_message: None,
             timestamp: crate::utils_inner::diagnostics::now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -651,8 +646,7 @@ async fn run_stream(
     if base_options
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

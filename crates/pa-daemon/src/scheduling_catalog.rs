@@ -14,12 +14,13 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use pa_core::cron::store::{AgentCronJobStore, HeartbeatManagementAction};
 use pa_core::cron::{is_heartbeat_cron_job, AgentCronJob, JobStatus};
 use pa_types::daemon::DaemonCommand;
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{
     command_type_name, response_failure, response_line, response_success, DaemonResponse,
 };
@@ -130,7 +131,13 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(resident, command_type, payload, CATALOG_FORWARD_TIMEOUT_MS)
+                    .route_command(
+                        resident,
+                        command_type,
+                        payload,
+                        CATALOG_FORWARD_TIMEOUT_MS,
+                        RouteAdmission::ClientRequest,
+                    )
                     .await
                 {
                     Ok(response) => response,
@@ -260,22 +267,20 @@ impl Supervisor {
                 ));
                 None
             };
-            let list = match list {
-                Some(list) => list,
-                None => {
-                    let snapshot = resident.heartbeat_snapshot.lock().await;
-                    match snapshot.as_ref().filter(|snapshot| {
-                        snapshot.generation
-                            == resident
-                                .heartbeat_snapshot_generation
-                                .load(Ordering::Relaxed)
-                    }) {
-                        Some(snapshot) => snapshot.rows.clone(),
-                        None => {
-                            failed.get_or_insert(response);
-                            continue;
-                        }
-                    }
+            let list = if let Some(list) = list {
+                list
+            } else {
+                let snapshot = resident.heartbeat_snapshot.lock().await;
+                if let Some(snapshot) = snapshot.as_ref().filter(|snapshot| {
+                    snapshot.generation
+                        == resident
+                            .heartbeat_snapshot_generation
+                            .load(Ordering::Relaxed)
+                }) {
+                    snapshot.rows.clone()
+                } else {
+                    failed.get_or_insert(response);
+                    continue;
                 }
             };
             // The stored snapshot carries the generation captured before
@@ -557,7 +562,7 @@ impl Supervisor {
             id: None,
             active_session_id: None,
             include_inactive: Some(true),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         for resident in self.live_workers_in_creation_order().await {
             let listing = self
@@ -571,11 +576,10 @@ impl Supervisor {
                 .as_ref()
                 .and_then(|data| data.get("jobs"))
                 .and_then(Value::as_array)
-                .map(|jobs| {
+                .is_some_and(|jobs| {
                     jobs.iter()
                         .any(|job| job.get("id").and_then(Value::as_str) == Some(job_id))
-                })
-                .unwrap_or(false);
+                });
             if !owns_job {
                 continue;
             }

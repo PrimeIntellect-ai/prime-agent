@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success, DaemonResponse};
 use crate::supervisor::{
     client_command_payload, Supervisor, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
@@ -55,7 +56,7 @@ pub(crate) struct PromptAdmissionTable {
 }
 
 impl PromptAdmissionTable {
-    /// The TS parse-time registration: a prompt/prompt_and_wait carrying
+    /// The TS parse-time registration: a `prompt/prompt_and_wait` carrying
     /// an `admissionId` reserves it (duplicates answer the TS error).
     pub(crate) fn register(
         &self,
@@ -237,8 +238,8 @@ impl Supervisor {
                 "Prompt admission was cancelled.",
             );
         }
-        let (worker_admission_id, timeout) =
-            match connection.prompt_admissions.with(&key, |admission| {
+        let Some((worker_admission_id, timeout)) =
+            connection.prompt_admissions.with(&key, |admission| {
                 (
                     admission.worker_admission_id.clone(),
                     if matches!(
@@ -250,57 +251,52 @@ impl Supervisor {
                         ROUTE_TIMEOUT_MS
                     },
                 )
-            }) {
-                Some(fields) => fields,
-                // An admission that vanished before the route: the prompt
-                // routes through the generic path (TS `admission undefined`).
-                None => {
-                    return self
-                        .route_client_command(command, client_id, attached, command_id, type_name)
-                        .await
-                }
-            };
+            })
+        else {
+            // An admission that vanished before the route: the prompt
+            // routes through the generic path (TS `admission undefined`).
+            return self
+                .route_client_command(command, client_id, attached, command_id, type_name)
+                .await;
+        };
         // Resolve the session (the generic route's wake-aware resolution).
         let mut rebound_to: Option<String> = None;
-        let resident = match self.registry.resolve(active_session_id).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                self.await_restore_target(active_session_id).await;
-                match self.registry.resolve(active_session_id).await {
-                    Ok(resident) => resident,
-                    Err(_) => {
-                        // The stale-active-id rebind (the generic route's
-                        // seam): the admission id stays the client's
-                        // idempotency key across the rebind - the prompt
-                        // failed before it reached any worker, so routing it
-                        // once to the session's current resident delivers
-                        // it exactly once.
-                        match self.binding_target(active_session_id).await {
-                            Some(resident) => {
-                                let current = self
-                                    .rebind_connection(active_session_id, &resident, attached)
-                                    .await;
-                                // The admission follows the rebind: a
-                                // cancellation by the advertised current id
-                                // must find the in-flight admission.
-                                let rekeyed = prompt_admission_key(
-                                    &current,
-                                    input_admission_id(command).unwrap_or_default(),
-                                );
-                                if connection.prompt_admissions.rekey(&key, &rekeyed) {
-                                    key = rekeyed;
-                                }
-                                rebound_to = Some(current);
-                                resident
-                            }
-                            None => {
-                                let message =
-                                    self.restore_failure_for(active_session_id).unwrap_or_else(
-                                        || format!("Unknown active session: {active_session_id}"),
-                                    );
-                                return self.admission_failure(&command_id, &type_name, &message);
-                            }
+        let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
+            resident
+        } else {
+            self.await_restore_target(active_session_id).await;
+            match self.registry.resolve(active_session_id).await {
+                Ok(resident) => resident,
+                Err(_) => {
+                    // The stale-active-id rebind (the generic route's
+                    // seam): the admission id stays the client's
+                    // idempotency key across the rebind - the prompt
+                    // failed before it reached any worker, so routing it
+                    // once to the session's current resident delivers
+                    // it exactly once.
+                    if let Some(resident) = self.binding_target(active_session_id).await {
+                        let current = self
+                            .rebind_connection(active_session_id, &resident, attached)
+                            .await;
+                        // The admission follows the rebind: a
+                        // cancellation by the advertised current id
+                        // must find the in-flight admission.
+                        let rekeyed = prompt_admission_key(
+                            &current,
+                            input_admission_id(command).unwrap_or_default(),
+                        );
+                        if connection.prompt_admissions.rekey(&key, &rekeyed) {
+                            key = rekeyed;
                         }
+                        rebound_to = Some(current);
+                        resident
+                    } else {
+                        let message =
+                            self.restore_failure_for(active_session_id)
+                                .unwrap_or_else(|| {
+                                    format!("Unknown active session: {active_session_id}")
+                                });
+                        return self.admission_failure(&command_id, &type_name, &message);
                     }
                 }
             }
@@ -343,7 +339,13 @@ impl Supervisor {
         // prompt still lands exactly once (the generic client route's
         // contract).
         let response = self
-            .route_command_ready(&resident, command_type, payload, timeout)
+            .route_command_ready(
+                &resident,
+                command_type,
+                payload,
+                timeout,
+                RouteAdmission::ClientRequest,
+            )
             .await;
         let mut response = match response {
             Ok(response) => response,
@@ -465,6 +467,7 @@ impl Supervisor {
                         "cancel_prompt_admission",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                 {

@@ -12,7 +12,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut message_count = 0usize;
     let mut first_message = String::new();
     let mut all_messages_text = String::new();
-    let mut agent_status: Option<Value> = None;
     let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
     for line in content.lines() {
@@ -35,7 +34,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|n| !n.is_empty())
-                    .map(str::to_string)
+                    .map(str::to_string);
             }
             "session_state" => {
                 if let Some(status) = entry
@@ -65,11 +64,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                 {
                     thinking_level = Some(level.to_string());
                 }
-            }
-            // Keep the latest recap/verdict (TS `agent_status` fold): the
-            // `summary` text is part of the agents-view search corpus.
-            "agent_status" => {
-                agent_status = entry.fields.get("status").cloned();
             }
             "child_usage_attributed" => {
                 let usage_field = |name: &str| {
@@ -119,10 +113,23 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                         }
                     }
                     // TS `allMessagesText`: user and assistant text
-                    // content feeds the full-transcript search.
+                    // content feeds the full-transcript search. The legacy
+                    // reference inlines the append (the product's helper
+                    // takes the fold's running char counter now), so the
+                    // oracle stays independent of the perf reshape.
                     if matches!(role, Some("user" | "assistant")) {
                         let text = message_text(message);
-                        append_capped_search_text(&mut all_messages_text, &text);
+                        if !text.is_empty() {
+                            let used = all_messages_text.chars().count();
+                            if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                                if used > 0 {
+                                    all_messages_text.push(' ');
+                                }
+                                let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+                                    - all_messages_text.chars().count();
+                                all_messages_text.extend(text.chars().take(remaining));
+                            }
+                        }
                     }
                 }
             }
@@ -130,17 +137,24 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         }
     }
     let header = header?;
-    let modified_ms = last_activity_ms.unwrap_or(0);
-    let modified = if modified_ms > 0 {
-        crate::util::iso_from_unix_ms(modified_ms)
-    } else {
-        crate::util::iso_from_unix_ms(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-        )
-    };
+    // Mirrors `build_info`: newest message timestamp, then the header's
+    // creation timestamp, then the file's mtime - never scan time. Zero is
+    // a real epoch timestamp; only the message arm filters it (a missing
+    // entry timestamp stamps 0, not activity). `None` renders blank.
+    let modified_ms = last_activity_ms
+        .filter(|ms| *ms > 0)
+        .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
+        .or_else(|| {
+            fs::metadata(path).ok().and_then(|meta| {
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as u64)
+            })
+        });
+    let modified = modified_ms
+        .map(crate::util::iso_from_unix_ms)
+        .unwrap_or_default();
     Some(SessionInfo {
         path: path.to_path_buf(),
         id: header.id,
@@ -160,7 +174,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
             first_message
         },
         all_messages_text,
-        agent_status,
         usage: usage_scan.summary(),
         deleted_descendant_usage: None,
     })
@@ -220,7 +233,6 @@ fn streaming_fold_matches_legacy_across_large_file_and_appends() {
             json!({"type":"model_change","id":"mc","timestamp":"2026-09-23T00:00:00.000Z","provider":"p2","modelId":"m2"}),
             json!({"type":"session_state","id":"st","timestamp":"2026-09-23T00:00:00.000Z","state":{"status":"sleep"}}),
             json!({"type":"thinking_level_change","id":"tl","timestamp":"2026-09-23T00:00:00.000Z","thinkingLevel":"high"}),
-            json!({"type":"agent_status","id":"as","timestamp":"2026-09-23T00:00:00.000Z","status":{"summary":"latest"}}),
         ],
     );
     assert_fold_matches(&path);
@@ -308,7 +320,7 @@ fn captured_fixture_cold_and_warm_timings() {
         let start = std::time::Instant::now();
         let reference = legacy_read_session_info(path);
         legacy.push(start.elapsed());
-        super::session_info_cache().lock().unwrap().remove(path);
+        super::session_info_cache().lock().unwrap().drop_state(path);
         let start = std::time::Instant::now();
         let result = read_session_info(path);
         cold.push(start.elapsed());
@@ -324,4 +336,549 @@ fn captured_fixture_cold_and_warm_timings() {
         "31MB read_session_info median old={:?} new_cold={:?} new_warm={:?}",
         legacy[3], cold[3], warm[3]
     );
+}
+
+#[test]
+fn a_torn_trailing_line_folds_once_completed() {
+    let dir = test_dir();
+    let path = dir.join("torn.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // A torn trailing message - invalid JSON (the write is mid-line), no
+    // newline: the scan leaves it unconsumed and the row cannot fold it
+    // (TS snapshotSessionInfo's tornTail is lenient: a parse failure is
+    // skipped).
+    let torn_head = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn"#;
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn_head.as_bytes()).unwrap();
+    }
+    let partial = read_session_info(&path).unwrap();
+    assert_eq!(partial.message_count, 0, "a torn line must not fold");
+    // The completed line folds exactly once, and the row matches the oracle.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#" text","timestamp":1790110000000}}"#.as_slice())
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.message_count, 1);
+    assert!(completed.all_messages_text.contains("torn text"));
+}
+
+#[test]
+fn a_same_size_rewrite_rescans_from_the_top() {
+    let dir = test_dir();
+    let path = dir.join("rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"r","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // A same-size rewrite with different early content: the resume must not
+    // answer the stale row (TS resumes only strictly-grown files).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let _ = fs::write(&path, rewritten.as_bytes());
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let rewritten_info = read_session_info(&path).unwrap();
+    assert_eq!(
+        rewritten_info.name.as_deref(),
+        Some("after!"),
+        "a same-size rewrite must rescan"
+    );
+    assert_fold_matches(&path);
+}
+
+#[test]
+fn multi_round_appends_match_the_legacy_fold() {
+    let dir = test_dir();
+    let path = dir.join("rounds.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"q","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    for round in 0..5 {
+        for index in 0..50 {
+            append_rows(
+                &path,
+                &[
+                    json!({"type":"message","id":format!("r{round}m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":format!("round {round} message {index}"),"timestamp":1_790_110_000_000_u64 + round as u64 * 1000 + index as u64}}),
+                ],
+            );
+        }
+        assert_fold_matches(&path);
+    }
+    let final_info = read_session_info(&path).unwrap();
+    assert_eq!(final_info.message_count, 250);
+}
+
+#[test]
+fn a_failed_prefix_check_rescans_from_byte_zero() {
+    let dir = test_dir();
+    let path = dir.join("grown-rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"g","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // An in-place rewrite of the consumed prefix's final line changes the
+    // resume tail window, so the grown-file path fails `prefix_intact` and
+    // must rescan from byte zero. A fresh scan that kept the shared cursor
+    // where `prefix_intact` left it would start mid-file, miss the session
+    // header, and return None (the bots' prefix-rewrite-then-append case).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    let _ = fs::write(&path, rewritten.as_bytes());
+    // The file also grows: a valid appended line enters the resume path.
+    append_rows(
+        &path,
+        &[
+            json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1_790_110_000_000_u64}}),
+        ],
+    );
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let second = read_session_info(&path).unwrap();
+    assert_eq!(
+        second.name.as_deref(),
+        Some("after!"),
+        "a prefix rewrite then append must rescan from the top"
+    );
+    assert_fold_matches(&path);
+}
+
+#[test]
+fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
+    let dir = test_dir();
+    let path = dir.join("unterminated.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"u","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // The final line is complete JSON with NO terminal newline: the row
+    // must fold it (TS snapshotSessionInfo's tornTail - the legacy
+    // str::lines oracle yields it too), without consuming it.
+    let tail = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}).to_string();
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(tail.as_bytes()).unwrap();
+    }
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.name.as_deref(), Some("tail-name"));
+    assert_fold_matches(&path);
+    // Completing the line folds it into the consumed prefix exactly once.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.name.as_deref(), Some("tail-name"));
+}
+
+#[test]
+fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
+    let dir = test_dir();
+    // Zero-usage sessions: a timestamped user message each (no assistant
+    // usage block, so accounted entries stay 0 - only the count cap can
+    // evict; the message also passes the modified_ms > 0 store guard).
+    for index in 0..(SESSION_SCAN_MAX_CACHED_STATES + 8) {
+        let path = dir.join(format!("zero-{index}.jsonl"));
+        append_rows(
+            &path,
+            &[
+                json!({"type":"session","id":format!("z{index}"),"timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+                json!({"type":"message","id":format!("zm{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"n","timestamp":1_790_110_000_000_u64}}),
+            ],
+        );
+        let info = read_session_info(&path).unwrap();
+        assert_eq!(info.message_count, 1);
+    }
+    // The cache really populated past the cap and stayed capped: LRU-first
+    // eviction dropped the earliest-written files, the latest stay resident.
+    let cache = super::session_info_cache().lock().unwrap();
+    assert_eq!(
+        super::SESSION_SCAN_MAX_CACHED_STATES,
+        cache.states.len(),
+        "the state count must sit exactly at the cap, got {}",
+        cache.states.len()
+    );
+    assert_eq!(cache.order.len(), cache.states.len());
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
+    assert!(!cache.states.contains_key(&dir.join("zero-0.jsonl")));
+    assert!(!cache.states.contains_key(&dir.join("zero-7.jsonl")));
+    assert!(cache.states.contains_key(&dir.join(format!(
+        "zero-{}.jsonl",
+        super::SESSION_SCAN_MAX_CACHED_STATES + 7
+    ))));
+}
+
+#[test]
+fn scan_cache_recency_tracks_updates_and_removals_without_growth() {
+    let dir = test_dir();
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|index| dir.join(format!("lru-{index}.jsonl")))
+        .collect();
+    let generation = SessionInfoGeneration::from_metadata(&fs::metadata(&dir).unwrap());
+    let mut cache = SessionInfoScanCache::default();
+    for path in &paths {
+        cache.store_state(path, SessionScanState::fresh(generation));
+    }
+    cache.touch(&paths[0]);
+    cache.touch(&paths[2]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[1], &paths[0], &paths[2]]
+    );
+    for _ in 0..1000 {
+        cache.touch(&paths[0]);
+    }
+    assert_eq!(cache.order.len(), 3);
+    assert_eq!(cache.ordinal_by_path.len(), 3);
+    assert_eq!(cache.order.first_key_value().unwrap().1, &paths[1]);
+    cache.store_state(&paths[1], SessionScanState::fresh(generation));
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[2], &paths[0], &paths[1]]
+    );
+    cache.drop_state(&paths[0]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[2], &paths[1]]
+    );
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
+    cache.next_ordinal = u64::MAX;
+    cache.touch(&paths[2]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[1], &paths[2]]
+    );
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// The old-record regression (the Mac bug's shape): a session created
+/// days ago whose messages carry no numeric timestamp. The fold's
+/// `modified` is the header's own creation timestamp - TS
+/// `getSessionModifiedDateFromLastActivity` - so the agents-view age
+/// column keeps reading the record's real age across re-enumeration
+/// (rescans and mtime cache busts), never a scan-time `now()`.
+#[test]
+fn no_timestamp_record_modified_is_the_header_time_across_rescans() {
+    let dir = test_dir();
+    let path = dir.join("header-only.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"stub","timestamp":"2026-09-20T12:00:00.000Z","cwd":"/test","rlmDepth":1}),
+        ],
+    );
+    // A stamped mtime distinct from both the header time and the scan
+    // time: whichever value `modified` carries names its source.
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_110_000, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.created, "2026-09-20T12:00:00.000Z");
+    assert_eq!(info.modified, "2026-09-20T12:00:00.000Z");
+    // The rescan (no-timestamp records never certify into the cache) and
+    // an mtime cache bust both keep the durable header value.
+    assert_eq!(
+        read_session_info(&path).unwrap().modified,
+        "2026-09-20T12:00:00.000Z"
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::now()).unwrap();
+    assert_eq!(
+        read_session_info(&path).unwrap().modified,
+        "2026-09-20T12:00:00.000Z"
+    );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A header timestamp no parser accepts: TS falls to `stats.mtime`, and
+/// the fold follows the file's own mtime - including after an mtime
+/// cache bust - never the scan time.
+#[test]
+fn unparseable_header_modified_falls_back_to_the_file_mtime() {
+    let dir = test_dir();
+    let path = dir.join("legacy-header.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"legacy","timestamp":"not-a-date","cwd":"/test"})],
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_110_000, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.created, "not-a-date");
+    assert_eq!(
+        info.modified,
+        crate::util::iso_from_unix_ms(1_790_110_000_000)
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_120_000, 0)).unwrap();
+    assert_eq!(
+        read_session_info(&path).unwrap().modified,
+        crate::util::iso_from_unix_ms(1_790_120_000_000)
+    );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A record with real message timestamps keeps its live source: the
+/// newest user/assistant message timestamp wins over the header fallback
+/// and the file mtime.
+#[test]
+fn message_timestamps_still_win_over_the_header_fallback() {
+    let dir = test_dir();
+    let path = dir.join("live.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"live","timestamp":"2026-09-20T12:00:00.000Z","cwd":"/test"}),
+            json!({"type":"message","id":"m1","timestamp":"2026-09-24T00:00:00.000Z","message":{"role":"user","content":"hi","timestamp":1_790_110_000_000_u64}}),
+            json!({"type":"message","id":"m2","timestamp":"2026-09-24T00:00:01.000Z","message":{"role":"assistant","content":"ok","timestamp":1_790_110_001_000_u64,"provider":"p","model":"m"}}),
+        ],
+    );
+    // A future mtime proves the message timestamp wins over it too.
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_800_000_000, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(
+        info.modified,
+        crate::util::iso_from_unix_ms(1_790_110_001_000)
+    );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// An impossible calendar date in the header (2026-02-31): the parser
+/// rejects it instead of normalizing it into March (TS `Date.parse`
+/// rejects it too), so the fold falls to the file's mtime.
+#[test]
+fn impossible_calendar_date_header_falls_back_to_the_file_mtime() {
+    let dir = test_dir();
+    let path = dir.join("feb-31.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"feb","timestamp":"2026-02-31T00:00:00.000Z","cwd":"/test"}),
+        ],
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_110_000, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.created, "2026-02-31T00:00:00.000Z");
+    assert_eq!(
+        info.modified,
+        crate::util::iso_from_unix_ms(1_790_110_000_000)
+    );
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A real epoch mtime renders as the epoch date: a durable zero stays
+/// distinct from an unavailable value (blank), and neither is ever a
+/// fabricated scan-time age.
+#[test]
+fn epoch_zero_mtime_renders_the_epoch_not_blank() {
+    let dir = test_dir();
+    let path = dir.join("epoch.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"epoch","timestamp":"not-a-date","cwd":"/test"})],
+    );
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.modified, "1970-01-01T00:00:00.000Z");
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// The corpus text reads the `content` span the typed parse borrows; the
+/// full-parse path (the legacy reference fold above) re-parses the entry
+/// and reads the same subtree through `message_text`. This matrix pins
+/// the two extractions together for every content shape the fold can
+/// meet on disk, then folds the same rows end to end: each row's text,
+/// the first-message pick, and the capped corpus must agree.
+#[test]
+fn content_borrow_matches_full_parse_across_content_matrix() {
+    let header =
+        json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"});
+    let row = |id: &str, message: Value| json!({"type":"message","id":id,"timestamp":"2026-09-23T00:00:00.000Z","message":message});
+    let messages = vec![
+        // plain string content, user role
+        (row("m0", json!({"role":"user","content":"hello"})), "hello"),
+        // escaped string content: newlines, quotes, backslash, and unicode
+        // escapes at the JSON byte level (built from raw JSON so the
+        // escapes ride the bytes both extraction paths walk)
+        (
+            row(
+                "m1",
+                serde_json::from_str::<Value>(
+                    r#"{"role":"user","content":"line1\nline2 \"quoted\" \\ \"é世界\""}"#,
+                )
+                .unwrap(),
+            ),
+            "line1\nline2 \"quoted\" \\ \"é世界\"",
+        ),
+        // text blocks join with a space (TS `contentToText`)
+        (
+            row(
+                "m2",
+                json!({"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}),
+            ),
+            "hello world",
+        ),
+        // non-text blocks and blocks without string text are skipped
+        (
+            row(
+                "m3",
+                json!({"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"visible"},{"type":"tool_call","name":"t","args":{"a":1}},{"type":"text","text":null},{"type":"text","text":42},{"type":"text"}]}),
+            ),
+            "visible",
+        ),
+        // empty array, empty string, missing content, null content, scalar content
+        (row("m4", json!({"role":"assistant","content":[]})), ""),
+        (row("m5", json!({"role":"assistant","content":""})), ""),
+        (row("m6", json!({"role":"assistant"})), ""),
+        (row("m7", json!({"role":"assistant","content":null})), ""),
+        (row("m8", json!({"role":"assistant","content":42})), ""),
+        (
+            row(
+                "m9",
+                json!({"role":"assistant","content":[{"type":"image","source":{"data":"base64"}}]}),
+            ),
+            "",
+        ),
+        // tool results never feed the corpus, but the extraction still
+        // agrees on their shape
+        (
+            row(
+                "m10",
+                json!({"role":"toolResult","content":[{"type":"text","text":"tool output"}]}),
+            ),
+            "tool output",
+        ),
+        // a block object with extra unknown fields
+        (
+            row(
+                "m11",
+                json!({"role":"assistant","content":[{"id":"b1","type":"text","text":"extra fields","meta":{"x":1}}]}),
+            ),
+            "extra fields",
+        ),
+        // deeply nested unicode escapes inside the content — including a
+        // surrogate pair — at the JSON byte level
+        (
+            row(
+                "m12",
+                serde_json::from_str::<Value>(
+                    r#"{"role":"user","content":"\u672a\u8a60 emoji \ud83d\ude80 tail"}"#,
+                )
+                .unwrap(),
+            ),
+            "未詠 emoji 🚀 tail",
+        ),
+        // a message object with only role (no content at all)
+        (row("m13", json!({"role":"user"})), ""),
+        // scalar content under the user role
+        (row("m14", json!({"role":"user","content":true})), ""),
+    ];
+
+    // Row-level differential: the borrowed-span extraction equals the
+    // full-parse `message_text` for every row in the matrix.
+    for (entry, expected) in &messages {
+        let line = entry.to_string();
+        let full: SessionEntry = serde_json::from_str(&line).unwrap();
+        let reference = full
+            .fields
+            .get("message")
+            .map(message_text)
+            .unwrap_or_default();
+        assert_eq!(&reference, expected, "reference extraction: {line}");
+        let typed: SessionInfoEntry = serde_json::from_str(&line).unwrap();
+        let borrowed = typed
+            .message
+            .as_ref()
+            .map(|message| message_content_text(message.content))
+            .unwrap_or_default();
+        assert_eq!(&borrowed, expected, "borrowed extraction: {line}");
+        assert_eq!(borrowed, reference, "differential: {line}");
+    }
+
+    // Fold-level differential: the same rows through the production fold
+    // and the legacy full-parse reference, with cap-cut appends around
+    // the matrix (multibyte boundary cut, then past the cap).
+    let dir = test_dir();
+    let path = dir.join("session.jsonl");
+    append_rows(&path, std::slice::from_ref(&header));
+    for (entry, _) in &messages {
+        append_rows(&path, std::slice::from_ref(entry));
+    }
+    append_rows(
+        &path,
+        &[
+            row(
+                "cap0",
+                json!({"role":"assistant","content":"x".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS)}),
+            ),
+            row("cap1", json!({"role":"assistant","content":"past the cap"})),
+            row("cap2", json!({"role":"user","content":"past the cap user"})),
+        ],
+    );
+    assert_fold_matches(&path);
+
+    // First-message pick: the first NON-EMPTY user text wins (m0), the
+    // empty-string user rows never claim it, and later users cannot
+    // replace it; the corpus holds every user/assistant text under the
+    // cap in fold order.
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.first_message, "hello");
+    assert!(info.all_messages_text.starts_with("hello line1"));
+    assert!(info.all_messages_text.chars().count() <= SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+
+    // A session whose only user text is empty keeps the no-message label.
+    let empty_dir = test_dir();
+    let empty_path = empty_dir.join("session.jsonl");
+    append_rows(
+        &empty_path,
+        &[
+            header,
+            row("e0", json!({"role":"user","content":""})),
+            row("e1", json!({"role":"user"})),
+            row(
+                "e2",
+                json!({"role":"assistant","content":[{"type":"text","text":"assistant only"}]}),
+            ),
+        ],
+    );
+    assert_fold_matches(&empty_path);
+    let empty_info = read_session_info(&empty_path).unwrap();
+    assert_eq!(empty_info.first_message, "(no messages)");
+
+    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(empty_dir).unwrap();
 }

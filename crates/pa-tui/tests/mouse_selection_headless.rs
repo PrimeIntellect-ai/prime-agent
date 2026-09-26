@@ -229,7 +229,7 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -252,7 +252,7 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     }
 }
@@ -301,18 +301,20 @@ fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize
         .next_back()
 }
 
-/// The transcript window at the top after `ScrollTop`: the splash rows sit
-/// at 2-8, the first user message's text at row 11 (`  row 0`), its spacer
-/// rows at 12-13, and the first assistant answer at row 14 — the layout
-/// the selection coordinates below target (the geometry is asserted, not
-/// assumed, before each drag).
+/// The transcript window at the top after `ScrollTop`: the chat opened
+/// directly into content, so the brand splash is suppressed (the
+/// operator's 2026-09-26 zero-shift directive) — the first user
+/// message's text sits at row 2 (`  row 0`), its spacer rows at 3-4,
+/// and the first assistant answer at row 5 — the layout the selection
+/// coordinates below target (the geometry is asserted, not assumed,
+/// before each drag).
 fn top_layout() -> (usize, usize, usize, usize, usize, usize) {
     let probe = run_plan(vec![HeadlessStep::ScrollTop], true).0;
     let (_, row0, col0, _) = locate(&probe, "row 0").expect("row 0 rendered at the top");
     let (_, answer_row, answer_col, _) =
         locate(&probe, "answer 1").expect("answer 1 rendered below row 0");
     let (_, ctx_row, ctx_col, _) =
-        locate(&probe, "Collapsed mode").expect("the prompt-context row rendered");
+        locate(&probe, "Details mode").expect("the prompt-context row rendered");
     (row0, col0, answer_row, answer_col, ctx_row, ctx_col)
 }
 
@@ -321,8 +323,8 @@ fn press_drag_release_copies_the_spanned_transcript_text() {
     let (row0, col0, ..) = top_layout();
     assert_eq!(
         (row0, col0),
-        (11, 2),
-        "the first user message renders at 11:2"
+        (2, 2),
+        "the first user message renders at 2:2"
     );
     // Drag across the first user message's text: press at its first text
     // column, drag to its end, release — the copy is the text slice.
@@ -390,10 +392,13 @@ fn click_without_drag_copies_nothing() {
 #[test]
 fn dock_press_drag_copies_the_frame_region() {
     let (_, _, _, _, ctx_row, ctx_col) = top_layout();
+    // The right-aligned detail label (TS #2447's middle-level startup:
+    // "Details mode (Ctrl+O to expand)", 2 columns shorter than the old
+    // collapsed label) renders at 25:68.
     assert_eq!(
         (ctx_row, ctx_col),
-        (25, 66),
-        "the context row renders at 25:66"
+        (25, 68),
+        "the context row renders at 25:68"
     );
     let steps = vec![
         // Mount the window at the transcript top: the probe layout is the
@@ -404,7 +409,7 @@ fn dock_press_drag_copies_the_frame_region() {
         HeadlessStep::Mouse(release(ctx_col + 7, ctx_row + 1)),
     ];
     let (_, copies) = run_plan(steps, true);
-    assert_eq!(copies, vec!["Collap".to_string()], "the dock span copied");
+    assert_eq!(copies, vec!["Detail".to_string()], "the dock span copied");
 }
 
 /// With the `terminal.fullscreenMouse` setting off, tracking never enables

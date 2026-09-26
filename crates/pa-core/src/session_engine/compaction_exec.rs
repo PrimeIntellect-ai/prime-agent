@@ -1,5 +1,5 @@
 //! The compaction executor: assemble and run the summarization request.
-//! Port of compact() in core/compaction/compaction.ts (summarizer call via
+//! Port of `compact()` in core/compaction/compaction.ts (summarizer call via
 //! pa-ai's completion facade).
 
 use super::compaction::{build_summarization_prompt, CutPointResult};
@@ -9,6 +9,7 @@ use super::compaction_utils::{
 use super::messages::convert_to_llm;
 use pa_types::ai::{AssistantMessage, TextContent, UserContent, UserContentBlock, UserMessage};
 use pa_types::session::{AgentMessage, CompactionEntry, FileEntry};
+use std::fmt::Write as _;
 
 /// Details stored on the compaction entry for file tracking.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -55,9 +56,10 @@ pub fn build_summarization_request(
     let conversation_text = super::compaction_utils::serialize_conversation(&llm_messages);
     let mut prompt_text = format!("<conversation>\n{conversation_text}\n</conversation>\n\n");
     if let Some(previous_summary) = previous_summary {
-        prompt_text.push_str(&format!(
+        let _ = write!(
+            prompt_text,
             "<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
-        ));
+        );
     }
     if let Some(recent_state_anchor) = recent_state_anchor {
         prompt_text.push_str(&format!(
@@ -72,10 +74,10 @@ pub fn build_summarization_request(
         content: UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
             text: prompt_text,
             text_signature: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]),
         timestamp: 0,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })]
 }
 
@@ -113,27 +115,49 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
         content: UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
             text: prompt_text,
             text_signature: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]),
         timestamp: 0,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })]
 }
+
+/// The live summary-delta sink (the daemon's `compaction_summary_delta`
+/// broadcast seam): called with every text delta the summarizer model
+/// streams, in arrival order, while the summary is being generated. The
+/// compaction itself is unaffected — the sink is fire-and-forget, its
+/// emissions never gate the run — and the final summary still comes
+/// from the terminal assistant message, never from the sink's
+/// accumulated text. A caller whose run assembles several calls into one
+/// summary keeps the sink's stream in the summary's final order itself
+/// (see `execute_compaction`'s split-turn flush).
+pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Run one summarizer wire call through `pa_ai::complete_simple` (TS
 /// `completeSimple` under `SUMMARIZATION_SYSTEM_PROMPT`). `headers` are
 /// the routed model's merged request headers (TS `_resolveAuxiliaryModel`
 /// returns `headers` alongside the model and key); the session-model
 /// fallback passes None — its path never wired them.
+/// `on_delta` is the live summary sink ([`SummaryDeltaSink`]): `Some`
+/// consumes the provider stream event-by-event and forwards every text
+/// delta (the live compaction block the expanded TUI renders); `None`
+/// keeps the one-shot `complete_simple` completion, byte-identical to the
+/// pre-streaming path.
 /// `failure` labels the error-stop bail exactly like the TS throw sites:
 /// "Summarization failed" for the history call, "Turn prefix
 /// summarization failed" for the turn-prefix call.
+///
+/// # Errors
+///
+/// Returns an error when the summarizer wire call fails, or when its reply
+/// stops with an error (labeled with `failure`).
 pub async fn complete_summary_call(
     model: &pa_types::ai::Model,
     api_key: Option<String>,
     headers: Option<std::collections::BTreeMap<String, String>>,
     max_tokens: u64,
     request_messages: Vec<AgentMessage>,
+    on_delta: Option<SummaryDeltaSink>,
     failure: &'static str,
 ) -> anyhow::Result<SummarySlice> {
     let messages = request_messages
@@ -156,7 +180,24 @@ pub async fn complete_summary_call(
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
-    let assistant = pa_ai::complete_simple(model, &context, Some(stream_options)).await?;
+    let assistant = match on_delta {
+        None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
+        Some(on_delta) => {
+            // The live path rides the same provider stream
+            // `complete_simple` awaits the end of: every text delta is
+            // forwarded to the sink as it arrives, and the terminal
+            // event's message is the summary exactly like the one-shot
+            // arm. Thinking deltas stay off the sink — the final summary
+            // carries only the text blocks.
+            let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
+            while let Some(event) = stream.next_event().await {
+                if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
+                    on_delta(delta);
+                }
+            }
+            stream.result().await
+        }
+    };
     if assistant.stop_reason == pa_types::ai::StopReason::Error {
         anyhow::bail!(
             "{failure}: {}",
@@ -284,6 +325,10 @@ pub struct CompactRequest<'a> {
 
 /// Run compaction over a conversation slice: summarize the dropped prefix,
 /// keeping from `first_kept_entry_id`. `summarize` performs the model call.
+///
+/// # Errors
+///
+/// Returns the `summarize` call's error when the summarization fails.
 pub async fn compact_with(
     request: CompactRequest<'_>,
     summarize: SummarizerFn,
@@ -381,7 +426,7 @@ mod tests {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -390,7 +435,7 @@ mod tests {
             content: vec![pa_types::ai::AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -398,12 +443,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -438,7 +483,7 @@ mod tests {
             cache_read: 80,
             cache_write: 0,
             total_tokens: 110,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         let result = CompactionResult {
             summary: "the overflow summary".to_string(),
@@ -534,7 +579,7 @@ mod tests {
                     id: Some(format!("e{index}")),
                     parent_id: None,
                     timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             })
             .collect();

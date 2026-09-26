@@ -1,21 +1,27 @@
 //! The composition root's Prime Inference login (TS
-//! `runPrimeInferenceLogin`'s API-key surface): the prime-cli credential
-//! reuse, the pasted-key prompt with the whoami access check, the team
-//! selection, and the credential write. The TS flow races its browser
-//! challenge against the paste field; that challenge is not ported, so
-//! the paste prompt is the only entry and no line claims a browser step.
-//! The flow renders through the inline auth panel (TS the login dialog
-//! and the `PrimeTeamSelectorComponent` mount in the TUI): every
-//! progress line, prompt, and the team picker ride the panel channel,
-//! and no surface touches the terminal.
+//! `runPrimeInferenceLogin`): the core login's prime-cli credential
+//! reuse, the browser challenge raced against the pasted-key prompt,
+//! the whoami access check, the team selection, and the credential
+//! write. The race and its cooperative cancellation follow the traces
+//! login's proven shape (TS `Promise.race([browserLoginOrFallback,
+//! manualKeyEntry, dialogCancelled])`; a manual key drops the browser
+//! poll mid-flight and a failed browser keeps the prompt under the
+//! fallback text). The flow renders through the inline auth panel (TS
+//! the login dialog and the `PrimeTeamSelectorComponent` mount in the
+//! TUI): every progress line, the auth URL, the paste prompt, and the
+//! team picker ride the panel channel, and no surface touches the
+//! terminal.
 
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::pin::{pin, Pin};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use pa_core::auth::{
-    check_prime_inference_access, fetch_prime_teams, read_prime_cli_config, AuthStorage,
-    PrimeAccessError, PrimeHttp, PrimeInferenceAuthConfig, PrimeTeamAssignment,
-    PrimeTeamCredential, StoredPrimeTeam, DEFAULT_REQUEST_TIMEOUT_MS,
+    check_prime_inference_access, fetch_prime_teams, login_prime_inference, AuthStorage,
+    PrimeAccessError, PrimeAuthInfo, PrimeHttp, PrimeInferenceAuthConfig,
+    PrimeInferenceLoginCallbacks, PrimeInferenceLoginOptions, PrimeInferenceLoginResult,
+    PrimeTeamAssignment, PrimeTeamCredential, StoredPrimeTeam, DEFAULT_REQUEST_TIMEOUT_MS,
 };
 use pa_tui::auth_panel::{PasteStyle, PrimeTeamOption, PrimeTeamPick};
 use pa_tui::provider_auth::ProviderAuthOutcome;
@@ -31,12 +37,30 @@ pub(crate) enum TeamChoice {
     Cancelled,
 }
 
+/// TS `armManualInput`'s armed prompt after the browser URL shows.
+const BROWSER_PROMPT: &str = "Complete the sign-in in your browser, or paste an API key below:";
+/// TS the browser-unavailable fallback's prompt.
+const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
+
 /// The login's terminal surface (the TS login dialog's surface): progress
-/// lines, the paste prompt, and the team selection. The seam keeps the
-/// flow scriptable in tests.
-pub(crate) trait PrimeLoginUi {
+/// lines, the auth URL, the paste prompt, and the team selection. The seam
+/// keeps the flow scriptable in tests; `Send + Sync` because the race's
+/// boxed arms are `Send`.
+pub(crate) trait PrimeLoginUi: Send + Sync {
     /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
+    /// The driving surface's cooperative cancel state: `true` once the
+    /// pane that mounted the login exited. The flow checks it before
+    /// its auth-store writes — a `JoinHandle::abort` cannot reach a
+    /// started `spawn_blocking` body, so the pane marks this instead.
+    /// The default (`false`) serves the surfaces that never cancel
+    /// mid-flow (the scripted tests, the plain terminal).
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    /// TS `dialog.showAuth` (the URL + the code line) and the terminal
+    /// port's browser open.
+    fn on_auth(&self, url: &str, instructions: &str);
     /// One paste prompt (TS `armManualInput`): an empty line re-prompts,
     /// `None` (the input surface went away) cancels the login.
     fn prompt_line(
@@ -63,6 +87,9 @@ pub(crate) struct PrimeLoginInputs<'a> {
     pub http: &'a dyn PrimeHttp,
     pub prime_cli_config_path: Option<&'a Path>,
     pub prime_team_id: Option<&'a str>,
+    /// The challenge poll interval (the product's 5s default; tests use
+    /// milliseconds so the race's arms resolve deterministically).
+    pub poll_interval_ms: Option<u64>,
 }
 
 /// TS `runPrimeInferenceLogin`: the whole flow against the login UI seam
@@ -71,92 +98,128 @@ pub(crate) async fn run_prime_inference_login(
     inputs: PrimeLoginInputs<'_>,
     ui: &dyn PrimeLoginUi,
 ) -> ProviderAuthOutcome {
-    // TS `loginPrimeInference`'s candidate path: the prime CLI's
-    // production credential logs in without a prompt when it carries
-    // inference access.
-    let candidate = if inputs.config.is_production() {
-        inputs.prime_cli_config_path.and_then(read_prime_cli_config)
-    } else {
-        None
+    // TS `loginPrimeInference`'s options: the prime-cli reuse rides the
+    // core's own candidate pass, so the flow's prelude is the challenge
+    // race alone.
+    let mut options = PrimeInferenceLoginOptions::new(inputs.prime_cli_config_path);
+    options.poll_interval_ms = inputs.poll_interval_ms;
+    // TS `armManualInput`: the paste prompt arms when the browser URL
+    // shows, and again (under the fallback text) when the browser flow
+    // fails before it does.
+    let (arm_tx, mut arm_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let armed = Arc::new(AtomicBool::new(false));
+    let on_auth = {
+        let armed = armed.clone();
+        let arm_tx = arm_tx.clone();
+        move |info: &PrimeAuthInfo| {
+            ui.on_auth(&info.url, &info.instructions);
+            if !armed.swap(true, Ordering::SeqCst) {
+                let _ = arm_tx.send(BROWSER_PROMPT.to_string());
+            }
+        }
     };
-    let mut checked_cli_key = false;
-    if let Some(candidate) = candidate {
-        if let Some(api_key) = candidate.api_key {
-            checked_cli_key = true;
-            ui.progress("Checking existing Prime CLI credentials...");
-            match check_prime_inference_access(
-                inputs.http,
-                &inputs.config.base_url,
-                &api_key,
-                DEFAULT_REQUEST_TIMEOUT_MS,
-            )
-            .await
-            {
-                Ok(()) => {
-                    let team = match candidate.team {
-                        Some(team) => PrimeTeamAssignment::Team(team),
-                        None => PrimeTeamAssignment::PersonalAccount,
-                    };
-                    return complete_login(&inputs, &api_key, team, ui).await;
+    let on_progress = |message: &str| ui.progress(message);
+    let callbacks = PrimeInferenceLoginCallbacks {
+        on_auth: &on_auth,
+        on_progress: Some(&on_progress),
+    };
+    let mut login = pin!(login_prime_inference(
+        inputs.http,
+        inputs.config,
+        &options,
+        &callbacks
+    ));
+    // The local sender keeps the arm channel open for the fallback arm
+    // (the login future's own sender dies with it).
+    let _keep_arm_open = arm_tx;
+
+    let mut manual: Option<Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>>> =
+        None;
+    // Whether the arm signal has been consumed (the armed flag inside
+    // the closure guards the double-send; this one gates the select arm).
+    let mut arm_seen = false;
+    let mut login_dead = false;
+    loop {
+        // TS `Promise.race([browserLoginOrFallback, manualKeyEntry,
+        // dialogCancelled])`: whichever settles first wins; the loser is
+        // dropped (the browser poll on a manual key, the paste read on a
+        // browser key — the pane exit tears the whole flow down).
+        enum Step {
+            Login(Result<PrimeInferenceLoginResult, String>),
+            Armed,
+            Manual(Option<String>),
+        }
+        let step = tokio::select! {
+            result = &mut login, if !login_dead => Step::Login(result),
+            _ = arm_rx.recv(), if !arm_seen => Step::Armed,
+            line = async { manual.as_mut().expect("the manual read is armed").as_mut().await }, if manual.is_some() => Step::Manual(line),
+        };
+        match step {
+            Step::Login(Ok(result)) => {
+                // The result carries the team the credential write binds:
+                // the cli candidate's team, or the browser arm's
+                // preserve-when-key-matches (the core's TS parity).
+                return complete_login(&inputs, &result.api_key, result.prime_team, ui).await;
+            }
+            Step::Login(Err(error)) => {
+                // TS the browser-unavailable fallback: keep the dialog
+                // open and fall back to plain API key entry.
+                login_dead = true;
+                ui.progress(&format!("Browser sign-in unavailable ({error})."));
+                if manual.is_none() {
+                    arm_seen = true;
+                    manual = Some(Box::pin(prompt_non_empty(ui, FALLBACK_PROMPT)));
                 }
-                // TS continues to the browser login here; the paste
-                // prompt is this build's entry, so the line stops before
-                // the browser claim.
-                Err(PrimeAccessError::Denied(failure)) => ui.progress(&format!(
-                    "Existing Prime CLI key cannot access Prime Inference ({}).",
-                    failure.format()
-                )),
-                Err(PrimeAccessError::Failed(message)) => {
-                    return ProviderAuthOutcome::Error(format!(
-                        "Failed to login to {}: {message}",
-                        inputs.provider_name
-                    ));
+            }
+            Step::Armed => {
+                arm_seen = true;
+                manual = Some(Box::pin(prompt_non_empty(ui, BROWSER_PROMPT)));
+            }
+            Step::Manual(line) => {
+                let Some(api_key) = line else {
+                    return ProviderAuthOutcome::Cancelled;
+                };
+                // The race's loser is dropped above (TS the manual path's
+                // `browserAbort.abort()`); the pane exit ends the flow.
+                if ui.is_cancelled() {
+                    return ProviderAuthOutcome::Cancelled;
                 }
+                ui.progress("Checking Prime Inference access...");
+                match check_prime_inference_access(
+                    inputs.http,
+                    &inputs.config.base_url,
+                    &api_key,
+                    DEFAULT_REQUEST_TIMEOUT_MS,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(PrimeAccessError::Denied(failure)) => {
+                        return ProviderAuthOutcome::Error(format!(
+                            "Failed to login to {}: Prime API key does not have Prime Inference access ({})",
+                            inputs.provider_name,
+                            failure.format()
+                        ));
+                    }
+                    Err(PrimeAccessError::Failed(message)) => {
+                        return ProviderAuthOutcome::Error(format!(
+                            "Failed to login to {}: {message}",
+                            inputs.provider_name
+                        ));
+                    }
+                }
+                return complete_login(
+                    &inputs,
+                    &api_key,
+                    // TS: a manual entry carries no team — the stored
+                    // selection of the same key survives.
+                    PrimeTeamAssignment::PreserveWhenKeyMatches,
+                    ui,
+                )
+                .await;
             }
         }
     }
-    if !checked_cli_key {
-        // TS's line minus the browser step this build does not run.
-        ui.progress("No eligible production Prime CLI API key found.");
-    }
-
-    // The pasted key (TS `armManualInput`'s fallback surface).
-    let Some(api_key) = prompt_non_empty(ui, "Paste a Prime API key below:").await else {
-        return ProviderAuthOutcome::Cancelled;
-    };
-    ui.progress("Checking Prime Inference access...");
-    match check_prime_inference_access(
-        inputs.http,
-        &inputs.config.base_url,
-        &api_key,
-        DEFAULT_REQUEST_TIMEOUT_MS,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(PrimeAccessError::Denied(failure)) => {
-            return ProviderAuthOutcome::Error(format!(
-                "Failed to login to {}: Prime API key does not have Prime Inference access ({})",
-                inputs.provider_name,
-                failure.format()
-            ));
-        }
-        Err(PrimeAccessError::Failed(message)) => {
-            return ProviderAuthOutcome::Error(format!(
-                "Failed to login to {}: {message}",
-                inputs.provider_name
-            ));
-        }
-    }
-    complete_login(
-        &inputs,
-        &api_key,
-        // TS: a manual entry carries no team — the stored selection of the
-        // same key survives.
-        PrimeTeamAssignment::PreserveWhenKeyMatches,
-        ui,
-    )
-    .await
 }
 
 /// TS `armManualInput`'s loop: the prompt repeats until a non-empty line
@@ -179,6 +242,11 @@ async fn complete_login(
     team: PrimeTeamAssignment,
     ui: &dyn PrimeLoginUi,
 ) -> ProviderAuthOutcome {
+    // The pane exited while the login ran: no credential write lands —
+    // the exit ends the flow (TS the dialog's abort signal).
+    if ui.is_cancelled() {
+        return ProviderAuthOutcome::Cancelled;
+    }
     let mut auth = AuthStorage::create(inputs.agent_dir);
     auth.set_prime_inference_api_key(api_key, team);
     if let Some(error) = auth.drain_errors().pop() {
@@ -209,24 +277,33 @@ async fn select_team(
     if inputs
         .prime_team_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
     {
         auth.reload();
         return "Using team from PRIME_TEAM_ID.".to_string();
     }
+    // The pane exited: the stored key keeps its standing selection (the
+    // same state as a failed fetch below).
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
+    }
     ui.progress("Loading Prime teams...");
-    let teams = match fetch_prime_teams(
+    let Ok(teams) = fetch_prime_teams(
         inputs.http,
         &inputs.config.base_url,
         api_key,
         DEFAULT_REQUEST_TIMEOUT_MS,
     )
     .await
-    {
-        Ok(teams) => teams,
-        Err(_) => return default_team_status(auth, inputs.prime_team_id),
+    else {
+        return default_team_status(auth, inputs.prime_team_id);
     };
+    // The pane exited while the fetch ran: the stored key keeps its
+    // standing selection — the write below never lands.
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
+    }
     if teams.is_empty() {
         auth.set_prime_inference_team_selection(None, Some(api_key));
         return match auth.drain_errors().pop() {
@@ -238,7 +315,13 @@ async fn select_team(
         StoredPrimeTeam::Team(team) => Some(team.team_id),
         _ => None,
     };
-    let chosen = match ui.select_team(&teams, current.as_deref()).await {
+    let picked = ui.select_team(&teams, current.as_deref()).await;
+    // The pane exited while the picker waited: the stored key keeps its
+    // standing selection — the binding writes below never land.
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
+    }
+    let chosen = match picked {
         TeamChoice::Team(team) => {
             auth.set_prime_inference_team_selection(Some(team.clone()), Some(api_key));
             Some(format!("Using team \"{}\".", team.name))
@@ -260,8 +343,8 @@ async fn select_team(
 fn default_team_status(auth: &AuthStorage, prime_team_id: Option<&str>) -> String {
     if prime_team_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
     {
         return "Using team from PRIME_TEAM_ID.".to_string();
     }
@@ -290,6 +373,15 @@ impl PanelPrimeLoginUi {
 impl PrimeLoginUi for PanelPrimeLoginUi {
     fn progress(&self, message: &str) {
         self.panel.progress(message);
+    }
+
+    fn on_auth(&self, url: &str, instructions: &str) {
+        self.panel.auth_url(url, Some(instructions));
+        pa_core::platform::browser::open_in_browser(url);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.panel.cancelled()
     }
 
     fn prompt_line(
@@ -344,13 +436,25 @@ pub(crate) fn prime_cli_config_path(agent_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use rsa::pkcs8::DecodePublicKey;
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
+    type PrimeHttpResponse = pa_core::auth::PrimeHttpResponse;
+
     /// A scripted transport: exact URL -> response, in call order; the
-    /// served requests land in the log.
+    /// served requests land in the log. With `dynamic_generate` (the
+    /// default) the generate POST answers with a fixed challenge and the
+    /// status poll answers pending once, then the encrypted fixture key —
+    /// the flow's poll interval genuinely yields mid-flow, so the armed
+    /// paste wins the race deterministically.
     struct ScriptedHttp {
-        queue: Mutex<VecDeque<(String, pa_core::auth::PrimeHttpResponse)>>,
+        queue: Mutex<VecDeque<(String, u16, String)>>,
+        dynamic_generate: bool,
+        dynamic_status: Mutex<Option<String>>,
+        status_pending_once: AtomicBool,
         served: Mutex<Vec<String>>,
     }
 
@@ -360,23 +464,33 @@ mod tests {
                 queue: Mutex::new(
                     responses
                         .into_iter()
-                        .map(|(url, status, body)| {
-                            (
-                                url.to_string(),
-                                pa_core::auth::PrimeHttpResponse {
-                                    status,
-                                    body: body.to_string(),
-                                },
-                            )
-                        })
+                        .map(|(url, status, body)| (url.to_string(), status, body.to_string()))
                         .collect(),
                 ),
+                dynamic_generate: true,
+                dynamic_status: Mutex::new(None),
+                status_pending_once: AtomicBool::new(true),
                 served: Mutex::new(Vec::new()),
             }
         }
 
+        fn without_dynamic(responses: Vec<(&str, u16, &str)>) -> Self {
+            let mut scripted = Self::new(responses);
+            scripted.dynamic_generate = false;
+            scripted
+        }
+
         fn requests(&self) -> Vec<String> {
             self.served.lock().unwrap().clone()
+        }
+
+        fn pop(&self, url: &str) -> Option<(u16, String)> {
+            let mut queue = self.queue.lock().unwrap();
+            let position = queue.iter().position(|(expected, _, _)| expected == url)?;
+            let (_, status, body) = queue
+                .remove(position)
+                .expect("the scripted response was queued");
+            Some((status, body))
         }
     }
 
@@ -386,69 +500,117 @@ mod tests {
             url: &str,
             _api_key: &str,
             _timeout_ms: u64,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<pa_core::auth::PrimeHttpResponse, String>>
-                    + Send,
-            >,
-        > {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<PrimeHttpResponse, String>> + Send>>
+        {
+            // The trait's boxed answer is 'static, so the whole read
+            // resolves before the future arms.
             let url = url.to_string();
-            let entry = self.queue.lock().unwrap().pop_front();
             self.served.lock().unwrap().push(url.clone());
-            Box::pin(async move {
-                match entry {
-                    Some((expected_url, response)) if expected_url == url => Ok(response),
-                    Some((expected_url, _)) => {
-                        panic!("unexpected request {url}, scripted {expected_url}")
-                    }
+            // The cipher stays until the pending answer has been served:
+            // only the result response consumes it.
+            let dynamic = self.dynamic_status.lock().unwrap().clone();
+            let answer = if url.contains("/api/v1/auth_challenge/status") && dynamic.is_some() {
+                if self.status_pending_once.swap(false, Ordering::SeqCst) {
+                    // The first poll answers pending (the flow sleeps its
+                    // poll interval and yields).
+                    Ok(PrimeHttpResponse {
+                        status: 200,
+                        body: r#"{"pending":true}"#.to_string(),
+                    })
+                } else {
+                    let cipher = self.dynamic_status.lock().unwrap().take();
+                    Ok(PrimeHttpResponse {
+                        status: 200,
+                        body: format!(r#"{{"result":"{}"}}"#, cipher.unwrap_or_default()),
+                    })
+                }
+            } else {
+                match self.pop(&url) {
+                    Some((status, body)) => Ok(PrimeHttpResponse { status, body }),
                     None => panic!("no scripted response for {url}"),
                 }
-            })
+            };
+            Box::pin(async move { answer })
         }
 
         fn post_json<'a>(
             &'a self,
             url: &'a str,
-            _body: &'a str,
+            body: &'a str,
             _bearer: Option<&'a str>,
             _timeout_ms: u64,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<pa_core::auth::PrimeHttpResponse, String>>
-                    + Send
-                    + 'a,
-            >,
-        > {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>>
+        {
             let url = url.to_string();
-            let entry = self.queue.lock().unwrap().pop_front();
+            let body = body.to_string();
             self.served.lock().unwrap().push(url.clone());
             Box::pin(async move {
-                match entry {
-                    Some((expected_url, response)) if expected_url == url => Ok(response),
-                    Some((expected_url, _)) => {
-                        panic!("unexpected request {url}, scripted {expected_url}")
-                    }
+                if self.dynamic_generate && url.ends_with("/api/v1/auth_challenge/generate") {
+                    // Capture the flow's public key so the status poll can
+                    // encrypt the fixture key with it.
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).expect("generate body");
+                    let public_pem = parsed
+                        .get("encryptionPublicKey")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("public key")
+                        .to_string();
+                    let mut rng = rsa::rand_core::OsRng;
+                    let public_key =
+                        rsa::RsaPublicKey::from_public_key_pem(&public_pem).expect("public pem");
+                    let cipher = public_key
+                        .encrypt(
+                            &mut rng,
+                            rsa::Oaep::new::<sha2::Sha256>(),
+                            b"fixture-browser-key",
+                        )
+                        .expect("encrypt");
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(cipher);
+                    *self.dynamic_status.lock().unwrap() = Some(encoded);
+                    return Ok(PrimeHttpResponse {
+                        status: 200,
+                        body: r#"{"challenge":"ch-1","status_auth_token":"tok"}"#.to_string(),
+                    });
+                }
+                match self.pop(&url) {
+                    Some((status, body)) => Ok(PrimeHttpResponse { status, body }),
                     None => panic!("no scripted response for {url}"),
                 }
             })
         }
     }
 
-    /// A scripted UI: the queued paste lines and team choices answer in
-    /// order; progress lines land in the log.
+    /// The scripted login surface: progress lines, the auth URL, the
+    /// prompts, the pastes, and the team choice land in their logs; the
+    /// `wait_forever` flag holds the paste unanswered (the browser login
+    /// resolves while the armed prompt never answers).
     struct ScriptedUi {
         progress: Arc<Mutex<Vec<String>>>,
+        auth: Mutex<Vec<String>>,
+        prompt_seen: Mutex<Vec<String>>,
         pastes: Mutex<VecDeque<Option<String>>>,
         choices: Mutex<VecDeque<TeamChoice>>,
+        wait_forever: AtomicBool,
     }
 
     impl ScriptedUi {
         fn new(pastes: Vec<Option<String>>, choices: Vec<TeamChoice>) -> Self {
             ScriptedUi {
                 progress: Arc::new(Mutex::new(Vec::new())),
+                auth: Mutex::new(Vec::new()),
+                prompt_seen: Mutex::new(Vec::new()),
                 pastes: Mutex::new(pastes.into_iter().collect()),
                 choices: Mutex::new(choices.into_iter().collect()),
+                wait_forever: AtomicBool::new(false),
             }
+        }
+
+        fn logs(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+            (
+                self.progress.lock().unwrap().clone(),
+                self.auth.lock().unwrap().clone(),
+                self.prompt_seen.lock().unwrap().clone(),
+            )
         }
 
         fn progress_log(&self) -> Vec<String> {
@@ -461,17 +623,34 @@ mod tests {
             self.progress.lock().unwrap().push(message.to_string());
         }
 
+        fn on_auth(&self, url: &str, instructions: &str) {
+            self.auth
+                .lock()
+                .unwrap()
+                .push(format!("{instructions}\n{url}"));
+        }
+
         fn prompt_line(
             &self,
-            _prompt: &str,
+            prompt: &str,
         ) -> Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
-            let next = self
+            self.prompt_seen.lock().unwrap().push(prompt.to_string());
+            // The answer pops synchronously (a Mutex is not clonable into
+            // the future).
+            let answer = self
                 .pastes
                 .lock()
                 .unwrap()
                 .pop_front()
-                .expect("the test queued a paste entry");
-            Box::pin(async move { next })
+                .expect("a scripted paste is queued");
+            let wait_forever = self.wait_forever.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if wait_forever {
+                    std::future::pending::<Option<String>>().await;
+                    unreachable!("a pending paste never answers");
+                }
+                answer
+            })
         }
 
         fn select_team(
@@ -532,6 +711,9 @@ mod tests {
                 http,
                 prime_cli_config_path,
                 prime_team_id,
+                // A short poll keeps the browser arm's pending round
+                // deterministically slower than the armed paste.
+                poll_interval_ms: Some(10),
             },
             ui,
         )
@@ -569,9 +751,32 @@ mod tests {
         assert_eq!(
             ui.progress_log(),
             vec![
-                "No eligible production Prime CLI API key found.".to_string(),
+                "No eligible production Prime CLI API key found. Starting browser login..."
+                    .to_string(),
                 "Checking Prime Inference access...".to_string(),
                 "Loading Prime teams...".to_string(),
+            ]
+        );
+        // The browser URL armed the paste prompt; the manual key won the
+        // race, so the challenge poll never resolved (no result read, no
+        // browser whoami).
+        let (progress, auth, prompts) = ui.logs();
+        assert_eq!(progress, ui.progress_log());
+        assert_eq!(
+            auth,
+            vec![
+                "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
+        let requests = http.requests();
+        assert_eq!(
+            requests[..2],
+            [
+                "https://api.primeintellect.ai/api/v1/auth_challenge/generate".to_string(),
+                "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1"
+                    .to_string(),
             ]
         );
         // The stored credential carries the key and the selected team.
@@ -675,12 +880,23 @@ mod tests {
             ui.progress_log(),
             vec![
                 "Checking existing Prime CLI credentials...".to_string(),
-                "Existing Prime CLI key cannot access Prime Inference (HTTP 403: denied)."
+                "Existing Prime CLI key cannot access Prime Inference (HTTP 403: denied). Starting browser login..."
                     .to_string(),
                 "Checking Prime Inference access...".to_string(),
                 "Loading Prime teams...".to_string(),
             ]
         );
+        // The denied candidate falls to the browser challenge, whose URL
+        // arms the paste prompt; the pasted key wins the race.
+        let (_, auth, prompts) = ui.logs();
+        assert_eq!(
+            auth,
+            vec![
+                "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
     }
 
     #[tokio::test]
@@ -706,6 +922,16 @@ mod tests {
             .get_all()
             .get("prime-inference")
             .is_none());
+        // The race's prelude and the manual check are the flow's own
+        // lines; the core's browser check never ran (the paste won).
+        assert_eq!(
+            ui.progress_log(),
+            vec![
+                "No eligible production Prime CLI API key found. Starting browser login..."
+                    .to_string(),
+                "Checking Prime Inference access...".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -776,8 +1002,12 @@ mod tests {
                 agent_dir.join("auth.json").display()
             ))
         );
-        // No team list request went out.
-        assert_eq!(http.requests().len(), 1);
+        // No team list request went out (the browser challenge and the
+        // manual key's check did).
+        assert!(!http
+            .requests()
+            .iter()
+            .any(|request| request.contains("/api/v1/user/teams")));
     }
 
     #[tokio::test]
@@ -864,5 +1094,128 @@ mod tests {
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::Team(team("t-1", "Team One"))
         );
+    }
+
+    #[tokio::test]
+    async fn the_browser_login_completes_when_the_prompt_never_answers() {
+        let http = ScriptedHttp::new(vec![
+            whoami_ok(),
+            (
+                teams_request(),
+                200,
+                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}"#,
+            ),
+        ]);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let ui = ScriptedUi::new(
+            vec![Some("held".to_string())],
+            vec![TeamChoice::Team(team("t-1", "Team One"))],
+        );
+        // The armed paste never answers: the browser challenge wins the
+        // race.
+        ui.wait_forever.store(true, Ordering::SeqCst);
+        assert_eq!(
+            login(&agent_dir, &ui, &http, None, None).await,
+            ProviderAuthOutcome::Status(format!(
+                "Saved API key for Prime Inference. Credentials saved to {}. Using team \"Team One\".",
+                agent_dir.join("auth.json").display()
+            ))
+        );
+        // The browser arm's own lines ride the core's progress; the flow
+        // never prompts past the armed (unanswered) paste.
+        assert_eq!(
+            ui.progress_log(),
+            vec![
+                "No eligible production Prime CLI API key found. Starting browser login..."
+                    .to_string(),
+                "Checking Prime Inference access...".to_string(),
+                "Loading Prime teams...".to_string(),
+            ]
+        );
+        let (_, auth, prompts) = ui.logs();
+        // TS sends no scope for the inference arm: the URL keeps only the
+        // code, with the code line next to it.
+        assert_eq!(
+            auth,
+            vec![
+                "Code: ch-1\nhttps://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
+        // The poll resolved (pending once, then the encrypted key) before
+        // the whoami and the teams fetch.
+        assert_eq!(
+            http.requests()[..4],
+            [
+                "https://api.primeintellect.ai/api/v1/auth_challenge/generate".to_string(),
+                "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1"
+                    .to_string(),
+                "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1"
+                    .to_string(),
+                "https://api.primeintellect.ai/api/v1/user/whoami".to_string(),
+            ]
+        );
+        // The browser arm's key is the stored credential.
+        let auth = AuthStorage::create(&agent_dir);
+        assert!(matches!(
+            auth.get_all().credential("prime-inference"),
+            Some(pa_core::auth::AuthCredential::ApiKey { key, .. }) if key == "fixture-browser-key"
+        ));
+        assert_eq!(
+            auth.get_prime_inference_team_selection(),
+            StoredPrimeTeam::Team(team("t-1", "Team One"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_browser_falls_back_to_the_paste_prompt() {
+        // The challenge generate endpoint is down: the browser flow
+        // fails before its URL shows, so the fallback prompt arms under
+        // the unavailable line and the pasted key completes the login.
+        let http = ScriptedHttp::without_dynamic(vec![
+            (
+                "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
+                500,
+                "Service Unavailable",
+            ),
+            whoami_ok(),
+            (
+                teams_request(),
+                200,
+                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}"#,
+            ),
+        ]);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let ui = ScriptedUi::new(
+            vec![Some("sk-new".to_string())],
+            vec![TeamChoice::PersonalAccount],
+        );
+        assert_eq!(
+            login(&agent_dir, &ui, &http, None, None).await,
+            ProviderAuthOutcome::Status(format!(
+                "Saved API key for Prime Inference. Credentials saved to {}. Using personal account.",
+                agent_dir.join("auth.json").display()
+            ))
+        );
+        assert_eq!(
+            ui.progress_log(),
+            vec![
+                "No eligible production Prime CLI API key found. Starting browser login..."
+                    .to_string(),
+                "Browser sign-in unavailable (Failed to generate Prime login challenge: Service Unavailable)."
+                    .to_string(),
+                "Checking Prime Inference access...".to_string(),
+                "Loading Prime teams...".to_string(),
+            ]
+        );
+        let (_, auth, prompts) = ui.logs();
+        // No browser URL ever showed; the fallback prompt is the TS text.
+        assert!(auth.is_empty(), "no browser URL on the failed browser");
+        assert_eq!(prompts, vec![FALLBACK_PROMPT.to_string()]);
     }
 }
