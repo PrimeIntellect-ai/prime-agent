@@ -190,6 +190,11 @@ def make_side(name: str, binary: str, root: Path, prime_port: int) -> B.Side:
         mock=mock,
     )
     side.env = B.scrubbed_env(agent, tmpdir)
+    # `scrubbed_env` keeps the ambient environment apart from the worker
+    # markers: an operator-pinned PRIME_TEAM_ID would skip the team
+    # question (the flow answers the pin instead), so the harness drops
+    # it — the frame-diff drives the full question.
+    side.env.pop("PRIME_TEAM_ID", None)
     # A real user terminal: both sides render their full styled surface.
     side.env["COLORTERM"] = "truecolor"
     # The mock Prime API: the browser challenge stays pending, whoami
