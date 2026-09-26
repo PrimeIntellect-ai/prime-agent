@@ -3,7 +3,9 @@
 //! inside the selection range's diff — the rows the previous frame
 //! already styled (and the untouched rows around them) reuse the cached
 //! styled copies verbatim, so extending a drag by one row styles one row,
-//! not the window. Rebuilt rows re-style from the cached window rows
+//! not the window. Frames without a selection skip the pass entirely, so
+//! a drag's first styled frame is a cold rebuild and the diff below owns
+//! every frame after it. Rebuilt rows re-style from the cached window rows
 //! (the per-entry line cache), never from the raw entries.
 
 use super::AgentView;
@@ -180,14 +182,17 @@ mod tests {
         let (base, start) = base_rows(&mut view);
         let row = row_of(&mut view, "row zero");
         // Drag across three window rows, then extend by one more: the
-        // second frame styles only the newly covered row.
+        // first styled frame is a cold rebuild (the composed frame skipped
+        // the restyle without a selection), the extension's frame styles
+        // only the newly covered row.
         view.begin_selection(row, 2);
         view.extend_active_selection(row + 3, 6);
         let styled = view.selection_styled_window(base.clone(), start);
-        // The composed frame already cached the unselected rows: the drag
-        // styles only its four covered rows.
-        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), 4, "the drag styles its rows"));
-        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
+        // The drag's first styled frame rebuilds the whole window (the
+        // no-selection frame before it cached nothing); the extension
+        // below proves the steady-state diff takes over from there.
+        RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), base.len()));
+        RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 1));
         view.extend_active_selection(row + 4, 6);
         let base_len = base.len();
         let styled_rows = view.selection_styled_window(base, start);
