@@ -350,6 +350,10 @@ pub struct Settings {
     /// unrestricted (the TS behavior).
     pub allowed_models: Option<Vec<String>>,
     pub tree_filter_mode: Option<String>,
+    /// `chatDetail` (TS #2709): the conversation-detail level Ctrl+O
+    /// cycles and persists ("overview"/"details"/"all"); `None` reads
+    /// as the TS default startup level, `details`.
+    pub chat_detail: Option<String>,
     pub thinking_budgets: Option<ThinkingBudgetsSettings>,
     pub editor_padding_x: Option<u64>,
     pub autocomplete_max_visible: Option<u64>,

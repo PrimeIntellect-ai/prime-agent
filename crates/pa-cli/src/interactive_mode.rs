@@ -2035,6 +2035,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn fork_startup_selection_rejects_a_fifo_source_without_hanging() {
         // A FIFO with no writer blocks the copy's read forever; the guard

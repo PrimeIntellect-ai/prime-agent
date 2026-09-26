@@ -1,3 +1,61 @@
+## Goal/autonomous continuations wait for background bash (TS #2465 port, lane goal-bash-race-fix, 2026-09-25)
+
+**The TS fix.** TS PR #2465 (`b08f08efad` merged 2026-09-21): a
+goal-active or autonomous session that ends its turn while a background
+`bash()` handle still runs was immediately re-prompted by the
+timer-driven continuation — the existing hold
+(`_goalContinuationAwaitsRlmWork` /
+`_autonomousContinuationAwaitsRlmWork`) only paused for unsettled RLM
+descendant work. The fix extends the same hold to live background bash
+handles without spending continuation budget: the kernel's
+bash-activity tracking (`hasBackgroundWork`, the state behind the
+bash-done completion follow-ups) is the liveness query, and the kernel
+manager notifies the session (`onBackgroundWorkSettled`) when the last
+live handle settles (its completion notice is admitted first — the
+runtime awaits the `bash.completed` host reply before emitting the
+activity release) or when the kernel tears down; the session then runs
+the same resume pair the RLM child settlement sites fire, so the held
+continuation resumes behind the notice exactly like child-exit notices.
+
+**The Rust mapping.** The manager seam
+(`KernelManagerOptions.on_background_work_settled`, fired at the
+activity-map-empty release and at teardown with live handles, panic
+guarded into the diagnostics tail like the TS try/catch) threads
+`SessionEngineConfig` -> `runtime_wiring::kernel_provisioner` ->
+`IpythonKernelProvisionerOptions` -> the manager; the daemon engine
+builds it from its registered weak arc and retries both owed
+continuations. The liveness probe
+(`AgentSessionEngine::has_live_background_bash_handles`, TS
+`_hasLiveBackgroundBashHandles`) reads the built session's provisioner
+weakly — the in-run consult can run inside a compaction turn, which
+holds the session mutex — and gates all five continuation mint/resume
+sites: the goal turn-end mint, the goal settle retry, the post-compaction
+goal resume mint (TS `resumeQueuedWork()`'s arm), the autonomous in-run
+hold, and the autonomous settle retry. User prompts and explicit
+commands are never gated (a user prompt always wakes the session).
+
+**Deliberate non-ports.** The TS keep-alive-valve hunks
+(`_fireAutonomousSubagentKeepAlive` re-poll) have no Rust counterpart:
+the subagent keep-alive valve is not ported to the daemon surface. The
+pa-cli headless/print surfaces pass no settlement callback: their
+continuation loops are separate ported surfaces without the RLM-work
+hold either (pre-existing divergence, unchanged by this port). The TS
+`.changes` changelog file has no Rust equivalent. A background handle
+that never exits holds the pause indefinitely by design — the handle
+settling, not a timer, is the wake-up (TS parity), and a user prompt
+always wakes the session immediately.
+
+**Regression pins.** Manager-level rows (malformed releases never
+settle, the matching release fires exactly once, teardown with live
+handles fires once, a panicking callback neither breaks the event path
+nor aborts teardown) over injected activity events; live-kernel rows
+(settlement at handle completion, teardown-with-live-handles once) over
+a real `python -m rlm.repl`; daemon rows (the goal and autonomous
+continuations hold behind a live handle with budget unspent, keep the
+deferral on the settlement retry while the handle still runs, and
+deliver/admit exactly once when it settles; the post-compaction mint
+defers the same way).
+
 ## Deleted-subagent spend: the durable capture ahead of TS (lane deleted-child-spend, 2026-09-23)
 
 **The ahead-of-TS exception (Kevin's directive, 2026-09-23).** TS PR
@@ -1794,3 +1852,47 @@ today."
   and `abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups`;
   `abort_and_send_queued_with_an_empty_queue_is_a_plain_abort` keeps
   the abort-only park.
+
+## Agents-view search maps the SESSION column (operator-directed divergence, 2026-09-26)
+
+Operator bug report (2026-09-26, the reported shape): "Agents View
+search does not accurately match against the SESSION column — a session
+named (or whose first-prompt-derived name is) 'hey' is not surfaced by
+searching 'hey', while other searches over-match, returning unrelated
+sessions because they match against the entire first prompt (long,
+truncated in agents view, containing lots of text)."
+
+- **Root cause**: the SESSION column renders `session_title`'s ladder
+  (`sessionName` → `firstMessage` → cwd basename → `sessionId` → `id`),
+  but the #2656 picker corpus indexed only `sessionName` (saved `name`)
+  plus the id and cwd: an unnamed session displayed its first prompt
+  ("hey") while its corpus name sat empty — a query for the displayed
+  title could not match. The TS corpus (agents-view-state.ts
+  `createUnifiedSearchableText`) joins the first message AND the 64 KiB
+  capped transcript (`allMessagesText`, session-manager.ts
+  `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`), which is the over-match side:
+  queries match prompt and transcript text the clipped column never
+  shows.
+- **The fix — the operator-directed divergence**: the picker's name
+  target is the SESSION column's own title — `session_title` over the
+  SAME merged summary the row renders, clipped by the column's own
+  truncation rule (`truncate_text`, display-width, no ellipsis) at the
+  column's own cap (`SESSION_NAME_COLUMN_MAX_CELLS` = 28, TS
+  `buildCompactAgentsViewLayout`'s `Math.min(28, ...)`, minus the two
+  cells the row icon takes). The id and cwd targets and the ranked
+  tiers (identity paste > name exact > prefix > substring > fuzzy > id
+  > cwd) are unchanged; the transcript corpus stays excluded, and the
+  full first prompt never enters — only the visible head.
+- **Unchanged invariants**: named sessions keep their explicit name as
+  the corpus name (the ladder's first rung — the first prompt stays
+  out); the daemon-wins/saved-fills merge for the id and cwd; ancestor
+  retention under a query; the regex corpus; the e2e picker contract
+  (names/ids/cwd match, transcripts never).
+- Verifiers (corpus tests in `crates/pa-tui/src/agents_view_state.rs`):
+  `an_unnamed_sessions_prompt_derived_title_matches` (the "hey" case
+  plus case variants), `long_first_prompts_enter_only_the_visible_title_head`
+  (deep prompt text never matches, the visible head does),
+  `the_corpus_name_is_the_sessions_column_title` (the corpus equals the
+  displayed title across named, prompt-derived, cwd-basename, and
+  archived rows), and `a_named_sessions_first_message_stays_out_of_the_corpus`
+  (the over-match guard).
