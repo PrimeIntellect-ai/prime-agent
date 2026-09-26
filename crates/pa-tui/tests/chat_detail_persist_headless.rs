@@ -1,29 +1,44 @@
-//! Headless e2e for skills-as-slash-commands (TS `interactive-mode.ts`
-//! `createBaseAutocompleteProvider`): the session's `get_commands`
-//! response enumerates the installed skills into the slash menu — the
-//! name, the description, and the source label (`#user`, `#project`, …)
-//! — so typing `/` surfaces them exactly like the TS product.
+//! Headless e2e for the persisted conversation-detail level (TS #2709
+//! "Keep the chat detail level across sessions"): Ctrl+O saves the cycled
+//! level as the `chatDetail` setting, and a later chat — the same session
+//! re-entered or a brand-new one, both a fresh process re-reading the
+//! settings store — opens at the saved level instead of resetting to the
+//! `details` startup default.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
 
+/// The session identity one run attaches to: the second run of the
+/// regression uses a different id, so the saved level is shown to apply
+/// to another chat too (the setting is global; TS #2709's `createMode`
+/// opens a new client at the saved level).
+struct MockSession {
+    active: &'static str,
+    wire: &'static str,
+    name: &'static str,
+}
+
 struct MockSupervisor {
     listener: UnixListener,
+    session: MockSession,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind(socket: &std::path::Path, session: MockSession) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            session,
         }
     }
 
@@ -70,72 +85,16 @@ impl MockSupervisor {
                             "command": "create",
                             "success": true,
                             "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
-                }
-                "get_commands" => {
-                    // TS `createAgentConnectionCommands`: the skills ride
-                    // the command catalog as `skill:<name>` entries with
-                    // their description and source info.
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_commands",
-                            "success": true,
-                            "data": {
-                                "commands": [
-                                    {
-                                        "name": "skill:web-search",
-                                        "description": "Search the web for answers",
-                                        "source": "skill",
-                                        "sourceInfo": {
-                                            "path": "/tmp/skills/web-search/SKILL.md",
-                                            "source": "local",
-                                            "scope": "user",
-                                            "origin": "top-level",
-                                            "baseDir": "/tmp/skills/web-search",
-                                        },
-                                    },
-                                ]
+                                "activeSessionId": self.session.active,
+                                "id": self.session.active,
+                                "sessionId": self.session.wire,
+                                "sessionFile": format!("/tmp/{}.jsonl", self.session.wire),
                             },
                         }),
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
+                    write_json(&mut writer, &attach_data(id, &self.session));
                 }
                 _ => {
                     write_json(
@@ -162,7 +121,7 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
 }
 
 /// The slim attach result: one empty session.
-fn attach_data(id: &str) -> Value {
+fn attach_data(id: &str, session: &MockSession) -> Value {
     json!({
         "type": "response",
         "id": id,
@@ -170,15 +129,15 @@ fn attach_data(id: &str) -> Value {
         "success": true,
         "data": {
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
+            "activeSessionId": session.active,
             "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
+                "activeSessionId": session.active,
+                "summary": { "id": session.active, "cwd": "/tmp" },
                 "state": {
-                    "activeSessionId": "s1",
+                    "activeSessionId": session.active,
                     "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "skills session",
+                    "sessionId": session.wire,
+                    "sessionName": session.name,
                     "model": null,
                     "isStreaming": false,
                     "isCompacting": false,
@@ -196,17 +155,17 @@ fn attach_data(id: &str) -> Value {
 }
 
 /// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence. The skill-commands flag
-/// starts at the TS default (true), not `bool::default`.
+/// default; the `chatDetail` pair is stateful — the store models the
+/// settings file a fresh process re-reads.
+#[derive(Default)]
 struct StubSettings {
-    enable_skill_commands: std::sync::Mutex<bool>,
+    chat_detail: Mutex<Option<String>>,
 }
 
-impl Default for StubSettings {
-    fn default() -> Self {
-        Self {
-            enable_skill_commands: std::sync::Mutex::new(true),
-        }
+impl StubSettings {
+    /// The stored level (what the settings file holds after a save).
+    fn stored(&self) -> Option<String> {
+        self.chat_detail.lock().expect("chat detail lock").clone()
     }
 }
 
@@ -254,16 +213,9 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn enable_skill_commands(&self) -> bool {
-        *self
-            .enable_skill_commands
-            .lock()
-            .expect("skill commands lock")
+        true
     }
-    fn set_enable_skill_commands(&self, enabled: bool) -> Result<()> {
-        *self
-            .enable_skill_commands
-            .lock()
-            .expect("skill commands lock") = enabled;
+    fn set_enable_skill_commands(&self, _enabled: bool) -> Result<()> {
         Ok(())
     }
     fn enable_builtin_skills(&self) -> bool {
@@ -315,9 +267,11 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn chat_detail(&self) -> String {
-        "details".to_string()
+        // TS `getChatDetail`: unset reads as the `details` startup level.
+        self.stored().unwrap_or_else(|| "details".to_string())
     }
-    fn set_chat_detail(&self, _detail: &str) -> Result<()> {
+    fn set_chat_detail(&self, detail: &str) -> Result<()> {
+        *self.chat_detail.lock().expect("chat detail lock") = Some(detail.to_string());
         Ok(())
     }
     fn warnings_anthropic_extra_usage(&self) -> bool {
@@ -341,7 +295,7 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     }
 }
 
-fn options(socket: PathBuf) -> InteractiveOptions {
+fn options(socket: PathBuf, settings: Arc<StubSettings>) -> InteractiveOptions {
     InteractiveOptions {
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
@@ -373,15 +327,19 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
-        client_settings: Some(std::sync::Arc::new(StubSettings::default())),
+        client_settings: Some(settings),
     }
 }
 
-fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
+fn run_plan(
+    settings: Arc<StubSettings>,
+    session: MockSession,
+    steps: Vec<HeadlessStep>,
+) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
+    let supervisor = MockSupervisor::bind(&socket, session);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -394,116 +352,129 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
         height: 30,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            options(socket, settings),
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     outcome.frames
 }
 
-/// Typing `/skill:<prefix>` surfaces the installed skill as a slash
-/// command: the menu row names it (`skill:web-search`), carries its
-/// description, and shows the source label from the source info
-/// (`#user`).
+fn ctrl_o() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+}
+
+const DETAILS_LABEL: &str = "Details mode (Ctrl+O to expand)";
+const ALL_LABEL: &str = "Expanded mode (Ctrl+O to collapse)";
+const OVERVIEW_LABEL: &str = "Collapsed mode (Ctrl+O to expand)";
+
+fn wait_label(label: &str) -> HeadlessStep {
+    HeadlessStep::WaitRender {
+        needle: label.to_string(),
+        timeout_ms: 10_000,
+    }
+}
+
+/// TS #2709's regression shape: pick a level with Ctrl+O in one chat;
+/// the pick is saved as the `chatDetail` setting, and a later run — a
+/// fresh process re-reading the settings store — opens at the saved
+/// level with no key pressed. The later run attaches to a DIFFERENT
+/// session id: the setting is global (the TS mechanism), so the saved
+/// level applies to that chat too.
 #[test]
-fn skill_commands_surface_in_the_slash_menu() {
-    let steps = vec![
-        // The command-catalog fetch lands in the background (the attach
-        // spawns it); give the fold a beat before typing.
-        HeadlessStep::WaitMs(300),
-        HeadlessStep::Type("/skill:web".to_string()),
-        HeadlessStep::SettleIdle,
-        HeadlessStep::WaitMs(100),
-    ];
-    let frames = run_plan(steps);
-    assert!(!frames.is_empty(), "frames were captured");
+fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
+    // Run one: an unset store, so the chat starts at the TS startup
+    // level `details`; one Ctrl+O cycles to `all` and saves it.
+    let run_one = Arc::new(StubSettings::default());
+    let frames = run_plan(
+        run_one.clone(),
+        MockSession {
+            active: "s1",
+            wire: "sess-1",
+            name: "detail persist session",
+        },
+        vec![
+            wait_label(DETAILS_LABEL),
+            HeadlessStep::Key(ctrl_o()),
+            wait_label(ALL_LABEL),
+        ],
+    );
     let all = frames.join("\n");
     assert!(
-        all.contains("skill:web-search"),
-        "the skill lists as a slash command: {all}"
+        all.contains(DETAILS_LABEL),
+        "the chat starts at the details startup level: {all}"
     );
     assert!(
-        all.contains("Search the web for answers"),
-        "the skill description renders: {all}"
+        all.contains(ALL_LABEL),
+        "ctrl+o cycles the visible level to all: {all}"
     );
-    assert!(all.contains("#user"), "the source label renders: {all}");
-}
+    assert_eq!(
+        run_one.stored().as_deref(),
+        Some("all"),
+        "the ctrl+o pick saves the chatDetail setting"
+    );
 
-/// The TS default (`enableSkillCommands: true`) applies when the
-/// composition root supplies no settings seam at all — an embedded run
-/// without `/settings` still lists the skills.
-#[test]
-fn skills_surface_without_a_settings_seam() {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let mut opts = options(socket);
-    opts.client_settings = None;
-    let plan = HeadlessPlan {
-        steps: vec![
-            HeadlessStep::WaitMs(300),
-            HeadlessStep::Type("/skill:web".to_string()),
-            HeadlessStep::SettleIdle,
-            HeadlessStep::WaitMs(100),
-        ],
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(opts, UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
-    let all = outcome.frames.join("\n");
+    // Run two: a fresh process whose settings store carries the saved
+    // level (the file the first run wrote), opening a different chat.
+    // TS #2709 (`next = createMode(harness)`): it starts at `all`, with
+    // no key pressed, and nothing re-saves.
+    let run_two = Arc::new(StubSettings {
+        chat_detail: Mutex::new(Some("all".to_string())),
+    });
+    let frames = run_plan(
+        run_two.clone(),
+        MockSession {
+            active: "s2",
+            wire: "sess-2",
+            name: "the next chat",
+        },
+        vec![wait_label(ALL_LABEL)],
+    );
+    let all = frames.join("\n");
     assert!(
-        all.contains("skill:web-search"),
-        "the TS default lists skills without a settings seam: {all}"
+        !all.contains(DETAILS_LABEL),
+        "a later chat opens at the saved level, not the details default: {all}"
+    );
+    assert!(
+        all.contains(ALL_LABEL),
+        "a later chat renders the saved all level: {all}"
+    );
+    assert_eq!(
+        run_two.stored().as_deref(),
+        Some("all"),
+        "opening at the saved level re-saves nothing"
     );
 }
 
-/// The `enableSkillCommands` setting gates the skill list (TS default
-/// true; off hides them from the autocomplete).
+/// The cycle saves every level, not just one hop: a chat opening at
+/// `all` wraps to `overview` on the next Ctrl+O and saves that too.
 #[test]
-fn disabled_skill_commands_stay_out_of_the_menu() {
-    use pa_tui::client_settings::ClientSettings;
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let mut opts = options(socket);
-    let settings = std::sync::Arc::new(StubSettings::default());
-    settings
-        .set_enable_skill_commands(false)
-        .expect("pin settings");
-    opts.client_settings = Some(settings);
-    let plan = HeadlessPlan {
-        steps: vec![
-            HeadlessStep::WaitMs(300),
-            HeadlessStep::Type("/skill:web".to_string()),
-            HeadlessStep::SettleIdle,
-            HeadlessStep::WaitMs(100),
+fn the_cycle_saves_the_overview_wrap_too() {
+    let settings = Arc::new(StubSettings {
+        chat_detail: Mutex::new(Some("all".to_string())),
+    });
+    let frames = run_plan(
+        settings.clone(),
+        MockSession {
+            active: "s1",
+            wire: "sess-1",
+            name: "wrap session",
+        },
+        vec![
+            wait_label(ALL_LABEL),
+            HeadlessStep::Key(ctrl_o()),
+            wait_label(OVERVIEW_LABEL),
         ],
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(opts, UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
-    let all = outcome.frames.join("\n");
+    );
+    let all = frames.join("\n");
     assert!(
-        !all.contains("skill:web-search"),
-        "the setting hides the skill commands: {all}"
+        all.contains(OVERVIEW_LABEL),
+        "ctrl+o wraps all -> overview: {all}"
+    );
+    assert_eq!(
+        settings.stored().as_deref(),
+        Some("overview"),
+        "the wrap saves the overview level"
     );
 }
