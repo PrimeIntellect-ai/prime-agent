@@ -2086,7 +2086,7 @@ mod tests {
         attach["snapshot"]["state"]["model"] = json!({
             "id": "faux-1", "provider": "faux", "reasoning": true
         });
-        attach["snapshot"]["state"]["thinkingLevel"] = "high";
+        attach["snapshot"]["state"]["thinkingLevel"] = json!("high");
         let data = attach_data_from_response(&attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(view.model_id.as_deref(), Some("faux-1"));
@@ -2098,7 +2098,7 @@ mod tests {
         attach["snapshot"]["state"]["model"] = json!({
             "id": "faux-plain", "provider": "faux", "reasoning": false
         });
-        attach["snapshot"]["state"]["thinkingLevel"] = "off";
+        attach["snapshot"]["state"]["thinkingLevel"] = json!("off");
         let data = attach_data_from_response(&attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
