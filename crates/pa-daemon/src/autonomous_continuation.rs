@@ -454,11 +454,11 @@ mod tests {
         );
         let engine = Arc::new(engine);
         engine.register_arc();
-        let admitted: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = std::sync::Arc::clone(&admitted);
+        // The admission itself is the observable event: the sink hands the
+        // owed turn to a channel the test waits on.
+        let (admit_tx, admit_rx) = std::sync::mpsc::channel::<String>();
         engine.set_autonomous_admission(std::sync::Arc::new(move |text| {
-            sink.lock().unwrap().push(text);
+            let _ = admit_tx.send(text);
         }));
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "warm".to_string(), &mut events);
@@ -477,18 +477,16 @@ mod tests {
         );
         admit(&engine, "go".to_string(), &mut events);
         // No settlement callback ever fires in this harness — the
-        // consult's own re-arm must deliver the owed turn.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while admitted.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        let texts = admitted.lock().unwrap().clone();
-        assert_eq!(
-            texts.len(),
-            1,
-            "the re-arm delivered the owed turn without an external retry: {texts:?}"
+        // consult's own re-arm must deliver the owed turn, and the wait
+        // rides the admission itself (the timeout only bounds failure).
+        let text = admit_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the re-arm delivered the owed turn without an external retry");
+        assert!(text.starts_with("[autonomous-continuation]"));
+        assert!(
+            admit_rx.try_recv().is_err(),
+            "the owed flag owns exactly one delivery"
         );
-        assert!(texts[0].starts_with("[autonomous-continuation]"));
         assert!(
             !engine
                 .autonomous_awaits_rlm_work
