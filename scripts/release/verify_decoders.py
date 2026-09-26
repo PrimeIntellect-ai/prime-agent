@@ -33,7 +33,8 @@ def build_id(data, path):
 
 
 def verify(incoming):
-    directories = sorted(p for p in incoming.iterdir() if p.is_dir())
+    directories = ([incoming] if (incoming / "manifest.json").is_file()
+                   else sorted(p for p in incoming.iterdir() if p.is_dir()))
     check(bool(directories), "no build artifact directories")
     for directory in directories:
         manifest = json.loads((directory / "manifest.json").read_text())

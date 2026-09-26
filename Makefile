@@ -41,12 +41,12 @@ actionlint:
 # runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
 glibc-gate:
 	@case "$(TARGET)" in *-linux-gnu) \
-		if ! objdump -T target/release/prime-agent >/dev/null 2>&1; then \
-			echo "glibc-gate: unable to inspect target/release/prime-agent with objdump (build first - the dry-run targets run cargo build before this gate)" >&2; exit 1; \
+		if ! objdump -T "$(GLIBC_BINARY)" >/dev/null 2>&1; then \
+			echo "glibc-gate: unable to inspect $(GLIBC_BINARY) with objdump (build and split first)" >&2; exit 1; \
 		fi; \
-		syms="$$(objdump -T target/release/prime-agent | grep -o 'GLIBC_[0-9.]*' || true)"; \
+		syms="$$(objdump -T "$(GLIBC_BINARY)" | grep -o 'GLIBC_[0-9.]*' || true)"; \
 		if [ -z "$$syms" ]; then \
-			echo "glibc-gate: no GLIBC symbols found in target/release/prime-agent - refusing to pass without evidence" >&2; exit 1; \
+			echo "glibc-gate: no GLIBC symbols found in $(GLIBC_BINARY) - refusing to pass without evidence" >&2; exit 1; \
 		fi; \
 		max_glibc="$$(printf '%s\n' "$$syms" | sort -Vu | tail -1)"; \
 		echo "highest GLIBC symbol required: $${max_glibc}"; \
@@ -83,6 +83,21 @@ CATALOG_ASSETS_DIR = target/catalog-assets
 CATALOG_ASSETS_MODE ?= fixture
 CATALOG_ASSETS_FLAG = --catalog-assets $(CATALOG_ASSETS_DIR)
 
+# Mirror the Linux CI split: Cargo's executable remains unstripped and the
+# archive receives a separate shipped ELF plus its detached decoder.
+ifneq ($(filter %-unknown-linux-gnu,$(TARGET)),)
+RELEASE_BINARY = target/release/dist/prime-agent
+RELEASE_DECODER = target/release/dist/prime-agent-$(VERSION)-$(if $(filter aarch64-%,$(TARGET)),linux-arm64,linux-x64).debug.gz
+RELEASE_ASSEMBLE_FLAGS = --binary $(RELEASE_BINARY) --decoder $(RELEASE_DECODER)
+RELEASE_SPLIT = python3 scripts/release/split_debug.py --binary target/release/prime-agent --shipped $(RELEASE_BINARY) --out target/release/dist --version "$(VERSION)" --target "$(TARGET)"
+RELEASE_VERIFY_DECODER = python3 scripts/release/verify_decoders.py target/release/dist
+GLIBC_BINARY = $(RELEASE_BINARY)
+else
+RELEASE_ASSEMBLE_FLAGS =
+RELEASE_SPLIT = :
+RELEASE_VERIFY_DECODER = :
+endif
+
 # Live-catalog asset generation (network fetch; packaging parity with the
 # TS release flow — CI itself uses the fixture snapshot for reliability).
 catalog-assets:
@@ -94,11 +109,13 @@ catalog-assets-fixture:
 
 release-dry-run:
 	cargo build --release --locked --workspace
+	$(RELEASE_SPLIT)
 	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
-		$(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+		$(RELEASE_ASSEMBLE_FLAGS) $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+	$(RELEASE_VERIFY_DECODER)
 	python3 scripts/release/verify_release.py \
 		--dist-dir target/release/dist --version "$(VERSION)" --target "$(TARGET)"
 
@@ -109,11 +126,13 @@ GIT_SHA := $(shell git rev-parse HEAD)
 
 continuous-dry-run:
 	cargo build --release --locked --workspace
+	$(RELEASE_SPLIT)
 	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
-		--sha "$(GIT_SHA)" $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+		--sha "$(GIT_SHA)" $(RELEASE_ASSEMBLE_FLAGS) $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+	$(RELEASE_VERIFY_DECODER)
 	python3 scripts/release/verify_release.py \
 		--dist-dir target/release/dist --version "$(VERSION)" --target "$(TARGET)" \
 		--sha "$(GIT_SHA)"

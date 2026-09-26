@@ -58,6 +58,7 @@ class DecoderManifest(unittest.TestCase):
                 run(*assemble)
                 if target == TARGETS[0][0]:
                     first_assemble = assemble
+                    run(sys.executable, str(VERIFIER), str(dist))
             manifest = json.loads((dist / "manifest.json").read_text())
             self.assertEqual({entry["target"] for entry in manifest["decoders"]},
                              {t for t, _ in TARGETS})
