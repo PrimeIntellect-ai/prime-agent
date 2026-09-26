@@ -18,6 +18,9 @@ use launch_budget::{
 };
 mod supervision;
 
+// STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
+// pub(super) const); the lib-target import is flagged unused since only tests use it.
+#[allow(unused_imports)]
 use supervision::STABLE_LIFETIME_MS;
 
 pub(crate) use options::ClientRouting;
