@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
-use crate::keybindings::KeybindingsManager;
+use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{
     login_field_row, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines,
     search_field_plain_row, MenuSegment,
@@ -415,6 +415,23 @@ const EMPTY_VALUE_NOTICE: &str = "The value cannot be empty.";
 /// TS `LoginDialogComponent`'s default browser-step line.
 const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser.";
 
+/// The outcome of copying the sign-in URL (TS `getAuthActionsText`'s
+/// status: `Copied sign-in link` / `Failed to copy sign-in link`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyStatus {
+    Copied,
+    Failed,
+}
+
+/// TS `isPrintableInput` over a key id: a single printable character
+/// types into the mounted paste field, so it stays the field's while the
+/// field shows; every other bound key (a modified one like `alt+c`) is
+/// the panel's.
+fn is_printable_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if !c.is_control()) && chars.next().is_none()
+}
+
 /// The mounted panel: the flow's progress lines, the browser URL block,
 /// and the one active input (a paste prompt or the team picker).
 #[derive(Debug)]
@@ -441,28 +458,13 @@ pub struct AuthPanel {
     notice: Option<String>,
     /// The active input.
     input: PanelInput,
-    /// TS the auth-actions row (`getAuthActionsText`): live once
-    /// `showAuth` or the paste field mounted it; it rides the panel's
-    /// last row.
-    actions_live: bool,
-    /// TS `copyAuthUrl`'s status: the actions row's success/error line.
-    copy_state: Option<CopyState>,
-    /// The resolved keybinding labels the actions row renders (TS reads
-    /// `getKeybindings()` live; the mounts sync the panel from the
-    /// surface's manager).
-    keybindings: KeybindingsManager,
+    /// The URL block's copy outcome (TS the actions row's status text).
+    copy_status: Option<CopyStatus>,
     /// The flow's cooperative cancel signal (TS the dialog's
     /// `abortController`): Esc/ctrl+c on a URL screen with no mounted
     /// input cancels the running login — the actions row's cancel hint
     /// is never a dead key.
     flow_cancel: Option<FlowCancel>,
-}
-
-/// TS `copyAuthUrl`'s status arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CopyState {
-    Copied,
-    Failed,
 }
 
 /// The panel's active input.
@@ -527,9 +529,7 @@ impl AuthPanel {
             auth_instructions: None,
             notice: None,
             input: PanelInput::Working,
-            actions_live: false,
-            copy_state: None,
-            keybindings: KeybindingsManager::new(),
+            copy_status: None,
             flow_cancel: None,
         }
     }
@@ -543,13 +543,6 @@ impl AuthPanel {
         let mut panel = AuthPanel::new(title);
         panel.surface = PanelSurface::Onboarding;
         panel
-    }
-
-    /// Sync the keybinding labels the actions row renders (TS reads
-    /// `getKeybindings()` live at render; the mounts carry the surface's
-    /// resolved manager so the row matches the user's bindings).
-    pub fn set_keybindings(&mut self, keybindings: KeybindingsManager) {
-        self.keybindings = keybindings;
     }
 
     /// Arm the flow's cooperative cancel signal (TS the dialog's
@@ -596,10 +589,9 @@ impl AuthPanel {
         self.auth_instructions = instructions;
         self.progress.clear();
         self.progress_open = false;
+        self.copy_status = None;
         self.input = PanelInput::Working;
         self.notice = None;
-        self.actions_live = true;
-        self.copy_state = None;
     }
 
     /// TS `showManualInput` / `armManualInput` (muted tone) and
@@ -623,8 +615,7 @@ impl AuthPanel {
             reply: Some(reply),
         };
         self.notice = None;
-        self.actions_live = true;
-        self.copy_state = None;
+        self.copy_status = None;
     }
 
     /// TS `PrimeTeamSelectorComponent`: the picker mounts as its own
@@ -645,10 +636,10 @@ impl AuthPanel {
         // section title, actions row, or copy status must never bleed
         // into the frame the pick leaves behind.
         self.progress_open = false;
-        self.actions_live = false;
-        self.copy_state = None;
+        self.copy_status = None;
         self.auth_url = None;
         self.auth_instructions = None;
+        self.copy_status = None;
         self.notice = None;
         let mut picker = PrimeTeamPicker {
             teams,
@@ -670,7 +661,15 @@ impl AuthPanel {
     /// mounted input through its oneshot; the answered flag hands the
     /// panel back to the flow after the match (the arms never hold the
     /// input's reply past its last use).
-    pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) {
+    ///
+    /// `sink` carries the copy's OSC 52 fallback: stdout on the terminal,
+    /// the session's captured buffer in a headless run.
+    pub(crate) fn handle_key(
+        &mut self,
+        key: &str,
+        kb: &KeybindingsManager,
+        sink: &mut crate::clipboard::OscSink,
+    ) {
         // Ctrl+C cancels the mounted input like Esc (the surfaces that
         // consume the pair note it handled).
         if key == "ctrl+c" {
@@ -684,14 +683,15 @@ impl AuthPanel {
             self.mark_flow_cancelled();
             return;
         }
-        // TS `copyAuthUrl`: the copy binding on the mounted URL (the
-        // plain-key arm only while the field is closed — a typed `c` is
-        // field input, TS `isTextEntryKeybinding`'s filter).
+        // TS `handleInput`'s copy arm: the copy binding copies the shown
+        // URL, except a single-character key while the paste field is
+        // visible — that one types into the field, so only the binding's
+        // non-text-entry keys (TS's `alt+c` default) copy then.
         if self.auth_url.is_some()
             && kb.matches(key, "app.clipboard.copyLoginUrl")
-            && (matches!(self.input, PanelInput::Working) || !is_text_entry_key(key))
+            && !(matches!(self.input, PanelInput::Paste { .. }) && is_printable_key(key))
         {
-            self.copy_auth_url();
+            self.copy_auth_url(sink);
             return;
         }
         let mut answered = false;
@@ -765,6 +765,24 @@ impl AuthPanel {
         }
     }
 
+    /// TS `copyAuthUrl`: copy the shown URL through the platform
+    /// clipboard chain and remember the outcome for the actions row (the
+    /// status text replaces the hint until the next URL replaces both).
+    /// The payload carries exactly what the row renders — the same
+    /// control-byte scrub and single-line fold the render applies — so a
+    /// provider-supplied URL cannot ride the clipboard channel as a
+    /// second input source.
+    fn copy_auth_url(&mut self, sink: &mut crate::clipboard::OscSink) {
+        let Some(url) = self.auth_url.clone() else {
+            return;
+        };
+        let url = scrub_controls(&url).replace('\n', "");
+        self.copy_status = match crate::clipboard::copy_to_clipboard(&url, sink) {
+            Ok(()) => Some(CopyStatus::Copied),
+            Err(_) => Some(CopyStatus::Failed),
+        };
+    }
+
     /// One paste payload while the panel owns the frame (TS the dialog's
     /// field and the selector's search accept pasted text): the payload
     /// lands in the mounted input — the paste field or the picker's
@@ -814,20 +832,6 @@ impl AuthPanel {
 
     /// TS `copyAuthUrl`: the mounted URL to the clipboard, the actions
     /// row carrying the outcome ("Copied sign-in link" / "Failed to copy
-    /// sign-in link").
-    fn copy_auth_url(&mut self) {
-        let Some(url) = self.auth_url.clone() else {
-            return;
-        };
-        let mut sink = crate::clipboard::OscSink::Stdout;
-        self.copy_state = Some(
-            if crate::clipboard::copy_to_clipboard(&url, &mut sink).is_ok() {
-                CopyState::Copied
-            } else {
-                CopyState::Failed
-            },
-        );
-    }
 
     /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over
     /// the `LoginDialogComponent` content: the session's dock opens with
@@ -836,7 +840,7 @@ impl AuthPanel {
     /// `startContent` row, the progress block, the URL block, the paste
     /// field, and the auth-actions row last — no bottom rule on either
     /// surface).
-    pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<Line> {
+    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let width = width.max(1);
         let mut lines: Vec<Line> = Vec::new();
         // TS `MenuPanel` inline's per-surface chrome: the session dock
@@ -855,7 +859,8 @@ impl AuthPanel {
         }
         // The team picker is TS `PrimeTeamSelectorComponent` — its own
         // panel: the rule, the title, the subtitle, the bordered field,
-        // the rows (no leading content blank, no auth-actions row).
+        // the rows (no leading content blank, no auth-actions row, no nav
+        // hint).
         if let PanelInput::Teams { picker, .. } = &mut self.input {
             lines.append(&mut search_field_lines(
                 theme,
@@ -1039,22 +1044,41 @@ impl AuthPanel {
                     lines.push(content_row(theme, width, ThemeColor::Warning, notice));
                 }
                 // TS `addInputField`'s inputSpacer: the blank row between
-                // the field and the actions.
-                lines.push(Vec::new());
+                // the field and the actions (the actions row rides last
+                // while the URL block shows; a paste-only panel — the MCP
+                // token surface — keeps its own hint row instead).
+                if self.auth_url.is_some() {
+                    lines.push(Vec::new());
+                } else {
+                    lines.push(hint_row(theme, width, "enter submit  escape cancel"));
+                }
             }
             PanelInput::Teams { .. } => unreachable!("the team picker returned above"),
         }
-        if self.actions_live {
+        // TS `getAuthActionsText`: the URL block's actions row rides last —
+        // the copy-key hint with the status of the last copy, the submit
+        // hint while the paste field is mounted, and the cancel hint.
+        if self.auth_url.is_some() {
             lines.push(auth_actions_row(
                 theme,
                 width,
-                &self.keybindings,
+                kb,
                 matches!(self.input, PanelInput::Paste { .. }),
-                self.copy_state,
+                self.copy_status,
             ));
         }
         lines
     }
+}
+
+/// TS `isTextEntryKeybinding` over one bound key id: a binding whose
+/// final part is a single character (or `space`) with no ctrl/alt
+/// modifier is the field's text while the paste field shows.
+fn is_text_entry_keybinding(key: &str) -> bool {
+    let parts: Vec<&str> = key.split('+').collect();
+    let key_part = parts.last().copied().unwrap_or("");
+    !parts.iter().any(|part| *part == "ctrl" || *part == "alt")
+        && (key_part == "space" || key_part.chars().count() == 1)
 }
 
 /// TS `getAuthActionsText`: the key-hint row that rides the panel's last
@@ -1066,7 +1090,7 @@ pub(crate) fn auth_actions_row(
     width: usize,
     keybindings: &KeybindingsManager,
     input_visible: bool,
-    copy_state: Option<CopyState>,
+    copy_state: Option<CopyStatus>,
 ) -> Line {
     let mut row: Line = vec![Span::raw(" ".to_string())];
     let mut parts: Vec<Line> = Vec::new();
@@ -1077,12 +1101,12 @@ pub(crate) fn auth_actions_row(
     }
     if let Some(state) = copy_state {
         let tone = match state {
-            CopyState::Copied => ThemeColor::Success,
-            CopyState::Failed => ThemeColor::Error,
+            CopyStatus::Copied => ThemeColor::Success,
+            CopyStatus::Failed => ThemeColor::Error,
         };
         let text = match state {
-            CopyState::Copied => "Copied sign-in link",
-            CopyState::Failed => "Failed to copy sign-in link",
+            CopyStatus::Copied => "Copied sign-in link",
+            CopyStatus::Failed => "Failed to copy sign-in link",
         };
         parts.push(vec![theme.fg_span(tone, text.to_string())]);
     }
@@ -1093,7 +1117,7 @@ pub(crate) fn auth_actions_row(
     let copy_keys = if input_visible {
         configured_copy_keys
             .iter()
-            .filter(|key| !is_text_entry_key(key))
+            .filter(|key| !is_text_entry_keybinding(key))
             .cloned()
             .collect::<Vec<_>>()
     } else {
@@ -1104,7 +1128,7 @@ pub(crate) fn auth_actions_row(
             .collect::<Vec<_>>()
     };
     if !copy_keys.is_empty() {
-        let action = if copy_state == Some(CopyState::Failed) {
+        let action = if copy_state == Some(CopyStatus::Failed) {
             "retry"
         } else {
             "copy"
@@ -1182,19 +1206,6 @@ fn verification_code(instructions: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// TS `isTextEntryKeybinding`: a binding without ctrl/alt whose final
-/// part is the space key or a single character — the keys a paste field
-/// consumes as input, so they copy nothing while the field is visible.
-fn is_text_entry_key(key: &str) -> bool {
-    let lowered = key.to_lowercase();
-    let parts: Vec<&str> = lowered.split('+').collect();
-    let last = parts.last().copied().unwrap_or_default();
-    !parts
-        .iter()
-        .any(|part| *part == "ctrl" || *part == "alt" || *part == "super")
-        && (last == "space" || last.chars().count() == 1)
 }
 
 impl PrimeTeamPicker {
@@ -1287,6 +1298,11 @@ mod tests {
         KeybindingsManager::new()
     }
 
+    /// The copy path's captured OSC 52 channel (a headless run's sink).
+    fn sink() -> crate::clipboard::OscSink {
+        crate::clipboard::OscSink::Buffer(Vec::new())
+    }
+
     fn theme() -> Theme {
         Theme::builtin("prime", crate::theme::ColorMode::TrueColor)
     }
@@ -1313,7 +1329,7 @@ mod tests {
 
     fn frame_text(panel: &mut AuthPanel) -> Vec<String> {
         panel
-            .render(&theme(), 90)
+            .render(&theme(), 90, &kb())
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect()
@@ -1444,16 +1460,17 @@ mod tests {
             rows[0].chars().all(|c| c == '\u{2500}'),
             "the rule opens the panel"
         );
-        // The actions row: submit while the field is visible, the copy key
-        // filtered to its non-text-entry arm, the cancel keys (TS
-        // `getAuthActionsText`).
+        // The paste-only panel keeps its own hint row (the MCP token
+        // surface's grammar); the auth-actions row rides only under a
+        // shown URL block (TS `getAuthActionsText` — pinned by the URL
+        // block's tests below).
         assert!(rows
             .iter()
-            .any(|row| row.contains("Enter submit  Alt+C copy  Esc/Ctrl+C cancel")));
+            .any(|row| row.contains("enter submit  escape cancel")));
         for character in "  sk-live  ".chars() {
-            panel.handle_key(character.to_string().as_str(), &kb());
+            panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some("sk-live".to_string())));
     }
 
@@ -1462,7 +1479,7 @@ mod tests {
     #[test]
     fn escape_on_the_paste_prompt_cancels_the_flow() {
         let (mut panel, mut answer) = mount_paste();
-        panel.handle_key("escape", &kb());
+        panel.handle_key("escape", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(None));
     }
 
@@ -1481,20 +1498,20 @@ mod tests {
             false,
             reply,
         );
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(rows
             .iter()
             .any(|row| row.contains("The value cannot be empty.")));
         assert!(answer.try_recv().is_err(), "nothing answered");
-        panel.handle_key("k", &kb());
-        panel.handle_key("enter", &kb());
+        panel.handle_key("k", &kb(), &mut sink());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
 
         // The login dialog's visible field: an empty submit mounts no
         // notice (the arm loop re-reads the field, TS keeps waiting).
         let (mut panel, mut answer) = mount_paste();
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(
             !rows
@@ -1519,7 +1536,7 @@ mod tests {
             true,
             reply,
         );
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some(String::new())));
         let rows = frame_text(&mut panel);
         assert!(
@@ -1543,7 +1560,7 @@ mod tests {
             oneshot::channel().0,
         );
         for character in "ghp_secretvalue".chars() {
-            panel.handle_key(character.to_string().as_str(), &kb());
+            panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
         let rows = frame_text(&mut panel);
         let joined = rows.join("\n");
@@ -1607,11 +1624,11 @@ mod tests {
     #[test]
     fn the_picker_navigates_and_picks() {
         let (mut panel, mut answer) = mount_teams(vec![acme(), beta()], None);
-        panel.handle_key("down", &kb());
-        panel.handle_key("enter", &kb());
+        panel.handle_key("down", &kb(), &mut sink());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::PersonalAccount));
     }
 
@@ -1620,7 +1637,7 @@ mod tests {
     #[test]
     fn escape_on_the_picker_answers_the_cancelled_pick() {
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
-        panel.handle_key("escape", &kb());
+        panel.handle_key("escape", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Cancelled));
     }
 
@@ -1631,7 +1648,7 @@ mod tests {
     fn the_picker_search_filters_and_picks_the_surviving_row() {
         let (mut panel, mut answer) = mount_teams(vec![acme(), beta()], None);
         for character in "acme".chars() {
-            panel.handle_key(character.to_string().as_str(), &kb());
+            panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
         let rows = frame_text(&mut panel);
         assert!(rows.iter().any(|row| row.contains("Acme Corp")));
@@ -1643,12 +1660,12 @@ mod tests {
             !rows.iter().any(|row| row.contains("Personal")),
             "the personal row is filtered out too: {rows:?}"
         );
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
         // The personal row's search text matches "personal account".
         let (mut panel, _answer) = mount_teams(vec![acme()], None);
         for character in "personal".chars() {
-            panel.handle_key(character.to_string().as_str(), &kb());
+            panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
         let rows = frame_text(&mut panel);
         assert!(rows.iter().any(|row| row.contains("Personal")));
@@ -1664,11 +1681,11 @@ mod tests {
     fn an_empty_filter_renders_the_ts_empty_row_and_selects_nothing() {
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
         for character in "zzz".chars() {
-            panel.handle_key(character.to_string().as_str(), &kb());
+            panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
         let rows = frame_text(&mut panel);
         assert!(rows.iter().any(|row| row.contains("No matching teams")));
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert!(
             answer.try_recv().is_err(),
             "an empty filter selects nothing"
@@ -1681,17 +1698,17 @@ mod tests {
     #[test]
     fn the_picker_navigation_clamps_instead_of_wrapping() {
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
-        panel.handle_key("up", &kb());
-        panel.handle_key("enter", &kb());
+        panel.handle_key("up", &kb(), &mut sink());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(
             answer.try_recv(),
             Ok(PrimeTeamPick::PersonalAccount),
             "up clamps at the personal row (index 0)"
         );
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
-        panel.handle_key("down", &kb());
-        panel.handle_key("down", &kb());
-        panel.handle_key("enter", &kb());
+        panel.handle_key("down", &kb(), &mut sink());
+        panel.handle_key("down", &kb(), &mut sink());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(
             answer.try_recv(),
             Ok(PrimeTeamPick::Team(acme())),
@@ -1728,12 +1745,12 @@ mod tests {
     fn a_paste_payload_lands_in_the_mounted_field() {
         let (mut panel, mut answer) = mount_paste();
         panel.handle_paste("  sk-pasted-key  ");
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some("sk-pasted-key".to_string())));
         // The picker's search accepts pasted text too (TS `MenuSearchInput`).
         let (mut panel, mut answer) = mount_teams(vec![acme()], None);
         panel.handle_paste("acme");
-        panel.handle_key("enter", &kb());
+        panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
     }
 
@@ -1912,7 +1929,7 @@ mod tests {
             !cancel.cancelled(),
             "the flow starts live: the URL screen alone cancels nothing"
         );
-        panel.handle_key("escape", &kb());
+        panel.handle_key("escape", &kb(), &mut sink());
         assert!(
             cancel.cancelled(),
             "Esc on the URL screen ends the running login (TS the dialog's abort)"
@@ -1926,7 +1943,7 @@ mod tests {
     fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
         let mut panel = AuthPanel::onboarding("Login to Prime Inference");
         panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
-        panel.handle_key("c", &kb());
+        panel.handle_key("c", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(
             rows.iter().any(|row| row.contains("Copied sign-in link")
@@ -1936,7 +1953,7 @@ mod tests {
         // Without a mounted URL the copy binding does nothing: the plain
         // `c` lands in the paste field as input (the URL guard holds).
         let (mut panel, mut _answer) = mount_paste();
-        panel.handle_key("c", &kb());
+        panel.handle_key("c", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(
             !rows.iter().any(|row| row.contains("Copied sign-in link")),

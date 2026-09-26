@@ -583,6 +583,7 @@ async fn drive_onboarding_pane(
     drive: &mut PaneDrive<'_>,
     mut screen: crate::onboarding::OnboardingScreen,
     mut flow: Option<OnboardingFlowTask>,
+    osc_sink: &mut crate::clipboard::OscSink,
 ) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
     // The armed render barrier holds the input batch behind it (the
     // loop's post-draw check pops it on satisfy or timeout).
@@ -670,7 +671,7 @@ async fn drive_onboarding_pane(
                     if key_id == "ctrl+c" {
                         drive.exit_guard.note_ctrl_c_handled();
                     }
-                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
+                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
                         // A decision tears the pane down mid-drive: end
                         // a still-running login flow with it (TS the
                         // dialog's abort signal) — the cooperative
@@ -799,7 +800,8 @@ async fn run_onboarding_phase(
         // The model-ready branch (TS `runOnboardingFlow`'s ready case):
         // the immediate splash mounts the trace question alone.
         let screen = crate::onboarding::OnboardingScreen::new();
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -839,7 +841,8 @@ async fn run_onboarding_phase(
     // questions. A flow that aborts (a cancelled or failed sign-in,
     // the exit keys) leaves the marker unset — the next launch retries.
     let screen = crate::onboarding::OnboardingScreen::welcome();
-    let (mut screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+    let (mut screen, outcome) =
+        drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
@@ -883,7 +886,6 @@ async fn run_onboarding_phase(
     // the dialog's abort signal).
     let mut prime_dialog =
         crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", prime_row.name));
-    prime_dialog.set_keybindings(drive.keybindings.clone());
     prime_dialog.set_cancel_signal(prime_cancel.clone());
     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
         panel: std::boxed::Box::new(prime_dialog),
@@ -900,8 +902,14 @@ async fn run_onboarding_phase(
         },
         prime_cancel,
     );
-    let (mut screen, outcome) =
-        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow)).await?;
+    let (mut screen, outcome) = drive_onboarding_pane(
+        view,
+        &mut *drive,
+        screen,
+        Some(prime_flow),
+        &mut session.osc_sink,
+    )
+    .await?;
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
@@ -994,7 +1002,7 @@ async fn run_onboarding_phase(
             crate::onboarding_flow::ProviderPicker::new(options),
         ));
         let (picked_screen, outcome) =
-            drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         screen = picked_screen;
         let pick = match outcome {
             PaneOutcome::InputClosed => return Ok(false),
@@ -1026,7 +1034,6 @@ async fn run_onboarding_phase(
             let prompt_cancel = panel.cancel_signal();
             let mut api_key_dialog =
                 crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
-            api_key_dialog.set_keybindings(drive.keybindings.clone());
             api_key_dialog.set_cancel_signal(prompt_cancel.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
                 panel: std::boxed::Box::new(api_key_dialog),
@@ -1066,8 +1073,14 @@ async fn run_onboarding_phase(
                 },
                 prompt_cancel,
             );
-            let (prompted_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
+            let (prompted_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(prompt_flow),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = prompted_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1101,7 +1114,6 @@ async fn run_onboarding_phase(
             let service_cancel = panel.cancel_signal();
             let mut service_dialog =
                 crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
-            service_dialog.set_keybindings(drive.keybindings.clone());
             service_dialog.set_cancel_signal(service_cancel.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
                 panel: std::boxed::Box::new(service_dialog),
@@ -1114,8 +1126,14 @@ async fn run_onboarding_phase(
                 async move { service_auth.0.login_on_panel(&row, panel).await },
                 service_cancel,
             );
-            let (login_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login)).await?;
+            let (login_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(provider_login),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = login_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1154,7 +1172,8 @@ async fn run_onboarding_phase(
                 crate::onboarding::trace_question_config(),
             ),
         ));
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -1230,6 +1249,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// Links opened by mouse clicks (headless runs have no terminal to
+    /// hand a browser to; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -1601,11 +1623,18 @@ async fn run_interactive_surface(
         options.fullscreen_mouse,
         &surface_mounted,
     )?;
-    if !headless {
-        // TS `ui.start()` renders once before the session loads: the first
-        // frame is the startup chrome (banner, editor, tray). The model
-        // and session labels are placeholders until the attach's
-        // `rebuild_view` repaints with the snapshot.
+    // The startup chrome paints before the session loads only for a NEW
+    // chat (TS `ui.start()` renders the banner once before the session
+    // loads): a fresh session's dock is deterministically empty, so the
+    // placeholder frame never reflows when the attach lands. A direct
+    // open into an existing session holds the previous surface instead
+    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
+    // construct the chat over an already-attached connection whose
+    // `getInitialSnapshot` is cached, so the first visible frame is the
+    // content): the queued clear rides the first draw's single flush,
+    // which carries the complete frame — no splash flash, no panel
+    // appearing late over a half-open view.
+    if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
@@ -1723,10 +1752,6 @@ async fn run_interactive_surface(
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
-    // The scoped heartbeat catalog seeds the tray heartbeat label (TS
-    // refreshes the catalog on chat open; failures stay silent).
-    session.spawn_heartbeat_refresh();
-    session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
@@ -1784,6 +1809,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -2301,7 +2327,10 @@ async fn run_interactive_surface(
                     // supersede notice or the submit-path retry
                     // re-attaches once a worker can serve the session.
                     if let Some(current) = session.pending_rebind.take() {
-                        match session.attach_session(&current).await {
+                        match session
+                            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
+                            .await
+                        {
                             Ok(()) => session.rebuild_view(
                                 &mut view,
                                 crate::session_ui::RebuildKind::Rebind,
@@ -2780,9 +2809,17 @@ async fn run_interactive_surface(
                 if state.active_session_id != session.active_session_id {
                     continue;
                 }
+                // The reconnect attempt's budget covers the attach
+                // alone: the surface is already up and its dock holds
+                // (the background refreshes update it), so the
+                // first-frame fold's bounded fetches cannot eat the 10s
+                // attempt budget on a slow daemon.
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
-                    session.attach_session(&state.active_session_id),
+                    session.attach_session(
+                        &state.active_session_id,
+                        crate::session_ui::DockFold::Held,
+                    ),
                 )
                 .await;
                 match attempt {
@@ -3073,6 +3110,7 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        opened_urls: std::mem::take(&mut session.opened_urls),
         agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now
@@ -3193,8 +3231,13 @@ impl Renderer {
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
-                // flashes the primary screen.
-                crate::altscreen::enter()?;
+                // flashes the primary screen. The enter itself is ARMED,
+                // not written: it rides the first draw's flush (see
+                // `altscreen::arm_first_draw_mount`), so a direct open —
+                // which paints nothing until its first content frame —
+                // holds the shell (a fresh process) or the handed-off
+                // surface through the attach.
+                crate::altscreen::arm_first_draw_mount();
                 // SGR mouse tracking follows the fullscreen surface in and
                 // out (TS `enterFullscreen` enables it blind — probing is
                 // not viable under tmux and unsupporting terminals ignore
@@ -3267,22 +3310,14 @@ impl Renderer {
                 // the first draw repaints the same buffer (a fresh alt
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
-                // never reach the pane on its own: queue it with the
-                // cursor hide and let the first draw's single flush carry
-                // clear + frame together — a separate clear-and-flush
-                // here shows a blank pane for the whole render gap, a
-                // visible flicker on every surface switch (the chat's own
-                // first frame is the tail render on the first event).
-                // The cursor hides with the mount (TS `TUI.start`
-                // writes hideCursor, never a show): a shown cursor at a
-                // stale position here would be dragged across the clear
-                // and the first repaint — the cursor-glitch window
-                // between surfaces.
-                crossterm::queue!(
-                    std::io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Hide
-                )?;
+                // never reach the pane on its own: the armed mount's
+                // clear and cursor hide ride the first draw's single
+                // flush (see `altscreen::take_first_draw_mount`) — a
+                // clear queued HERE would let any mid-gap flush (the
+                // kitty probe, a mode enable) carry it out early, wiping
+                // the shell or the held surface during a direct open's
+                // attach wait. The cursor hides with the mount (TS
+                // `TUI.start` writes hideCursor, never a show).
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,

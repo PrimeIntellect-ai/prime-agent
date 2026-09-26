@@ -377,7 +377,18 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
     // window from here to the settled status is the takeover-free proof.
     let mark = harness.mark();
     harness.write(b"\r");
-    harness.wait_from(mark, "Select a Prime Team:", "the inline team picker");
+    // The picker's mount needle is its styled subtitle: ratatui's diff
+    // paints only changed cells, and a direct open's transcript (the
+    // splash-suppressed content frame) leaves the picker's title row
+    // blank behind — the title's default-styled spaces match the blank
+    // cells and are skipped, so the title paints word by word. The
+    // subtitle carries its own style, so its whole line paints in one
+    // contiguous run.
+    harness.wait_from(
+        mark,
+        "Choose which account pays for Prime Inference usage.",
+        "the inline team picker",
+    );
 
     // The picker's rows render inline (the TS selector rows).
     harness.wait_from(mark, "Acme Corp", "the team row");

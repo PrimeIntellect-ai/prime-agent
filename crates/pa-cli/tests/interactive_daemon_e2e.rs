@@ -1635,6 +1635,136 @@ async fn tui_model_picker_applies_and_effort_reports() {
     drop(supervisor);
 }
 
+/// `/effort` on a thinking-capable model whose `reasoning` flag is false
+/// but whose `thinkingLevelMap` declares addressable levels (the live
+/// catalog's `gpt-5.3-chat-latest` shape): the map is the capability
+/// signal, so the command applies the level instead of reporting the
+/// unsupported-model note. No scripted engine runs — the switch and the
+/// state read must resolve the models.json model, not the faux one.
+#[tokio::test]
+async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_flag() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": {
+                "test-provider": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9/v1",
+                    "apiKey": "sk-test",
+                    "models": [
+                        { "id": "chat-plus", "name": "Chat Plus", "reasoning": false,
+                          "thinkingLevelMap": { "off": null, "xhigh": "xhigh" },
+                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
+                          "maxTokens": 4096 }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+    let supervisor = spawn_supervisor(dir.path());
+    let auth = pa_core::auth::AuthStorage::in_memory_without_env(
+        pa_core::auth::AuthStorageData::default(),
+        std::sync::Arc::new(pa_core::auth::NoOAuth),
+    );
+    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+    registry.load_private_authorization_from_cache();
+    let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
+    assert_eq!(catalog.len(), 1, "the models.json model resolves available");
+    assert_eq!(catalog[0].id, "chat-plus");
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: None,
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: catalog,
+        model_configured_providers: ["test-provider".to_string()].into_iter().collect(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::New,
+        show_images: true,
+        client_settings: None,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("chat".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/effort xhigh".to_string()),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Model: chat-plus"),
+        "picking the model showed the TS confirm row:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Thinking level: xhigh"),
+        "the /effort command applied the map's addressable level:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Current model does not support thinking"),
+        "a map-addressable model must not report the unsupported-model note:\n{rendered}"
+    );
+
+    // The durable `thinking_level_change` row persisted for the applied
+    // level (TS `appendThinkingLevelChange` on an effective change).
+    let mut level_changes = 0;
+    for entry in std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        level_changes += content
+            .lines()
+            .filter(|line| line.contains(r#""type":"thinking_level_change""#))
+            .filter(|line| line.contains("xhigh"))
+            .count();
+    }
+    assert!(
+        level_changes >= 1,
+        "the thinking_level_change row persisted at xhigh (saw {level_changes})"
+    );
+    drop(supervisor);
+}
+
 /// `/compact` on a fresh session: the compaction skips (TS
 /// `CompactionSkippedError`) and the warning reaches the transcript through
 /// the `compaction_end` event, with the durable echo row — TS's live
@@ -2689,8 +2819,11 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         "the auth-blind turn resolution must not report the resolver's empty-catalog error:\n{rendered}"
     );
     let last = outcome.frames.last().expect("a final frame");
+    // The reasoning fixture renders its live effort suffix (TS
+    // `getModelContextLabel`): the label the failed pick must hold is
+    // `model:effort`, with the daemon's effective level for glm-5.3.
     assert!(
-        last.contains("z-ai/glm-5.3 ·"),
+        last.contains("z-ai/glm-5.3:high ·"),
         "the footer label holds the resolved flagged model (the failed pick switched nothing):\n{last}"
     );
     drop(supervisor);
@@ -3161,7 +3294,11 @@ async fn tui_settings_menu_cycles_rows() {
         "the settings menu rendered its first row:\n{rendered}"
     );
     assert!(
-        rendered.contains("Type to search · Enter/Space change · Esc close"),
+        rendered.contains("1 General  2 Models  3 Display  4 Editor  5 Agents"),
+        "the settings menu rendered its tab strip:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close"),
         "the settings hint rendered:\n{rendered}"
     );
 }

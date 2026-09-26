@@ -5,6 +5,20 @@ use crate::chat::Detail;
 use crate::chrome::render_splash;
 use crate::Line;
 
+#[cfg(test)]
+thread_local! {
+    /// Splash renders the last sparse walk spent (the lazy end-section
+    /// verifier: a frame whose window cannot reach the splash renders it
+    /// zero times).
+    pub(super) static SPLASH_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tail renders the last sparse walk spent (see [`SPLASH_RENDERS`]).
+    pub(super) static TAIL_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "lazy_tests.rs"]
+mod tests;
+
 // Private selection coordinates increase down the screen while tail-relative
 // distances increase upwards. Never returned as global transcript metadata.
 pub(crate) const TAIL_SELECTION_ORIGIN: usize = usize::MAX / 2;
@@ -159,14 +173,39 @@ impl AgentView {
             isize::try_from(origin - start).ok()?.checked_neg()?
         }
         .checked_add(window.pending)?;
-        let splash = std::sync::Arc::new(render_splash(&self.chrome, &self.theme, window.width));
-        let tail = std::sync::Arc::new(self.render_transcript_tail(window.width));
         let last = self.chat.len() + 1;
-        let section_rows = |view: &mut Self, section: usize| {
+        let mut splash: Option<std::sync::Arc<Vec<Line>>> = None;
+        let mut tail: Option<std::sync::Arc<Vec<Line>>> = None;
+        // The end sections render only when the walk reaches them: a
+        // selection inside the transcript never pays for the splash or
+        // the streaming tail content it cannot show.
+        let mut section_rows = |view: &mut Self, section: usize| {
             if section == 0 {
-                splash.clone()
+                splash
+                    .get_or_insert_with(|| {
+                        #[cfg(test)]
+                        SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
+                        // The suppressed splash is an empty section: the
+                        // sparse walker skips zero-row sections exactly
+                        // like an empty tail.
+                        if view.splash_suppressed {
+                            std::sync::Arc::new(Vec::new())
+                        } else {
+                            std::sync::Arc::new(render_splash(
+                                &view.chrome,
+                                &view.theme,
+                                window.width,
+                            ))
+                        }
+                    })
+                    .clone()
             } else if section == last {
-                tail.clone()
+                tail.get_or_insert_with(|| {
+                    #[cfg(test)]
+                    TAIL_RENDERS.with(|count| count.set(count.get() + 1));
+                    std::sync::Arc::new(view.render_transcript_tail(window.width))
+                })
+                .clone()
             } else {
                 view.sparse_entry_rows(section - 1, window.width)
             }
@@ -291,30 +330,63 @@ impl AgentView {
         window.detail = self.detail;
         window.width = width;
         let mut touched = Vec::new();
-        let splash = std::sync::Arc::new(render_splash(&self.chrome, &self.theme, width));
-        let tail = std::sync::Arc::new(self.render_transcript_tail(width));
+        let mut splash: Option<std::sync::Arc<Vec<Line>>> = None;
+        let mut tail: Option<std::sync::Arc<Vec<Line>>> = None;
         let last = self.chat.len() + 1;
-        let mut section_rows = |view: &mut Self, section: usize| -> std::sync::Arc<Vec<Line>> {
-            if section == 0 {
-                return splash.clone();
-            }
-            if section == last {
-                return tail.clone();
-            }
-            touched.push(section - 1);
-            view.sparse_entry_rows(section - 1, width)
-        };
         let (mut section, mut row, mut movement) = if let Some((section, row)) = window.cursor {
             (section, row, window.pending)
         } else {
             match window.anchor {
-                Anchor::Tail(distance) => (
-                    last,
-                    tail.len(),
-                    -(height.saturating_add(distance) as isize),
-                ),
+                // The cursorless tail window walks down from the end, so
+                // its tail section is in view: render it now (the walk
+                // below reuses the same rows).
+                Anchor::Tail(distance) => {
+                    let rows = tail.get_or_insert_with(|| {
+                        #[cfg(test)]
+                        TAIL_RENDERS.with(|count| count.set(count.get() + 1));
+                        std::sync::Arc::new(self.render_transcript_tail(width))
+                    });
+                    (
+                        last,
+                        rows.len(),
+                        -(height.saturating_add(distance) as isize),
+                    )
+                }
                 Anchor::Top(offset) => (0, 0, offset as isize),
             }
+        };
+        // The end sections render only when a walk reaches them: a paused
+        // window in the middle of the transcript never pays for the splash
+        // or the streaming tail content (the shortcut guide, the pending
+        // bash output, the loaders) its rows cannot show.
+        let mut section_rows = |view: &mut Self, section: usize| -> std::sync::Arc<Vec<Line>> {
+            if section == 0 {
+                return splash
+                    .get_or_insert_with(|| {
+                        #[cfg(test)]
+                        SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
+                        // The suppressed splash is an empty section: the
+                        // sparse walker skips zero-row sections exactly
+                        // like an empty tail.
+                        if view.splash_suppressed {
+                            std::sync::Arc::new(Vec::new())
+                        } else {
+                            std::sync::Arc::new(render_splash(&view.chrome, &view.theme, width))
+                        }
+                    })
+                    .clone();
+            }
+            if section == last {
+                return tail
+                    .get_or_insert_with(|| {
+                        #[cfg(test)]
+                        TAIL_RENDERS.with(|count| count.set(count.get() + 1));
+                        std::sync::Arc::new(view.render_transcript_tail(width))
+                    })
+                    .clone();
+            }
+            touched.push(section - 1);
+            view.sparse_entry_rows(section - 1, width)
         };
         while movement < 0 {
             let step = row.min(movement.unsigned_abs());
