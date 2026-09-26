@@ -402,26 +402,23 @@ mod append_cache_tests {
         )
     }
 
-    /// Count this process's open descriptors into `dir` (the read_dir
+    /// Count this process's open descriptors into `dir` (the `read_dir`
     /// descriptor itself resolves under /proc, so it never counts).
     fn open_fds_into(dir: &Path) -> usize {
-        std::fs::read_dir("/proc/self/fd")
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        entry
-                            .path()
-                            .read_link()
-                            .map(|target| target.starts_with(dir))
-                            .unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        std::fs::read_dir("/proc/self/fd").map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .read_link()
+                        .is_ok_and(|target| target.starts_with(dir))
+                })
+                .count()
+        })
     }
 
-    /// More distinct session files than the default RLIMIT_NOFILE must
+    /// More distinct session files than the default `RLIMIT_NOFILE` must
     /// plateau the cached-descriptor count at the cap instead of growing
     /// toward EMFILE, and every appended row must survive eviction.
     #[test]
