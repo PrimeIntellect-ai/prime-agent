@@ -890,12 +890,35 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         "type": "switch_session",
         "sessionPath": bad_file.to_string_lossy()
     }));
+    client.drain_stderr();
     let (failed, _) = client.wait_response(&bad, TIMEOUT);
     assert_eq!(
         failed["success"], false,
         "the stale-cwd session fails the switch: {failed}"
     );
-    // The parked steer delivers as the live session's next turn.
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Stored session working directory does not exist"),
+        "the failure is the crafted stale cwd, not an unrelated refusal: {failed}"
+    );
+    // The restart delivers the parked row: the queue drains (the run
+    // takes the row), then the steer's own turn ends with its answer.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let state = client.request(&json!({ "type": "get_state" }));
+        if state["data"]["sessionActions"]["queuedCount"].as_u64() == Some(0) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the parked steer stayed queued after the failed switch: {state}"
+        );
+        // Pace the poll on the event stream (the steer's own turn may
+        // already be streaming once the queue reads zero).
+        let _ = client
+            .lines
+            .recv_timeout(Duration::from_millis(100));
+    }
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let timeout_left = deadline.saturating_duration_since(Instant::now());
@@ -936,7 +959,6 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
             }
         }
     }
-    client.drain_stderr();
 }
 
 /// A signal exit during an in-flight whole-session replacement must not
