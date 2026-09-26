@@ -81,11 +81,21 @@ async fn run_session_command(
     api_key: Option<String>,
 ) -> Result<(), String> {
     let is_compact = command.name == "compact";
+    // The compact frames carry the command's arguments as the
+    // `customInstructions` they compact under (TS `session.compact`'s
+    // frames pass the same `customInstructions` the call received): an
+    // admitted `/compact focus on tests` reports its instructions, not
+    // an omitted field.
+    let frame_instructions = if is_compact && !command.args.is_empty() {
+        Some(command.args.as_str())
+    } else {
+        None
+    };
     if is_compact {
         state.compacting.store(true, Ordering::SeqCst);
         state
             .session
-            .write_connection_output(compaction_frame("compaction_start", None, None))
+            .write_connection_output(compaction_frame("compaction_start", frame_instructions, None))
             .await;
     }
     let execution = {
@@ -112,7 +122,7 @@ async fn run_session_command(
         });
         state
             .session
-            .write_connection_output(compaction_frame("compaction_end", None, result.as_ref()))
+            .write_connection_output(compaction_frame("compaction_end", frame_instructions, result.as_ref()))
             .await;
     }
     state.publish_goal_update().await;

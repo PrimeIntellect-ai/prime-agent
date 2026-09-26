@@ -238,11 +238,19 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
             // next replacement, exactly when the old session stops
             // writing).
             let (manager, opened_lease) = match &request {
-                pa_daemon::rpc::session::RpcEngineRequest::New { parent_session } => {
+                pa_daemon::rpc::session::RpcEngineRequest::New {
+                    parent_session,
+                    cwd,
+                } => {
                     let session_dir = replacement_session_dir(&options);
+                    // The active session's cwd when the command passed
+                    // one (TS `runtimeHost.newSession` over `this.cwd`),
+                    // else the CLI startup directory.
+                    let cwd = cwd
+                        .clone()
+                        .unwrap_or_else(|| options.config.cwd.clone());
                     let manager = match parent_session {
                         Some(parent) => {
-                            let cwd = options.config.cwd.clone();
                             let mut manager = pa_core::session::manager::SessionManager::persisted(
                                 &cwd,
                                 &session_dir,
@@ -254,7 +262,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                             manager
                         }
                         None => pa_core::session::manager::SessionManager::persisted(
-                            &options.config.cwd,
+                            &cwd,
                             &session_dir,
                         ),
                     };
@@ -273,15 +281,24 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     .map_err(|error| format!("{error:#}"))?;
                     (manager, Some(lease))
                 }
-                pa_daemon::rpc::session::RpcEngineRequest::Open { session_path } => {
+                pa_daemon::rpc::session::RpcEngineRequest::Open {
+                    session_path,
+                    reuse_lease,
+                } => {
                     let session_dir = replacement_session_dir(&options);
                     let cwd = options.config.cwd.clone();
                     // The ownership guard every in-process open applies:
                     // refuse a file a live daemon worker or another
                     // process already hosts (a second writer over a
                     // persisted history), and hold its runtime lease for
-                    // the opened session.
-                    let lease = session_open_guard(options.daemon_socket.as_deref(), session_path)?;
+                    // the opened session. A same-path reopen skips the
+                    // guard (TS `acquireReplacementLease` reuses the
+                    // current lease; the session layer adopted it).
+                    let lease = if *reuse_lease {
+                        None
+                    } else {
+                        Some(session_open_guard(options.daemon_socket.as_deref(), session_path)?)
+                    };
                     // A failed open's early return drops the lease
                     // (released), so errors never leave an orphaned hold.
                     let manager = open_session_file(session_path, &session_dir, &cwd, None)?;
@@ -291,7 +308,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     // directory): tools, settings, and file work run
                     // against the session's repository.
                     options.config.cwd = manager.get_cwd().to_path_buf();
-                    (manager, Some(lease))
+                    (manager, lease)
                 }
             };
             let engine = if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {

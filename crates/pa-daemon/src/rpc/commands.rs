@@ -78,6 +78,19 @@ impl RpcState {
     }
 }
 
+impl RpcState {
+    /// The live session's project directory (TS builds every session's
+    /// `SettingsManager` over the session's own cwd): the settings
+    /// writes follow it, so after a `switch_session`/`fork` adopts
+    /// another project the persisted defaults land there, not under the
+    /// CLI startup directory.
+    pub async fn settings_cwd(&self) -> std::path::PathBuf {
+        let handle = self.session.handle().await;
+        let persistence = handle.engine.session.shared_persistence();
+        persistence.lock().await.get_cwd().to_path_buf()
+    }
+}
+
 /// Resume queued-input delivery (TS `_resumeSessionInputAdmission`): the
 /// pump restarts with the next queued batch.
 pub fn resume_pump(state: &Arc<RpcState>) {
@@ -192,10 +205,20 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
         .get("parentSession")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // The fresh session builds over the ACTIVE session's project (TS
+    // `runtimeHost.newSession` over `this.cwd`), so a session adopted
+    // from another project does not seed the new one back into the CLI
+    // startup directory.
+    let cwd = {
+        let handle = state.session.handle().await;
+        let persistence = handle.engine.session.shared_persistence();
+        persistence.lock().await.get_cwd().to_path_buf()
+    };
     state
         .session
         .replace(RpcEngineRequest::New {
             parent_session: parent,
+            cwd: Some(cwd),
         })
         .await?;
     resume_pump(state);
@@ -461,7 +484,8 @@ async fn set_auto_compaction(
     // Persist the settings default first: a settings failure must leave
     // the live toggle untouched (the session keeps its configured
     // behavior instead of half-applying the request).
-    let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+    let mut settings =
+        pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     settings
         .set_compaction_enabled(enabled)
         .map_err(|error| error.to_string())?;
@@ -477,7 +501,8 @@ async fn set_auto_retry(state: &Arc<RpcState>, payload: &Value) -> Result<Respon
         .get("enabled")
         .and_then(Value::as_bool)
         .ok_or_else(|| "set_auto_retry requires enabled".to_string())?;
-    let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+    let mut settings =
+        pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     settings
         .set_retry_enabled(enabled)
         .map_err(|error| error.to_string())?;

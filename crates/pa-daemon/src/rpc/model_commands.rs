@@ -113,7 +113,8 @@ async fn apply_model_selection(
         let mut manager = persistence.lock().await;
         let _ = manager.append_model_change(&model.provider, &model.id);
     }
-    let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+    let mut settings =
+        pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     settings
         .set_default_model_and_provider(model.provider.clone(), model.id.clone())
         .map_err(|error| error.to_string())?;
@@ -227,8 +228,10 @@ async fn apply_thinking_level(
             // TS persists the default when the model can think or the
             // level is a real reasoning request.
             if model.reasoning || clamped != ModelThinkingLevel::Off {
-                let mut settings =
-                    pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+                let mut settings = pa_core::settings::SettingsManager::create(
+                    &state.settings_cwd().await,
+                    &state.agent_dir,
+                );
                 settings
                     .set_default_thinking_level(
                         pa_core::settings::ThinkingLevelSetting::from_model_level(clamped),
@@ -309,7 +312,8 @@ pub(crate) async fn set_queue_mode(
     // The settings default follows the live mode (the daemon handlers
     // persist the same way): a later session/connection loads the
     // selected mode instead of reverting.
-    let mut settings = pa_core::settings::SettingsManager::create(&state.cwd, &state.agent_dir);
+    let mut settings =
+        pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     let setting = match mode {
         pa_agent::agent::QueueMode::All => pa_core::settings::QueueModeSetting::All,
         pa_agent::agent::QueueMode::OneAtATime => pa_core::settings::QueueModeSetting::OneAtATime,

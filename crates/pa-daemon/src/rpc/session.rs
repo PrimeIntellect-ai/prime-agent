@@ -37,8 +37,22 @@ pub struct RpcEngineHandle {
 /// `switchSession` / `fork`): a fresh session (optionally under a parent
 /// session) or an existing session file to open.
 pub enum RpcEngineRequest {
-    New { parent_session: Option<String> },
-    Open { session_path: PathBuf },
+    New {
+        parent_session: Option<String>,
+        /// The ACTIVE session's cwd (TS `runtimeHost.newSession` builds
+        /// the fresh session over `this.cwd` — the live runtime's
+        /// project, not the CLI startup directory): the factory falls
+        /// back to the startup cwd when absent.
+        cwd: Option<std::path::PathBuf>,
+    },
+    Open {
+        session_path: PathBuf,
+        /// The same-path reopen: the caller adopted the current lease
+        /// (TS `acquireReplacementLease` reuses it), so the factory must
+        /// not re-acquire (its own open guard would refuse our own
+        /// holder).
+        reuse_lease: bool,
+    },
 }
 
 /// The composition root's engine assembly: rebuilds the in-process
@@ -211,49 +225,71 @@ impl RpcSession {
             .factory
             .clone()
             .ok_or_else(|| "Session switching is not wired for this RPC transport".to_string())?;
-        // Reopening the currently-owned session file: release the current
-        // lease BEFORE the factory re-acquires it (TS's
-        // `acquireReplacementLease` reuses the current lease for the same
-        // path; releasing first lets the fresh acquire succeed).
-        if let RpcEngineRequest::Open { session_path } = &request {
+        // Reopening the currently-owned session file: ADOPT the current
+        // lease (TS `acquireReplacementLease` reuses the current lease
+        // for the same path) — the lease never leaves this process, so
+        // no failed build leaves the live session unleased and no
+        // cross-process claim window opens.
+        let mut adopted_lease = None;
+        let mut request = request;
+        if let RpcEngineRequest::Open { session_path, reuse_lease } = &mut request {
             let canonical = crate::lease::canonical_session_path(session_path);
             let same_path = {
-                let current = self.handle.read().await;
+                let current = self.handle.write().await;
                 current
                     .session_lease
                     .as_ref()
                     .is_some_and(|lease| lease.session_path == canonical)
             };
             if same_path {
-                // The dropped lease releases as the take's value drops.
-                self.handle.write().await.session_lease.take();
+                adopted_lease = self.handle.write().await.session_lease.take();
+                *reuse_lease = true;
             }
         }
         // Build the replacement BEFORE any teardown: a failed assembly
         // must leave the live session serving (the old kernel keeps its
-        // subscription and turns; nothing was disposed). The swap below
-        // runs only on a fully assembled replacement.
-        let replacement = factory(request).await?;
+        // subscription and turns; nothing was disposed) — and the
+        // adopted lease goes back on the live handle.
+        let mut replacement = match factory(request).await {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                if adopted_lease.is_some() {
+                    self.handle.write().await.session_lease = adopted_lease;
+                }
+                return Err(error);
+            }
+        };
         // Subscribe the replacement BEFORE publishing the handle: a
         // prompt dispatched the instant the handle lands finds the
         // subscription attached, so the turn's first events never drop.
         let subscription =
             Self::engine_subscription(&replacement.engine, &self.pending_outputs, &self.writer)
                 .await;
+        // Retire the pumps spawned against the replaced engine BEFORE the
+        // teardown: a queued pump that wakes during the wait sees the
+        // moved epoch and returns instead of delivering onto the session
+        // this swap is about to dispose.
+        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
+        // The write guard stays held through the whole teardown: it waits
+        // out every live reader (a prompt/steer/compact handler holding
+        // the handle), so no command can admit a turn onto the old
+        // engine between the settle and the dispose.
+        let mut handle = self.handle.write().await;
+        // Wait the running turn out BEFORE unsubscribing: the finishing
+        // turn's final events (its `agent_end`) still reach the client.
+        handle.engine.session.agent().wait_for_idle().await;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
-        let old = self.handle.read().await.engine.clone();
-        old.session.agent().wait_for_idle().await;
-        old.dispose_kernel().await;
-        // The write guard waits out every live reader (a prompt/steer
-        // handler holding the handle), so the swap lands only once the
-        // in-flight handle holders finish.
-        *self.handle.write().await = replacement;
+        handle.engine.dispose_kernel().await;
+        // The adopted same-path lease rides the replacement (TS reuses
+        // the current lease); a fresh-open replacement carries the lease
+        // the factory's open guard acquired.
+        if adopted_lease.is_some() {
+            replacement.session_lease = adopted_lease;
+        }
+        *handle = replacement;
         *self.subscription.lock().await = Some(subscription);
-        // Retire the pumps spawned against the replaced engine so queued
-        // input never delivers to the disposed session.
-        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

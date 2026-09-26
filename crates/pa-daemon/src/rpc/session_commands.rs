@@ -94,6 +94,7 @@ async fn switch_session(state: &Arc<RpcState>, payload: &Value) -> Result<Respon
         .session
         .replace(RpcEngineRequest::Open {
             session_path: std::path::PathBuf::from(session_path),
+            reuse_lease: false,
         })
         .await?;
     super::commands::resume_pump(state);
@@ -194,6 +195,12 @@ async fn fork_at(
             let branch_entries = branch_entries_to_leaf(&manager, target_leaf.as_deref());
             (branch_entries, handle.engine.clone())
         };
+        // Settle any streaming turn before the rebuild: a turn still
+        // appending would land its later messages on the newly selected
+        // branch instead of the pre-fork session (the persisted
+        // replacement path waits idle for the same reason — its teardown
+        // cannot run under a live turn).
+        engine.session.agent().wait_for_idle().await;
         engine
             .session
             .rebuild_branch_context(branch_entries)
@@ -252,6 +259,7 @@ async fn fork_at(
         .session
         .replace_locked(RpcEngineRequest::Open {
             session_path: forked_path,
+            reuse_lease: false,
         })
         .await?;
     drop(lease);
