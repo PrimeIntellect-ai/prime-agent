@@ -329,6 +329,18 @@ def pack_tarball(staging: Path, out_path: Path, entries: list[str]) -> None:
         fail(str(error))
 
 
+def debug_sections(binary: Path) -> list[str]:
+    """ELF .debug_* section names, so the split asserts on real evidence."""
+    result = subprocess.run(["objdump", "-h", str(binary)], capture_output=True, text=True)
+    if result.returncode != 0:
+        fail(f"objdump -h failed on {binary}: {result.stderr.strip()}")
+    return [
+        line.split()[1]
+        for line in result.stdout.splitlines()
+        if line[:1].isspace() and ".debug" in line
+    ]
+
+
 def gnu_build_id(path: Path) -> str:
     result = subprocess.run(["readelf", "-n", str(path)],
                             capture_output=True, text=True)
@@ -339,7 +351,12 @@ def gnu_build_id(path: Path) -> str:
 
 
 def decoder_facts(args: argparse.Namespace) -> dict | None:
-    if args.target.endswith("-unknown-linux-gnu") and args.decoder is not None:
+    if args.target.endswith("-unknown-linux-gnu"):
+        if args.binary is None or args.decoder is None:
+            fail("Linux release requires explicit --binary shipped ELF and "
+                 "--decoder from split_debug.py")
+        if debug_sections(resolve_binary(args)):
+            fail(f"Linux shipped ELF still has DWARF: {args.binary}")
         expected = f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
         decoder = args.decoder
         if decoder.name != expected or not decoder.is_file():

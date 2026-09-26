@@ -91,11 +91,15 @@ RELEASE_DECODER = target/release/dist/prime-agent-$(VERSION)-$(if $(filter aarch
 RELEASE_ASSEMBLE_FLAGS = --binary $(RELEASE_BINARY) --decoder $(RELEASE_DECODER)
 RELEASE_SPLIT = python3 scripts/release/split_debug.py --binary target/release/prime-agent --shipped $(RELEASE_BINARY) --out target/release/dist --version "$(VERSION)" --target "$(TARGET)"
 RELEASE_VERIFY_DECODER = python3 scripts/release/verify_decoders.py target/release/dist
+RELEASE_PACKAGE_BUILD = cargo build --release --locked --workspace
+RELEASE_PACKAGE_FLAGS = --binary $(RELEASE_BINARY) --decoder $(RELEASE_DECODER) --skip-build
 GLIBC_BINARY = $(RELEASE_BINARY)
 else
 RELEASE_ASSEMBLE_FLAGS =
 RELEASE_SPLIT = :
 RELEASE_VERIFY_DECODER = :
+RELEASE_PACKAGE_BUILD = :
+RELEASE_PACKAGE_FLAGS =
 endif
 
 # Live-catalog asset generation (network fetch; packaging parity with the
@@ -147,8 +151,10 @@ audit-build:
 # hash, and tar the artifact under target/release-package. Generates the
 # bundled catalog assets first (same modes as the dry-runs above).
 package:
+	$(RELEASE_PACKAGE_BUILD)
+	$(RELEASE_SPLIT)
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
-	python3 scripts/package_release.py $(CATALOG_ASSETS_FLAG)
+	python3 scripts/package_release.py $(RELEASE_PACKAGE_FLAGS) $(CATALOG_ASSETS_FLAG)
 
 # Bundled-catalog gates (scripts/release/test_catalog_assets.py): the
 # offline fixture passes the full packer validation, the packer hard-fails

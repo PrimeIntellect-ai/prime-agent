@@ -45,7 +45,7 @@ from pathlib import Path
 
 # Same platform alias map the assembler uses, so the decoder file name
 # matches the release naming convention exactly.
-from assemble_artifacts import TARGET_ALIASES
+from assemble_artifacts import TARGET_ALIASES, debug_sections
 
 
 def fail(message: str) -> None:
@@ -65,18 +65,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def debug_sections(binary: Path) -> list[str]:
-    """ELF .debug_* section names, so the split asserts on real evidence."""
-    result = subprocess.run(["objdump", "-h", str(binary)], capture_output=True, text=True)
-    if result.returncode != 0:
-        fail(f"objdump -h failed on {binary}: {result.stderr.strip()}")
-    return [
-        line.split()[1]
-        for line in result.stdout.splitlines()
-        if line[:1].isspace() and ".debug" in line
-    ]
 
 
 def main() -> int:
