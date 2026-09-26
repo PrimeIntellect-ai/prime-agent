@@ -13,7 +13,7 @@
 //! whole byte stream, like the cursor-visibility e2e.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -74,15 +74,14 @@ fn kitty_child_mode() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let _ = runtime.block_on(async move {
+    runtime.block_on(async move {
         let outcome = run_interactive(options.clone(), UiMode::Terminal)
             .await
             .expect("the chat surface ran");
         // TS `main.ts`'s agents-back arm: the session hands the terminal
         // to the agents view anchored on the session just left.
         if outcome.return_to_agents_view {
-            let anchor =
-                (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
+            let anchor = (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
             let view_options = AgentsViewOptions {
                 socket_path: options.socket_path.clone(),
                 cwd: options.cwd.clone(),
@@ -186,10 +185,10 @@ fn releases_around_the_handoff_never_become_visible() {
     // Stream hygiene across the whole session: the LAST kitty-mode byte
     // is a pop (a probe answer landing around the exit must not re-arm
     // CSI-u on the parent shell — the `release_for_exit` guard).
-    let last_push = find_subsequence_last(&stream, KITTY_FLAGS_PUSH)
-        .expect("the flags push is in the stream");
-    let last_pop = find_subsequence_last(&stream, KITTY_FLAGS_POP)
-        .expect("the flags pop is in the stream");
+    let last_push =
+        find_subsequence_last(&stream, KITTY_FLAGS_PUSH).expect("the flags push is in the stream");
+    let last_pop =
+        find_subsequence_last(&stream, KITTY_FLAGS_POP).expect("the flags pop is in the stream");
     assert!(
         last_pop > last_push,
         "the stream's last kitty-mode write is a push at {last_push} after          the last pop at {last_pop} — the exit left CSI-u reporting armed"
@@ -204,7 +203,7 @@ fn releases_around_the_handoff_never_become_visible() {
         "the release sequence echoed into the restored terminal's output"
     );
     assert!(
-        exit.map_or(false, |code| code == 0),
+        exit.is_some_and(|code| code == 0),
         "the child exited cleanly (code {exit:?})"
     );
 
@@ -401,7 +400,6 @@ fn find_subsequence_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// own session (the harness must behave the same under a detached
 /// runner and an interactive shell).
 fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
-    let slave_fd = slave.as_raw_fd();
     // Runs between fork and exec in the child: become a session leader
     // and claim the pty slave as the controlling terminal.
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
@@ -412,6 +410,7 @@ fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
         }
         Ok(())
     }
+    let slave_fd = slave.as_raw_fd();
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command
         .arg("--exact")
