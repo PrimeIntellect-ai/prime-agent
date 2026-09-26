@@ -110,10 +110,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A menu surface opened (event `tui menu opened`): `menu` names the
-    /// surface (`model`, `mcp`, or a read-only info panel command —
-    /// `context`, `session`, `system-prompt`, `logs`, `changelog`,
-    /// `hotkeys`, `traces`, `list`), `source` how it opened (`command` —
-    /// the bare slash submission, `tab` — a typed partial + Tab).
+    /// surface (`model`, `mcp`, `settings`, or a read-only info panel
+    /// command — `context`, `session`, `system-prompt`, `logs`,
+    /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
+    /// (`command` — the bare slash submission, `tab` — a typed partial +
+    /// Tab).
     fn menu_opened(
         &self,
         menu: &'static str,
