@@ -5265,18 +5265,14 @@ mod tests {
                 json!({ "type": "session_event", "index": index, "padding": padding }),
             ));
         }
-        // Drain the parked connection to EOF-quiet: the loop unparks,
-        // its next event read reports the dropped span, and the loss
-        // lands in the daemon log.
+        // Drain the parked connection while watching for the log line: the
+        // loop unparks as the reader frees the socket buffer, its next
+        // event read reports the dropped span, and the loss lands in the
+        // daemon log. The quiet counter only bounds an idle connection,
+        // never a live one (a slow runner may pace the backlog, so the
+        // drain continues as long as the log line has not landed).
         let mut buffer = vec![0u8; 64 * 1024];
-        let mut quiet = 0;
-        while quiet < 3 {
-            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => quiet += 1,
-                Ok(Ok(_)) => quiet = 0,
-            }
-        }
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let log = loop {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             if log.contains("lagged on the event ring") {
@@ -5286,7 +5282,10 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "the lagged drain was never logged; log: {log}"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(_)) | Ok(Err(_)) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
         };
         let line = log
             .lines()
