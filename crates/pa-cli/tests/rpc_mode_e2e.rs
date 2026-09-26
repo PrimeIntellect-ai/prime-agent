@@ -323,7 +323,7 @@ fn rpc_parse_and_unknown_command_errors() {
 fn rpc_steer_and_follow_up_queue_then_abort() {
     let script = json!({
         "responses": [
-            { "text": "slow turn", "delayMs": 900 },
+            { "text": "slow turn", "delayMs": 2000 },
             { "text": "continue reply" },
             { "text": "steer answer" },
             { "text": "follow-up answer" },
@@ -338,11 +338,12 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     assert_eq!(mode["success"], true, "the mode is set: {mode}");
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
-    // Queue while the delayed turn is still mid-LLM-call (admission
-    // returns before the turn settles; the faux delayMs holds the call
-    // open). Observe the queues IMMEDIATELY: waiting for the turn's
-    // first event would outlast the delay, and the post-turn queue
-    // polls would deliver the queued rows as their own (fast) turns.
+    // Pace into the turn's LLM call: the run's initial steering poll
+    // (the TS prompt loop folds anything queued before the turn starts)
+    // happens within milliseconds of admission, and the faux delayMs
+    // then holds the stream closed for 2000ms — 100ms in, the queues
+    // are past the fold window and nothing polls until the turn ends.
+    std::thread::sleep(Duration::from_millis(100));
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
     assert_eq!(steer["success"], true, "steer queues: {steer}");
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));

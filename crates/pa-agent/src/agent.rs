@@ -210,7 +210,7 @@ fn batch_preview(batch: &[AgentMessage]) -> String {
                             .iter()
                             .filter_map(|part| match part {
                                 crate::types::UserPart::Text(text) => Some(text.text.as_str()),
-                                _ => None,
+                                crate::types::UserPart::Image(_) => None,
                             })
                             .collect();
                         (!text.is_empty()).then(|| text.join(" "))
