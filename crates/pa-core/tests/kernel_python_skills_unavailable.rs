@@ -90,15 +90,18 @@ async fn broken_skill_import_reports_and_healthy_skills_stay_silent() {
             reported.lock().unwrap().push(errors.clone());
         }) as pa_core::kernel::provisioner::UnavailableSkillsCallback
     };
-    let provisioner = IpythonKernelProvisioner::new("/tmp", IpythonKernelProvisionerOptions {
-        python: Some(python),
-        host_handlers: HostRequestHandlers::new(),
-        // One broken import (nothing named this in the kernel) and
-        // one healthy stdlib import ride the same bootstrap.
-        python_skills: vec![skill("broken-skill-lane"), skill("json")],
-        on_unavailable_skills: Some(on_unavailable_skills),
-        ..Default::default()
-    });
+    let provisioner = IpythonKernelProvisioner::new(
+        "/tmp",
+        IpythonKernelProvisionerOptions {
+            python: Some(python),
+            host_handlers: HostRequestHandlers::new(),
+            // One broken import (nothing named this in the kernel) and
+            // one healthy stdlib import ride the same bootstrap.
+            python_skills: vec![skill("broken-skill-lane"), skill("json")],
+            on_unavailable_skills: Some(on_unavailable_skills),
+            ..Default::default()
+        },
+    );
     provisioner
         .ensure(None, None)
         .await
@@ -108,7 +111,10 @@ async fn broken_skill_import_reports_and_healthy_skills_stay_silent() {
         "broken_skill_lane".to_string(),
         "No module named 'broken_skill_lane'".to_string(),
     )]];
-    assert_eq!(reported, expected, "the healthy `json` import must stay out");
+    assert_eq!(
+        reported, expected,
+        "the healthy `json` import must stay out"
+    );
     provisioner.dispose(None).await;
 }
 
@@ -183,10 +189,16 @@ async fn notice_rides_the_next_turn_as_model_context() {
     // pushes exactly this row; TS drives `_onPythonSkillsUnavailable` the
     // same way in its regression).
     let errors: UnavailablePythonSkills = vec![
-        ("websearch".to_string(), "No module named 'websearch'".to_string()),
+        (
+            "websearch".to_string(),
+            "No module named 'websearch'".to_string(),
+        ),
         ("edit".to_string(), "boom".to_string()),
     ];
-    engine.session.queue_next_turn_row(notice_message(&errors)).await;
+    engine
+        .session
+        .queue_next_turn_row(notice_message(&errors))
+        .await;
 
     let outcome = engine
         .prompt("go", PromptOptions::default())
@@ -212,10 +224,16 @@ async fn notice_rides_the_next_turn_as_model_context() {
         })
         .expect("the notice must land durably");
     assert!(notice.display, "the notice is user-visible");
-    assert_eq!(notice.details, Some(serde_json::json!({ "skills": ["websearch", "edit"] })));
+    assert_eq!(
+        notice.details,
+        Some(serde_json::json!({ "skills": ["websearch", "edit"] }))
+    );
     let pa_types::ai::UserContent::Text(content) = &notice.content else {
         panic!("text content");
     };
-    assert!(content.contains("- websearch: No module named 'websearch'"), "{content}");
+    assert!(
+        content.contains("- websearch: No module named 'websearch'"),
+        "{content}"
+    );
     assert!(content.contains("- edit: boom"), "{content}");
 }

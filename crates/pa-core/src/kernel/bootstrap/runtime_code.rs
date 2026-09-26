@@ -224,7 +224,11 @@ mod tests {
             (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{}}"), None),
         ];
         for (stdout, expected) in cases {
-            assert_eq!(parse_unavailable_python_skills(&stdout), expected, "{stdout}");
+            assert_eq!(
+                parse_unavailable_python_skills(&stdout),
+                expected,
+                "{stdout}"
+            );
         }
     }
 

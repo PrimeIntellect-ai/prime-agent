@@ -453,7 +453,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(row);
             },
-        ) as crate::kernel::provisioner::UnavailableSkillsCallback)
+        )
+            as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,

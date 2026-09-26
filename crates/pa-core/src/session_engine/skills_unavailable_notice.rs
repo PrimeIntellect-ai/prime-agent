@@ -67,7 +67,10 @@ mod tests {
 
     fn errors() -> UnavailablePythonSkills {
         vec![
-            ("websearch".to_string(), "No module named 'websearch'".to_string()),
+            (
+                "websearch".to_string(),
+                "No module named 'websearch'".to_string(),
+            ),
             ("edit".to_string(), "boom".to_string()),
         ]
     }
@@ -77,7 +80,10 @@ mod tests {
         let message = notice_message(&errors());
         assert_eq!(message.custom_type, "python_skills_unavailable");
         assert!(message.display);
-        assert_eq!(message.details, Some(serde_json::json!({ "skills": ["websearch", "edit"] })));
+        assert_eq!(
+            message.details,
+            Some(serde_json::json!({ "skills": ["websearch", "edit"] }))
+        );
         let pa_types::ai::UserContent::Text(content) = &message.content else {
             panic!("text content");
         };

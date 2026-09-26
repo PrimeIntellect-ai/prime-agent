@@ -535,13 +535,19 @@ mod tests {
         };
         let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80);
         assert_eq!(rows.len(), 2, "{rows:?}");
-        assert_eq!(flat(&rows[1]).trim_end(), " Python skills unavailable \u{b7} websearch, edit");
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            " Python skills unavailable \u{b7} websearch, edit"
+        );
         assert_eq!(rows[1][0].style, theme().fg_style(ThemeColor::Muted));
         assert_eq!(rows[1][1].style, theme().fg_style(ThemeColor::Dim));
         // Expanded: no hint, the full report renders as the body.
         let rows = render_injected_prompt(&row, Detail::All, &theme(), 80);
         assert!(rows.len() > 2, "body renders expanded: {rows:?}");
-        assert_eq!(flat(&rows[1]).trim_end(), " Python skills unavailable \u{b7} websearch, edit");
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            " Python skills unavailable \u{b7} websearch, edit"
+        );
         // The names truncate to the TS budget (62 columns, `...`).
         let long: Vec<String> = (0..12).map(|i| format!("skill-{i}")).collect();
         let row = InjectedPromptRow {
@@ -549,7 +555,8 @@ mod tests {
             body: None,
         };
         let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120);
-        let meta = flat(&rows[1]).trim_end();
+        let row_text = flat(&rows[1]);
+        let meta = row_text.trim_end();
         let names = meta.trim_start_matches(" Python skills unavailable \u{b7} ");
         assert_eq!(str_width(names), 62, "names width: {names}");
         assert!(names.ends_with("..."), "ellipsized names: {names}");
