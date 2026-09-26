@@ -408,8 +408,6 @@ def main() -> int:
     # combined: the promotion job collects every per-target entry instead.
     manifest_path = out_dir / "manifest.json"
     manifest = {"version": f"v{args.version}", "binaries": []}
-    if decoder is not None:
-        manifest["decoders"] = [decoder]
     if args.sha is not None:
         manifest["commit"] = args.sha
     if manifest_path.exists():
@@ -417,23 +415,32 @@ def main() -> int:
         if existing.get("version") == manifest["version"] \
                 and existing.get("commit") == manifest.get("commit"):
             manifest["binaries"] = existing["binaries"]
+            previous = existing.get("decoders", [])
+            targets = [d["target"] for d in previous]
+            if len(targets) != len(set(targets)):
+                fail("existing manifest has duplicate decoder target entries")
+            if previous:
+                manifest["decoders"] = previous
     manifest["binaries"] = [
         b for b in manifest["binaries"] if b.get("target") != args.target
     ] + [entry]
     manifest["binaries"].sort(key=lambda b: b["file"])
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
-    sums_path = out_dir / "SHA256SUMS"
-    lines = []
-    for line in sums_path.read_text().splitlines() if sums_path.exists() else []:
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1].strip() not in (
-                archive_name, decoder["file"] if decoder else ""):
-            lines.append(line)
-    lines.append(f"{archive_sha256}  {archive_name}")
+    decoders = [d for d in manifest.get("decoders", [])
+                if d.get("target") != args.target]
     if decoder is not None:
-        lines.append(f"{decoder['sha256']}  {decoder['file']}")
-    lines.sort(key=lambda line: line.split(None, 1)[1])
+        decoders.append(decoder)
+    if decoders:
+        manifest["decoders"] = sorted(decoders, key=lambda d: d["file"])
+    else:
+        manifest.pop("decoders", None)
+    sums_path = out_dir / "SHA256SUMS"
+    artifacts = manifest["binaries"] + manifest.get("decoders", [])
+    files = [artifact["file"] for artifact in artifacts]
+    if len(files) != len(set(files)):
+        fail("manifest contains duplicate artifact filenames")
+    lines = [f"{artifact['sha256']}  {artifact['file']}"
+             for artifact in sorted(artifacts, key=lambda item: item["file"])]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     sums_path.write_text("\n".join(lines) + "\n")
 
     print(json.dumps(entry, indent=2))
