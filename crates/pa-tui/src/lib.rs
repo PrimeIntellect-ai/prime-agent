@@ -68,7 +68,6 @@ pub(crate) mod prompt_highlight;
 pub mod prompt_stash;
 pub mod provider_auth;
 pub mod queued;
-pub mod runs_view;
 pub(crate) mod search_input;
 pub mod selection;
 mod sequence_guard;
