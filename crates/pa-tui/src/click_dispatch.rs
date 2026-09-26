@@ -59,7 +59,7 @@ impl SessionUi {
         match pressed.action {
             ClickAction::CycleDetail => {
                 self.track_click("transcript");
-                self.cycle_detail(view)
+                self.cycle_detail(view);
             }
             ClickAction::PlaceCaret {
                 row,
