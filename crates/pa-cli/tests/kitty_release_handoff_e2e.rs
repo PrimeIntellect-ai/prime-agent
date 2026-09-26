@@ -482,10 +482,16 @@ impl MockSupervisor {
         }
     }
 
+    /// One listener, every connection served in turn: the chat surface
+    /// holds one connection and the agents view opens its own after the
+    /// handoff — a single-accept mock would refuse the second.
     fn serve(self) {
-        let Ok((stream, _)) = self.listener.accept() else {
-            return;
-        };
+        for stream in self.listener.incoming() {
+            serve_connection(stream);
+        }
+    }
+
+    fn serve_connection(stream: std::os::unix::net::UnixStream) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
