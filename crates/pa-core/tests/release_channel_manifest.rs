@@ -490,6 +490,12 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     .expect("runtime manifest");
     std::fs::create_dir_all(repo.join("skills")).expect("skills dir");
     std::fs::create_dir_all(repo.join("docs")).expect("docs dir");
+    // The user-facing docs are REQUIRED payload content (SHIPPED_DOC_ENTRIES
+    // gates the assembly); the synthetic repo stages all three.
+    for doc in ["MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md"] {
+        std::fs::write(repo.join("docs").join(doc), "# fixture\n")
+            .unwrap_or_else(|_| panic!("fixture doc {doc}"));
+    }
     std::fs::write(repo.join("LICENSE"), "fixture license\n").expect("LICENSE");
     std::fs::write(repo.join("README.md"), "fixture readme\n").expect("README.md");
     let binary = repo.join("prime-agent");

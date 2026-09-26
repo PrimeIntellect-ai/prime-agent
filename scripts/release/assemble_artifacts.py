@@ -218,20 +218,18 @@ def copy_runtime_tree(source: Path, target: Path) -> None:
 def copy_shipped_docs(source: Path, target: Path) -> None:
     """Stage the user-facing docs subset (SHIPPED_DOC_ENTRIES).
 
-    The docs entry always ships, even when a tree carries none of the
-    curated files (synthetic fixtures stage an empty docs dir): the update
-    flow's RELEASE_ASSETS and the TS binaryAssets list require the entry.
-    A curated file missing from a real tree only logs a note — the release
-    gate for it is package_release.py's REQUIRED_FILES, which runs the
-    same policy on the local dry-run.
+    The docs entry always ships (the update flow's RELEASE_ASSETS and the
+    TS binaryAssets list require it), and every curated doc is REQUIRED:
+    a missing user-facing doc fails the assembly (the adversarial-review
+    gate — a whitelist that silently skips missing files would let the
+    payload ship without the quickstart install-rust.sh points at).
     """
     target.mkdir()
     for name in SHIPPED_DOC_ENTRIES:
         doc = source / name
-        if doc.is_file():
-            shutil.copy2(doc, target / name)
-        else:
-            print(f"note: {name} not found in {source}; the payload ships without it")
+        if not doc.is_file():
+            fail(f"user-facing doc {name!r} missing from {source}; the payload must ship {SHIPPED_DOC_ENTRIES}")
+        shutil.copy2(doc, target / name)
 
 
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:

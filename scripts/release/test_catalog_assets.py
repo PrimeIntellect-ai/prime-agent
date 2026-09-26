@@ -154,7 +154,10 @@ class SyntheticRepo:
         (root / "skills").mkdir(parents=True)
         (root / "skills" / "skill.md").write_text("# skill\n")
         (root / "docs").mkdir()
-        (root / "docs" / "MODEL-SURFACE.md").write_text("# models\n")
+        # Every user-facing doc SHIPPED_DOC_ENTRIES requires (fail-closed
+        # packaging gate): the synthetic repo stages all three.
+        for doc in ("MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md"):
+            (root / "docs" / doc).write_text("# doc\n")
         (root / "LICENSE").write_text("license\n")
         (root / "README.md").write_text("readme\n")
         runtime = root / "runtime"
@@ -594,6 +597,33 @@ class PackerGates(unittest.TestCase):
         self.assertFalse(
             (out / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz").exists())
         self.assertFalse((out / "manifest.json").exists())
+
+    def test_assembler_fails_on_each_missing_user_doc(self):
+        """The user-facing docs are REQUIRED payload content: each curated
+        doc missing from the repo must fail the assembly (fail-closed)."""
+        for doc in ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md"):
+            with self.subTest(doc=doc):
+                repo = SyntheticRepo(self.tmp / f"repo-missing-{doc}")
+                (repo.root / "docs" / doc).unlink()
+                result = repo.assemble(
+                    self.tmp / f"dist-missing-{doc}", catalog_assets=self.assets)
+                self.assertNotEqual(result.returncode, 0, doc)
+                self.assertIn(f"user-facing doc '{doc}' missing", result.stderr, doc)
+
+    def test_local_packer_fails_on_each_missing_user_doc(self):
+        """package_release.py must fail closed on every missing curated doc
+        (REQUIRED_FILES gate), never silently ship a diminished docs entry."""
+        for doc in ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md"):
+            with self.subTest(doc=doc):
+                repo = SyntheticRepo(self.tmp / f"pkrepo-missing-{doc}")
+                (repo.root / "docs" / doc).unlink()
+                args = ["--root", str(repo.root), "--version", "9.9.9",
+                        "--binary", str(repo.binary), "--skip-build",
+                        "--catalog-assets", str(self.assets),
+                        "--out-dir", str(self.tmp / f"pkout-{doc}")]
+                result = run_cli(PACKER, args)
+                self.assertNotEqual(result.returncode, 0, doc)
+                self.assertIn(f"missing binary asset: docs/{doc}", result.stderr, doc)
 
     def test_packer_fails_on_invalid_assets(self):
         cases = {

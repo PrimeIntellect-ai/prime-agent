@@ -90,7 +90,12 @@ REQUIRED_FILES = (
     "mcp-services.bundled.json",
     "prime-agent-runtime/pyproject.toml",
     "prime-agent-runtime/src/rlm/repl.py",
+    # Every user-facing doc SHIPPED_DOC_ENTRIES gates the local dry-run too
+    # (the adversarial-review docs gate: a curated doc missing from the
+    # repo must fail packaging, not silently ship an empty docs entry).
     "docs/MODEL-SURFACE.md",
+    "docs/RUST_QUICKSTART.md",
+    "docs/keybindings.md",
 )
 REQUIRED_DIRS = ("prime-agent-runtime/src/rlm", "skills")
 
