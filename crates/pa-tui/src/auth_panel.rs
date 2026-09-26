@@ -840,7 +840,11 @@ impl AuthPanel {
     /// non-text-entry keys while the field shows — a plain key types into
     /// it — else the first bound key, so the primary plain key is what the
     /// user sees), and the cancel hint, joined by the TS two-space
-    /// separator. A failed copy renames the hint's action to `retry`.
+    /// separator. A failed copy renames the hint's action to `retry`. The
+    /// cancel hint rides only while a cancellable input is mounted: with
+    /// no input (the URL block alone), Esc has nothing to cancel — the
+    /// flow settles through its own timeout — and a hint that does
+    /// nothing is worse than none.
     fn auth_actions_row(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
         let field_visible = matches!(self.input, PanelInput::Paste { .. });
         let mut parts: Vec<Line> = Vec::new();
@@ -882,8 +886,11 @@ impl AuthPanel {
                 theme.fg_span(ThemeColor::Muted, format!(" {action}")),
             ]);
         }
-        if let Some(key) = kb.first_key("tui.select.cancel") {
-            parts.push(hint_part(theme, &key, "cancel"));
+        if matches!(self.input, PanelInput::Paste { .. } | PanelInput::Teams { .. }) {
+            parts.extend(
+                kb.first_key("tui.select.cancel")
+                    .map(|key| hint_part(theme, &key, "cancel")),
+            );
         }
         let mut spans: Vec<Span> = vec![Span::raw("  ")];
         for (index, part) in parts.into_iter().enumerate() {
@@ -1495,7 +1502,9 @@ mod tests {
 
     /// TS `copyAuthUrl` + `getAuthActionsText`: the copy key copies the
     /// shown URL through the clipboard chain, and the actions row reports
-    /// the success status beside its hints.
+    /// the success status beside its hints. With no input mounted (the
+    /// URL block alone) the cancel hint stays off — Esc has nothing to
+    /// cancel while the flow settles through its own timeout.
     #[test]
     fn the_copy_key_copies_the_url_and_reports_the_status() {
         let mut panel = AuthPanel::new("Login to Prime Inference");
@@ -1511,8 +1520,8 @@ mod tests {
             "the plain-key hint rides the actions row: {actions:?}"
         );
         assert!(
-            actions.contains("Esc cancel"),
-            "the cancel hint rides the actions row: {actions:?}"
+            !actions.contains("Esc cancel"),
+            "no cancellable input is mounted: {actions:?}"
         );
     }
 
