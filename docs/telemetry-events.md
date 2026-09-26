@@ -280,6 +280,16 @@ client run (adoption; later copies in the same run are not reported).
 |---|---|---|
 | `lines` | number | the copied text's line count |
 
+### `tui click used`
+
+The interactive surface's first click-driven interaction per client run
+(adoption; later clicks in the same run are not reported): a mouse or touch
+plain click fired one of the clickable surfaces' actions.
+
+| property | type | notes |
+|---|---|---|
+| `surface` | string | `transcript` (a card or condensed-run expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
+
 ### `tui enhanced keys`
 
 The terminal enhanced-key modes settled for an interactive run (adoption:

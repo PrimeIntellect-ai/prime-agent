@@ -386,7 +386,7 @@ fn run_plan(steps: Vec<HeadlessStep>, catalog: Vec<Model>) -> Vec<String> {
 
 /// The last frame holding a needle and the needle's (row, column) within
 /// it — the rendered coordinates a click targets.
-fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize, &str)> {
+fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize)> {
     frames
         .iter()
         .enumerate()
@@ -394,7 +394,7 @@ fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize, &str)
             let rows: Vec<&str> = frame.split('\n').collect();
             let row = rows.iter().position(|r| r.contains(needle))?;
             let col = rows[row].find(needle)?;
-            Some((index, row, col, frame.as_str()))
+            Some((index, row, col))
         })
         .next_back()
 }
@@ -426,7 +426,7 @@ fn a_click_on_a_condensed_run_expands_it() {
         ],
         Vec::new(),
     );
-    let (_, row, col, _) =
+    let (_, row, col) =
         locate(&frames, "8 tool calls").expect("the condensed run renders before the click");
     // The SGR report's cells are one-based.
     let click = HeadlessStep::Mouse(press(col + 1, row + 1));
@@ -480,7 +480,7 @@ fn a_click_in_the_prompt_bar_places_the_caret() {
     );
     // `world`'s first cell is the clicked one: the caret lands in front
     // of the word, so the insert splits `hello ` from `world`.
-    let (_, row, col, _) = locate(&frames, "world").expect("the draft renders");
+    let (_, row, col) = locate(&frames, "world").expect("the draft renders");
     // The caret goes in front of `world` (the needle's own column).
     let click = HeadlessStep::Mouse(press(col + 1, row + 1));
     let release = HeadlessStep::Mouse(release(col + 1, row + 1));
@@ -526,7 +526,7 @@ fn a_click_selects_a_model_picker_row() {
         ],
         catalog.clone(),
     );
-    let (_, row, col, _) = locate(&frames, "Mock Two").expect("the picker row renders");
+    let (_, row, col) = locate(&frames, "Mock Two").expect("the picker row renders");
     let click = HeadlessStep::Mouse(press(col + 1, row + 1));
     let release = HeadlessStep::Mouse(release(col + 1, row + 1));
     let frames = run_plan(

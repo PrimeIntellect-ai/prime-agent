@@ -635,6 +635,9 @@ pub(crate) struct SessionUi {
     selection_auto_scroll: Option<SelectionAutoScroll>,
     /// Whether this run already reported its first selection copy.
     selection_adoption_emitted: bool,
+    /// Whether this run already reported its first click-driven
+    /// interaction.
+    click_adoption_emitted: bool,
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
@@ -882,6 +885,7 @@ impl SessionUi {
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
+            click_adoption_emitted: false,
             copies: Vec::new(),
             pressed_hyperlink: None,
             left_mouse_dragged: false,
@@ -7894,6 +7898,20 @@ impl SessionUi {
         if let Some(telemetry) = self.telemetry.clone() {
             tokio::spawn(async move {
                 telemetry.selection_used(lines).await;
+            });
+        }
+    }
+
+    /// The run's first click-driven interaction (`tui click used`,
+    /// adoption; later clicks in the same run are not reported).
+    fn track_click(&mut self, surface: &'static str) {
+        if self.click_adoption_emitted {
+            return;
+        }
+        self.click_adoption_emitted = true;
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.click_used(surface).await;
             });
         }
     }

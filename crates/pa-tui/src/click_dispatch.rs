@@ -57,23 +57,29 @@ impl SessionUi {
             return;
         }
         match pressed.action {
-            ClickAction::CycleDetail => self.cycle_detail(view),
+            ClickAction::CycleDetail => {
+                self.track_click("transcript");
+                self.cycle_detail(view)
+            }
             ClickAction::PlaceCaret {
                 row,
                 col,
                 content_width,
             } => {
+                self.track_click("editor");
                 view.editor.place_cursor_from_click(content_width, row, col);
                 self.dirty = true;
             }
             ClickAction::SelectModelRow(position) => {
                 if let Some(picker) = view.model_picker.as_mut() {
+                    self.track_click("picker");
                     picker.select_filtered(position);
                     self.dirty = true;
                 }
             }
             ClickAction::SelectEffortRow(position) => {
                 if let Some(picker) = view.effort_picker.as_mut() {
+                    self.track_click("picker");
                     picker.select_position(position);
                     self.dirty = true;
                 }
