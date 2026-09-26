@@ -25,14 +25,15 @@
 //! within their request timeouts; a settled flow always unmounts the
 //! panel.
 
+use ratatui::style::Modifier;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
-use crate::keybindings::{format_key_text, KeybindingsManager};
+use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{
-    hint_row, key_hint, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines,
-    MenuSegment,
+    hint_row, key_hint, login_field_row, menu_row, no_match_row, scroll_row, scrub_controls,
+    search_field_lines, search_field_plain_row, MenuSegment,
 };
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
@@ -77,13 +78,44 @@ pub enum PasteStyle {
     Masked,
 }
 
+/// The paste prompt's rendering tone: TS `showManualInput` renders its
+/// prompt muted (the browser-step hint under the URL block), while
+/// `showPrompt` renders it as a section title in text colour (the API-key
+/// prompt "Enter API key:").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PastePromptTone {
+    /// TS `addMutedText(prompt)` — `showManualInput`'s arm-prompt.
+    Muted,
+    /// TS `addSectionTitle(message)` — `showPrompt`'s "Enter API key:".
+    Text,
+}
+
+/// Which surface mounts the panel: TS `loginDialogOptions()` per surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelSurface {
+    /// The session's prompt dock (TS the non-onboarding shape):
+    /// `topRule: true, hideTitle: false` — the borderMuted rule and the
+    /// muted one-space title open the panel.
+    Session,
+    /// The first-run onboarding block (TS the onboarding shape):
+    /// `topRule: false, hideTitle: true` — the splash names the step, so
+    /// the panel carries no chrome of its own.
+    Onboarding,
+}
+
 /// One request a login flow (or its session wrapper) sends to the inline
 /// auth panel. Fire-and-forget requests render; the prompt and picker
 /// requests await their oneshot replies; the settled requests close the
 /// panel and apply the outcome.
 pub enum AuthPanelRequest {
     /// TS `dialog.showProgress`: a muted progress line joins the panel.
-    Progress { message: String },
+    /// `chatter` marks the line as the `onProgress` callback's step
+    /// chatter (TS `runPrimeInferenceLogin`'s guarded arm): the
+    /// onboarding surface drops it — "onboarding narrates itself; step
+    /// chatter stays in the chat flows" (TS `if (!this.isOnboarding())`)
+    /// — while a direct `showProgress` line (the browser-fallback arm,
+    /// the OAuth dialogs' chatter) renders on every surface.
+    Progress { message: String, chatter: bool },
     /// TS `dialog.showAuth`: the browser URL block (the flow launches
     /// the browser itself; the panel only renders).
     AuthUrl {
@@ -92,13 +124,16 @@ pub enum AuthPanelRequest {
         /// "Complete the sign-in in your browser." line.
         instructions: Option<String>,
     },
-    /// TS `dialog.showManualInput` / `armManualInput`: the prompt above
-    /// the panel's paste field. Enter submits the trimmed value (an
-    /// empty submit stays mounted with the notice, unless the prompt
-    /// allows it — TS `OAuthPrompt.allowEmpty`: a blank answer is a
-    /// valid submit); Esc cancels the flow (`None`).
+    /// TS `dialog.showManualInput` / `armManualInput` (the muted prompt)
+    /// and `dialog.showPrompt` (the section-title prompt, TS text
+    /// colour): the prompt above the panel's paste field. Enter submits
+    /// the trimmed value (a blank submit resolves when the prompt allows
+    /// it — TS `OAuthPrompt.allowEmpty` — else the field stays mounted:
+    /// the token panel shows its notice, the login dialog waits
+    /// silently); Esc cancels the flow (`None`).
     PastePrompt {
         prompt: String,
+        tone: PastePromptTone,
         style: PasteStyle,
         allow_empty: bool,
         reply: oneshot::Sender<Option<String>>,
@@ -136,6 +171,12 @@ pub enum AuthPanelRequest {
 pub struct FlowCancel {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     wake: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl std::fmt::Debug for FlowCancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowCancel").finish()
+    }
 }
 
 impl FlowCancel {
@@ -226,10 +267,23 @@ impl AuthPanelHandle {
         let _ = self.tx.send(request);
     }
 
-    /// TS `dialog.showProgress`.
+    /// TS the `onProgress` callback's step chatter (TS `dialog.showProgress`
+    /// behind the `if (!this.isOnboarding())` guard): the onboarding
+    /// surface drops the line — the flow narrates itself there.
     pub fn progress(&self, message: impl Into<String>) {
         self.send(AuthPanelRequest::Progress {
             message: message.into(),
+            chatter: true,
+        });
+    }
+
+    /// TS a direct `dialog.showProgress` line (the browser-sign-in
+    /// fallback arm, the OAuth dialogs' chatter): renders on every
+    /// surface, onboarding included.
+    pub fn progress_line(&self, message: impl Into<String>) {
+        self.send(AuthPanelRequest::Progress {
+            message: message.into(),
+            chatter: false,
         });
     }
 
@@ -241,11 +295,17 @@ impl AuthPanelHandle {
         });
     }
 
-    /// TS `dialog.showManualInput` / `armManualInput`: prompt above the
-    /// paste field; the submitted value resolves the future, a cancel
-    /// answers `None`.
-    pub async fn paste_prompt(&self, prompt: &str, style: PasteStyle) -> Option<String> {
-        self.paste_prompt_with(prompt, style, false).await
+    /// TS `dialog.showManualInput` / `armManualInput` (the muted
+    /// browser-step prompt) and `dialog.showPrompt` (the text-coloured
+    /// section-title prompt): prompt above the paste field; the
+    /// submitted value resolves the future, a cancel answers `None`.
+    pub async fn paste_prompt(
+        &self,
+        prompt: &str,
+        tone: PastePromptTone,
+        style: PasteStyle,
+    ) -> Option<String> {
+        self.paste_prompt_with(prompt, tone, style, false).await
     }
 
     /// The `allow_empty` variant (TS `OAuthPrompt.allowEmpty`): a blank
@@ -254,9 +314,10 @@ impl AuthPanelHandle {
     pub async fn paste_prompt_allow_empty(
         &self,
         prompt: &str,
+        tone: PastePromptTone,
         style: PasteStyle,
     ) -> Option<String> {
-        self.paste_prompt_with(prompt, style, true).await
+        self.paste_prompt_with(prompt, tone, style, true).await
     }
 
     /// One paste prompt over the request channel (the two surfaces
@@ -264,6 +325,7 @@ impl AuthPanelHandle {
     async fn paste_prompt_with(
         &self,
         prompt: &str,
+        tone: PastePromptTone,
         style: PasteStyle,
         allow_empty: bool,
     ) -> Option<String> {
@@ -276,6 +338,7 @@ impl AuthPanelHandle {
         let (reply, answer) = oneshot::channel();
         self.send(AuthPanelRequest::PastePrompt {
             prompt: prompt.to_string(),
+            tone,
             style,
             allow_empty,
             reply,
@@ -326,10 +389,6 @@ impl std::fmt::Debug for AuthPanelHandle {
 /// TS `PREFERRED_VISIBLE_TEAMS`.
 const PREFERRED_VISIBLE_TEAMS: usize = 8;
 
-/// The login dialog's paste field placeholder (TS
-/// `MenuSearchInput("Paste value")`).
-const PASTE_PLACEHOLDER: &str = "Paste value";
-
 /// The token paste panel's placeholder (TS `MenuSearchInput("Paste
 /// token", ..., { masked: true })`).
 const TOKEN_PLACEHOLDER: &str = "Paste token";
@@ -344,6 +403,11 @@ const TEAM_PANEL_SUBTITLE: &str = "Choose which account pays for Prime Inference
 /// teams")`).
 const TEAM_SEARCH_PLACEHOLDER: &str = "Search teams";
 
+/// The login dialog's paste field placeholder (TS
+/// `MenuSearchInput("Paste value")` — the session's API-key prompt uses
+/// the same field).
+pub(crate) const PASTE_PLACEHOLDER: &str = "Paste value";
+
 /// The empty-submit notice (TS `McpTokenPastePanelComponent`'s
 /// "The value cannot be empty.").
 const EMPTY_VALUE_NOTICE: &str = "The value cannot be empty.";
@@ -354,7 +418,7 @@ const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser
 /// The outcome of copying the sign-in URL (TS `getAuthActionsText`'s
 /// status: `Copied sign-in link` / `Failed to copy sign-in link`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CopyStatus {
+pub(crate) enum CopyStatus {
     Copied,
     Failed,
 }
@@ -375,21 +439,32 @@ pub struct AuthPanel {
     /// TS the dialog's panel title: `Login to {provider}` / `Connect
     /// {service}`.
     title: String,
+    /// TS `loginDialogOptions()`'s per-surface chrome: the session's
+    /// dock frames the panel with the rule and the title, the onboarding
+    /// block mounts it chrome-less (the splash names the step).
+    surface: PanelSurface,
     /// TS the `MenuPanel` subtitle; the team picker sets its own.
     subtitle: Option<String>,
-    /// TS `showProgress` lines, in arrival order (the section title
-    /// "Preparing authentication" rides first, TS `showProgress`'s
-    /// empty-content arm).
+    /// TS `showProgress` lines, in arrival order.
     progress: Vec<String>,
+    /// Whether the progress block opened the panel (TS `showProgress`'s
+    /// empty-content arm renders the "Preparing authentication"
+    /// section title only when the panel was still empty).
+    progress_open: bool,
     /// TS `showAuth`'s URL block.
     auth_url: Option<String>,
     auth_instructions: Option<String>,
-    /// The URL block's copy outcome (TS the actions row's status text).
-    copy_status: Option<CopyStatus>,
-    /// The empty-submit notice row.
+    /// The empty-submit notice row (the token paste panel's arm only).
     notice: Option<String>,
     /// The active input.
     input: PanelInput,
+    /// The URL block's copy outcome (TS the actions row's status text).
+    copy_status: Option<CopyStatus>,
+    /// The flow's cooperative cancel signal (TS the dialog's
+    /// `abortController`): Esc/ctrl+c on a URL screen with no mounted
+    /// input cancels the running login — the actions row's cancel hint
+    /// is never a dead key.
+    flow_cancel: Option<FlowCancel>,
 }
 
 /// The panel's active input.
@@ -399,9 +474,10 @@ enum PanelInput {
     /// lines stay; Esc has nothing to cancel — the flow settles within
     /// its request timeouts).
     Working,
-    /// The paste prompt (TS `showManualInput`).
+    /// The paste prompt (TS `showManualInput` / `showPrompt`).
     Paste {
         prompt: String,
+        tone: PastePromptTone,
         style: PasteStyle,
         /// Whether a blank submit is a valid answer (TS
         /// `OAuthPrompt.allowEmpty`).
@@ -439,61 +515,107 @@ enum PickerSegment {
 }
 
 impl AuthPanel {
-    /// Mount the panel for one login run: the title rides the top rule
-    /// (TS `showAuthPanel` mounts the dialog the moment the flow starts).
+    /// Mount the panel for one session-surface login run (TS the
+    /// non-onboarding `loginDialogOptions`: the rule and the title open
+    /// the panel; the dialog mounts the moment the flow starts).
     pub fn new(title: impl Into<String>) -> Self {
         AuthPanel {
             title: scrub_controls(&title.into()),
+            surface: PanelSurface::Session,
             subtitle: None,
             progress: Vec::new(),
+            progress_open: false,
             auth_url: None,
             auth_instructions: None,
-            copy_status: None,
             notice: None,
             input: PanelInput::Working,
+            copy_status: None,
+            flow_cancel: None,
         }
     }
 
-    /// TS `showProgress`: the first line lands under the section title.
+    /// Mount the panel inside the first-run onboarding block (TS the
+    /// onboarding `loginDialogOptions`: `topRule: false, hideTitle:
+    /// true` — the splash renders the step's heading, the panel carries
+    /// no chrome of its own). The title stays for the flow's identity;
+    /// it never renders on this surface.
+    pub fn onboarding(title: impl Into<String>) -> Self {
+        let mut panel = AuthPanel::new(title);
+        panel.surface = PanelSurface::Onboarding;
+        panel
+    }
+
+    /// Arm the flow's cooperative cancel signal (TS the dialog's
+    /// `abortController`): the mounts pass the driving flow's signal so
+    /// the panel's cancel keys end a running login, not just a mounted
+    /// input.
+    pub fn set_cancel_signal(&mut self, cancel: FlowCancel) {
+        self.flow_cancel = Some(cancel);
+    }
+
+    /// Whether the team picker owns the panel (TS the selector is its own
+    /// component: its Esc answers the picker and keeps the dialog
+    /// mounted, so a session cancel unmounts every other state only).
+    pub fn team_picker_mounted(&self) -> bool {
+        matches!(self.input, PanelInput::Teams { .. })
+    }
+
+    /// TS `showProgress`: the first line lands under the section title
+    /// (the title renders only when the panel was still empty).
     /// One request-fold entry (the session's channel arm calls it).
     pub fn push_progress(&mut self, message: String) {
-        if self.progress.is_empty() {
-            self.progress.push("Preparing authentication".to_string());
+        if !self.content_open() {
+            self.progress_open = true;
         }
         // The flow's lines can quote provider text: the same control
         // character hygiene every daemon-supplied row carries.
         self.progress.push(scrub_controls(&message));
     }
 
-    /// TS `showAuth`: the URL block replaces the content (the paste
-    /// field unmounts with it, TS `startContent` clears). One
-    /// request-fold entry (the session's channel arm calls it).
+    /// Whether any content block has landed (TS `contentContainer.children
+    /// .length > 0`): the panel renders its leading blank row once
+    /// `startContent` ever ran, and the progress section title renders
+    /// only before it.
+    fn content_open(&self) -> bool {
+        self.progress_open || self.auth_url.is_some() || !matches!(self.input, PanelInput::Working)
+    }
+
+    /// TS `showAuth`: the URL block replaces the content (the progress
+    /// lines and the paste field unmount with it, TS `startContent`
+    /// clears) and the auth-actions row goes live. One request-fold
+    /// entry (the session's channel arm calls it).
     pub fn show_auth_url(&mut self, url: String, instructions: Option<String>) {
         self.auth_url = Some(url);
         self.auth_instructions = instructions;
+        self.progress.clear();
+        self.progress_open = false;
         self.copy_status = None;
         self.input = PanelInput::Working;
         self.notice = None;
     }
 
-    /// TS `showManualInput` / `armManualInput`: the prompt above a fresh
+    /// TS `showManualInput` / `armManualInput` (muted tone) and
+    /// `showPrompt` (the section-title tone): the prompt above a fresh
     /// paste field (the flow's progress lines stay). One request-fold
     /// entry (the session's channel arm calls it).
     pub fn mount_paste(
         &mut self,
         prompt: String,
+        tone: PastePromptTone,
         style: PasteStyle,
         allow_empty: bool,
         reply: oneshot::Sender<Option<String>>,
     ) {
         self.input = PanelInput::Paste {
             prompt: scrub_controls(&prompt),
+            tone,
             style,
             allow_empty,
             field: SearchInput::new(),
             reply: Some(reply),
         };
         self.notice = None;
+        self.copy_status = None;
     }
 
     /// TS `PrimeTeamSelectorComponent`: the picker mounts as its own
@@ -509,6 +631,12 @@ impl AuthPanel {
         self.title = TEAM_PANEL_TITLE.to_string();
         self.subtitle = Some(TEAM_PANEL_SUBTITLE.to_string());
         self.progress.clear();
+        // The picker is its own panel (TS `PrimeTeamSelectorComponent`):
+        // the login dialog's whole content state goes with it — a stale
+        // section title, actions row, or copy status must never bleed
+        // into the frame the pick leaves behind.
+        self.progress_open = false;
+        self.copy_status = None;
         self.auth_url = None;
         self.auth_instructions = None;
         self.copy_status = None;
@@ -542,6 +670,13 @@ impl AuthPanel {
         kb: &KeybindingsManager,
         sink: &mut crate::clipboard::OscSink,
     ) {
+        // TS `cancel()` on a URL screen (no mounted input): the dialog's
+        // abort signal ends the running login — the actions row's cancel
+        // hint is never a dead key.
+        if matches!(self.input, PanelInput::Working) && kb.matches(key, "tui.select.cancel") {
+            self.mark_flow_cancelled();
+            return;
+        }
         // TS `handleInput`'s copy arm: the copy binding copies the shown
         // URL, except a single-character key while the paste field is
         // visible — that one types into the field, so only the binding's
@@ -558,6 +693,7 @@ impl AuthPanel {
             PanelInput::Working => {}
             PanelInput::Paste {
                 field,
+                style,
                 allow_empty,
                 reply,
                 ..
@@ -578,9 +714,11 @@ impl AuthPanel {
                                 let _ = reply.send(Some(value));
                                 answered = true;
                             }
-                        } else {
-                            // TS the paste panel's empty-submit notice; the
-                            // field stays mounted.
+                        } else if *style == PasteStyle::Masked {
+                            // TS the token paste panel's empty-submit
+                            // notice; the login dialog waits silently (the
+                            // arm loop re-reads the field), so only the
+                            // masked field shows it.
                             self.notice = Some(EMPTY_VALUE_NOTICE.to_string());
                         }
                     } else if let Some(reply) = reply.take() {
@@ -654,100 +792,232 @@ impl AuthPanel {
         }
     }
 
-    /// The panel's rendered rows (the provider selector's panel chrome:
-    /// the top rule, the title, the subtitle, the content, the hint, the
-    /// bottom rule). The hint row renders the effective bindings, so a
-    /// user `keybindings.json` override moves the hint with the handler.
-    pub(crate) fn render(
-        &mut self,
-        theme: &Theme,
-        width: usize,
-        kb: &KeybindingsManager,
-    ) -> Vec<Line> {
-        let mut lines: Vec<Line> = Vec::new();
-        lines.push(Vec::new());
-        lines.push(vec![
-            theme.fg_span(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-        ]);
-        lines.push(vec![crate::Span::raw(format!("  {}", self.title))]);
-        if let Some(subtitle) = &self.subtitle {
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Muted, format!("  {subtitle}"))
-            ]);
+    /// Mark the driving flow's cancel signal (TS the dialog's abort):
+    /// a running login ends between its poll steps; a signal that was
+    /// never armed is a flow that owns no cancel path.
+    fn mark_flow_cancelled(&mut self) {
+        if let Some(cancel) = &self.flow_cancel {
+            cancel.mark();
         }
-        lines.push(Vec::new());
-        for message in &self.progress {
+    }
+
+    /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over
+    /// the `LoginDialogComponent` content: the session's dock opens with
+    /// the borderMuted rule and the muted one-space title, the onboarding
+    /// block mounts the content chrome-less; the content is the blank
+    /// `startContent` row, the progress block, the URL block, the paste
+    /// field, and the auth-actions row last — no bottom rule on either
+    /// surface).
+    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        let width = width.max(1);
+        let mut lines: Vec<Line> = Vec::new();
+        // TS `MenuPanel` inline's per-surface chrome: the session dock
+        // opens with the borderMuted rule and the muted one-space title
+        // (TS `loginDialogOptions`'s non-onboarding shape); the
+        // onboarding block mounts the panel chrome-less (`topRule:
+        // false, hideTitle: true` — the splash renders the heading).
+        if self.surface == PanelSurface::Session {
             lines.push(vec![
-                theme.fg_span(ThemeColor::Muted, format!("  {message}"))
+                theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width))
             ]);
+            lines.push(content_row(theme, width, ThemeColor::Muted, &self.title));
+            if let Some(subtitle) = &self.subtitle {
+                lines.push(content_row(theme, width, ThemeColor::Muted, subtitle));
+            }
+        }
+        // The team picker is TS `PrimeTeamSelectorComponent` — its own
+        // panel: the rule, the title, the subtitle, the bordered field,
+        // the rows (no leading content blank, no auth-actions row, no nav
+        // hint).
+        if let PanelInput::Teams { picker, .. } = &mut self.input {
+            lines.append(&mut search_field_lines(
+                theme,
+                width,
+                picker.search.value(),
+                picker.search.cursor(),
+                false,
+                TEAM_SEARCH_PLACEHOLDER,
+            ));
+            let count = picker.filtered.len();
+            let visible = PREFERRED_VISIBLE_TEAMS.min(count.max(1));
+            let start = if count > visible {
+                picker
+                    .selected
+                    .saturating_sub(visible / 2)
+                    .min(count - visible)
+            } else {
+                0
+            };
+            let end = (start + visible).min(count);
+            for index in start..end {
+                let Some(row) = picker.filtered.get(index) else {
+                    continue;
+                };
+                let selected = index == picker.selected;
+                let (primary, trailing) = picker.row_parts(*row);
+                let segments: Vec<MenuSegment> = trailing
+                    .iter()
+                    .map(|segment| match segment {
+                        PickerSegment::Muted(text) => MenuSegment::muted(text),
+                        PickerSegment::Current => {
+                            MenuSegment::themed(ThemeColor::Success, "current")
+                        }
+                    })
+                    .collect();
+                lines.push(menu_row(theme, width, primary, &segments, selected));
+            }
+            if start > 0 || end < count {
+                lines.push(scroll_row(theme, width, picker.selected + 1, count));
+            }
+            if count == 0 {
+                lines.push(no_match_row(theme, width, "No matching teams"));
+            }
+            return lines;
+        }
+        if !self.content_open() {
+            // TS renders the empty dialog as zero rows: only the
+            // surface's chrome (nothing, on the onboarding block) shows.
+            return lines;
+        }
+        // TS `startContent`'s Spacer(1): the content's leading blank row.
+        lines.push(Vec::new());
+        // TS `showProgress`'s empty-content arm: the section title rides
+        // the first progress line (text colour, TS `addSectionTitle`).
+        if self.progress_open {
+            lines.push(content_row(
+                theme,
+                width,
+                ThemeColor::Text,
+                "Preparing authentication",
+            ));
+        }
+        for message in &self.progress {
+            lines.push(content_row(theme, width, ThemeColor::Muted, message));
         }
         if let Some(url) = &self.auth_url {
             // The URL and the instructions are provider-supplied: control
             // characters can never execute terminal control operations
             // when rendered (the same hygiene every daemon-supplied row
             // carries); a URL is additionally single-line, so newlines
-            // drop. TS `showAuth` wraps the URL in OSC 8 (the URL is the
-            // link's own display text) when the terminal is known to
-            // implement hyperlinks, else prints it plain.
+            // drop. TS `showAuth` renders the link in the text colour
+            // and wraps it in OSC 8 (the URL is the link's own display
+            // text) when the terminal is known to implement hyperlinks,
+            // else prints it plain.
             let safe = scrub_controls(url).replace('\n', "");
-            let linked = if crate::hyperlinks::hyperlinks_enabled() {
-                format!("{}{safe}{OSC8_CLOSE}", osc8_open(&safe))
+            // The OSC 8 wrap survives truncation intact: the display text
+            // truncates to the column budget BEFORE the wrap (a long URL
+            // cut mid-sequence would leave the terminal's link region
+            // open), and the URI parameter always carries the full URL.
+            let budget = width.saturating_sub(2);
+            let display = if crate::width::str_width(&safe) > budget {
+                crate::width::truncate_line(&vec![Span::raw(safe.clone())], budget, "")
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
             } else {
-                safe
+                safe.clone()
             };
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Accent, format!("  {linked}"))
-            ]);
+            let linked = if crate::hyperlinks::hyperlinks_enabled() {
+                format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
+            } else {
+                display
+            };
+            lines.push(content_row(theme, width, ThemeColor::Text, &linked));
+            // TS `addSectionSpacer`: the browser-step text reads apart
+            // from the URL.
+            lines.push(Vec::new());
             let instructions = self.auth_instructions.clone().map_or_else(
                 || BROWSER_DEFAULT_INSTRUCTIONS.to_string(),
                 |text| scrub_controls(&text),
             );
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Text, format!("  {instructions}"))
-            ]);
+            if let Some(code) = verification_code(&instructions) {
+                // TS `addInstructions`' code arm: a blank row separates
+                // the sign-in link from the code below it.
+                lines.push(Vec::new());
+                lines.push(content_row(
+                    theme,
+                    width,
+                    ThemeColor::Muted,
+                    "Verification code",
+                ));
+                let bold_code = vec![
+                    Span::raw(" ".to_string()),
+                    Span::styled(
+                        code,
+                        theme
+                            .fg_style(ThemeColor::Text)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                lines.push(crate::width::truncate_line(&bold_code, width, ""));
+            } else if self.auth_instructions.is_some() {
+                // Provider instructions already describe the browser step
+                // (TS renders them in the text colour).
+                lines.push(content_row(theme, width, ThemeColor::Text, &instructions));
+            } else {
+                // TS `addMutedText`'s default browser-step line.
+                lines.push(content_row(theme, width, ThemeColor::Muted, &instructions));
+            }
         }
         match &mut self.input {
             PanelInput::Working => {}
             PanelInput::Paste {
                 prompt,
+                tone,
                 style,
                 field,
                 ..
             } => {
-                lines.push(vec![theme.fg_span(ThemeColor::Muted, format!("  {prompt}"))]);
+                // TS `addSectionSpacer`: the blank before the prompt
+                // rides only when content already rendered above (an
+                // empty panel's `startContent` blank already opened the
+                // body).
+                if !self.progress.is_empty() || self.auth_url.is_some() {
+                    lines.push(Vec::new());
+                }
+                let prompt_tone = match tone {
+                    PastePromptTone::Muted => ThemeColor::Muted,
+                    PastePromptTone::Text => ThemeColor::Text,
+                };
+                lines.push(content_row(theme, width, prompt_tone, prompt));
                 let placeholder = match style {
                     PasteStyle::Visible => PASTE_PLACEHOLDER,
                     PasteStyle::Masked => TOKEN_PLACEHOLDER,
                 };
-                let (value, cursor) = match style {
+                match style {
+                    // The login dialog's field is the plain prompt-bearing
+                    // field (TS `MenuSearchInput` inline + plain, no
+                    // enclosing rules).
+                    PasteStyle::Visible => lines.push(login_field_row(
+                        theme,
+                        width,
+                        field.value(),
+                        field.cursor(),
+                        true,
+                        placeholder,
+                    )),
                     // A masked render never contains the secret: only the
-                    // bullet projection rides the line (TS
-                    // `McpTokenPastePanelComponent`).
-                    PasteStyle::Masked => (
-                        "\u{2022}".repeat(field.value().chars().count()),
+                    // bullet projection rides the prompt-less plain field
+                    // (TS `McpTokenPastePanelComponent`).
+                    PasteStyle::Masked => lines.push(search_field_plain_row(
+                        theme,
+                        width,
+                        &"\u{2022}".repeat(field.value().chars().count()),
                         field.value().chars().count(),
-                    ),
-                    PasteStyle::Visible => (field.value().to_string(), field.cursor()),
-                };
-                lines.append(&mut search_field_lines(
-                    theme,
-                    width,
-                    &value,
-                    cursor,
-                    true,
-                    placeholder,
-                ));
-                if let Some(notice) = &self.notice {
-                    lines.push(vec![
-                        theme.fg_span(ThemeColor::Warning, format!("  {notice}"))
-                    ]);
+                        true,
+                        placeholder,
+                    )),
                 }
-                // While the URL block shows, the actions row below the
-                // input carries the submit and cancel hints (TS
-                // `getAuthActionsText`); a paste-only panel (the MCP token
-                // surface) keeps its own hint row — rendered from the
-                // effective bindings.
-                if self.auth_url.is_none() {
+                if let Some(notice) = &self.notice {
+                    lines.push(content_row(theme, width, ThemeColor::Warning, notice));
+                }
+                // TS `addInputField`'s inputSpacer: the blank row between
+                // the field and the actions (the actions row rides last
+                // while the URL block shows; a paste-only panel — the MCP
+                // token surface — keeps its own hint row instead).
+                if self.auth_url.is_some() {
+                    lines.push(Vec::new());
+                } else {
                     let hints = [
                         key_hint(kb, &["tui.select.confirm"], "submit"),
                         key_hint(kb, &["tui.select.cancel"], "cancel"),
@@ -759,151 +1029,22 @@ impl AuthPanel {
                     lines.push(hint_row(theme, width, &hints));
                 }
             }
-            PanelInput::Teams { picker, .. } => {
-                let mut search = search_field_lines(
-                    theme,
-                    width,
-                    picker.search.value(),
-                    picker.search.cursor(),
-                    false,
-                    TEAM_SEARCH_PLACEHOLDER,
-                );
-                lines.append(&mut search);
-                let count = picker.filtered.len();
-                let visible = PREFERRED_VISIBLE_TEAMS.min(count.max(1));
-                let start = if count > visible {
-                    picker
-                        .selected
-                        .saturating_sub(visible / 2)
-                        .min(count - visible)
-                } else {
-                    0
-                };
-                let end = (start + visible).min(count);
-                for index in start..end {
-                    let Some(row) = picker.filtered.get(index) else {
-                        continue;
-                    };
-                    let selected = index == picker.selected;
-                    let (primary, trailing) = picker.row_parts(*row);
-                    let segments: Vec<MenuSegment> = trailing
-                        .iter()
-                        .map(|segment| match segment {
-                            PickerSegment::Muted(text) => MenuSegment::muted(text),
-                            PickerSegment::Current => {
-                                MenuSegment::themed(ThemeColor::Success, "current")
-                            }
-                        })
-                        .collect();
-                    lines.push(menu_row(theme, width, primary, &segments, selected));
-                }
-                if start > 0 || end < count {
-                    lines.push(scroll_row(theme, width, picker.selected + 1, count));
-                }
-                if count == 0 {
-                    lines.push(no_match_row(theme, width, "No matching teams"));
-                }
-                let hints = [
-                    key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
-                    key_hint(kb, &["tui.select.confirm"], "select"),
-                    key_hint(kb, &["tui.select.cancel"], "cancel"),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<String>>()
-                .join("  ");
-                lines.push(hint_row(theme, width, &hints));
-            }
+            PanelInput::Teams { .. } => unreachable!("the team picker returned above"),
         }
         // TS `getAuthActionsText`: the URL block's actions row rides last —
         // the copy-key hint with the status of the last copy, the submit
         // hint while the paste field is mounted, and the cancel hint.
         if self.auth_url.is_some() {
-            lines.push(self.auth_actions_row(theme, width, kb));
+            lines.push(auth_actions_row(
+                theme,
+                width,
+                kb,
+                matches!(self.input, PanelInput::Paste { .. }),
+                self.copy_status,
+            ));
         }
-        lines.push(vec![
-            theme.fg_span(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-        ]);
         lines
     }
-
-    /// TS `getAuthActionsText` as one row: the submit hint while the paste
-    /// field is mounted, the copy status, the copy-key hint (the panel's
-    /// non-text-entry keys while the field shows — a plain key types into
-    /// it — else the first bound key, so the primary plain key is what the
-    /// user sees), and the cancel hint, joined by the TS two-space
-    /// separator. A failed copy renames the hint's action to `retry`. The
-    /// cancel hint rides only while a cancellable input is mounted: with
-    /// no input (the URL block alone), Esc has nothing to cancel — the
-    /// flow settles through its own timeout — and a hint that does
-    /// nothing is worse than none.
-    fn auth_actions_row(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
-        let field_visible = matches!(self.input, PanelInput::Paste { .. });
-        let mut parts: Vec<Line> = Vec::new();
-        if field_visible {
-            if let Some(key) = kb.first_key("tui.select.confirm") {
-                parts.push(hint_part(theme, &key, "submit"));
-            }
-        }
-        match self.copy_status {
-            Some(CopyStatus::Copied) => {
-                parts.push(vec![
-                    theme.fg_span(ThemeColor::Success, "Copied sign-in link".to_string())
-                ]);
-            }
-            Some(CopyStatus::Failed) => {
-                parts.push(vec![theme.fg_span(
-                    ThemeColor::Error,
-                    "Failed to copy sign-in link".to_string(),
-                )]);
-            }
-            None => {}
-        }
-        let keys = kb.get_keys("app.clipboard.copyLoginUrl");
-        let keys: Vec<String> = if field_visible {
-            keys.into_iter()
-                .filter(|key| !is_text_entry_keybinding(key))
-                .collect()
-        } else {
-            keys.into_iter().take(1).collect()
-        };
-        if !keys.is_empty() {
-            let action = if self.copy_status == Some(CopyStatus::Failed) {
-                "retry"
-            } else {
-                "copy"
-            };
-            parts.push(vec![
-                theme.fg_span(ThemeColor::Dim, format_key_text(&keys.join("/"))),
-                theme.fg_span(ThemeColor::Muted, format!(" {action}")),
-            ]);
-        }
-        if matches!(
-            self.input,
-            PanelInput::Paste { .. } | PanelInput::Teams { .. }
-        ) {
-            parts.extend(
-                kb.first_key("tui.select.cancel")
-                    .map(|key| hint_part(theme, &key, "cancel")),
-            );
-        }
-        let mut spans: Vec<Span> = vec![Span::raw("  ")];
-        for (index, part) in parts.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("  "));
-            }
-            spans.extend(part);
-        }
-        crate::width::truncate_line(&spans, width, "")
-    }
-}
-
-/// One hint part (TS `keyHint`): the key label dim, the action muted.
-fn hint_part(theme: &Theme, key: &str, action: &str) -> Line {
-    vec![
-        theme.fg_span(ThemeColor::Dim, format_key_text(key)),
-        theme.fg_span(ThemeColor::Muted, format!(" {action}")),
-    ]
 }
 
 /// TS `isTextEntryKeybinding` over one bound key id: a binding whose
@@ -914,6 +1055,133 @@ fn is_text_entry_keybinding(key: &str) -> bool {
     let key_part = parts.last().copied().unwrap_or("");
     !parts.iter().any(|part| *part == "ctrl" || *part == "alt")
         && (key_part == "space" || key_part.chars().count() == 1)
+}
+
+/// TS `getAuthActionsText`: the key-hint row that rides the panel's last
+/// row — the submit hint while the field is visible, the copy status, the
+/// copy hint, and the cancel hint, joined by two spaces (the provider
+/// selector's API-key prompt renders the same row).
+pub(crate) fn auth_actions_row(
+    theme: &Theme,
+    width: usize,
+    keybindings: &KeybindingsManager,
+    input_visible: bool,
+    copy_state: Option<CopyStatus>,
+) -> Line {
+    let mut row: Line = vec![Span::raw(" ".to_string())];
+    let mut parts: Vec<Line> = Vec::new();
+    if input_visible {
+        if let Some(hint) = key_hint_row(theme, keybindings, "tui.select.confirm", "submit") {
+            parts.push(hint);
+        }
+    }
+    if let Some(state) = copy_state {
+        let tone = match state {
+            CopyStatus::Copied => ThemeColor::Success,
+            CopyStatus::Failed => ThemeColor::Error,
+        };
+        let text = match state {
+            CopyStatus::Copied => "Copied sign-in link",
+            CopyStatus::Failed => "Failed to copy sign-in link",
+        };
+        parts.push(vec![theme.fg_span(tone, text.to_string())]);
+    }
+    // TS `copyHint`: the copy keys (the plain text-entry keys drop out
+    // while the field is visible — a typed key is field input), the
+    // description turning to "retry" after a failed copy.
+    let configured_copy_keys = keybindings.get_keys("app.clipboard.copyLoginUrl");
+    let copy_keys = if input_visible {
+        configured_copy_keys
+            .iter()
+            .filter(|key| !is_text_entry_keybinding(key))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        configured_copy_keys
+            .iter()
+            .take(1)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if !copy_keys.is_empty() {
+        let action = if copy_state == Some(CopyStatus::Failed) {
+            "retry"
+        } else {
+            "copy"
+        };
+        parts.push(vec![
+            Span::styled(
+                crate::keybindings::format_key_text(&copy_keys.join("/")),
+                theme.fg_style(ThemeColor::Dim),
+            ),
+            Span::styled(format!(" {action}"), theme.fg_style(ThemeColor::Muted)),
+        ]);
+    }
+    if let Some(hint) = key_hint_row(theme, keybindings, "tui.select.cancel", "cancel") {
+        parts.push(hint);
+    }
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            row.push(Span::raw("  ".to_string()));
+        }
+        row.extend(part);
+    }
+    crate::width::truncate_line(&row, width, "")
+}
+
+/// One content row at the panel's single-column indent: `" {text}"` in
+/// `tone`, truncated to the frame width (TS `MenuPanel` inline prefixes
+/// each child row with one space).
+fn content_row(theme: &Theme, width: usize, tone: ThemeColor, text: &str) -> Line {
+    crate::width::truncate_line(
+        &vec![
+            Span::raw(" ".to_string()),
+            theme.fg_span(tone, text.to_string()),
+        ],
+        width,
+        "",
+    )
+}
+
+/// TS `keyHint`: the dim key label over the muted ` {action}` — one
+/// hint part of the auth-actions row. An unbound action is omitted: the
+/// hint never advertises a key the surface does not handle.
+fn key_hint_row(
+    theme: &Theme,
+    keybindings: &KeybindingsManager,
+    binding: &str,
+    action: &str,
+) -> Option<Line> {
+    let label = keybindings.key_text(binding);
+    if label.is_empty() {
+        return None;
+    }
+    Some(vec![
+        Span::styled(label, theme.fg_style(ThemeColor::Dim)),
+        Span::styled(format!(" {action}"), theme.fg_style(ThemeColor::Muted)),
+    ])
+}
+
+/// TS `addInstructions`' code arm (`/^(?:Code|Enter code):\s*(.+)$/i`):
+/// the verification code the browser instructions carry, rendered below
+/// the muted label.
+fn verification_code(instructions: &str) -> Option<String> {
+    let trimmed = instructions.trim();
+    for prefix in ["Enter code:", "Code:"] {
+        let head: String = trimmed.chars().take(prefix.chars().count()).collect();
+        if head.eq_ignore_ascii_case(prefix) {
+            let code: String = trimmed
+                .chars()
+                .skip(prefix.chars().count())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if !code.is_empty() {
+                return Some(code);
+            }
+        }
+    }
+    None
 }
 
 impl PrimeTeamPicker {
@@ -1043,12 +1311,21 @@ mod tests {
             .collect()
     }
 
-    /// A paste prompt mounted over a panel with its oneshot pair.
+    /// A paste prompt mounted over a panel with its oneshot pair (TS
+    /// `armManualInput`'s muted arm prompt).
     fn mount_paste() -> (AuthPanel, oneshot::Receiver<Option<String>>) {
+        mount_paste_tone(PastePromptTone::Muted)
+    }
+
+    /// A paste prompt with its own tone (TS `showManualInput` renders the
+    /// prompt muted, `showPrompt` renders it as the text-coloured section
+    /// title).
+    fn mount_paste_tone(tone: PastePromptTone) -> (AuthPanel, oneshot::Receiver<Option<String>>) {
         let mut panel = AuthPanel::new("Login to Prime Inference");
         let (reply, answer) = oneshot::channel();
         panel.mount_paste(
             "Paste a Prime API key below:".to_string(),
+            tone,
             PasteStyle::Visible,
             false,
             reply,
@@ -1094,6 +1371,7 @@ mod tests {
         let mut panel = AuthPanel::new("Login to Linear");
         panel.mount_paste(
             "Paste the code below:".to_string(),
+            PastePromptTone::Muted,
             PasteStyle::Visible,
             false,
             oneshot::channel().0,
@@ -1124,20 +1402,47 @@ mod tests {
         );
     }
 
-    /// The paste prompt renders the TS prompt row, the bordered field
-    /// with the "Paste value" placeholder, and the hint row; Enter
-    /// submits the trimmed value through the oneshot.
+    /// The paste prompt renders the TS prompt row, the plain `> ` field
+    /// with the "Paste value" placeholder, and the auth-actions row;
+    /// Enter submits the trimmed value through the oneshot. TS
+    /// `addInputField`: a blank row rides between the field and the
+    /// actions.
     #[test]
     fn the_paste_prompt_submits_the_typed_value() {
         let (mut panel, mut answer) = mount_paste();
         // The mounted field shows its placeholder while empty, the prompt
-        // row above it, and the hint row below.
+        // row above it, and the actions row below.
         let rows = frame_text(&mut panel);
         assert!(rows
             .iter()
             .any(|row| row.contains("Paste a Prime API key below:")));
-        assert!(rows.iter().any(|row| row.contains("Paste value")));
-        assert!(rows.iter().any(|row| row.contains("Enter submit")));
+        let field = rows
+            .iter()
+            .position(|row| row.contains("Paste value"))
+            .expect("the plain field row");
+        assert!(
+            rows[field].starts_with(" > "),
+            "the field keeps its `> ` prompt: {rows:?}"
+        );
+        let rules = rows
+            .iter()
+            .filter(|row| !row.is_empty() && row.chars().all(|c| c == '\u{2500}'))
+            .count();
+        assert_eq!(
+            rules, 1,
+            "the session panel's top rule alone rides; the field adds none: {rows:?}"
+        );
+        assert!(
+            rows[0].chars().all(|c| c == '\u{2500}'),
+            "the rule opens the panel"
+        );
+        // The paste-only panel keeps its own hint row, rendered from the
+        // effective bindings (the MCP token surface's grammar); the
+        // auth-actions row rides only under a shown URL block (TS
+        // `getAuthActionsText` — pinned by the URL block's tests below).
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Enter submit  Esc cancel")));
         for character in "  sk-live  ".chars() {
             panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
@@ -1155,10 +1460,20 @@ mod tests {
     }
 
     /// TS the token paste panel: an empty submit keeps the field mounted
-    /// and shows the notice; the submit that follows still works.
+    /// and shows the notice; the submit that follows still works. The
+    /// login dialog's visible field waits silently instead (TS
+    /// `armManualInput`'s `while (!value)` loop never shows a notice).
     #[test]
-    fn an_empty_paste_submit_shows_the_notice() {
-        let (mut panel, mut answer) = mount_paste();
+    fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
+        let mut panel = AuthPanel::new("Connect GitHub");
+        let (reply, mut answer) = oneshot::channel();
+        panel.mount_paste(
+            "Paste the token for github:".to_string(),
+            PastePromptTone::Text,
+            PasteStyle::Masked,
+            false,
+            reply,
+        );
         panel.handle_key("enter", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(rows
@@ -1168,6 +1483,19 @@ mod tests {
         panel.handle_key("k", &kb(), &mut sink());
         panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
+
+        // The login dialog's visible field: an empty submit mounts no
+        // notice (the arm loop re-reads the field, TS keeps waiting).
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("enter", &kb(), &mut sink());
+        let rows = frame_text(&mut panel);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("The value cannot be empty.")),
+            "the login dialog waits silently: {rows:?}"
+        );
+        assert!(answer.try_recv().is_err(), "nothing answered");
     }
 
     /// The cancel keys run through the effective binding (TS
@@ -1217,6 +1545,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         panel.mount_paste(
             "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
+            PastePromptTone::Text,
             PasteStyle::Visible,
             true,
             reply,
@@ -1239,6 +1568,7 @@ mod tests {
         let mut panel = AuthPanel::new("Connect GitHub");
         panel.mount_paste(
             "Paste the token for github:".to_string(),
+            PastePromptTone::Text,
             PasteStyle::Masked,
             false,
             oneshot::channel().0,
@@ -1413,7 +1743,7 @@ mod tests {
         let handle = AuthPanelHandle::new(tx);
         assert_eq!(
             handle
-                .paste_prompt("Paste a key:", PasteStyle::Visible)
+                .paste_prompt("Paste a key:", PastePromptTone::Muted, PasteStyle::Visible)
                 .await,
             None
         );
@@ -1496,102 +1826,160 @@ mod tests {
         assert!(linked.contains("https://fixture.example/authorize"));
     }
 
-    /// On a hyperlink terminal the URL block wraps its URL in the OSC 8
-    /// open/close pair (TS `showAuth`'s `linkedUrl`), so the row is a
-    /// clickable link AND carries the URL as its own display text.
+    /// The session surface's panel chrome is TS `MenuPanel` inline: the
+    /// borderMuted rule, the muted one-space title — and NO bottom rule,
+    /// NO leading blank (the content's own `startContent` blank opens
+    /// the body).
     #[test]
-    fn the_url_block_wraps_the_osc8_pair_when_hyperlinks_supported() {
-        crate::hyperlinks::set_hyperlinks_override(Some(true));
-        let mut panel = AuthPanel::new("Login to Linear");
+    fn the_session_chrome_is_the_ts_inline_panel() {
+        let mut panel = AuthPanel::new("Login to Prime Inference");
+        let rows = frame_text(&mut panel);
+        assert_eq!(
+            rows.len(),
+            2,
+            "the empty dialog renders its chrome alone: {rows:?}"
+        );
+        assert!(
+            rows[0].chars().all(|c| c == '\u{2500}'),
+            "the rule opens the panel: {rows:?}"
+        );
+        assert_eq!(
+            rows[1], " Login to Prime Inference",
+            "the muted 1-space title"
+        );
+        panel.push_progress("Opening the browser challenge...".to_string());
+        let rows = frame_text(&mut panel);
+        assert_eq!(rows[2], "", "the startContent blank opens the body");
+        assert!(
+            !rows.iter().any(|row| row == " Login to Prime Inference  "),
+            "no 2-space raw title rides the panel"
+        );
+        // No bottom rule: the last row is the content's.
+        assert!(
+            !rows
+                .last()
+                .is_some_and(|row| row.chars().all(|c| c == '\u{2500}')),
+            "the inline panel closes on its content: {rows:?}"
+        );
+    }
+
+    /// The onboarding surface mounts the dialog chrome-less (TS
+    /// `loginDialogOptions`: `topRule: false, hideTitle: true` — the
+    /// splash's heading names the step): an empty panel renders zero
+    /// rows.
+    #[test]
+    fn the_onboarding_panel_is_chrome_less() {
+        let mut panel = AuthPanel::onboarding("Login to Prime Inference");
+        let rows = frame_text(&mut panel);
+        assert!(
+            rows.is_empty(),
+            "the empty onboarding dialog renders nothing: {rows:?}"
+        );
         panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
         let rows = frame_text(&mut panel);
-        crate::hyperlinks::set_hyperlinks_override(None);
-        let linked = rows
+        assert!(
+            !rows
+                .iter()
+                .any(|row| !row.is_empty() && row.chars().all(|c| c == '\u{2500}')),
+            "no rule rides the onboarding dialog: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("Login to Prime Inference")),
+            "no title rides the onboarding dialog: {rows:?}"
+        );
+        // The body: the startContent blank, the text-coloured URL, the
+        // section spacer, the muted default browser line, the actions.
+        assert_eq!(rows[0], "");
+        assert_eq!(rows[1], " https://fixture.example/authorize");
+        assert_eq!(rows[2], "");
+        assert_eq!(rows[3], " Complete the sign-in in your browser.");
+        assert_eq!(
+            rows[4], " C copy  Esc/Ctrl+C cancel",
+            "the TS auth-actions row: {rows:?}"
+        );
+    }
+
+    /// TS `showAuth`'s frame with provider instructions: the URL renders
+    /// in the text colour (never the accent), the instructions in the
+    /// text colour, and a code-carrying line becomes the verification
+    /// code block (the muted label, the bold code, the separating
+    /// blank).
+    #[test]
+    fn the_url_block_renders_the_ts_instruction_frames() {
+        let mut panel = AuthPanel::onboarding("Login to Linear");
+        panel.show_auth_url(
+            "https://fixture.example/authorize".to_string(),
+            Some("Complete the OAuth flow.".to_string()),
+        );
+        let rows = frame_text(&mut panel);
+        assert_eq!(rows[1], " https://fixture.example/authorize");
+        assert_eq!(rows[3], " Complete the OAuth flow.");
+        panel.show_auth_url(
+            "https://fixture.example/authorize".to_string(),
+            Some("Enter code: 4242-9911".to_string()),
+        );
+        let rows = frame_text(&mut panel);
+        let code = rows
             .iter()
-            .find(|row| row.contains("https://fixture.example/authorize"))
-            .expect("the URL row");
-        assert_eq!(
-            *linked,
-            format!(
-                "  {}https://fixture.example/authorize{}",
-                crate::hyperlinks::osc8_open("https://fixture.example/authorize"),
-                crate::hyperlinks::OSC8_CLOSE
-            ),
-            "the row is the indented OSC 8 pair around the bare URL"
+            .position(|row| row.contains("4242-9911"))
+            .expect("the code row");
+        assert_eq!(rows[code - 1], " Verification code");
+        assert_eq!(rows[code - 2], "", "the blank separates link and code");
+    }
+
+    /// TS `cancel()` on a URL screen: the actions row advertises the
+    /// cancel keys and Esc ends the running login through the flow's
+    /// cooperative cancel signal (never a dead hint).
+    #[test]
+    fn escape_on_a_url_screen_marks_the_flow_cancelled() {
+        let mut panel = AuthPanel::onboarding("Login to Prime Inference");
+        let handle = AuthPanelHandle::new(mpsc::unbounded_channel().0);
+        let cancel = handle.cancel_signal();
+        panel.set_cancel_signal(cancel.clone());
+        panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
+        assert!(
+            !cancel.cancelled(),
+            "the flow starts live: the URL screen alone cancels nothing"
+        );
+        panel.handle_key("escape", &kb(), &mut sink());
+        assert!(
+            cancel.cancelled(),
+            "Esc on the URL screen ends the running login (TS the dialog's abort)"
         );
     }
 
-    /// The copy binding is the TS default pair: a PLAIN key (`c`) with the
-    /// `alt+c` fallback — no Option/Alt modifier required to copy the
-    /// login URL (the operator directive, TS
-    /// `app.clipboard.copyLoginUrl`).
+    /// TS `copyAuthUrl`: the copy binding on the mounted URL carries the
+    /// clipboard outcome into the actions row; a typed plain key stays
+    /// field input while the field is visible (the alt arm copies).
     #[test]
-    fn the_copy_binding_defaults_to_a_plain_key() {
-        assert_eq!(
-            kb().get_keys("app.clipboard.copyLoginUrl"),
-            vec!["c".to_string(), "alt+c".to_string()]
-        );
-    }
-
-    /// TS `copyAuthUrl` + `getAuthActionsText`: the copy key copies the
-    /// shown URL through the clipboard chain, and the actions row reports
-    /// the success status beside its hints. With no input mounted (the
-    /// URL block alone) the cancel hint stays off — Esc has nothing to
-    /// cancel while the flow settles through its own timeout.
-    #[test]
-    fn the_copy_key_copies_the_url_and_reports_the_status() {
-        let mut panel = AuthPanel::new("Login to Prime Inference");
-        panel.show_auth_url("https://fixture.example/auth".to_string(), None);
+    fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
+        let mut panel = AuthPanel::onboarding("Login to Prime Inference");
+        panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
         panel.handle_key("c", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
-        let actions = rows
-            .iter()
-            .find(|row| row.contains("Copied sign-in link"))
-            .expect("the success status rendered");
         assert!(
-            actions.contains("C copy"),
-            "the plain-key hint rides the actions row: {actions:?}"
+            rows.iter().any(|row| row.contains("Copied sign-in link")
+                || row.contains("Failed to copy sign-in link")),
+            "the copy outcome rides the actions row: {rows:?}"
         );
-        assert!(
-            !actions.contains("Esc cancel"),
-            "no cancellable input is mounted: {actions:?}"
-        );
-    }
-
-    /// TS `handleInput`'s `inputVisible` guard: while the paste field
-    /// shows, a plain character types into the field — the hint drops it
-    /// for the non-text-entry `Alt+C` — and that fallback key still
-    /// copies the URL.
-    #[test]
-    fn a_plain_key_types_into_the_field_but_alt_c_copies() {
-        // The URL block shows first (TS `showAuth`), then the flow mounts
-        // the paste field beside it (`showManualInput` over the URL).
-        let mut panel = AuthPanel::new("Login to Prime Inference");
-        panel.show_auth_url("https://fixture.example/auth".to_string(), None);
-        let (reply, _answer) = oneshot::channel();
-        panel.mount_paste(
-            "Paste the code:".to_string(),
-            PasteStyle::Visible,
-            false,
-            reply,
-        );
+        // Without a mounted URL the copy binding does nothing: the plain
+        // `c` lands in the paste field as input (the URL guard holds).
+        let (mut panel, mut _answer) = mount_paste();
         panel.handle_key("c", &kb(), &mut sink());
         let rows = frame_text(&mut panel);
         assert!(
             !rows.iter().any(|row| row.contains("Copied sign-in link")),
-            "the plain key did not copy: {rows:?}"
+            "no URL means no copy: {rows:?}"
         );
+        let field = rows
+            .iter()
+            .find(|row| row.contains("Paste value") || row.contains('c'))
+            .expect("the field row");
         assert!(
-            rows.iter()
-                .any(|row| row.contains("Alt+C copy") && row.contains("Enter submit")),
-            "the field-visible hint filters the plain key and adds submit: {rows:?}"
-        );
-        panel.handle_key("alt+c", &kb(), &mut sink());
-        assert!(
-            frame_text(&mut panel)
-                .iter()
-                .any(|row| row.contains("Copied sign-in link")),
-            "the alt-bound key copied the URL"
+            field.contains('c'),
+            "the plain key typed into the field: {rows:?}"
         );
     }
 }

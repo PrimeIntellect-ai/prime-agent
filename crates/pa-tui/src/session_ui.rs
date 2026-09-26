@@ -3930,11 +3930,11 @@ impl SessionUi {
         auth: crate::provider_auth::ProviderAuthCommandsHandle,
         view: &mut AgentView,
     ) {
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            provider.name
-        )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut session_dialog =
+            crate::auth_panel::AuthPanel::new(format!("Login to {}", provider.name));
+        session_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(session_dialog);
         // A still-running previous flow ends before its replacement arms:
         // its flag marks the blocking body out of the way, and its late
         // settle is skipped below so it can never close the newer panel.
@@ -3979,16 +3979,24 @@ impl SessionUi {
         if let Some(panel) = view.auth_panel.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
         }
-        // A cancel key on an armed panel flow ends it cooperatively
-        // (#2770): the flag marks the blocking body (no credential write
-        // after the exit), the panel unmounts, and the settled outcome
-        // is the silent cancel.
+        // A cancel key on the mounted panel ends it (TS `cancel()` closes
+        // the dialog): the armed flag marks the blocking body (#2770 — no
+        // credential write after the exit), every flow reads its own
+        // dropped oneshot or cooperative flag as the silent cancel, and
+        // the panel unmounts immediately so a cancelled login never
+        // strands the frame. The team picker's Esc answers the picker and
+        // keeps the dialog mounted (TS the selector is its own component
+        // whose cancel keeps the login going).
         let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
-        if cancel_key {
+        let team_picker = view
+            .auth_panel
+            .as_ref()
+            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
+        if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                view.auth_panel = None;
             }
+            view.auth_panel = None;
         }
         self.dirty = true;
         Ok(())
@@ -4060,7 +4068,7 @@ impl SessionUi {
     ) {
         use crate::auth_panel::AuthPanelRequest;
         match request {
-            AuthPanelRequest::Progress { message } => {
+            AuthPanelRequest::Progress { message, .. } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
                     panel.push_progress(message);
                 }
@@ -4072,12 +4080,13 @@ impl SessionUi {
             }
             AuthPanelRequest::PastePrompt {
                 prompt,
+                tone,
                 style,
                 allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, allow_empty, reply);
+                    panel.mount_paste(prompt, tone, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -4401,10 +4410,10 @@ impl SessionUi {
             return;
         };
         self.traces_login_run = Some(intent);
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
-            "Login to Prime Agent Traces",
-        ));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
+        traces_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(traces_dialog);
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
             panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
@@ -5850,8 +5859,10 @@ impl SessionUi {
             self.note("/mcp is not available in this client yet", view);
             return;
         };
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut mcp_dialog = crate::auth_panel::AuthPanel::new(intent.title);
+        mcp_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(mcp_dialog);
         let args = intent.args;
         tokio::spawn(async move {
             let note =

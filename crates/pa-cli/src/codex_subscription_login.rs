@@ -24,7 +24,7 @@ use pa_ai::oauth::{
     login_openai_codex, CodexHttp, CodexLoginUi, DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
 };
 use pa_core::auth::{AuthCredential, AuthStorage, OPENAI_CODEX_PROVIDER_ID};
-use pa_tui::auth_panel::{AuthPanelHandle, PasteStyle};
+use pa_tui::auth_panel::{AuthPanelHandle, PastePromptTone, PasteStyle};
 use pa_tui::provider_auth::ProviderAuthOutcome;
 
 /// The inline auth panel as the codex login's surface (TS the login
@@ -53,6 +53,7 @@ impl CodexLoginUi for PanelCodexLoginUi {
             panel
                 .paste_prompt(
                     "Paste redirect URL below, or complete login in browser:",
+                    PastePromptTone::Muted,
                     PasteStyle::Visible,
                 )
                 .await
@@ -62,7 +63,11 @@ impl CodexLoginUi for PanelCodexLoginUi {
     fn on_prompt(&self, message: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
         let panel = self.panel.clone();
         let message = message.to_string();
-        Box::pin(async move { panel.paste_prompt(&message, PasteStyle::Visible).await })
+        Box::pin(async move {
+            panel
+                .paste_prompt(&message, PastePromptTone::Text, PasteStyle::Visible)
+                .await
+        })
     }
 
     fn is_cancelled(&self) -> bool {

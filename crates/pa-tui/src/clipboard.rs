@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The OSC 52 payload channel: stdout in the terminal, a captured buffer in
 /// headless verification runs.
@@ -89,11 +90,22 @@ impl Env {
 /// waiting on a compositor that never focuses — dies at the deadline
 /// instead of hanging the input loop that copied.
 const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5_000);
+/// The bounded wait's poll cadence.
+const PIPE_POLL: Duration = Duration::from_millis(20);
 
-/// Run `program` with `text` on its stdin (the pipe write plus process
-/// wait are quick enough that a synchronous call matches the TS
-/// behavior).
+/// Run `program` with `text` on its stdin (TS `execSyncHidden`'s
+/// deadline): a helper that does not finish inside the cap is killed
+/// and reported as a failed copy.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
+    // The stdin write can block only when the helper refuses to read a
+    // payload larger than the pipe buffer: clipboard payloads are URLs
+    // and keys, so anything past the buffer budget fails the copy
+    // instead of hanging the write (the budget stays under the smallest
+    // guaranteed pipe buffer).
+    const PIPE_WRITE_BUDGET: usize = 16 * 1024;
+    if text.len() > PIPE_WRITE_BUDGET {
+        return false;
+    }
     let Ok(mut child) = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -107,18 +119,20 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    // The bounded wait (std carries no `Child::wait_timeout`): poll the
+    // exit until the deadline, then kill the hung helper and reap it.
     let deadline = std::time::Instant::now() + HELPER_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success() && wrote,
-            Ok(None) => {}
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(PIPE_POLL),
             Err(_) => return false,
         }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
