@@ -2554,6 +2554,7 @@ impl SessionUi {
         // inline path too, so it counts here.
         let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
         self.prompt_in_flight += 1;
+        eprintln!("DBG order: session={} text={:?}", self.active_session_id, text);
         let _ = self.prompt_orders.send(PromptOrder {
             client: self.client.clone(),
             active_session_id: self.active_session_id.clone(),
@@ -2605,6 +2606,7 @@ impl SessionUi {
                 },
                 rest: Map::default(),
             };
+            eprintln!("DBG worker: sending prompt for session={}", order.active_session_id);
             let result = tokio::time::timeout(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 order.client.request_ok(command),
@@ -2616,6 +2618,11 @@ impl SessionUi {
                 )
             })
             .and_then(|result| result.map(|_| ()));
+            eprintln!(
+                "DBG worker: settled ok={} err={:?}",
+                result.is_ok(),
+                result.as_ref().err().map(|e| format!("{e:#}"))
+            );
             let _ = notes.send(PromptSubmitNote {
                 active_session_id: order.active_session_id,
                 session_id: order.session_id,
@@ -2660,6 +2667,7 @@ impl SessionUi {
         view: &mut AgentView,
     ) -> Result<()> {
         self.prompt_in_flight = self.prompt_in_flight.saturating_sub(1);
+        eprintln!("DBG outcome: session={} mounted={} ok={}", note.active_session_id, self.active_session_id, note.result.is_ok());
         // The submit's session is no longer the mounted one (a switch, a
         // supersede rebind, or a `/new` replaced it — TS's staleness
         // guard for a submit that outlived its session): the outcome
