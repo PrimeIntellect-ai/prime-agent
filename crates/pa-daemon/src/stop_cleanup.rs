@@ -356,7 +356,11 @@ impl Supervisor {
     /// (`stopRequestedAt ??=` / `archiveOnStop ||=` in TS), and a persist
     /// failure fails the stop before the shutdown is forwarded (the
     /// worker's intentional-stop flag flips only once the tombstone is
-    /// durable).
+    /// durable) — EXCEPT when the durable intent already exists: a plain
+    /// kill reaches here holding the route-side persist's tombstone, so
+    /// its re-write is a no-op whose failure must not abort the stop
+    /// (aborting leaves the killed worker running on its session lease
+    /// until the next boot — the exact symptom this lane exists to end).
     pub(crate) async fn persist_stop_tombstone_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -376,10 +380,17 @@ impl Supervisor {
             // A failed persist rolls the in-memory mutation back: a later
             // descriptor write must not carry a tombstone the rejected
             // stop never durably set (adoption would finish a stop nobody
-            // requested).
+            // requested). The rollback is a no-op when the tombstone
+            // already existed — the mutation touched nothing — and the
+            // existing tombstone carries the stop through: it is the
+            // durable intent itself, already on disk from the earlier
+            // persist, so the stop proceeds to its escalation instead of
+            // failing behind a redundant re-write.
             descriptor.stop_requested_at = old_stop_requested_at;
             descriptor.archive_on_stop = old_archive_on_stop;
-            return Err(error);
+            if old_stop_requested_at.is_none() {
+                return Err(error);
+            }
         }
         drop(descriptor);
         resident
