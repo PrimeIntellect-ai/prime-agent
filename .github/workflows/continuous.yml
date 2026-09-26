@@ -113,10 +113,21 @@ jobs:
           key: ${{ matrix.target }}-glibc235
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: Split the shipped binary + split-debug decoder (Option C posture)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ -n "${version}" ]] || { echo "could not read the workspace version"; exit 1; }
+          python3 scripts/release/split_debug.py \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --shipped "target/${{ matrix.target }}/dist/prime-agent" \
+            --out "target/${{ matrix.target }}/dist" \
+            --version "${version}" \
+            --target "${{ matrix.target }}"
       - name: "GLIBC baseline gate: no symbols above GLIBC_2.35 (Ubuntu 22.04)"
         run: |
           set -euo pipefail
-          bin="target/${{ matrix.target }}/release/prime-agent"
+          bin="target/${{ matrix.target }}/dist/prime-agent"
           syms="$(objdump -T "${bin}" | grep -o 'GLIBC_[0-9.]*' || true)"
           if [ -z "${syms}" ]; then
             echo "::error::could not inspect ${bin} with objdump (no GLIBC symbols found) - refusing to pass the gate without evidence"
@@ -144,7 +155,8 @@ jobs:
             --version "${version}" \
             --target "${{ matrix.target }}" \
             --sha "${GITHUB_SHA}" \
-            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --binary "target/${{ matrix.target }}/dist/prime-agent" \
+            --decoder "target/${{ matrix.target }}/dist/prime-agent-${version}-$(case "${{ matrix.target }}" in x86_64*) echo linux-x64;; aarch64*) echo linux-arm64;; esac).debug.gz" \
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"

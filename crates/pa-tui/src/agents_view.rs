@@ -82,6 +82,13 @@ pub struct AgentsViewOptions {
     /// hardware cursor is positioned at the search caret for IME every
     /// frame, but only shown when this is set.
     pub show_hardware_cursor: bool,
+    /// The incident notice state carried across view runs (TS
+    /// `AgentsViewPersistentState.incidentNoticeState`): the windowed log
+    /// entries, the consumed log offset, and the dismissal horizons
+    /// survive leaving and re-entering the view, so a dismissed incident
+    /// never comes back and the poll does not re-read consumed bytes.
+    /// `None` on the first run creates a fresh state.
+    pub incident_notice_state: Option<crate::incident_notices::IncidentNoticeState>,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -126,6 +133,14 @@ pub enum AgentsStep {
     Key(String),
     /// Hold until the roster settles (or the deadline passes).
     WaitSettle { timeout_ms: u64 },
+    /// A plain left click on one screen cell (zero-based): the verifier
+    /// drives the click grammar with the same SGR press/release pair a
+    /// terminal sends.
+    Click { row: usize, col: usize },
+    /// A raw SGR mouse sequence, decoded by the same parser the
+    /// terminal's reports flow through (the drag report between a
+    /// click's press and release).
+    Mouse(String),
 }
 
 /// The result of one agents-view run.
@@ -169,6 +184,10 @@ pub struct AgentsViewOutcome {
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
     pub status_message: Option<String>,
+    /// The incident notice state this run ended with, for the caller to
+    /// restore on re-entry (TS `persistentState.incidentNoticeState`):
+    /// dismissal horizons and the consumed log offset survive.
+    pub incident_notice_state: crate::incident_notices::IncidentNoticeState,
 }
 
 /// TS `WORKING_ICON_INTERVAL_MS`: the running-row icon frame cadence.
@@ -198,6 +217,8 @@ fn saved_catalog_timeout_ms() -> u64 {
 
 enum UiInput {
     Key(String),
+    /// A decoded SGR mouse report (the click grammar's input).
+    Mouse(crate::mouse::MouseEvent),
     Resize,
     Settled,
     Done,
@@ -562,6 +583,11 @@ struct AgentsViewMode {
     /// anchor's wait ended with it, and the next query change re-arms one
     /// retry (TS `rearmSavedSearchFetch`).
     saved_fetch_failed: bool,
+    /// The incident notice state (TS `persistentState.incidentNoticeState`
+    /// — `??=` lazily initialized on first access, materialized here):
+    /// windowed log entries, the consumed log offset, dismissal horizons,
+    /// and the collapsed notice line.
+    incident_notice_state: crate::incident_notices::IncidentNoticeState,
     /// A failed saved-catalog fetch wants re-arming on the query's next
     /// change (the loop owns the client, so the mode records the intent).
     saved_query_rearm: bool,
@@ -579,10 +605,28 @@ struct AgentsViewMode {
     /// fetch while it holds, and the exit link carries it so the flow's
     /// next view run skips its own fetch.
     saved_catalog_loaded: bool,
+    /// The screen rows of the rendered session rows, in frame order: a
+    /// plain left click selects and opens the row under it (the Enter
+    /// action), so the recorded span is exactly the rows the last frame
+    /// painted. Rebuilt on every render; empty while no row is visible.
+    click_rows: Vec<(usize, usize)>,
+    /// The left press a release may fire (TS's press/release click
+    /// grammar): the pressed row and whether the press turned into a
+    /// drag — a dragged release never opens.
+    pressed_click: Option<PressedMouseClick>,
+}
+
+/// The press state of one left click on the agents view (TS
+/// `fullscreenPressedClick`'s grammar, row-scoped: the release must land
+/// on the same row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PressedMouseClick {
+    row: usize,
+    dragged: bool,
 }
 
 impl AgentsViewMode {
-    fn new(options: AgentsViewOptions) -> Self {
+    fn new(mut options: AgentsViewOptions) -> Self {
         let theme = crate::app::load_theme(&options.theme);
         let query = options.query.clone().unwrap_or_default();
         // A notice with lines to show (the refusal families) renders as
@@ -614,6 +658,9 @@ impl AgentsViewMode {
                 .anchor_session_id
                 .as_deref()
                 .is_some_and(|anchor| !anchor.is_empty());
+        // TS `persistentState.incidentNoticeState ??= createIncidentNoticeState()`:
+        // the first run starts fresh; later runs continue the carried state.
+        let incident_notice_state = options.incident_notice_state.take().unwrap_or_default();
         AgentsViewMode {
             options,
             theme,
@@ -649,6 +696,9 @@ impl AgentsViewMode {
             saved_query_rearm: false,
             saved_stream: Vec::new(),
             saved_catalog_loaded: false,
+            incident_notice_state,
+            click_rows: Vec::new(),
+            pressed_click: None,
         }
     }
 
@@ -929,9 +979,10 @@ impl AgentsViewMode {
     /// user's — opening it would confirm an arbitrary row (on a
     /// continue-recent launch that can be an unrelated live session). The
     /// open waits instead: the anchor lands the selection once its row
-    /// appears, and any direction key cancels the wait for an explicit
-    /// manual pick. A scoped view never lists its anchor (the scope root
-    /// is excluded), so its wait never resolves — it keeps the open.
+    /// appears, and any direction key or row click cancels the wait for
+    /// an explicit manual pick. A scoped view never lists its anchor
+    /// (the scope root is excluded), so its wait never resolves — it
+    /// keeps the open.
     /// End the entry anchor's wait (the anchor row landed).
     fn end_anchor_wait(&mut self) {
         self.anchor_selection_pending = false;
@@ -1489,6 +1540,63 @@ impl AgentsViewMode {
         self.last_height.saturating_sub(9).max(4).max(1)
     }
 
+    /// TS `refreshIncidentNotices`: one best-effort poll of the structured
+    /// agent log (a missing or unreadable log simply retries a bounded
+    /// tail on the next poll and never breaks the view). `true` when the
+    /// collapsed notice line changed, so the caller re-renders.
+    fn refresh_incident_notices(&mut self) -> bool {
+        let Some(agent_dir) = pa_types::platform::agent_dir() else {
+            return false;
+        };
+        let log_path = agent_dir.join("logs").join("agent.jsonl");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as i64);
+        crate::incident_notices::refresh_incident_notice_state(
+            &mut self.incident_notice_state,
+            &log_path,
+            now_ms,
+        )
+    }
+
+    /// Dismiss the collapsed incident notice (TS `dismissIncidentNotice`):
+    /// `false` when none is showing; the dismissal status line confirms it.
+    fn dismiss_incident_notice(&mut self) -> bool {
+        if !crate::incident_notices::dismiss_incident_notice_state(&mut self.incident_notice_state)
+        {
+            return false;
+        }
+        self.status = Some("Incident notice dismissed".to_string());
+        true
+    }
+
+    /// The incident notice lines for the header (TS `renderIncidentNotice`):
+    /// the styled warning line wrapped over the pane width, each wrapped row
+    /// prefixed with the one-column gutter like the startup notices.
+    fn render_incident_notice(&self, width: usize) -> Vec<Line> {
+        let Some(notice) = self.incident_notice_state.notice.as_ref() else {
+            return Vec::new();
+        };
+        let styled = self.theme.fg(
+            crate::theme::ThemeColor::Warning,
+            format!(
+                "⚠ {} {}",
+                notice.text,
+                crate::incident_notices::INCIDENT_NOTICE_POINTER
+            ),
+        );
+        // Wrap instead of truncating, so the pointer to the incident CLI
+        // stays readable; `Math.max(1, width - 1)`.
+        let wrap_width = width.saturating_sub(1).max(1);
+        crate::width::wrap_line(&vec![styled], wrap_width)
+            .into_iter()
+            .map(|mut line| {
+                line.insert(0, crate::Span::raw(" "));
+                line
+            })
+            .collect()
+    }
+
     /// Handle one key id. Every action dispatches through the effective
     /// keybindings in TS dispatch order (`AgentsViewMode.handleInput`,
     /// then `CustomEditor.handleInput`/`Editor.handleInput`), so a user
@@ -1527,6 +1635,22 @@ impl AgentsViewMode {
             } else {
                 self.exit_armed = true;
             }
+            return;
+        }
+        // Esc (tui.select.cancel) dismisses the incident notice while it is
+        // the only thing to cancel: an empty search prompt (the TS gate also
+        // requires no armed reply and no autocomplete popup; this view's
+        // search editor has neither). An armed delete confirmation is the
+        // more dangerous state: Esc cancels it (the take() above) and keeps
+        // the notice instead of dismissing the notice and leaving the
+        // delete armed to fire on the next press without a fresh
+        // confirmation. Without a visible notice, Esc keeps its back/exit
+        // meaning.
+        if was_delete_armed.is_none()
+            && !has_query
+            && self.keybindings.matches(key, "tui.select.cancel")
+            && self.dismiss_incident_notice()
+        {
             return;
         }
         // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
@@ -1680,6 +1804,84 @@ impl AgentsViewMode {
         }
     }
 
+    /// One mouse report (the session surface's click grammar, scoped to
+    /// the view's rows): a plain left press always re-records the row
+    /// under it (a release lost to a focus change or a touch cancel
+    /// never pins the next tap to the old row), a drag kills the
+    /// pending click, and a plain release on the same row selects and
+    /// opens that row — the Enter action with its own preamble (a
+    /// showing notice panel consumes the click, the exit hint and the
+    /// stop-or-delete confirm clear with it), so the selection's own
+    /// feedback (the band moves, the session opens) is the click's.
+    /// The clicked row is an explicit user choice, a direction key's
+    /// peer: it ends the entry anchor's wait, so the open targets the
+    /// clicked row, never the loading hint. Wheel turns and other
+    /// buttons are consumed without a dispatch: the view's window is
+    /// selection-centered, not scroll-driven.
+    fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
+        if !crate::mouse_tracking::active() {
+            return;
+        }
+        if event.button != crate::mouse::BUTTON_LEFT {
+            return;
+        }
+        // Modifier presses stay inert — the session surface treats them
+        // as selection-only, and this view has no selection surface to
+        // offer (a stale pending click dies with them).
+        if event.shift || event.alt || event.ctrl {
+            self.pressed_click = None;
+            return;
+        }
+        let row = event.y.saturating_sub(1) as usize;
+        if event.press {
+            // A fresh plain press always re-records its row (the session
+            // surface's `fullscreenPressedClick` always assigns): a
+            // release lost to a focus change or a touch cancel must
+            // never pin the next tap to the old row. A motion report
+            // while pressed only marks the drag.
+            if event.motion {
+                if let Some(pressed) = self.pressed_click.as_mut() {
+                    pressed.dragged = true;
+                }
+            } else {
+                self.pressed_click = Some(PressedMouseClick {
+                    row,
+                    dragged: false,
+                });
+            }
+            return;
+        }
+        let Some(pressed) = self.pressed_click.take() else {
+            return;
+        };
+        if pressed.dragged || pressed.row != row {
+            return;
+        }
+        let Some((_, index)) = self.click_rows.iter().find(|(r, _)| *r == row) else {
+            return;
+        };
+        // The click is an input like any key, so the open runs the Enter
+        // action's own preamble (`handle_key`'s): a showing notice panel
+        // consumes the click — the close is its whole action — and the
+        // exit hint and the stop-or-delete confirm clear with it, so a
+        // later ctrl+x re-arms over the clicked row instead of executing
+        // a stale arm.
+        if self.notice.is_some() {
+            self.notice = None;
+            return;
+        }
+        self.exit_armed = false;
+        self.pending_delete = None;
+        self.selected = *index;
+        // A click is an explicit user choice like a direction key: it
+        // ends the entry anchor's wait, so the open below targets the
+        // clicked row, never the loading hint.
+        self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
+        self.sync_selected_row_state();
+        self.open_selected();
+    }
+
     /// Compose one frame (splash, search prompt, sectioned list, hints).
     fn render_frame(&mut self, width: usize, height: usize) -> (Vec<Line>, Option<(usize, usize)>) {
         // The frame height feeds the page step (TS reads
@@ -1716,8 +1918,12 @@ impl AgentsViewMode {
             ..Default::default()
         };
         // `render_splash` already trails one blank row (TS renderContent's
-        // `headerLines.push("")`).
+        // `headerLines.push("")`), so the incident notice rides directly
+        // under it (TS `renderContent`'s `headerLines.push("",
+        // ...noticeLines)`): the warning line and its pointer stay above
+        // the scope label and the search prompt.
         lines.extend(crate::chrome::render_splash(&chrome, theme, width));
+        lines.extend(self.render_incident_notice(width));
         // The scoped view's back label (TS `<back> back · <title> ›
         // subagents`), dim, over the full width under the splash.
         if self.scope_active {
@@ -1789,7 +1995,8 @@ impl AgentsViewMode {
             .map(str::to_string);
         let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
         let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
-        lines.extend(self.render_list(width, list_rows));
+        let list_frame_row = lines.len();
+        lines.extend(self.render_list(width, list_rows, list_frame_row));
         if let Some(panel) = notice_panel {
             lines.extend(panel);
         }
@@ -1882,15 +2089,19 @@ impl AgentsViewMode {
     /// render inside their top-level agent's section block, and the
     /// headings count top-level agents only (TS `getDisplayRowsForSection`
     /// / `countRowsBySection`).
-    fn render_list(&mut self, width: usize, max_rows: usize) -> Vec<Line> {
+    fn render_list(&mut self, width: usize, max_rows: usize, frame_row: usize) -> Vec<Line> {
         /// One rendered display entry of the sectioned list (TS
         /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row.
+        /// heading, or one row (carrying its `self.rows` index — the
+        /// click surface's row identity).
         enum DisplayItem<'a> {
             Spacer,
             Heading(Section),
-            Row(&'a AgentsViewRow),
+            Row(usize, &'a AgentsViewRow),
         }
+        // The click surface records this render's visible rows; the
+        // early exits below leave it empty.
+        self.click_rows.clear();
         if max_rows == 0 {
             return Vec::new();
         }
@@ -1933,17 +2144,22 @@ impl AgentsViewMode {
                 }
                 display.push(DisplayItem::Heading(*section));
                 let mut include = false;
-                for row in &self.rows {
+                for (index, row) in self.rows.iter().enumerate() {
                     if row.depth == 0 {
                         include = row.kind == RowKind::Agent && row.section == *section;
                     }
                     if include {
-                        display.push(DisplayItem::Row(row));
+                        display.push(DisplayItem::Row(index, row));
                     }
                 }
             }
         } else {
-            display.extend(self.rows.iter().map(DisplayItem::Row));
+            display.extend(
+                self.rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| DisplayItem::Row(index, row)),
+            );
         }
         // The viewport (TS `renderSessionRows`): reserve the column header
         // and its spacer, center the slice on the selected row, and clip
@@ -1960,7 +2176,7 @@ impl AgentsViewMode {
         let selected_display_index = display
             .iter()
             .position(
-                |item| matches!(item, DisplayItem::Row(row) if Some(row.identity.as_str()) == selected_identity),
+                |item| matches!(item, DisplayItem::Row(_, row) if Some(row.identity.as_str()) == selected_identity),
             )
             .map_or(-1, |index| index as isize);
         let anchor = selected_display_index - (visible_rows / 2) as isize;
@@ -1975,23 +2191,28 @@ impl AgentsViewMode {
             start
         };
         let slice_end = (slice_start + content_rows).min(display.len());
-        let mut lines: Vec<Line> = display[slice_start..slice_end]
-            .iter()
-            .map(|item| match item {
-                DisplayItem::Spacer => Vec::new(),
+        let mut lines: Vec<Line> = Vec::with_capacity(content_rows);
+        let mut click_rows: Vec<(usize, usize)> = Vec::new();
+        for item in &display[slice_start..slice_end] {
+            let local = lines.len();
+            match item {
+                DisplayItem::Spacer => lines.push(Vec::new()),
                 DisplayItem::Heading(section) => {
                     let count = counts
                         .iter()
                         .find(|(count_section, _)| count_section == section)
                         .map_or(0, |(_, count)| *count);
-                    vec![self.theme.fg(
+                    lines.push(vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
-                    )]
+                    )]);
                 }
-                DisplayItem::Row(row) => self.render_row(row, &layout, width),
-            })
-            .collect();
+                DisplayItem::Row(index, row) => {
+                    lines.push(self.render_row(row, &layout, width));
+                    click_rows.push((local, *index));
+                }
+            }
+        }
         if show_leading {
             lines.insert(0, vec![self.theme.fg(ThemeColor::Dim, "  ...".to_string())]);
         }
@@ -2012,6 +2233,14 @@ impl AgentsViewMode {
                 )],
             );
         }
+        // The viewport's front rows (the leading ellipsis and the column
+        // legend block) shift the session rows down; the recorded click
+        // rows carry the shift with them.
+        let shift = header_rows + show_leading as usize;
+        self.click_rows = click_rows
+            .into_iter()
+            .map(|(local, index)| (frame_row + local + shift, index))
+            .collect();
         lines
     }
 
@@ -2325,6 +2554,10 @@ impl Renderer {
                 // one chunk, the kitty probe runs before the reader
                 // thread starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
+                // The view's rows open on a click (the session surface's
+                // mouse grammar): SGR button tracking while the view owns
+                // the terminal, released on every exit path.
+                crate::mouse_tracking::enable(&mut std::io::stdout())?;
                 // One reader thread feeds the view; the reader registry
                 // joins the previous surface's reader (the chat it opened)
                 // before this one starts polling. The reader also observes
@@ -2345,6 +2578,18 @@ impl Renderer {
                             return true;
                         };
                         ui_tx.send(UiInput::Key(id)).is_ok()
+                    }
+                    crossterm::event::Event::Mouse(mouse) => {
+                        // Mouse reports are consumed even when tracking is
+                        // off (terminal noise downstream); an active surface
+                        // decodes and dispatches them.
+                        let report = crate::mouse_tracking::active()
+                            .then(|| crate::mouse::from_crossterm(&mouse))
+                            .flatten();
+                        match report {
+                            Some(event) => ui_tx.send(UiInput::Mouse(event)).is_ok(),
+                            None => true,
+                        }
                     }
                     crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
                     _ => true,
@@ -2374,6 +2619,11 @@ impl Renderer {
                 })
             }
             AgentsViewUiMode::Headless(plan) => {
+                // The click grammar's dispatch gate (the terminal arm's
+                // enable records the same state; a headless stdout only
+                // records it): a headless run's Click steps drive the same
+                // active-tracking branch a terminal's reports take.
+                let _ = crate::mouse_tracking::enable(&mut std::io::stdout());
                 let steps = plan.steps;
                 tokio::spawn(async move {
                     for step in steps {
@@ -2393,6 +2643,32 @@ impl Renderer {
                             AgentsStep::WaitSettle { timeout_ms } => {
                                 let _ = ui_tx.send(UiInput::Settled);
                                 tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+                            }
+                            AgentsStep::Click { row, col } => {
+                                // The SGR press/release pair a click sends
+                                // (the report cells are one-based):
+                                // decoded by the same parser the terminal
+                                // path feeds.
+                                for sequence in [
+                                    format!("\x1b[<0;{};{}M", col + 1, row + 1),
+                                    format!("\x1b[<0;{};{}m", col + 1, row + 1),
+                                ] {
+                                    if let Some(event) =
+                                        crate::mouse::parse_sgr_mouse_event(&sequence)
+                                    {
+                                        if ui_tx.send(UiInput::Mouse(event)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            AgentsStep::Mouse(sequence) => {
+                                if let Some(event) = crate::mouse::parse_sgr_mouse_event(&sequence)
+                                {
+                                    if ui_tx.send(UiInput::Mouse(event)).is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
@@ -2497,6 +2773,9 @@ impl Renderer {
                     // bracket (TS `stop` on every exit, handoffs included).
                     let mut out = std::io::stdout();
                     let _ = crate::enhanced_keys::disable(&mut out);
+                    // The adopting surface re-enables tracking through its
+                    // own setting; the view never leaves it on.
+                    let _ = crate::mouse_tracking::disable(&mut out);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 } else {
                     // The one exit restore ends the view's real exit: the
@@ -2736,6 +3015,10 @@ async fn run_agents_view_surface(
     mode.saved = saved_sessions;
     mode.saved_catalog_loaded = saved_catalog_loaded;
     mode.rebuild_rows();
+    // TS `start()`'s `this.refreshIncidentNotices()`: the notice from the
+    // log's bounded tail paints on the FIRST frame, before the 30s
+    // interval's first tick.
+    mode.refresh_incident_notices();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
     // A panic anywhere between the mount below and the deliberate
@@ -2789,6 +3072,12 @@ async fn run_agents_view_surface(
     }
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
+    // TS `setInterval(refreshIncidentNotices, INCIDENT_NOTICE_POLL_INTERVAL_MS)`:
+    // the re-read of appended agent.jsonl bytes, re-derived and re-rendered
+    // only when the collapsed line changed (`.unref()` — it never keeps the
+    // app alive; here the deadline simply stops firing with the loop).
+    let mut incident_poll_at = tokio::time::Instant::now()
+        + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
     // The saved-catalog stream's open batch window: the first buffered row
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
@@ -2837,6 +3126,11 @@ async fn run_agents_view_surface(
                             action,
                         ));
                     }
+                }
+                // A plain click opens the row under it (the Enter
+                // action); drags and wheel turns are consumed inside.
+                UiInput::Mouse(event) => {
+                    mode.handle_mouse(&event);
                 }
                 UiInput::Resize | UiInput::Settled => {}
                 UiInput::DeleteResult {
@@ -2977,10 +3271,21 @@ async fn run_agents_view_surface(
                     }
                     saved_flush = None;
                 }
+                // The incident-notice poll's wake-up: the deadline drain
+                // below the select does the refresh, so the arm only ends
+                // the wait (the pulse arm's shape).
+                () = tokio::time::sleep_until(incident_poll_at) => {}
             }
         }
-        // Coalesce a due animation pulse with the input or roster frame.
+        // Coalesce a due animation pulse with the input or roster frame,
+        // and a due incident poll behind a busy input stream (the TS
+        // interval fires between turns regardless).
         redraw |= advance_running_pulse(&mut mode, &mut last_pulse, tokio::time::Instant::now());
+        if tokio::time::Instant::now() >= incident_poll_at {
+            incident_poll_at = tokio::time::Instant::now()
+                + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
+            redraw |= mode.refresh_incident_notices();
+        }
         if redraw {
             renderer.draw(&mut mode);
         }
@@ -3102,6 +3407,7 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
+            incident_notice_state: mode.incident_notice_state,
         },
     })
 }
@@ -3155,6 +3461,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -3188,6 +3495,265 @@ mod tests {
             "{bullet} {title_cell}  {}  $0.00   1s",
             cell("mock-1", layout.model_width),
         )
+    }
+
+    /// One SGR left report: a press, a press with the motion bit (a
+    /// drag), or a release.
+    fn mouse_report(row: usize, press: bool, motion: bool) -> crate::mouse::MouseEvent {
+        crate::mouse::MouseEvent {
+            button: crate::mouse::BUTTON_LEFT,
+            x: 3,
+            y: (row + 1) as u16,
+            press,
+            motion,
+            shift: false,
+            alt: false,
+            ctrl: false,
+        }
+    }
+
+    #[test]
+    fn a_plain_click_selects_and_opens_the_row_under_it() {
+        // Mouse tracking is process-global state: the click grammar's
+        // tests serialize through its lock and leave it off.
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("click me", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "click me",
+            "activeSessionId": "s-click",
+        });
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert_eq!(mode.selected, index, "the click selected the row");
+        assert!(
+            mode.opened.is_some(),
+            "the click opened the row (the Enter action)"
+        );
+        assert!(!mode.running, "an open ends the view run");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    #[test]
+    fn a_modified_press_never_opens_the_row() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("shift over me", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "shift over me",
+            "activeSessionId": "s-shift",
+        });
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        // A shift-press plus a plain release: the modifier press stays
+        // selection-only, so nothing opens.
+        let mut shifted = mouse_report(row, true, false);
+        shifted.shift = true;
+        mode.handle_mouse(&shifted);
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(mode.opened.is_none(), "the modified press never opened");
+        assert!(mode.running, "the view keeps running");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    #[test]
+    fn a_dragged_release_never_opens_the_row() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("drag over me", "mock-1");
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        // The drag report carries the motion bit.
+        mode.handle_mouse(&mouse_report(row, true, true));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(mode.opened.is_none(), "a dragged release never opens");
+        assert!(mode.running, "the view keeps running");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    #[test]
+    fn a_release_on_another_row_never_opens() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("press here", "mock-1");
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        // The release lands one row below the pressed one.
+        mode.handle_mouse(&mouse_report(row + 1, false, false));
+        assert!(mode.opened.is_none(), "the press row gates the open");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// A fresh plain press always re-records its row (the session
+    /// surface's `fullscreenPressedClick` always assigns): a release
+    /// lost to a focus change or a touch cancel must never pin the next
+    /// tap to the old row (Cursor Bugbot: a new press kept the stale
+    /// row, so the next tap on a different row did nothing).
+    #[test]
+    fn a_fresh_press_re_records_the_click_row_after_a_lost_release() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("re-record me", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "re-record me",
+            "activeSessionId": "s-re-record",
+        });
+        mode.render_frame(120, 24);
+        let row_of = |mode: &AgentsViewMode, wanted: usize| {
+            mode.click_rows
+                .iter()
+                .find(|(_, row_index)| *row_index == wanted)
+                .map(|(row, _)| *row)
+                .expect("the row renders")
+        };
+        let other = row_of(&mode, 0);
+        let clicked = row_of(&mode, index);
+        // Press the first row, "lose" the release, then tap the second:
+        // the new press owns the row, so the release on it opens it.
+        mode.handle_mouse(&mouse_report(other, true, false));
+        mode.handle_mouse(&mouse_report(clicked, true, false));
+        mode.handle_mouse(&mouse_report(clicked, false, false));
+        let opened = mode.opened.expect("the fresh press re-recorded its row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s-re-record".to_string()),
+            "the tapped row opened, not the lost press's"
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// The click is an input like any key: a showing notice panel
+    /// consumes it — the close is the click's whole action, exactly like
+    /// the key that dismisses it (Cursor Bugbot: the click opened
+    /// through the refusal notice that any key would only close).
+    #[test]
+    fn a_click_consumes_the_notice_panel_like_any_key() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("click through", "mock-1");
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "click through",
+            "activeSessionId": "s-through",
+        });
+        mode.notice = Some("The refusal block.\n\n- a second line".to_string());
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(mode.notice.is_none(), "the click closed the panel");
+        assert!(
+            mode.opened.is_none(),
+            "the panel consumed the click - no open behind it"
+        );
+        assert!(mode.running, "the view keeps running behind the panel");
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+    }
+
+    /// The open's Enter preamble clears with the click: the exit hint
+    /// drops and the armed stop-or-delete confirm is taken, so a later
+    /// ctrl+x re-arms over the clicked row instead of executing a stale
+    /// arm (Cursor Bugbot: the click leaked both).
+    #[test]
+    fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let (mut mode, index) = mode_with_row("click clears arms", "mock-1");
+        // Both rows must be armable (a live session arms the stop word)
+        // and openable.
+        mode.rows[0].summary = serde_json::json!({
+            "sessionName": "holder",
+            "activeSessionId": "s-holder",
+        });
+        mode.rows[index].summary = serde_json::json!({
+            "sessionName": "click clears arms",
+            "activeSessionId": "s-clears",
+        });
+        mode.render_frame(120, 24);
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, row_index)| *row_index == index)
+            .copied()
+            .expect("the row renders");
+        mode.handle_key("ctrl+c");
+        assert!(mode.exit_armed, "the first ctrl+c armed the exit hint");
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete.is_some(),
+            "the ctrl+x armed the stop-or-delete confirm"
+        );
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert!(!mode.exit_armed, "the click dropped the exit hint");
+        assert!(
+            mode.pending_delete.is_none(),
+            "the click took the armed confirm"
+        );
+        // The next ctrl+x re-arms instead of executing the stale one.
+        mode.handle_key("ctrl+x");
+        assert!(mode.pending_delete.is_some(), "the confirm re-arms");
+        assert!(
+            mode.pending_delete_action.is_none(),
+            "no execution rode the re-arm"
+        );
+        // The selection binds last: `expect` moves `mode.opened`, so no
+        // method call on `mode` may follow it.
+        let opened = mode.opened.expect("the click opened the row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s-clears".to_string())
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 
     #[test]
@@ -3353,6 +3919,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3860,6 +4427,7 @@ mod tests {
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -3883,6 +4451,7 @@ mod tests {
             status_message: Some(notice.to_string()),
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.rebuild_rows();
         mode
@@ -4032,6 +4601,61 @@ the holder exits.";
             .push(roster_entry("s2", "idle", parent_summary("s2")));
         mode.rebuild_rows();
         assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+    }
+
+    /// A plain click during the entry anchor's wait is an explicit user
+    /// choice too — the clicked row IS the pick — so it cancels the wait
+    /// and opens that row; the keyboard Enter's loading hint never stands
+    /// between a visible row and its open (Macroscope: the click grammar
+    /// must not inherit Enter's wait).
+    #[test]
+    fn a_click_cancels_the_anchor_wait_and_opens_the_clicked_row() {
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![
+                roster_entry("s1", "idle", parent_summary("s1")),
+                roster_entry("s3", "idle", parent_summary("s3")),
+            ],
+        );
+        assert!(mode.anchor_selection_pending, "the anchor waits on its row");
+        // Enter during the wait arms the loading hint (the default row is
+        // not the user's pick); the user then clicks a different row.
+        mode.handle_key("enter");
+        assert!(mode.opened.is_none(), "the wait still holds the open");
+        mode.render_frame(120, 24);
+        let clicked = mode
+            .rows
+            .iter()
+            .position(|row| row.summary["sessionId"] == "s3")
+            .expect("the other row renders");
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, index)| *index == clicked)
+            .copied()
+            .expect("the clicked row is on screen");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        assert_eq!(mode.selected, clicked, "the click selected the row");
+        assert!(
+            !mode.anchor_selection_pending,
+            "the click ends the entry anchor's wait"
+        );
+        let opened = mode.opened.expect("the click opened the row");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s3-live".to_string())
+        );
+        assert!(
+            mode.status.is_none(),
+            "the click drops the loading hint with the wait"
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 
     /// A terminal saved-catalog failure settles the entry anchor's wait (TS
@@ -4224,6 +4848,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -4258,6 +4883,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4339,6 +4965,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4523,6 +5150,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4867,6 +5495,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -4901,6 +5530,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -5011,6 +5641,7 @@ the holder exits.";
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             show_hardware_cursor: false,
+            incident_notice_state: None,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -5143,7 +5774,7 @@ the holder exits.";
         let mut mode = fresh_mode(roster);
         assert_eq!(mode.rows.len(), 12);
         let frame_texts = |mode: &mut AgentsViewMode| -> Vec<String> {
-            mode.render_list(120, 8)
+            mode.render_list(120, 8, 0)
                 .iter()
                 .map(|line| line.iter().map(|span| span.content.as_str()).collect())
                 .collect()
@@ -5177,7 +5808,7 @@ the holder exits.";
         assert_ne!(texts.last().map(|t| t.trim()), Some("..."));
         // The selected row carries the selection background (its line
         // paints over the full width; the unselected rows do not).
-        let selected_line = mode.render_list(120, 8);
+        let selected_line = mode.render_list(120, 8, 0);
         let painted = selected_line
             .iter()
             .any(|line| line.iter().any(|span| span.style.bg.is_some()));
@@ -5327,7 +5958,7 @@ the holder exits.";
         let mut mode = fresh_mode(forest_roster(80));
         mode.handle_key("end");
         let texts: Vec<String> = mode
-            .render_list(120, 10)
+            .render_list(120, 10, 0)
             .iter()
             .map(|line| line.iter().map(|s| s.content.as_str()).collect())
             .collect();
