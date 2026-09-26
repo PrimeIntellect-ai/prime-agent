@@ -7454,24 +7454,21 @@ impl SessionUi {
                 },
             )
             .await;
-        match state {
-            Ok(data) => {
-                let model_id = data
-                    .get("model")
-                    .and_then(|model| model.get("id"))
-                    .and_then(Value::as_str)
-                    .map_or_else(|| picked_model_id.to_string(), str::to_string);
-                view.chrome.model_id = Some(model_id);
-                view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
-            }
+        if let Ok(data) = state {
+            let model_id = data
+                .get("model")
+                .and_then(|model| model.get("id"))
+                .and_then(Value::as_str)
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            view.chrome.model_id = Some(model_id);
+            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+        } else {
             // The picked model's effort is unknown when the read fails:
             // a stale suffix would pair the new model with the old
             // model's level (a combination TS never renders), so the
             // bare id wins.
-            Err(_) => {
-                view.chrome.model_id = Some(picked_model_id.to_string());
-                view.chrome.thinking_suffix = None;
-            }
+            view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.thinking_suffix = None;
         }
         self.dirty = true;
     }
