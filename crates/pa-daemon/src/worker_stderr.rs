@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 /// The stderr tail attached to not-ready launch failures (Codex
 /// `STDERR_LOG_TAIL_BYTES`).
