@@ -598,13 +598,12 @@ pub(crate) struct SessionUi {
     /// Compaction-abort outcomes from the backgrounded request (the abort
     /// supervision's UI recovery): a failed abort clears the stuck loader.
     compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
-    /// Where backgrounded prompt round trips deliver their outcomes (TS
-    /// `onSubmit` resolves `agentConnection.prompt` off the render path);
-    /// the run loop folds them through `apply_prompt_outcome`.
-    prompt_notes: mpsc::UnboundedSender<PromptSubmitNote>,
     /// The ordered inbox the single submit worker drains (see
     /// [`PromptOrder`]): one in-flight request at a time keeps the wire
     /// in submit order while the key path stays free of the round trip.
+    /// The outcome channel is not held here — the worker (spawned in
+    /// [`Self::open`]) owns its sender, and the run loop owns the
+    /// receiving side.
     prompt_orders: mpsc::UnboundedSender<PromptOrder>,
     /// Monotonic submit generation (TS `inputSubmissionGeneration`): every
     /// submit bumps it, and a failed one's draft-restore right dies under
@@ -883,7 +882,6 @@ impl SessionUi {
             goal_view: GoalView::new(),
             notes,
             compaction_abort_notes,
-            prompt_notes,
             prompt_orders: orders_tx,
             input_submission_generation: 0,
             prompt_in_flight: 0,
