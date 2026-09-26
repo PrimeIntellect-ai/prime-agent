@@ -790,26 +790,31 @@ impl AgentView {
                     {
                         index
                     }
-                    // A boundary flip (the merge/split) and a
-                    // receipt-bearing mutation both reshape the block at
-                    // the captured suffix start - a formed, dissolved, or
-                    // re-counted run moves its rows there (and the
-                    // standalone card's own start IS its index). A bare
-                    // arg/state mutation keeps the slot-based fold: a
-                    // member card moves the BLOCK's rows (they live at
+                    // A boundary flip (the merge/split) or a receipt
+                    // change that re-derived the run map reshapes the
+                    // block at the captured suffix start - a formed,
+                    // dissolved, or re-counted run moves its rows there
+                    // (and the standalone card's own start IS its index).
+                    Some(RunShapeInputs::AssistantGlue(_) | RunShapeInputs::Receipts(_))
+                        if rebuild.is_some() =>
+                    {
+                        start
+                    }
+                    // Everything else is a bare content/state change:
+                    // a member card moves the BLOCK's rows (they live at
                     // the run's start); a solo card (a short uncondensed
                     // sequence, or a standalone card) moves only its own
                     // rows - the fold lands there, never at the
                     // sequence's first card.
-                    Some(RunShapeInputs::AssistantGlue(_)) | Some(RunShapeInputs::Receipts(_)) => {
-                        start
+                    Some(RunShapeInputs::AssistantGlue(_) | RunShapeInputs::Receipts(_)) | None => {
+                        match self.run_map.slot(index) {
+                            Some(
+                                crate::tool_runs::RunSlot::Start(_)
+                                    | crate::tool_runs::RunSlot::Member,
+                            ) => start,
+                            _ => index,
+                        }
                     }
-                    None => match self.run_map.slot(index) {
-                        Some(
-                            crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
-                        ) => start,
-                        _ => index,
-                    },
                 };
                 self.sparse_tail_delta(after as isize - before as isize, fold);
             }
