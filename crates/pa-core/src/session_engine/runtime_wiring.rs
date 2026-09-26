@@ -230,6 +230,7 @@ pub fn kernel_provisioner(
     agent_dir: &std::path::Path,
     snapshot_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
+    on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
@@ -254,6 +255,7 @@ pub fn kernel_provisioner(
             snapshot_dir,
             ready_gate: None,
             on_restore,
+            on_background_work_settled,
             on_unavailable_skills,
             on_bootstrap_result,
         },
