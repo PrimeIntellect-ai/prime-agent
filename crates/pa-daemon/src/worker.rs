@@ -18,8 +18,8 @@ pub use env::{
     WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
     WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
-pub(crate) use session_core::SessionCore;
 use serde_json::Map;
+pub(crate) use session_core::SessionCore;
 use std::collections::VecDeque;
 // PathBuf is read only by this facade's in-file test modules (via `use super::*`); the
 // lib-target import is flagged unused since the lib users moved out, so allow it deliberately.
