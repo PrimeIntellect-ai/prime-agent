@@ -2688,6 +2688,148 @@ mod tests {
     }
 
     #[test]
+    fn search_text_counter_lockstep_names_every_corpus_mutation_path() {
+        // Every path that can mutate the capped corpus, at the accumulator
+        // level. Any other path is read-only (build_info derives, the wire
+        // serializes); eviction drops the whole state (counter and corpus
+        // together, so it cannot desync) and store_state keeps it whole.
+        // The paths: (1) a fresh fold's appends, (2) the resume copy a
+        // grown file folds into (clone_for_resume travels the counter),
+        // (3) the torn-tail SNAPSHOT fold (build_info folds the tail into
+        // a clone, the durable accumulator untouched), and (4) a rewritten
+        // file (generation mismatch re-folds from a fresh accumulator).
+        let header_line = session_header_line(&SessionHeader {
+            version: None,
+            id: "s1".to_string(),
+            timestamp: "2026-09-26T00:00:00.000Z".to_string(),
+            cwd: "/repo".to_string(),
+            parent_session: None,
+            rlm_depth: None,
+            git: None,
+            rest: serde_json::Map::default(),
+        })
+        .to_string();
+        let message = |text: &str, index: u64| {
+            json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": index.to_string(),
+                "message": {"role": "user", "content": text}
+            })
+            .to_string()
+        };
+
+        // (1) fresh fold, past the cap.
+        let generation = SessionInfoGeneration {
+            len: 4096,
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        };
+        let mut state = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut state.acc, &header_line).unwrap();
+        fold_scan_entry(&mut state.acc, &message("first user turn", 1)).unwrap();
+        fold_scan_entry(
+            &mut state.acc,
+            &message(&"x".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS), 2),
+        )
+        .unwrap();
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            state.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (2) the resume copy: the grown file's next appends fold into
+        // clone_for_resume's accumulator - the counter travels with the
+        // corpus and stays in lockstep for post-cap appends.
+        let mut resumed = state.clone_for_resume();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        fold_scan_entry(&mut resumed.acc, &message("appended after cap", 3)).unwrap();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            resumed.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (3) the torn-tail snapshot: build_info folds the torn final
+        // line into a CLONE, so the durable accumulator's counter stays
+        // untouched; an uncapped snapshot's row gains the tail's text,
+        // the capped one cannot (the tail arm is under the same cap).
+        let durable_before = state.acc.clone();
+        let capped_info = state
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            capped_info.all_messages_text, durable_before.all_messages_text,
+            "the cap bounds the snapshot fold too - a torn tail past it changes no corpus byte"
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            durable_before.search_text_chars
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        let mut uncapped = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut uncapped.acc, &header_line).unwrap();
+        fold_scan_entry(&mut uncapped.acc, &message("user turn one", 1)).unwrap();
+        let uncapped_durable = uncapped.acc.clone();
+        let uncapped_info = uncapped
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            uncapped_info.all_messages_text,
+            "user turn one user turn two"
+        );
+        assert_eq!(
+            uncapped.acc.all_messages_text,
+            uncapped_durable.all_messages_text
+        );
+        assert_eq!(
+            uncapped.acc.search_text_chars,
+            uncapped_durable.search_text_chars
+        );
+
+        // (4) a rewritten file re-folds from a fresh accumulator: both
+        // corpus and counter restart at zero together.
+        let mut rewritten = SessionScanState::fresh(generation);
+        assert_eq!(rewritten.acc.search_text_chars, 0);
+        assert!(rewritten.acc.all_messages_text.is_empty());
+        fold_scan_entry(&mut rewritten.acc, &header_line).unwrap();
+        fold_scan_entry(&mut rewritten.acc, &message("rewrite from zero", 1)).unwrap();
+        assert_eq!(
+            rewritten.acc.search_text_chars,
+            rewritten.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            rewritten.acc.all_messages_text, "rewrite from zero",
+            "a rewritten file's corpus is the fresh fold's, not the old session's"
+        );
+    }
+
+    #[test]
     fn durable_first_kept_entry_id_pins_the_boundary_the_read_retains() {
         // The parity scenario the frame diff caught: the engine compacts its
         // in-memory entries and reports an id that never exists in the
