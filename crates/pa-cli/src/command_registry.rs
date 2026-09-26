@@ -59,6 +59,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "--json      Print JSON",
     ]),
     CommandSpec::new(
+        &["sessions"],
+        "sessions [--all] [--json]",
+        "Show agent status, activity, and usage",
+    )
+    .options(&[
+        "-a, --all  Include saved agents",
+        "--json      Print JSON",
+    ]),
+    CommandSpec::new(
         &["attach"],
         "attach <agent>",
         "Attach the interactive UI to an agent",

@@ -70,7 +70,7 @@ fn is_session_summary(value: &Value) -> bool {
         && pointer(value, "sessionActions.followUps").is_some_and(Value::is_array)
 }
 
-fn string_field<'a>(value: &'a Value, path: &str) -> Option<&'a str> {
+pub(crate) fn string_field<'a>(value: &'a Value, path: &str) -> Option<&'a str> {
     pointer(value, path).and_then(Value::as_str)
 }
 
@@ -116,21 +116,61 @@ fn session_summary_from_value(value: &Value) -> Option<SessionSummary> {
     })
 }
 
+/// `getSessionSummaries` for surfaces that read the wire rows directly (the
+/// sessions table): `Some(rows)` when every row validates, else `None` so
+/// the caller prints raw JSON like the TS client.
+pub(crate) fn validated_session_values(data: &Value) -> Option<Vec<&Value>> {
+    let sessions = data.get("sessions")?.as_array()?;
+    sessions
+        .iter()
+        .map(|session| is_session_summary(session).then_some(session))
+        .collect()
+}
+
 /// `getSessionSummaries`: `Some(rows)` when every row validates, else `None`
 /// so the caller prints raw JSON like the TS client.
 pub(crate) fn get_session_summaries(data: &Value) -> Option<Vec<SessionSummary>> {
-    let sessions = data.get("sessions")?.as_array()?;
-    let mut summaries = Vec::with_capacity(sessions.len());
-    for session in sessions {
-        summaries.push(session_summary_from_value(session)?);
-    }
-    Some(summaries)
+    validated_session_values(data)?
+        .iter()
+        .map(|session| session_summary_from_value(session))
+        .collect()
 }
 
 /// `isLiveSessionSummary` as a public guard for create/rename output paths.
 pub(crate) fn live_session_summary(data: &Value) -> Option<&Value> {
     is_live_session_summary(data).then_some(data)
 }
+
+/// The shared CLI table renderer (TS `formatTable`): every column pads to
+/// the widest cell's terminal display width, so a wide glyph (CJK, emoji)
+/// cannot drift the columns after it. Two spaces separate columns.
+pub(crate) fn format_table<const N: usize>(headers: &[&str; N], rows: &[[String; N]]) -> String {
+    let widths: [usize; N] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| pa_tui::width::str_width(&row[column]))
+            .chain(std::iter::once(pa_tui::width::str_width(headers[column])))
+            .max()
+            .unwrap_or(0)
+    });
+    let padded_row = |row: &[String; N]| {
+        row.iter()
+            .zip(widths)
+            .map(|(cell, width)| pa_tui::width::pad_cell(cell, width))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    let header_row: [String; N] = std::array::from_fn(|column| headers[column].to_string());
+    let mut lines = vec![padded_row(&header_row)];
+    for row in rows {
+        lines.push(padded_row(row));
+    }
+    lines.join("\n")
+}
+
+/// The `list` table's columns.
+const LIST_HEADERS: [&str; 7] = [
+    "name", "id", "status", "age", "model", "messages", "clients",
+];
 
 /// The fixed-column table, mirroring `formatSessionListTable` (colors are
 /// TTY-only in TS; this output is color-free like TS piped output).
@@ -156,39 +196,7 @@ pub(crate) fn format_session_list_table(sessions: &[SessionSummary]) -> String {
             ]
         })
         .collect();
-    let headers: Vec<String> = [
-        "name", "id", "status", "age", "model", "messages", "clients",
-    ]
-    .iter()
-    .map(std::string::ToString::to_string)
-    .collect();
-    let widths: Vec<usize> = headers
-        .iter()
-        .enumerate()
-        .map(|(column, header)| {
-            rows.iter()
-                .map(|row| row[column].chars().count())
-                .chain(std::iter::once(header.chars().count()))
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let mut lines = vec![padded_row(&headers, &widths)];
-    for row in &rows {
-        lines.push(padded_row(row, &widths));
-    }
-    lines.join("\n")
-}
-
-fn padded_row(row: &[String], widths: &[usize]) -> String {
-    row.iter()
-        .zip(widths)
-        .map(|(cell, width)| {
-            let pad = width.saturating_sub(cell.chars().count());
-            format!("{cell}{}", " ".repeat(pad))
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
+    format_table(&LIST_HEADERS, &rows)
 }
 
 /// `formatSessionDisplayId`: the last 12 chars of a hex-normalized id.
@@ -356,7 +364,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis() as u64)
