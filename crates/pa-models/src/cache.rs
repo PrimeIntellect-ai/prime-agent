@@ -166,6 +166,19 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         }
     }
 
+    /// The scope recorded in the disk snapshot, when one exists (the stored
+    /// header only — no validation, no in-memory promotion): a fresh
+    /// process's first auth-scope observation seeds its comparison from
+    /// it, so a credential change that predates the process is detected.
+    /// `None` when no snapshot is stored, or it belongs to another source
+    /// URL.
+    pub fn stored_scope(&self) -> Option<String> {
+        let path = self.cache_path.as_ref()?;
+        let bytes = std::fs::read(path).ok()?;
+        let stored: SnapshotFile = serde_json::from_slice(&bytes).ok()?;
+        (stored.url == self.url.as_ref()).then_some(stored.scope)
+    }
+
     /// Drop the snapshot for `scope` (401/403 revocation); other scopes keep
     /// their own snapshots.
     ///
