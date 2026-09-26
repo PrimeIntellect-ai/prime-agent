@@ -27,8 +27,14 @@ pub(super) const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TI
 pub(super) const WORKER_CONNECT_PROBE_MS: u64 = 500;
 #[cfg(not(unix))]
 pub(super) const WORKER_CONNECT_PROBE_MS: u64 = 2_000;
-/// Pause between probe attempts (TS backoff min = max on Unix).
+/// Pause between probe attempts. The TS backoff min = max on Unix; this
+/// port tightens the pause from TS's 25ms to 5ms: a session worker binds
+/// its socket ~1-3ms after the fork (measured cold-open boot floor at
+/// 7064d039a, boot-floor lane record 20260926-194800), so the 25ms grid
+/// quantized every spawn by 0-25ms (mean ~12.5ms) of pure wait on the
+/// open path. Timing-only: the probe, the connect budget, the auth floor,
+/// and the launch-failure error are unchanged.
 #[cfg(unix)]
-pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 25;
+pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 5;
 #[cfg(not(unix))]
 pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
