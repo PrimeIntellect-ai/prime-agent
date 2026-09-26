@@ -138,6 +138,8 @@ pub(crate) struct PromptSubmitNote {
     /// flag after its await, which nothing could move while the loop was
     /// blocked).
     pub(crate) turn_was_active: bool,
+    /// The expected end of this admitted prompt in submit order.
+    pub(crate) expected_turn_end: u64,
     /// The submit's generation (TS `inputSubmissionGeneration`): a newer
     /// submit supersedes an older one's draft-restore right.
     pub(crate) generation: u64,
@@ -169,6 +171,7 @@ pub(crate) struct PromptOrder {
     pub(crate) images: Option<serde_json::Value>,
     pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
     pub(crate) turn_was_active: bool,
+    pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
     pub(crate) rebind_available: bool,
 }
@@ -467,6 +470,11 @@ pub(crate) struct SessionUi {
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// Completed turns observed on this connection. A prompt ACK may arrive
+    /// after its entire streamed turn; it must not restart the loader then.
+    turn_ends_seen: u64,
+    /// The last submitted prompt's expected completion in wire order.
+    last_prompt_turn_end: u64,
     /// The session's queue delivery mode (TS `steeringMode`, the state's
     /// `steeringMode`): `all` delivers the queued steering prefix as one
     /// batched turn at the boundary; `one-at-a-time` one per turn. The
@@ -855,6 +863,8 @@ impl SessionUi {
             cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
+            turn_ends_seen: 0,
+            last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
@@ -2601,6 +2611,8 @@ impl SessionUi {
         // earlier submit still in flight held `turn_active` true on the
         // inline path too, so it counts here.
         let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
+        let expected_turn_end = self.last_prompt_turn_end.max(self.turn_ends_seen) + 1;
+        self.last_prompt_turn_end = expected_turn_end;
         self.prompt_in_flight += 1;
         let _ = self.prompt_orders.send(PromptOrder {
             client: self.client.clone(),
@@ -2611,6 +2623,7 @@ impl SessionUi {
             images,
             stashed_images,
             turn_was_active,
+            expected_turn_end,
             generation,
             rebind_available,
         });
@@ -2672,6 +2685,7 @@ impl SessionUi {
                 images: order.images,
                 stashed_images: order.stashed_images,
                 turn_was_active: order.turn_was_active,
+                expected_turn_end: order.expected_turn_end,
                 generation: order.generation,
                 rebind_available: order.rebind_available,
                 result,
@@ -2756,11 +2770,16 @@ impl SessionUi {
                         });
                     }
                 }
-                if !self.turn_active {
+                // The daemon can stream the complete turn before the ACK
+                // reaches this channel. In that case turn_end already owns
+                // the idle state; re-arming it would strand WaitIdle until
+                // timeout. The per-submit end watermark also keeps a prior
+                // turn's end from settling a queued later prompt.
+                if self.turn_ends_seen < note.expected_turn_end {
                     self.turn_active = true;
+                    self.start_loader(view);
+                    self.dirty = true;
                 }
-                self.start_loader(view);
-                self.dirty = true;
                 Ok(())
             }
             Err(error) => {
@@ -8992,6 +9011,7 @@ impl SessionUi {
                 // trailing `agent_end` frames from the previous turn must
                 // not cancel a turn admitted in between (prompt queueing).
                 self.streaming_index = None;
+                self.turn_ends_seen += 1;
                 self.turn_active = false;
                 view.working = None;
                 view.working_since = None;
