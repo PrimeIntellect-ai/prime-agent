@@ -1237,20 +1237,26 @@ pub struct SessionInfo {
 pub const SESSION_LIST_SEARCH_TEXT_MAX_CHARS: usize = 64 * 1024;
 
 /// TS `appendCappedSearchText`: space-join the texts, cut the final
-/// addition so the corpus never grows past the cap.
-fn append_capped_search_text(current: &mut String, text: &str) {
+/// addition so the corpus never grows past the cap. `used` is the corpus's
+/// char count before this append; the returned count is the corpus's char
+/// count after it, so the fold keeps an O(1) running counter instead of
+/// re-counting the capped string for every message.
+fn append_capped_search_text(current: &mut String, text: &str, used: usize) -> usize {
     if text.is_empty() {
-        return;
+        return used;
     }
-    let used = current.chars().count();
     if used >= SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
-        return;
+        return used;
     }
-    if used > 0 {
+    let mut count = used;
+    if count > 0 {
         current.push(' ');
+        count += 1;
     }
-    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - current.chars().count();
-    current.extend(text.chars().take(remaining));
+    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - count;
+    let mut taken = 0;
+    current.extend(text.chars().take(remaining).inspect(|_| taken += 1));
+    count + taken
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1413,6 +1419,11 @@ struct SessionScanAccumulator {
     message_count: usize,
     first_message: String,
     all_messages_text: String,
+    /// [`SessionScanAccumulator::all_messages_text`]'s char count, kept in
+    /// lockstep by the only writer (`append_capped_search_text`): the cap
+    /// guard and the append read this O(1) counter instead of re-counting
+    /// the capped string per message (an O(messages x cap) fold tax).
+    search_text_chars: usize,
     last_activity_ms: Option<u64>,
     usage_scan: crate::session_usage::UsageScan,
 }
@@ -1459,6 +1470,7 @@ impl SessionScanState {
                 message_count: self.acc.message_count,
                 first_message: self.acc.first_message.clone(),
                 all_messages_text: self.acc.all_messages_text.clone(),
+                search_text_chars: self.acc.search_text_chars,
                 last_activity_ms: self.acc.last_activity_ms,
                 usage_scan: self.acc.usage_scan.clone(),
             },
@@ -1850,8 +1862,7 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                 }
                 if (role == Some("user") && acc.first_message.is_empty())
                     || (matches!(role, Some("user" | "assistant"))
-                        && acc.all_messages_text.chars().count()
-                            < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
+                        && acc.search_text_chars < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
                 {
                     if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
                         if let Some(message) = full.fields.get("message") {
@@ -1862,9 +1873,10 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                                 }
                             }
                             if matches!(role, Some("user" | "assistant")) {
-                                append_capped_search_text(
+                                acc.search_text_chars = append_capped_search_text(
                                     &mut acc.all_messages_text,
                                     &message_text(message),
+                                    acc.search_text_chars,
                                 );
                             }
                         }
@@ -2599,6 +2611,72 @@ mod tests {
         assert!(info.all_messages_text.starts_with("0 xxx"));
         assert!(info.all_messages_text.contains("1 xxx"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_text_char_counter_stays_in_lockstep_with_the_corpus() {
+        // The O(1) running counter must equal `chars().count()` of the
+        // corpus at every fold step - including multibyte text, the cap
+        // cut mid-message, and post-cap appends - or the cap guard drifts
+        // from the TS corpus it bounds.
+        let mut acc = SessionScanAccumulator::default();
+        let texts = [
+            "fix the login bug".to_string(),
+            "ünïcödé — multibyte ✓ chars".to_string(),
+            "x".repeat(66 * 1024),
+            "post-cap tail that must not move the corpus".to_string(),
+            "y".repeat(10),
+        ];
+        for (index, text) in texts.iter().enumerate() {
+            let entry = json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": format!("{}", index + 1),
+                "message": {"role": "user", "content": text}
+            });
+            fold_scan_entry(&mut acc, &entry.to_string()).unwrap();
+            assert_eq!(
+                acc.search_text_chars,
+                acc.all_messages_text.chars().count(),
+                "counter drift after fold {index}"
+            );
+            assert!(acc.all_messages_text.chars().count() <= SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+        }
+        assert_eq!(acc.first_message, "fix the login bug");
+        assert_eq!(acc.message_count, 5);
+        // The cap cut mid-message: the corpus holds exactly the limit.
+        assert_eq!(acc.search_text_chars, SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn search_text_char_counter_matches_the_legacy_append() {
+        // The reference append (the pre-counter shape: count, then extend)
+        // must produce the same corpus for the same sequence of texts.
+        let mut corpus = String::new();
+        let mut count = 0usize;
+        let texts = [
+            String::new(),
+            "one".to_string(),
+            "twö with multibyte".to_string(),
+            "z".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS + 10),
+            "post-cap".to_string(),
+        ];
+        for text in &texts {
+            let mut legacy = corpus.clone();
+            if !text.is_empty() {
+                let used = legacy.chars().count();
+                if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                    if used > 0 {
+                        legacy.push(' ');
+                    }
+                    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - legacy.chars().count();
+                    legacy.extend(text.chars().take(remaining));
+                }
+            }
+            count = append_capped_search_text(&mut corpus, text, count);
+            assert_eq!(corpus, legacy);
+            assert_eq!(count, legacy.chars().count());
+        }
     }
 
     #[test]
