@@ -110,8 +110,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A menu surface opened (event `tui menu opened`): `menu` names the
-    /// surface (`model`, `mcp`), `source` how it opened (`command` — the
-    /// bare slash submission, `tab` — a typed partial + Tab).
+    /// surface (`model`, `mcp`, `settings`, or a read-only info panel
+    /// command — `context`, `session`, `system-prompt`, `logs`,
+    /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
+    /// (`command` — the bare slash submission, `tab` — a typed partial +
+    /// Tab).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -1517,6 +1520,12 @@ async fn run_interactive_surface(
     // failed abort into the transcript note and clears the stuck loader.
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
+    // A backgrounded prompt round trip reports here (TS `onSubmit`
+    // resolves `agentConnection.prompt` off the render path — the
+    // cleared editor paints before the daemon answers); the loop folds
+    // the settled outcome into the session.
+    let (prompt_tx, mut prompt_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::PromptSubmitNote>();
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
@@ -1638,6 +1647,7 @@ async fn run_interactive_surface(
         &options,
         notes_tx,
         compaction_abort_tx,
+        prompt_tx,
         share_tx,
         reload_tx,
         traces_upload_tx,
@@ -1922,8 +1932,16 @@ async fn run_interactive_surface(
                 let timeout_ms = *timeout_ms;
                 // A parked follow-up/steering message keeps the barrier waiting
                 // until the session delivers it (the queue strip must clear
-                // before the next step observes the frames).
-                if session.turn_active || !view.queued.is_empty() {
+                // before the next step observes the frames). A submit whose
+                // round trip is still armed holds the barrier too: the async
+                // submit resolves off the render path (the inline submit
+                // held the barrier by blocking the loop until its ack
+                // landed), so the outcome must land before the barrier can
+                // read idle.
+                if session.turn_active
+                    || !view.queued.is_empty()
+                    || session.prompt_submits_in_flight() > 0
+                {
                     if wait_idle_deadline.is_none() {
                         wait_idle_deadline =
                             Some(Instant::now() + Duration::from_millis(timeout_ms));
@@ -2226,8 +2244,8 @@ async fn run_interactive_surface(
                 // next applies (a plan step is not a terminal burst, and the
                 // captured frame sequence IS the verifier evidence — a
                 // batched drain would collapse intermediate states like the
-                // quick-shortcut guide or the expanded compaction block out
-                // of the capture). The terminal path keeps the full batch
+                // expanded compaction block or an open panel out of the
+                // capture). The terminal path keeps the full batch
                 // drain, the input-starvation fix.
                 if !renderer.is_terminal() {
                     inputs_pending = false;
@@ -2248,6 +2266,7 @@ async fn run_interactive_surface(
         if headless_done
             && pending.is_empty()
             && !session.turn_active
+            && session.prompt_submits_in_flight() == 0
             && view.queued.is_empty()
             && wait_idle_deadline.is_none()
             && !session.dirty
@@ -2505,7 +2524,16 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            maybe_input = ui_rx.recv() => {
+            maybe_input = async {
+                // The headless driver drops its sender after HeadlessDone.
+                // A closed recv is always ready and would starve turn events
+                // while the final submitted prompt is still settling.
+                if headless_done {
+                    std::future::pending::<Option<UiInput>>().await
+                } else {
+                    ui_rx.recv().await
+                }
+            } => {
                 if let Some(input) = maybe_input {
                     pending.push_back(input);
                 }
@@ -2558,6 +2586,14 @@ async fn run_interactive_surface(
             maybe_commands = commands_rx.recv() => {
                 if let Some(update) = maybe_commands {
                     session.apply_command_catalog(update, &mut view);
+                }
+            }
+            maybe_prompt = prompt_rx.recv() => {
+                if let Some(note) = maybe_prompt {
+                    // Protocol corruption stays fatal exactly like the
+                    // inline submit's ladder (the handle-key catch's
+                    // "everything else" arm).
+                    session.apply_prompt_outcome(note, &mut view).await?;
                 }
             }
             _reconnect_tick = async {
