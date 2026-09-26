@@ -1368,7 +1368,11 @@ mod tests {
         std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
         clear_in_process_probe_memo_for_tests();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
-        assert_eq!(probe_count(), 8, "the repaired venv re-probes and republishes");
+        assert_eq!(
+            probe_count(),
+            8,
+            "the repaired venv re-probes and republishes"
+        );
 
         // A rewritten version file (a newer concurrent daemon rebuilt the
         // venv) fails the cheap version check before any probe or memo
@@ -1517,7 +1521,10 @@ mod tests {
             &raw,
             &installed_runtime_identity(Path::new(&python_str), &venv),
         );
-        super::super::disk_memo::disk_memo_write(&super::super::disk_memo::disk_memo_path(&venv), &key);
+        super::super::disk_memo::disk_memo_write(
+            &super::super::disk_memo::disk_memo_path(&venv),
+            &key,
+        );
 
         // The retry hits the late entry: benign, honestly earned.
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
@@ -1583,7 +1590,9 @@ mod tests {
                     let path = entry.path();
                     if path.is_dir() {
                         walk(&path, found);
-                    } else if path.file_name().is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
+                    } else if path
+                        .file_name()
+                        .is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
                     {
                         found.push(path);
                     }
@@ -1762,7 +1771,12 @@ mod tests {
             std::fs::copy(file, &target).unwrap();
         }
         invalidate_runtime_probe_cache();
-        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
         assert_eq!(
             probe_count(),
             9,
@@ -1771,7 +1785,12 @@ mod tests {
         // The fresh-process leg: the in-process map is empty, the verdict
         // lives on disk under the real content-walk key.
         clear_in_process_probe_memo_for_tests();
-        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert!(kernel_ready(
+            &python.to_string_lossy(),
+            &fake,
+            &identity,
+            &[]
+        ));
         assert_eq!(
             probe_count(),
             9,
@@ -1868,10 +1887,7 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
             .expect("the real python must run the closure parse");
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        assert!(
-            output.status.success(),
-            "closure parse failed: {stderr}"
-        );
+        assert!(output.status.success(), "closure parse failed: {stderr}");
         #[derive(Debug, serde::Deserialize)]
         struct ClosureReport {
             closure: Vec<String>,

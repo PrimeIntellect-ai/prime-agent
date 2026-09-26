@@ -148,9 +148,10 @@ fn write_map(path: &Path, keys: &[String]) {
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map_or_else(|| DISK_MEMO_FILE.to_string(), |name| name.to_string_lossy().into_owned());
+    let mut name = path.file_name().map_or_else(
+        || DISK_MEMO_FILE.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     name.push_str(&format!(".tmp.{}", std::process::id()));
     path.with_file_name(name)
 }
