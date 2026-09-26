@@ -42,7 +42,9 @@ async fn queue_action_rows_serve_the_labeled_preview() {
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
             message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
-            preview: Some("Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission".to_string()),
+            preview: Some(
+                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
+            ),
             custom_message: None,
             agent_message: None,
             queue_key: None,

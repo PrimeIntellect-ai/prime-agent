@@ -1070,8 +1070,7 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir =
-        std::env::temp_dir().join(format!("pa-worker-aborted-row-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("pa-worker-aborted-row-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
@@ -1260,8 +1259,7 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir =
-        std::env::temp_dir().join(format!("pa-worker-kill-jobs-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("pa-worker-kill-jobs-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let sessions_dir = dir.join("sessions");
     let config = WorkerConfig {
@@ -1323,8 +1321,7 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
     assert_eq!(cancelled.status, pa_core::cron::JobStatus::Cancelled);
     assert_eq!(cancelled.next_run_at, None);
     // The close archived the session file (the wake scan's state gate).
-    let info =
-        crate::session_store::read_session_info(std::path::Path::new(session_file)).unwrap();
+    let info = crate::session_store::read_session_info(std::path::Path::new(session_file)).unwrap();
     assert_eq!(info.state.as_deref(), Some("archived"));
 }
 
@@ -1346,8 +1343,7 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir =
-        std::env::temp_dir().join(format!("pa-worker-kill-path-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("pa-worker-kill-path-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
