@@ -173,6 +173,12 @@ pub struct FlowCancel {
     wake: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
 }
 
+impl std::fmt::Debug for FlowCancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowCancel").finish()
+    }
+}
+
 impl FlowCancel {
     /// The signal starts live (nothing cancelled it yet).
     fn new() -> Self {

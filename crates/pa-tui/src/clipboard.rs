@@ -89,6 +89,8 @@ impl Env {
 /// TS `execSyncHidden`'s helper wait cap: a hung clipboard tool is a
 /// failed copy, never a blocked UI.
 const PIPE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The bounded wait's poll cadence.
+const PIPE_POLL: Duration = Duration::from_millis(20);
 
 /// Run `program` with `text` on its stdin (TS `execSyncHidden` with the
 /// 5s timeout): a helper that does not finish inside the cap is killed
@@ -107,14 +109,20 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    match child.wait_timeout(PIPE_TIMEOUT) {
-        Ok(Some(status)) => status.success() && wrote,
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            false
+    // The bounded wait (std carries no `Child::wait_timeout`): poll the
+    // exit until the cap, then kill the hung helper and fail the copy.
+    let deadline = std::time::Instant::now() + PIPE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success() && wrote,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(PIPE_POLL),
+            Err(_) => return false,
         }
-        Err(_) => false,
     }
 }
 
