@@ -432,23 +432,11 @@ mod tests {
     use crate::theme::{ColorMode, Theme};
     use serde_json::{json, Value};
 
-    fn selector_data() -> serde_json::Value {
-        serde_json::json!({
-            "flatNodes": [{
-                "entry": {
-                    "type": "custom",
-                    "id": "c1",
-                    "parentId": null,
-                    "timestamp": "2024-01-01T00:00:00.000Z",
-                    "customType": "x"
-                }
-            }],
-            "leafId": "c1"
-        })
-    }
-
+    /// A selector over one visible user-message node (the default tree
+    /// filter hides settings-class entries, so the pane's fixtures ride
+    /// the same `wire_chain` user-message shape as the deep-tree tests).
     fn selector() -> TreeSelector {
-        TreeSelector::new(&selector_data(), 40, false, FilterMode::Default)
+        TreeSelector::new(&wire_chain(1), 40, false, FilterMode::Default)
             .expect("a selector over one node")
     }
 
