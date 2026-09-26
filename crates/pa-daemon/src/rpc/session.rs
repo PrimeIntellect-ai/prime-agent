@@ -322,14 +322,28 @@ impl RpcSession {
         // Build the replacement after the settle: a failed assembly
         // leaves the live session serving (idle, subscribed, nothing
         // disposed — only the settle ran), and the adopted lease goes
-        // back onto the held handle.
-        let mut replacement = match factory(request).await {
-            Ok(replacement) => replacement,
-            Err(error) => {
-                if adopted_lease.is_some() {
-                    handle.session_lease = adopted_lease;
+        // back onto the held handle. The build races the shutdown
+        // broadcast too: a signal landing mid-assembly cancels the
+        // replacement (the live session answers the exit) instead of
+        // holding the lease the signal handler is waiting on.
+        let mut replacement = {
+            let built = tokio::select! {
+                built = factory(request) => built,
+                () = self.signal_shutdown.cancelled() => {
+                    if adopted_lease.is_some() {
+                        handle.session_lease = adopted_lease;
+                    }
+                    return Err("A signal exit is in progress".to_string());
                 }
-                return Err(error);
+            };
+            match built {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    if adopted_lease.is_some() {
+                        handle.session_lease = adopted_lease;
+                    }
+                    return Err(error);
+                }
             }
         };
         // Subscribe the replacement BEFORE publishing the handle: a
@@ -341,7 +355,20 @@ impl RpcSession {
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
-        handle.engine.dispose_kernel().await;
+        // The teardown races the shutdown broadcast: a signal during the
+        // old kernel's disposal cancels the swap (the live session stays
+        // published — exactly what the exit's abort/dispose targets) and
+        // the adopted lease returns with it.
+        let disposed = tokio::select! {
+            () = handle.engine.dispose_kernel() => true,
+            () = self.signal_shutdown.cancelled() => false,
+        };
+        if !disposed {
+            if adopted_lease.is_some() {
+                handle.session_lease = adopted_lease;
+            }
+            return Err("A signal exit is in progress".to_string());
+        }
         // The adopted same-path lease rides the replacement (TS reuses
         // the current lease); a fresh-open replacement carries the lease
         // the factory's open guard acquired.

@@ -111,6 +111,17 @@ pub fn resume_pump(state: &Arc<RpcState>) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Restart the queued-work pump on the LIVE session after a failed
+/// whole-session replacement: the pre-settle pump-epoch bump retired the
+/// old pump, and the still-serving session's parked steer/follow-up rows
+/// must keep delivering (a failed assembly never owned them — the
+/// success paths resume delivery the same way).
+pub async fn restart_queue_pump(state: &Arc<RpcState>) {
+    resume_pump(state);
+    let engine = state.session.handle().await.engine.clone();
+    kick_queue_pump(state, &engine);
+}
+
 /// Kick the queued-work pump (TS `_pumpSessionInputs`): deliver queued
 /// steering/follow-up batches as runs, one settled turn at a time, until
 /// nothing is queued or an abort suspends delivery. Serialized behind the
@@ -242,7 +253,10 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
         })
         .await;
     drop(lease);
-    outcome?;
+    if let Err(error) = outcome {
+        restart_queue_pump(state).await;
+        return Err(error);
+    }
     resume_pump(state);
     Ok(ResponseData::Present(json!({ "cancelled": false })))
 }

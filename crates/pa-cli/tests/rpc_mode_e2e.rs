@@ -854,6 +854,72 @@ fn rpc_fork_leases_the_materialized_file() {
     forked.spawn_stderr = None;
 }
 
+/// A FAILED whole-session replacement re-arms the queued-work pump: the
+/// pre-settle epoch bump retired the old pump, but the live session's
+/// parked steer rows must still deliver (the failure never owned them).
+#[test]
+fn rpc_failed_replacement_restarts_the_queue_pump() {
+    let script = json!({ "responses": [
+        { "text": "first answer", "delayMs": 300 },
+        "steer answer",
+    ]});
+    let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
+    let response = client.request(&json!({ "type": "prompt", "message": "go" }));
+    assert_eq!(response["success"], true);
+    client.wait_event("message_start", TIMEOUT);
+    // The steer parks behind the running turn.
+    let steer = client.request(&json!({ "type": "steer", "message": "steer me" }));
+    assert_eq!(steer["success"], true, "the steer queues: {steer}");
+    // The missing file fails the switch AFTER the settle: the
+    // replacement retired the pump, its assembly failed, and the
+    // restart must hand the parked rows back to a live pump.
+    let bad = client.command(&json!({
+        "type": "switch_session",
+        "sessionPath": "/nonexistent/no-such-session.jsonl"
+    }));
+    let (failed, _) = client.wait_response(&bad, TIMEOUT);
+    assert_eq!(failed["success"], false, "the missing file fails the switch");
+    // The parked steer delivers as the live session's next turn.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let timeout_left = deadline.saturating_duration_since(Instant::now());
+        assert!(!timeout_left.is_zero(), "no second turn: the parked steer stranded");
+        match client.lines.recv_timeout(timeout_left) {
+            Ok(line) => {
+                let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
+                if frame.get("type").and_then(Value::as_str) == Some("agent_end") {
+                    let texts = frame["messages"]
+                        .as_array()
+                        .map(|messages| {
+                            messages
+                                .iter()
+                                .map(|message| {
+                                    message["content"]
+                                        .as_array()
+                                        .and_then(|content| content.first())
+                                        .and_then(|part| part.get("text"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if texts.iter().any(|text| text.contains("steer answer")) {
+                        break;
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the parked steer never delivered after the failed switch");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("rpc child closed before the parked steer delivered");
+            }
+        }
+    }
+    client.drain_stderr();
+}
+
 /// A signal exit during an in-flight whole-session replacement must not
 /// queue behind the replacement's settle: the shutdown broadcast aborts
 /// the running turn, the replacement refuses, and the 143 exit fires

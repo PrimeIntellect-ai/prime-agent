@@ -26,7 +26,6 @@ pub mod protocol;
 pub mod session;
 pub mod session_commands;
 
-use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -120,12 +119,14 @@ impl LineWriter {
 const SIGTERM_EXIT: i32 = 143;
 const SIGHUP_EXIT: i32 = 129;
 
-/// The mode's exit path: the writer must flush its queued frames before
-/// the process exits (TS `process.exit` follows the synchronous writes).
+/// The mode's exit path. The signal paths' bounded drains already waited
+/// on the writer task (every frame is flushed as it is written), so the
+/// exit never re-acquires the stdout lock directly: a stalled reader
+/// holds that lock inside the writer task's blocked write, and a
+/// synchronous flush here would wait on it indefinitely — the 143/129
+/// exit must fire regardless of the reader (TS `process.exit` never
+/// queues on the pipe).
 fn exit_with(code: i32) -> ! {
-    // stdout is line-buffered on the writer task; a direct flush of the
-    // blocking handle covers the frames the task already wrote.
-    let _ = std::io::stdout().flush();
     std::process::exit(code);
 }
 

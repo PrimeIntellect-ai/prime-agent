@@ -90,13 +90,17 @@ async fn switch_session(state: &Arc<RpcState>, payload: &Value) -> Result<Respon
         .get("sessionPath")
         .and_then(Value::as_str)
         .ok_or_else(|| "switch_session requires a sessionPath".to_string())?;
-    state
+    let outcome = state
         .session
         .replace(RpcEngineRequest::Open {
             session_path: std::path::PathBuf::from(session_path),
             reuse_lease: false,
         })
-        .await?;
+        .await;
+    if let Err(error) = outcome {
+        super::commands::restart_queue_pump(state).await;
+        return Err(error);
+    }
     super::commands::resume_pump(state);
     Ok(ResponseData::Present(json!({ "cancelled": false })))
 }
@@ -255,14 +259,18 @@ async fn fork_at(
             forked.path
         }
     };
-    state
+    let outcome = state
         .session
         .replace_locked(RpcEngineRequest::Open {
             session_path: forked_path,
             reuse_lease: false,
         })
-        .await?;
+        .await;
     drop(lease);
+    if let Err(error) = outcome {
+        super::commands::restart_queue_pump(state).await;
+        return Err(error);
+    }
     super::commands::resume_pump(state);
     let mut data = json!({ "cancelled": false });
     if let Some(text) = selected_text {
