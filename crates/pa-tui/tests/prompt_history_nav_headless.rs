@@ -406,8 +406,11 @@ fn a_heartbeats_only_dock_never_takes_the_prompts_down() {
 /// operator's direct-navigation redesign), the right arrow walks to the
 /// heartbeats group (the 2026-09-26 dock-arrows directive — every
 /// rendered group is traversable, empty ones included), Enter opens the
-/// focused group's view, Escape returns to the editor, and the history
-/// recall works right after the round trip.
+/// focused group's view, and Escape closes the panel onto the dock's own
+/// Heartbeates item (the 2026-09-26 panel-exit ruling — leaving a panel
+/// lands on its dock item, never the prompt bar): the cancel Escape
+/// hands the editor back, and the history recall works right after the
+/// round trip.
 #[test]
 fn alt_a_arrows_and_enter_still_open_the_dock_group_view_and_recall_survives_it() {
     let mut steps = Vec::new();
@@ -421,6 +424,11 @@ fn alt_a_arrows_and_enter_still_open_the_dock_group_view_and_recall_survives_it(
     steps.push(wait_render("Heartbeats"));
     steps.push(HeadlessStep::Key(escape()));
     steps.push(wait_gone("Heartbeats"));
+    // The panel's exit hands the keyboard focus to the dock's own
+    // Heartbeates item (the panel-exit ruling), so the recall needs the
+    // dock's focus released first: the cancel Escape returns the editor,
+    // and only then the Up recalls the prompt.
+    steps.push(HeadlessStep::Key(escape()));
     steps.push(HeadlessStep::Key(up()));
     steps.push(wait_render("first prompt"));
     let frames = run_plan(steps);
