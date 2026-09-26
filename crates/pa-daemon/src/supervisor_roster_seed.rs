@@ -822,16 +822,13 @@ pub(crate) mod tests {
     /// Drain the pushed roster frames (the events a subscribed client
     /// pump forwards); anything else on the channel is not a roster push.
     pub(crate) fn drain_roster_pushes(
-        events: &mut tokio::sync::broadcast::Receiver<(
-            ClientRouting,
-            std::sync::Arc<Value>,
-        )>,
+        events: &mut tokio::sync::broadcast::Receiver<(ClientRouting, std::sync::Arc<Value>)>,
     ) -> Vec<Value> {
         let mut pushes = Vec::new();
         loop {
             match events.try_recv() {
                 Ok((ClientRouting::RosterSubscribers, payload)) => {
-                    pushes.push((*payload).clone())
+                    pushes.push((*payload).clone());
                 }
                 Ok(_) => {}
                 Err(
