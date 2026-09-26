@@ -7164,6 +7164,110 @@ mod agent_message_tests {
             Some("Target session has too many pending messages: 20 unfinished, limit is 20")
         );
     }
+
+    /// The attach response's wire shape is the TS `createAttachResult`
+    /// byte order, proven on the serialized payload: snapshot keys in TS
+    /// order, the non-slim top-level duplication between
+    /// `activeSessionId` and `snapshot`, the slim response carrying the
+    /// messages exactly once (inside the snapshot), and the duplicated
+    /// message trees byte-identical.
+    #[tokio::test]
+    async fn attach_response_wire_bytes_keep_the_ts_key_order() {
+        let worker = created_worker().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            let store = core.store.as_mut().expect("the created store");
+            store.append_entry(
+                "message",
+                json!({ "message": { "role": "user", "content": "wire bytes" } }),
+            );
+            store.append_entry(
+                "message",
+                json!({ "message": { "role": "assistant", "content": "byte order" } }),
+            );
+        }
+        for (capabilities, slim) in [(vec!["slim_attach"], true), (Vec::<&str>::new(), false)] {
+            let response = worker
+                .dispatch(
+                    "attach",
+                    &json!({
+                        "clientId": "wire-client",
+                        "capabilities": capabilities,
+                    }),
+                )
+                .await;
+            assert!(response.success, "attach failed: {response:?}");
+            let data = response.data.expect("attach carries data");
+            let payload = serde_json::to_string(&data).unwrap();
+            // serde_json preserves insertion order (preserve_order), so
+            // the first occurrence of a key name marks its byte position.
+            let after = |payload: &str, left: &str, right: &str| {
+                assert!(
+                    payload.find(&format!("\"{left}\""))
+                        < payload.find(&format!("\"{right}\"")),
+                    "{left} must serialize before {right}"
+                );
+            };
+            after(&payload, "protocol", "activeSessionId");
+            after(&payload, "activeSessionId", "snapshot");
+            after(&payload, "snapshot", "replay");
+            after(&payload, "replay", "lastEventSequence");
+            after(&payload, "lastEventSequence", "lastEventCursor");
+            after(&payload, "lastEventCursor", "client");
+            let snapshot = data.get("snapshot").expect("the attach snapshot");
+            let snapshot_payload = serde_json::to_string(snapshot).unwrap();
+            let snapshot_after = |left: &str, right: &str| {
+                assert!(
+                    snapshot_payload.find(&format!("\"{left}\""))
+                        < snapshot_payload.find(&format!("\"{right}\"")),
+                    "the snapshot's {left} must serialize before {right}"
+                );
+            };
+            snapshot_after("activeSessionId", "summary");
+            snapshot_after("summary", "state");
+            snapshot_after("state", "messages");
+            snapshot_after("messages", "lastEventSequence");
+            snapshot_after("lastEventSequence", "lastEventCursor");
+            snapshot_after("lastEventCursor", "children");
+            let messages = snapshot.get("messages").expect("the snapshot messages");
+            let rows = messages.as_array().expect("messages are an array");
+            let content: Vec<&str> = rows
+                .iter()
+                .map(|row| {
+                    row.get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                })
+                .collect();
+            assert_eq!(
+                content,
+                vec!["wire bytes", "byte order"],
+                "the snapshot carries the store's transcript rows in order"
+            );
+            if slim {
+                assert!(
+                    data.get("messages").is_none() && data.get("state").is_none(),
+                    "the slim attach duplicates no message tree at the top level"
+                );
+            } else {
+                after(&payload, "activeSessionId", "state");
+                after(&payload, "state", "messages");
+                after(&payload, "messages", "snapshot");
+                let top_messages = data.get("messages").expect("the top-level messages");
+                assert_eq!(
+                    serde_json::to_string(top_messages).unwrap(),
+                    serde_json::to_string(messages).unwrap(),
+                    "the duplicated message trees serialize to identical bytes"
+                );
+                assert_eq!(
+                    data.get("state"),
+                    snapshot.get("summary"),
+                    "the top-level state is the summary the snapshot carries"
+                );
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -11964,108 +12068,5 @@ mod recovery_verdict_tests {
             "the settled session proves nothing"
         );
         let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
-    }
-
-    /// The attach response's wire shape is the TS `createAttachResult`
-    /// byte order, proven on the serialized payload: snapshot keys in TS
-    /// order, the non-slim top-level duplication between
-    /// `activeSessionId` and `snapshot`, the slim response carrying the
-    /// messages exactly once (inside the snapshot), and the duplicated
-    /// message trees byte-identical.
-    #[tokio::test]
-    async fn attach_response_wire_bytes_keep_the_ts_key_order() {
-        let worker = created_worker().await;
-        {
-            let mut core = worker.core.lock().unwrap();
-            let store = core.store.as_mut().expect("the created store");
-            store.append_entry(
-                "message",
-                json!({ "message": { "role": "user", "content": "wire bytes" } }),
-            );
-            store.append_entry(
-                "message",
-                json!({ "message": { "role": "assistant", "content": "byte order" } }),
-            );
-        }
-        for (capabilities, slim) in [(vec!["slim_attach"], true), (Vec::<&str>::new(), false)] {
-            let response = worker
-                .dispatch(
-                    "attach",
-                    &json!({
-                        "clientId": "wire-client",
-                        "capabilities": capabilities,
-                    }),
-                )
-                .await;
-            assert!(response.success, "attach failed: {response:?}");
-            let data = response.data.expect("attach carries data");
-            let payload = serde_json::to_string(&data).unwrap();
-            // serde_json preserves insertion order (preserve_order), so
-            // the first occurrence of a key name marks its byte position.
-            let after = |payload: &str, left: &str, right: &str| {
-                assert!(
-                    payload.find(&format!("\"{left}\""))
-                        < payload.find(&format!("\"{right}\"")),
-                    "{left} must serialize before {right}"
-                );
-            };
-            after(&payload, "protocol", "activeSessionId");
-            after(&payload, "activeSessionId", "snapshot");
-            after(&payload, "snapshot", "replay");
-            after(&payload, "replay", "lastEventSequence");
-            after(&payload, "lastEventSequence", "lastEventCursor");
-            after(&payload, "lastEventCursor", "client");
-            let snapshot = data.get("snapshot").expect("the attach snapshot");
-            let snapshot_payload = serde_json::to_string(snapshot).unwrap();
-            let snapshot_after = |left: &str, right: &str| {
-                assert!(
-                    snapshot_payload.find(&format!("\"{left}\""))
-                        < snapshot_payload.find(&format!("\"{right}\"")),
-                    "the snapshot's {left} must serialize before {right}"
-                );
-            };
-            snapshot_after("activeSessionId", "summary");
-            snapshot_after("summary", "state");
-            snapshot_after("state", "messages");
-            snapshot_after("messages", "lastEventSequence");
-            snapshot_after("lastEventSequence", "lastEventCursor");
-            snapshot_after("lastEventCursor", "children");
-            let messages = snapshot.get("messages").expect("the snapshot messages");
-            let rows = messages.as_array().expect("messages are an array");
-            let content: Vec<&str> = rows
-                .iter()
-                .map(|row| {
-                    row.get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                })
-                .collect();
-            assert_eq!(
-                content,
-                vec!["wire bytes", "byte order"],
-                "the snapshot carries the store's transcript rows in order"
-            );
-            if slim {
-                assert!(
-                    data.get("messages").is_none() && data.get("state").is_none(),
-                    "the slim attach duplicates no message tree at the top level"
-                );
-            } else {
-                after(&payload, "activeSessionId", "state");
-                after(&payload, "state", "messages");
-                after(&payload, "messages", "snapshot");
-                let top_messages = data.get("messages").expect("the top-level messages");
-                assert_eq!(
-                    serde_json::to_string(top_messages).unwrap(),
-                    serde_json::to_string(messages).unwrap(),
-                    "the duplicated message trees serialize to identical bytes"
-                );
-                assert_eq!(
-                    data.get("state"),
-                    snapshot.get("summary"),
-                    "the top-level state is the summary the snapshot carries"
-                );
-            }
-        }
     }
 }
