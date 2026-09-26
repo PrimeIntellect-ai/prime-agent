@@ -10,7 +10,7 @@ fn view() -> AgentView {
 }
 
 /// A view with a long transcript and tail content an eager compose would
-/// render on every frame: the `?` shortcut guide and the working loader.
+/// render on every frame: the working loader.
 fn filled(turns: usize) -> AgentView {
     let mut view = view();
     for index in 0..turns {
@@ -19,7 +19,6 @@ fn filled(turns: usize) -> AgentView {
             kind: StatusKind::Info,
         });
     }
-    view.shortcut_guide = Some("# guide\nfirst tip\nsecond tip".to_string());
     view.working = Some(WorkingState {
         activity: "Thinking",
         message: None,
@@ -85,12 +84,12 @@ fn frames_render_an_end_section_only_when_the_window_reaches_it() {
     assert_eq!(TAIL_RENDERS.with(std::cell::Cell::get), 0);
     let rows = text_of(&top);
     assert!(rows.iter().any(|row| row.contains("prime agent")));
-    assert!(!rows.iter().any(|row| row.contains("first tip")));
+    assert!(!rows.iter().any(|row| row.contains("Thinking")));
     view.scroll_to_bottom();
     reset_section_counters();
     let tail = view.render_frame(37, 24);
     assert_eq!(SPLASH_RENDERS.with(std::cell::Cell::get), 0);
     assert_eq!(TAIL_RENDERS.with(std::cell::Cell::get), 1);
     let rows = text_of(&tail);
-    assert!(rows.iter().any(|row| row.contains("first tip")));
+    assert!(rows.iter().any(|row| row.contains("Thinking")));
 }

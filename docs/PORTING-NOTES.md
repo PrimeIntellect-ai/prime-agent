@@ -1,3 +1,100 @@
+## Bounded backpressure on the supervisor's request path (Codex finding 4, lane daemon-backpressure, 2026-09-26)
+
+**The Codex comparison and the finding.** The Codex daemon-comparison
+report (handoffs/codex-daemon-comparison.md, finding 4) maps Codex's
+`app-server-transport` against `pa-daemon`: Codex bounds its inbound
+queue (`CHANNEL_CAPACITY = 128`, `transport/mod.rs:21-24`) and answers
+a request that finds it full with the explicit JSON-RPC error
+`-32001 "Server overloaded; retry later."` (`mod.rs:228-259`) instead of
+blocking or dropping (non-request traffic awaits, `:265`); each
+connection drains a bounded 32K-message outbound queue with a
+compile-time headroom assert (`websocket.rs:46-49`). Our supervisor
+instead held unbounded queues at both hops of the request path — the
+worker command pump (`mpsc::unbounded_channel::<WorkerRequest>`, now
+`supervisor/supervision.rs`) and the per-connection dispatch channel
+(`unbounded_channel::<(Vec<Value>, bool)>`, now `supervisor.rs`) — and
+the 4096-slot client event broadcast (`broadcast::channel(4096)`)
+silently dropped lagged frames (`RecvError::Lagged(_) => {}`): a slow
+or wedged consumer produced ambiguous timeouts and invisible event
+loss, never a "slow down" signal.
+
+**The Rust mapping.** The bounds live in the new
+`pa-daemon/src/backpressure.rs` (supervisor.rs stays at its size
+budget; the ownership rule keeps new daemon seams in their own module):
+
+- `WORKER_INFLIGHT_CAPACITY = 128` — Codex's single-process bound,
+  adapted per unit: this daemon fronts N one-session worker processes,
+  so the bound applies per worker (the aggregate is 128*N, and a
+  flooding client exhausts only the session it floods). One constant
+  bounds both the in-flight set (a `tokio::sync::Semaphore` on
+  `ResidentWorker`, one permit per admitted request, held until its
+  reply resolves) and the worker command channel (admission precedes
+  enqueue, so the queue and the in-flight set share the bound — a
+  wedged writer parks at most 128 frames).
+- `CLIENT_OUTBOUND_CAPACITY = 32 * 1024` — the per-connection dispatch
+  channel's bound (the `WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY` mirror),
+  with the same compile-time assert that it exceeds the internal
+  bound. A client that reads nothing stalls only its own dispatch
+  tasks at this bound; the saved-session scan paces itself to its
+  reader via `blocking_send` (a dead connection stops the scan exactly
+  as before, via the send error).
+- `RouteAdmission` splits what a saturated route does, Codex's
+  request/notification split: `ClientRequest` (the generic client route
+  and the prompt-admission route) answers the explicit refusal the
+  moment the worker saturates — at the semaphore or at a full queue;
+  `SupervisorInternal` (stop/kill, create replay, detach cleanup,
+  polls) waits for a slot inside the route's own budget and never
+  refuses (a saturated worker surfaces the existing
+  `Session worker timed out` budget error). The whole route —
+  admission, enqueue, and reply waits — never exceeds the caller's
+  budget.
+- The wire shape: the refusal is a normal failed response carrying
+  `errorInfo: { "code": "worker_overloaded" }` (the `-32001` analog on
+  our wire — a new `DaemonErrorInfo::WorkerOverloaded` variant, the
+  same additive-error-code pattern as `CommandResultUncertain` and
+  `UpdatePrepareRefused`) with `error: "Session worker <id> is
+  overloaded; retry later"`. The refused request provably never left
+  the supervisor (nothing queued, nothing held), so a retry cannot
+  duplicate it — the unambiguous counterpart of the wedged-worker
+  timeout. Each refusal emits the `daemon event` kind
+  `worker_overloaded` (telemetry-events.md, schema v1).
+- The lagged event arm logs the client id and the dropped count to the
+  daemon log: the ring's drop stays defined behavior (a 4096-slot
+  broadcast must not block the supervisor on one slow reader), but it
+  is never invisible anymore.
+
+**Parity position.** TS has no overload surface at all — its daemon
+queue commands without bound and its clients ride ambiguous timeouts;
+the typed refusal is an additive Rust-only reliability surface, not a
+divergence from a TS behavior (unknown `errorInfo` codes render through
+the existing generic refusal paths in every client: the TUI shows the
+refusal inline — the submit path restores the draft for retry, the
+attach/create paths fall back to the agents view with the refusal as
+the status line — and the daemon log + `worker_overloaded` telemetry
+carry the field evidence for tuning the bounds).
+
+**Not ported (documented non-ports).** Codex's write-completion
+oneshots (`QueuedOutgoingMessage.write_complete_tx`) exist so a
+producer can await its frame reaching the wire; this daemon's
+per-connection outbound is a single-writer queue whose blocking
+`send().await` already provides that flow control (the queue drains
+only as the loop writes), and no current producer needs per-frame
+flush confirmation — speculative surface per BUGBOT. The worker-side
+direct-transport fan-out's own silent lag arm (`worker.rs`, the
+`broadcast::channel(4096)` event pump) is the same disease on a
+different surface and stays with the worker-split lanes.
+
+**Verifiers.** `a_saturated_worker_answers_client_requests_with_the_typed_overload_refusal`
+and `a_full_queue_answers_client_requests_with_the_same_refusal`
+(pa-daemon unit, `backpressure.rs`: at-capacity client requests get the
+explicit typed refusal and never enter the in-flight set — internal
+traffic only ever waits; the freed-slot arm admits again),
+`a_saturated_internal_route_admits_once_a_slot_frees` (the wait is for
+a slot, and a freed slot admits the waiter),
+`a_lagged_client_event_stream_is_logged` (pa-daemon unit,
+`supervisor.rs`: a real connection loop over a socket pair, a flooded
+ring, and the lag line in the daemon log).
+
 ## Goal/autonomous continuations wait for background bash (TS #2465 port, lane goal-bash-race-fix, 2026-09-25)
 
 **The TS fix.** TS PR #2465 (`b08f08efad` merged 2026-09-21): a
