@@ -955,8 +955,16 @@ mod tests {
         });
         for (label, store) in [("full", &full), ("windowed", &windowed)] {
             let stats = session_stats(store, None);
-            assert_eq!(stats["totalCost"].as_f64(), expected["totalCost"].as_f64(), "{label}");
-            assert_eq!(stats["ownCost"].as_f64(), expected["ownCost"].as_f64(), "{label}");
+            assert_eq!(
+                stats["totalCost"].as_f64(),
+                expected["totalCost"].as_f64(),
+                "{label}"
+            );
+            assert_eq!(
+                stats["ownCost"].as_f64(),
+                expected["ownCost"].as_f64(),
+                "{label}"
+            );
             assert_eq!(
                 stats["subagentsCost"].as_f64(),
                 expected["subagentsCost"].as_f64(),

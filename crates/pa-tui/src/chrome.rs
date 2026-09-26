@@ -268,7 +268,10 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
         // nothing) adds no information, exactly like the own-cost span
         // omits unknown spend. No TS precedent (TS `TopBar`'s single
         // `getCostUsd` is the combined total); sanctioned divergence.
-        if let Some(aggregate) = state.subagents_cost_usd.filter(|aggregate| *aggregate > 0.0) {
+        if let Some(aggregate) = state
+            .subagents_cost_usd
+            .filter(|aggregate| *aggregate > 0.0)
+        {
             line.push(Span::styled(format!(" + ${aggregate:.2} (subagents)"), dim));
         }
     }

@@ -375,9 +375,8 @@ impl WindowedSessionStore {
                         // bills that spend to the session's own cost,
                         // the same tolerance the retained walk's
                         // subtraction has.
-                        if let Some(child) = value
-                            .get("childUsage")
-                            .filter(|child| child.is_object())
+                        if let Some(child) =
+                            value.get("childUsage").filter(|child| child.is_object())
                         {
                             let child_cost = child
                                 .get("cost")
