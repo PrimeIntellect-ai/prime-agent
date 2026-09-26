@@ -1031,10 +1031,11 @@ impl Supervisor {
             RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
+                    self.note_daemon_event("worker_overloaded", None);
                     return Ok(crate::backpressure::overloaded_response(
                         command_type,
                         &resident.worker_id,
-                    ))
+                    ));
                 }
             },
             RouteAdmission::SupervisorInternal => {
@@ -1080,6 +1081,7 @@ impl Supervisor {
             match admission {
                 RouteAdmission::ClientRequest => {
                     resident.pending.lock().await.remove(&request_id);
+                    self.note_daemon_event("worker_overloaded", None);
                     return Ok(crate::backpressure::overloaded_response(
                         command_type,
                         &resident.worker_id,
