@@ -303,11 +303,34 @@ fn current_frame_links() -> Vec<LinkRange> {
     FRAME_LINKS.with(|cell| cell.borrow().clone())
 }
 
-fn link_at(ranges: &[LinkRange], row: usize, col: usize) -> Option<&str> {
+/// The URL of the link range covering one row/column cell, if any.
+pub(crate) fn link_at(ranges: &[LinkRange], row: usize, col: usize) -> Option<&str> {
     ranges
         .iter()
         .find(|r| r.row == row && col >= r.start_col && col < r.end_col)
         .map(|r| r.url.as_str())
+}
+
+/// The URL a click at `row`/`col` opens (TS `viewport.hyperlinkAt`'s
+/// lookup over the last composed frame's ranges).
+pub(crate) fn url_at(ranges: &[LinkRange], row: usize, col: usize) -> Option<String> {
+    link_at(ranges, row, col).map(str::to_string)
+}
+
+/// TS `openHyperlink`'s guard: a control byte never rides an opener
+/// argument, and only http/https/file targets open — a terminal-origin
+/// URL is still renderer output, so the click path keeps the opener
+/// surfaces closed to everything a browser could execute beyond a web
+/// or file location. Canonical href on success, `None` when refused.
+pub(crate) fn openable_href(url: &str) -> Option<String> {
+    if url.chars().any(char::is_control) {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    match parsed.scheme() {
+        "http" | "https" | "file" => Some(parsed.to_string()),
+        _ => None,
+    }
 }
 
 /// Terminal writer wrapper that injects OSC 8 hyperlink sequences around the
@@ -533,6 +556,49 @@ mod tests {
         assert_eq!(resolve_link_href("#s"), "#s%7F");
         // Printable fragments stay untouched, byte-identical to TS.
         assert_eq!(resolve_link_href("#section"), "#section");
+    }
+
+    #[test]
+    fn openable_href_gates_the_click_opener() {
+        // TS `openHyperlink`: control bytes never reach the opener, and
+        // only http/https/file targets open; a parseable target opens as
+        // its canonical href.
+        assert_eq!(
+            openable_href("https://example.com/docs"),
+            Some("https://example.com/docs".to_string())
+        );
+        assert_eq!(
+            openable_href("http://example.com"),
+            Some("http://example.com/".to_string())
+        );
+        assert_eq!(
+            openable_href("file:///home/user/notes"),
+            Some("file:///home/user/notes".to_string())
+        );
+        assert_eq!(openable_href("mailto:a@b.dev"), None);
+        assert_eq!(openable_href("ftp://example.com/f"), None);
+        assert_eq!(openable_href("not a url"), None);
+        assert_eq!(openable_href("https://example.com/a\x1bb"), None);
+    }
+
+    #[test]
+    fn url_at_resolves_the_covering_range() {
+        let ranges = vec![LinkRange {
+            row: 2,
+            start_col: 4,
+            end_col: 8,
+            url: "https://example.com".to_string(),
+        }];
+        assert_eq!(
+            url_at(&ranges, 2, 5),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            url_at(&ranges, 2, 4),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(url_at(&ranges, 2, 8), None, "the end column is outside");
+        assert_eq!(url_at(&ranges, 3, 5), None, "another row");
     }
 
     #[test]

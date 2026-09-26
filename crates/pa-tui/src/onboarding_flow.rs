@@ -380,7 +380,12 @@ impl OnboardingPanel {
     /// The panel's rows (TS `render`'s active-panel arm; the panel indents
     /// its own content). The auth panel's hint row renders the
     /// effective bindings, so the keybindings manager rides along.
-    pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+    pub(crate) fn render(
+        &mut self,
+        theme: &Theme,
+        width: usize,
+        kb: &KeybindingsManager,
+    ) -> Vec<Line> {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.render(theme, width, kb),
             OnboardingPanel::Providers(picker) => picker.render(theme, width),
@@ -390,13 +395,19 @@ impl OnboardingPanel {
 
     /// One key (TS the mounted panel's `handleInput`; the exit keys were
     /// answered before the panel). `None` keeps the pane waiting.
-    pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> Option<OnboardingDecision> {
+    /// `osc_sink` carries the login dialog's URL-copy OSC 52 fallback.
+    pub(crate) fn handle_key(
+        &mut self,
+        key: &str,
+        kb: &KeybindingsManager,
+        osc_sink: &mut crate::clipboard::OscSink,
+    ) -> Option<OnboardingDecision> {
         match self {
             // The dialog consumes every key itself: its mounted input
             // answers through the request's oneshot, and the flow behind
             // it settles through its own future.
             OnboardingPanel::Auth { panel, .. } => {
-                panel.handle_key(key, kb);
+                panel.handle_key(key, kb, osc_sink);
                 None
             }
             OnboardingPanel::Providers(picker) => {

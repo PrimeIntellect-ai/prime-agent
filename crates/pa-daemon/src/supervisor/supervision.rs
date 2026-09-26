@@ -387,13 +387,19 @@ impl Supervisor {
         };
 
         let executable = std::env::current_exe().context("resolve pa-daemon executable")?;
+        let stderr_log_path =
+            crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id);
+        let stderr_log = crate::worker_stderr::open_for_spawn(&stderr_log_path)?;
         let mut command = Command::new(&executable);
         command
             .arg("worker")
             .envs(launch_env)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
+            // The worker's stderr lands in its per-worker log (not the
+            // supervisor's inherited stderr, which a detached supervisor
+            // never had): the launch failure errors below tail this file.
+            .stderr(std::process::Stdio::from(stderr_log));
         if std::path::Path::new(&cwd).is_dir() {
             command.current_dir(&cwd);
         }
@@ -434,7 +440,10 @@ impl Supervisor {
         {
             let mut child = child;
             let _ = child.kill().await;
-            return Err(error);
+            return Err(crate::worker_stderr::not_ready_with_tail(
+                error,
+                &stderr_log_path,
+            ));
         }
         Ok(child)
     }
@@ -733,7 +742,16 @@ impl Supervisor {
                 // what actually happened (never the generic route timeout
                 // text, which pointed triage at the wrong seam).
                 if error.to_string() == "Session worker timed out" {
-                    anyhow!("session worker {} did not come up in time", resident.worker_id)
+                    // The worker answered nothing inside the launch budget:
+                    // its captured stderr tail rides the failure (the same
+                    // evidence the probe arm carries).
+                    crate::worker_stderr::not_ready_with_tail(
+                        anyhow!("session worker {} did not come up in time", resident.worker_id),
+                        &crate::worker_stderr::log_path(
+                            &self.options.agent_dir,
+                            &resident.worker_id,
+                        ),
+                    )
                 } else {
                     error
                 }

@@ -637,6 +637,15 @@ pub(crate) struct SessionUi {
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
+    /// TS `fullscreenPressedHyperlink`: the link under the last plain left
+    /// press; a release without a drag opens it.
+    pressed_hyperlink: Option<String>,
+    /// TS `fullscreenLeftMouseDragged`: the left press turned into a drag,
+    /// so its release ends the selection instead of opening the link.
+    left_mouse_dragged: bool,
+    /// Links opened by clicks this run (headless runs have no terminal to
+    /// hand a browser to; the verifier reads these).
+    pub(crate) opened_urls: Vec<String>,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
@@ -659,6 +668,27 @@ pub(crate) enum RebuildKind {
     /// held cards stay mounted and the `bashFinished` edge settles a run
     /// that ended behind the dead link.
     Resync,
+}
+
+/// How the attach settles the dock's data before the rebuild renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockFold {
+    /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
+    /// responses into the session before the attach returns: the dock
+    /// (the panel and its divider under the prompt bar) is first-frame
+    /// geometry — its visibility must be final when the first content
+    /// frame renders (open, switch, rebind), never a late layout shift.
+    FirstFrame,
+    /// Clear and hand the dock to the background refreshes: a brand-new
+    /// session (`/new`) owns nothing, so its dock is deterministically
+    /// empty — the fold cannot change geometry, and waiting on two
+    /// registry reads would only delay the new chat's first frame.
+    Fresh,
+    /// Hold the dock's data and let the background refreshes update it: a
+    /// same-session re-attach of an already-up surface (the §10.4
+    /// recovery, the session reconnect) must not flicker its dock away,
+    /// and the attach's budget must cover the attach alone.
+    Held,
 }
 
 /// The attached snapshot's bash slot state, captured by `attach_session`
@@ -843,9 +873,12 @@ impl SessionUi {
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
             copies: Vec::new(),
+            pressed_hyperlink: None,
+            left_mouse_dragged: false,
+            opened_urls: Vec::new(),
         };
         session
-            .attach_session(&active_session_id)
+            .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
         Ok(session)
@@ -896,7 +929,11 @@ impl SessionUi {
             self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        let attach = tokio::time::timeout(
+            REATTACH_BUDGET,
+            self.attach_session(&durable, DockFold::Held),
+        )
+        .await;
         match attach {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -975,7 +1012,11 @@ impl SessionUi {
     /// locally bound but server-detached - the previous subscription stays
     /// until the new one exists, and the next supersede notice or the
     /// submit-path retry re-attaches when a worker can serve the session.
-    pub(crate) async fn attach_session(&mut self, active_session_id: &str) -> Result<()> {
+    pub(crate) async fn attach_session(
+        &mut self,
+        active_session_id: &str,
+        dock_fold: DockFold,
+    ) -> Result<()> {
         let previous = self.active_session_id.clone();
         // A direct link is bound to one session: drop it when switching.
         if self
@@ -1081,21 +1122,48 @@ impl SessionUi {
         self.roster.clear();
         self.subagents_focused = false;
         self.subscribe_roster().await;
-        // The heartbeat catalog is scoped to the session: drop the old
-        // session's rows and fetch fresh ones in the background (TS
-        // refreshes the catalog on every chat open).
-        self.heartbeat_catalog.clear();
-        self.spawn_heartbeat_refresh();
+        // The dock's heartbeat rows follow `dock_fold` (the enum's
+        // contract): a first-content-frame attach folds the fresh fetch
+        // BEFORE the attach returns — the dock's visibility (the panel
+        // and its divider under the prompt bar) is first-frame geometry,
+        // never a late layout shift (the operator's 2026-09-26
+        // zero-shift ruling). TS guarantees the same for its dock: the
+        // counts seed from the attach snapshot (`seedSubagentSummary`)
+        // and the roster subscription is awaited before the first
+        // content render; TS's own heartbeat fetch stays fire-and-forget
+        // only because its summary line renders no heartbeat rows.
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
+            // The held dock keeps its data: an already-up surface's dock
+            // must not flicker away while the background refresh runs.
+            DockFold::Held => {}
+        }
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_heartbeat_catalog().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_heartbeat_refresh(),
+        }
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
-        // The bash registry is kernel-owned and session-scoped: the previous
-        // session's rows are not this one's (the next poll refills).
-        self.bash_activities = serde_json::json!({"activities": []});
+        // The dock's bash rows follow the same `dock_fold` contract; the
+        // capability gate matches the background refresh (older daemons
+        // never see the request), and a failed fold fetch leaves the
+        // cleared registry (the 2s poll refills).
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => {
+                self.bash_activities = serde_json::json!({"activities": []});
+            }
+            // The held dock keeps its registry for the same reason it
+            // keeps the heartbeat catalog above.
+            DockFold::Held => {}
+        }
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
-        self.spawn_bash_activity_refresh();
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_bash_activities().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
+        }
         self.pending_model = reconstructed.model_id;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
@@ -1456,6 +1524,24 @@ impl SessionUi {
         }
         view.follow();
         self.update_fast_filter(view);
+        // An open `/heartbeats` picker follows the rebuilt session's
+        // catalog (the channel fold's `apply_catalog` path, which the
+        // attach-time inline fold replaced): without this, a rebind
+        // leaves the picker showing the previous session's rows, and
+        // its Manage actions would target the stale active session.
+        if let Some(picker) = view.heartbeats_picker.as_mut() {
+            picker.apply_catalog(self.heartbeat_catalog.clone(), None);
+        }
+        // The brand splash is the EMPTY chat's header (TS mounts
+        // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
+        // non-empty transcript suppresses it — the chat opened or
+        // switched directly into content, where TS's own direct opens
+        // attach before mount and the tail-anchored viewport scrolls the
+        // splash out of reach — while every rebuild into an empty chat
+        // keeps it (a new session shows its header; the incremental
+        // first-turn growth never passes through here, so a new chat's
+        // splash scrolls away exactly like TS).
+        view.splash_suppressed = !view.chat.is_empty();
         self.dirty = true;
     }
 
@@ -2503,7 +2589,11 @@ impl SessionUi {
                     {
                         rebind_available = false;
                         let durable = self.session_id.clone();
-                        if self.attach_session(&durable).await.is_ok() {
+                        if self
+                            .attach_session(&durable, DockFold::FirstFrame)
+                            .await
+                            .is_ok()
+                        {
                             // The fresh attach snapshot owns the transcript;
                             // the replayed prompt renders on top of it.
                             self.rebuild_view(view, RebuildKind::Rebind);
@@ -2815,7 +2905,7 @@ impl SessionUi {
             }
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id).await?;
+                self.attach_session(&id, DockFold::Fresh).await?;
                 // The title's pair is session-scoped: fetch the new
                 // session's stats before the rebuild copies them into
                 // the chrome, or the rebind would ride the session being
@@ -3856,7 +3946,7 @@ impl SessionUi {
         }
         let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_key(&id, kb);
+            panel.handle_key(&id, kb, &mut self.osc_sink);
         }
         // A cancel key on an armed panel flow ends it cooperatively
         // (#2770): the flag marks the blocking body (no credential write
@@ -4535,6 +4625,7 @@ impl SessionUi {
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
+        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
@@ -6032,7 +6123,7 @@ impl SessionUi {
         // so the switch lands on an empty prompt (the draft returns on a
         // switch back).
         self.stash_draft_for_switch(view);
-        match self.attach_session(&id).await {
+        match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
                 // Session-scoped stats again: the rebuilt title must show
                 // the switched-to session's pair, not the one being left.
@@ -6173,28 +6264,29 @@ impl SessionUi {
         Ok(())
     }
 
-    /// A mouse report (TS `handleFullscreenInput`'s selection branches):
+    /// A mouse report (TS `handleFullscreenInput`'s mouse branches):
     /// wheel turns scroll the transcript window by three lines; a left
-    /// press starts a selection (transcript, or the dock's frame surface
-    /// when the press is outside the window), a drag extends it with
-    /// edge auto-scroll, and a release copies the spanned text out
-    /// through OSC 52. Reports are consumed even while a picker, selector,
-    /// or loader owns the frame (the TS overlay-focus gate) — the wheel
-    /// never scrolls behind one, but its rows select; while tracking is
-    /// inactive every report is consumed without a dispatch. The onboarding
-    /// pane replaces the whole frame, so its runs consume reports without
-    /// a selection surface (a known deviation from the TS inline block).
+    /// press starts a selection (transcript, or the frame surface when the
+    /// press is outside the window), a drag extends it with edge
+    /// auto-scroll, and a release copies the spanned text out through OSC
+    /// 52. A release without a drag opens the link under the press
+    /// position (TS `fullscreenPressedHyperlink`: terminals gate native
+    /// link handling while mouse reporting is active, so clicks the TUI
+    /// consumes must open their OSC 8 targets themselves). Reports are
+    /// consumed even while a picker, selector, or loader owns the frame
+    /// (the TS overlay-focus gate) — the wheel never scrolls behind one,
+    /// but its rows select; while tracking is inactive every report is
+    /// consumed without a dispatch. The onboarding pane owns the frame the
+    /// same way (TS's splash is a 100% overlay): its rows select as frame
+    /// regions and its links open, but no transcript scrolls behind it.
     pub(crate) fn handle_mouse(&mut self, event: crate::mouse::MouseEvent, view: &mut AgentView) {
         if !crate::mouse_tracking::active() {
             return;
         }
-        if view.onboarding.is_some() {
-            return;
-        }
         // TS `isFullscreenOverlayFocused`: the `/model` and `/effort`
         // pickers, the `/tree` and `/fork` selectors, the `/mcp`
-        // connections view, and the `/share` loader own the frame like the
-        // TS overlays.
+        // connections view, the `/share` loader, and the onboarding splash
+        // own the frame like the TS overlays.
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
@@ -6203,7 +6295,21 @@ impl SessionUi {
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
-            || view.mcp_view.is_some();
+            || view.mcp_view.is_some()
+            || view.onboarding.is_some();
+        // TS records the press state before the dispatch: a drag report
+        // marks the press, a plain press remembers the link under it.
+        let left = event.button == crate::mouse::BUTTON_LEFT;
+        let release_was_drag = left && !event.press && self.left_mouse_dragged;
+        // Screen cells are one-based in the report (TS passes `event.y - 1`).
+        let row = event.y.saturating_sub(1) as usize;
+        let col = event.x.saturating_sub(1) as usize;
+        if left && event.press {
+            self.left_mouse_dragged = event.motion;
+            if !event.motion {
+                self.pressed_hyperlink = view.hyperlink_at(row, col);
+            }
+        }
         // Wheel turns scroll only on the session surface; a pane owns the
         // frame, the turn is consumed without scrolling.
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
@@ -6213,10 +6319,8 @@ impl SessionUi {
             }
             return;
         }
-        // Screen cells are one-based in the report (TS passes `event.y - 1`).
-        let row = event.y.saturating_sub(1) as usize;
-        let col = event.x.saturating_sub(1) as usize;
-        let left_press = event.press && event.button == crate::mouse::BUTTON_LEFT;
+        let left_press = event.press && left;
+        let mut open_pressed_link = false;
         if overlay_focused {
             // TS tries the frame surface first while an overlay owns the
             // frame (its rows are the selectable spans), then the window.
@@ -6237,10 +6341,9 @@ impl SessionUi {
                 self.dirty = true;
             } else if !event.press {
                 view.clear_selection();
+                open_pressed_link = left && !event.motion && !release_was_drag;
             }
-            return;
-        }
-        if left_press && !event.motion {
+        } else if left_press && !event.motion {
             self.stop_selection_auto_scroll();
             // TS `beginSelection` then the `beginFrameSelection` fallback.
             if !view.begin_selection(row, col) {
@@ -6261,6 +6364,40 @@ impl SessionUi {
         } else if !event.press {
             self.stop_selection_auto_scroll();
             view.clear_selection();
+            open_pressed_link = left && !event.motion && !release_was_drag;
+        }
+        // TS opens `fullscreenPressedHyperlink ?? hyperlinkAt(release)`
+        // on a plain left release: the pressed position wins, and a
+        // release over another link still opens that link (a plain click
+        // moves no cells).
+        if open_pressed_link {
+            let url = self
+                .pressed_hyperlink
+                .take()
+                .or_else(|| view.hyperlink_at(row, col));
+            if let Some(url) = url {
+                self.open_hyperlink(&url);
+            }
+        }
+        // TS clears the press state after every left release, so a later
+        // release can never open a stale press.
+        if left && !event.press {
+            self.left_mouse_dragged = false;
+            self.pressed_hyperlink = None;
+        }
+    }
+
+    /// Open one clicked link (TS `openHyperlink`): the href guard admits
+    /// only web and file locations, then the platform opener launches it
+    /// fire-and-forget. A headless run has no terminal — and no browser to
+    /// hand one to — so it records the URL for its verifier instead.
+    fn open_hyperlink(&mut self, url: &str) {
+        let Some(href) = crate::hyperlinks::openable_href(url) else {
+            return;
+        };
+        self.opened_urls.push(href.clone());
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            crate::browser::open_in_browser(&href);
         }
     }
 
@@ -6403,9 +6540,41 @@ impl SessionUi {
         Ok(())
     }
 
-    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
-        if !self
-            .client
+    /// The open-time kernel-bash fold: the first `list_kernel_bash`
+    /// response lands in the registry synchronously with the attach
+    /// (capability-gated and bounded like the background refresh), so
+    /// the dock's bash rows ride the first content frame instead of
+    /// popping in late. A failed fetch leaves the just-cleared registry
+    /// — the 2s poll refills.
+    async fn fetch_bash_activities(&mut self) {
+        if !self.kernel_bash_supported() {
+            return;
+        }
+        // Advance the epoch so a poll still in flight from before the
+        // attach (the 2s cadence's spawned list) never overwrites this
+        // fold with its older registry: the epoch check drops it at
+        // fold time.
+        self.bash_list_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        self.bash_activities = data;
+    }
+
+    /// Whether the daemon advertises the kernel-bash registry (older
+    /// daemons never see the list requests).
+    fn kernel_bash_supported(&self) -> bool {
+        self.client
             .hello()
             .get("serverCapabilities")
             .and_then(Value::as_array)
@@ -6413,7 +6582,10 @@ impl SessionUi {
                 caps.iter()
                     .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
             })
-        {
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
+        if !self.kernel_bash_supported() {
             return;
         }
         // The 2s poll, the view open, and the post-kill refresh can
@@ -6875,6 +7047,37 @@ impl SessionUi {
             (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
+    }
+
+    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
+    /// response scopes and sorts into the catalog synchronously with the
+    /// attach (bounded like every UI request), so the dock's heartbeat
+    /// rows ride the first content frame instead of popping in late. A
+    /// failed or timed-out fetch leaves the just-cleared catalog — the
+    /// same empty-open state the background refresh's failure arm
+    /// produces, and the next `heartbeats_changed` event refills.
+    async fn fetch_heartbeat_catalog(&mut self) {
+        // Advance the epoch so a refresh still in flight from before the
+        // attach (a `heartbeats_changed` burst's spawned fetch) never
+        // overwrites this fold with its older catalog: the epoch's
+        // staleness check drops it at fold time.
+        self.heartbeat_refresh_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::HeartbeatsList {
+                    id: None,
+                    active_session_id: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
+        sort_heartbeats(&mut heartbeats);
+        self.heartbeat_catalog = heartbeats;
     }
 
     /// Fire a background heartbeat-catalog refresh (TS
