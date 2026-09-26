@@ -396,6 +396,10 @@ pub(crate) struct SessionUi {
     /// Context usage + cost refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
     cost_usd: Option<f64>,
+    /// The aggregate descendant-subagent spend from the same stats (the
+    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
+    /// split fields).
+    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
@@ -760,6 +764,7 @@ impl SessionUi {
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
             cost_usd: None,
+            subagents_cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
             steering_mode: "all".to_string(),
@@ -1392,6 +1397,7 @@ impl SessionUi {
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
@@ -1576,15 +1582,27 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        // The top bar's spend is the FULL session+subagents total
-        // (`totalCost`, the /context root totalUsage's fold): the TS
-        // active-region `cost` drops pre-compaction spend, which reads
-        // as an inaccurate title after every compaction. Older daemons
-        // without the field fall back to the TS shape.
-        self.cost_usd = data
-            .get("totalCost")
-            .and_then(Value::as_f64)
-            .or_else(|| data.get("cost").and_then(Value::as_f64));
+        // The title shows the session's own spend plus the aggregate of
+        // its subagents (`ownCost`/`subagentsCost`, the split of the
+        // full session+subagents total): the TS active-region `cost`
+        // drops pre-compaction spend, which reads as an inaccurate
+        // title after every compaction. The split lands together; a
+        // daemon without `ownCost` serves the combined `totalCost`
+        // (or the TS `cost`), and a subagent suffix next to that would
+        // double-count — the suffix only rides the split's own half.
+        match data.get("ownCost").and_then(Value::as_f64) {
+            Some(own) => {
+                self.cost_usd = Some(own);
+                self.subagents_cost_usd = data.get("subagentsCost").and_then(Value::as_f64);
+            }
+            None => {
+                self.cost_usd = data
+                    .get("totalCost")
+                    .and_then(Value::as_f64)
+                    .or_else(|| data.get("cost").and_then(Value::as_f64));
+                self.subagents_cost_usd = None;
+            }
+        }
         self.dirty = true;
     }
 
@@ -1592,6 +1610,7 @@ impl SessionUi {
     pub(crate) fn rebuild_tray(&mut self, view: &mut AgentView) {
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         view.chrome.chat_name = self.session_display();
         self.dirty = true;
     }

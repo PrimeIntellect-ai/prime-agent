@@ -56,6 +56,10 @@ pub struct ChromeState {
     pub chat_name: String,
     /// Session spend (USD) beside the chat name.
     pub cost_usd: Option<f64>,
+    /// The aggregate descendant-subagent spend (USD) rendered after the
+    /// own cost as ` + $X (subagents)` (the title split; `None` or zero
+    /// omits the suffix).
+    pub subagents_cost_usd: Option<f64>,
     /// Context usage: tokens, window, percent (tray right label).
     pub context: Option<ContextUsage>,
     /// `← manage` hint: shown for persisted (attachable) sessions.
@@ -258,6 +262,15 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
     if let Some(cost) = state.cost_usd.filter(|cost| *cost >= 0.0) {
         line.push(Span::styled("  ".to_string(), Style::default()));
         line.push(Span::styled(format!("${cost:.2}"), dim));
+        // The subagent aggregate rides the own cost as a labeled pair
+        // (the operator's ask): rendered only when known and strictly
+        // positive — zero (no subagents, or subagents that spent
+        // nothing) adds no information, exactly like the own-cost span
+        // omits unknown spend. No TS precedent (TS `TopBar`'s single
+        // `getCostUsd` is the combined total); sanctioned divergence.
+        if let Some(aggregate) = state.subagents_cost_usd.filter(|aggregate| *aggregate > 0.0) {
+            line.push(Span::styled(format!(" + ${aggregate:.2} (subagents)"), dim));
+        }
     }
     line
 }
@@ -987,6 +1000,44 @@ mod tests {
         assert!(text.contains("shared-cwd  $0.00"));
         let start = text.find("shared-cwd").unwrap();
         assert_eq!(start, 55);
+    }
+
+    /// The title's own + subagent aggregate pair (the operator's ask):
+    /// both values render in the details-view cost format with the
+    /// labeled `(subagents)` suffix on the aggregate.
+    #[test]
+    fn top_bar_trails_the_subagent_aggregate_beside_the_own_cost() {
+        let state = ChromeState {
+            chat_name: "orchestrator".to_string(),
+            cost_usd: Some(58.1),
+            subagents_cost_usd: Some(94.36),
+            ..Default::default()
+        };
+        let line = render_top_bar(&state, &theme(), 120);
+        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+        assert!(
+            text.contains("orchestrator  $58.10 + $94.36 (subagents)"),
+            "the pair renders: {text}"
+        );
+    }
+
+    /// A zero aggregate (no subagents, or subagents with no spend)
+    /// omits the suffix cleanly: the title shows the own cost alone,
+    /// exactly like a session that never spawned.
+    #[test]
+    fn top_bar_omits_the_subagent_suffix_at_zero() {
+        for subagents in [None, Some(0.0)] {
+            let state = ChromeState {
+                chat_name: "solo".to_string(),
+                cost_usd: Some(1.0),
+                subagents_cost_usd: subagents,
+                ..Default::default()
+            };
+            let line = render_top_bar(&state, &theme(), 120);
+            let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+            assert!(text.contains("solo  $1.00"), "the own cost: {text}");
+            assert!(!text.contains("subagents"), "no suffix at zero: {text}");
+        }
     }
 
     #[test]

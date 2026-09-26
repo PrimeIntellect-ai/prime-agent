@@ -147,6 +147,15 @@ pub struct WindowStats {
     /// undercount, so the version bump retires those caches.
     #[serde(default)]
     pub summarization_cost: f64,
+    /// The discarded prefix's attributed child spend — the subagent half
+    /// of `cost`: the `child_usage_attributed` rows targeting older-path
+    /// assistants, summed over the same rows whose cumulative aggregate
+    /// the walk folds into the prefix totals. Snapshot version 7 is the
+    /// first format that carries it: a v6 sidecar deserializes it as
+    /// zero and would bill the prefix's subagent spend to the session's
+    /// own cost, so the version bump retires those caches.
+    #[serde(default)]
+    pub attributed_child_cost: f64,
 }
 
 /// One older-path assistant row's spend-relevant usage: the walk records
@@ -263,6 +272,11 @@ impl WindowedSessionStore {
         let mut older_path_stats = WindowStats::default();
         let mut older_usage: Vec<(String, OlderPathUsage)> = Vec::new();
         let mut older_aggregates: HashMap<String, OlderPathUsage> = HashMap::new();
+        // The attributed child spend per older-path target (the
+        // `childUsage` cost the attribution rows carry): the subagent
+        // half of the prefix's `cost`, read at the same rows whose
+        // aggregate the walk folds in.
+        let mut child_cost_by_target: HashMap<String, f64> = HashMap::new();
         let mut first_user_line = None;
         let mut expected: Option<String> = None;
         let mut leaf_id = None;
@@ -353,6 +367,26 @@ impl WindowedSessionStore {
                         older_aggregates
                             .entry(target.to_owned())
                             .or_insert_with(|| OlderPathUsage::from_usage(aggregate));
+                        // The batch's child spend sums across every
+                        // attribution row of the target (each aggregate
+                        // is cumulative, so the sum is the folded row's
+                        // attributed portion). A malformed `childUsage`
+                        // block adds nothing — the own/total split then
+                        // bills that spend to the session's own cost,
+                        // the same tolerance the retained walk's
+                        // subtraction has.
+                        if let Some(child) = value
+                            .get("childUsage")
+                            .filter(|child| child.is_object())
+                        {
+                            let child_cost = child
+                                .get("cost")
+                                .and_then(|cost| cost.get("total"))
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0);
+                            let sum = child_cost_by_target.entry(target.to_owned()).or_default();
+                            *sum += child_cost;
+                        }
                     }
                 }
             }
@@ -549,6 +583,15 @@ impl WindowedSessionStore {
             older_path_stats.cache_read += folded.cache_read;
             older_path_stats.cache_write += folded.cache_write;
             older_path_stats.cost += folded.cost;
+            // The folded row bills own + attributed spend: the
+            // captured child sums carry the attributed half separately,
+            // so the whole-file own/subagents split bills the prefix's
+            // subagent spend to the aggregate it belongs to (only
+            // folded rows carry a child sum — the capture rides the
+            // same validity gate as the aggregate).
+            if let Some(child_cost) = child_cost_by_target.get(id) {
+                older_path_stats.attributed_child_cost += *child_cost;
+            }
         }
         let first_user_message = first_user_line
             .and_then(|line| serde_json::from_slice::<serde_json::Value>(&line).ok())
