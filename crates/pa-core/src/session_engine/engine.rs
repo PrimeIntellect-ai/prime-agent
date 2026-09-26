@@ -623,7 +623,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 // contract as the `to_value`/`from_value` crossing,
                 // without the `Value` tree over the whole resumed
                 // context (this runs on every session open).
-                .filter_map(|message| super::messages::cross_wire(&message))
+                .filter_map(|message| super::messages::cross_wire_loop_message(&message))
                 .collect(),
         )
     };

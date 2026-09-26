@@ -508,7 +508,7 @@ impl AgentSession {
             // The buffered wire cross (see `cross_wire`): same JSON
             // contract as the `to_value`/`from_value` crossing, without
             // the `Value` tree over the whole rebuilt context.
-            .filter_map(|message| messages::cross_wire(&message))
+            .filter_map(|message| messages::cross_wire_loop_message(&message))
             .collect();
         let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
@@ -619,7 +619,7 @@ impl AgentSession {
             // The buffered wire cross (see `cross_wire`): same JSON
             // contract as the `to_value`/`from_value` crossing, without
             // the `Value` tree over the whole rebuilt context.
-            .filter_map(|message| messages::cross_wire(&message))
+            .filter_map(|message| messages::cross_wire_loop_message(&message))
             .collect();
         self.agent.set_messages(loop_messages).await;
         Ok(())
@@ -675,7 +675,7 @@ impl AgentSession {
                 // contract as the `to_value`/`from_value` crossing,
                 // without the `Value` tree over the whole rebuilt
                 // context.
-                .filter_map(|message| messages::cross_wire(&message))
+                .filter_map(|message| messages::cross_wire_loop_message(&message))
                 .collect();
         drop(session);
         self.agent.set_messages(loop_messages).await;

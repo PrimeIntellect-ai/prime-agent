@@ -434,9 +434,43 @@ where
 {
     let mut bytes = Vec::new();
     let mut serializer = serde_json::Serializer::new(&mut bytes);
-    value.serialize(&mut serializer).ok()?;
-    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
-    U::deserialize(&mut deserializer).ok()
+    if value.serialize(&mut serializer).is_ok() {
+        let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+        if let Ok(crossed) = U::deserialize(&mut deserializer) {
+            return Some(crossed);
+        }
+    }
+    // Degenerate-input fallback, the exact pre-buffering path: a
+    // flattened `rest` key colliding with a typed field serializes the
+    // wire key twice, and the buffered parse rejects the duplicate where
+    // the `Value` map collapses it last-wins. The fallback keeps every
+    // message the old crossing kept, with the old result — never a
+    // drop. Real inputs never collide (a parsed message's `rest` holds
+    // only keys its struct did not model), so the fallback never runs
+    // in practice.
+    let wire = serde_json::to_value(value).ok()?;
+    serde_json::from_value(wire).ok()
+}
+
+/// The buffered crossing for the loop's untagged message type
+/// (`pa_agent::AgentMessage = Standard(Message) | Custom(...)`), with
+/// the old semantics preserved exactly: the standard shapes cross
+/// through the compact byte path deserialized straight as the tagged
+/// `Message` shape (no untagged variant probing — a colliding
+/// degenerate input can never satisfy it and re-resolve as `Custom`,
+/// where the old `Value` crossing collapsed the duplicate and produced
+/// `Standard`), and anything the byte parse rejects falls back to the
+/// full `to_value`/`from_value` round-trip — identical input, identical
+/// output, never a drop.
+pub(crate) fn cross_wire_loop_message<T>(value: &T) -> Option<pa_agent::types::AgentMessage>
+where
+    T: serde::Serialize,
+{
+    if let Some(standard) = cross_wire::<T, pa_agent::types::Message>(value) {
+        return Some(pa_agent::types::AgentMessage::Standard(standard));
+    }
+    let wire = serde_json::to_value(value).ok()?;
+    serde_json::from_value(wire).ok()
 }
 
 /// One loop custom row as its session wire shape, when the row matches a
@@ -582,6 +616,125 @@ mod tests {
         }
     }
 
+
+    /// Degenerate wire input, kept exactly like the old crossing: a
+    /// flattened `rest` key colliding with a typed field (one per
+    /// message shape) serializes the wire key twice — the buffered byte
+    /// parse rejects the duplicate, the fallback `Value` round-trip
+    /// collapses it last-wins exactly like the pre-buffering path. The
+    /// message must survive with the old result, never drop and never
+    /// re-resolve as a `Custom` row (the untagged variant the byte
+    /// parse could otherwise land in).
+    #[test]
+    fn wire_cross_keeps_colliding_rest_keys_like_the_value_crossing() {
+        use pa_types::ai::{
+            AssistantMessage, Message, TextContent, ToolResultMessage, UserContent,
+            UserContentBlock, UserMessage,
+        };
+        use pa_types::JsonMap;
+
+        fn rest(value: serde_json::Value) -> JsonMap {
+            match value {
+                serde_json::Value::Object(map) => map,
+                other => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("rest".to_string(), other);
+                    map
+                }
+            }
+        }
+
+        fn old_path(value: &Message) -> Option<pa_agent::types::AgentMessage> {
+            serde_json::from_value::<pa_agent::types::AgentMessage>(
+                serde_json::to_value(value).unwrap(),
+            )
+            .ok()
+        }
+
+        let user = Message::User(UserMessage {
+            content: UserContent::Text("kept".to_string()),
+            timestamp: 1,
+            rest: rest(serde_json::json!({"timestamp": 2})),
+        });
+        let assistant = Message::Assistant(AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(TextContent {
+                text: "kept".to_string(),
+                text_signature: None,
+                rest: Default::default(),
+            })],
+            api: Default::default(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Default::default(),
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 3,
+            rest: rest(serde_json::json!({"model": "colliding"})),
+        });
+        let tool_result = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "echo".to_string(),
+            content: vec![UserContentBlock::Text(TextContent {
+                text: "kept".to_string(),
+                text_signature: None,
+                rest: Default::default(),
+            })],
+            details: None,
+            is_error: false,
+            timestamp: 4,
+            rest: rest(serde_json::json!({"isError": true})),
+        });
+
+        for message in [&user, &assistant, &tool_result] {
+            let old = old_path(message);
+            let buffered = cross_wire_loop_message(message);
+            assert!(old.is_some(), "the old crossing kept the message");
+            assert_eq!(old, buffered, "the buffered crossing must match the old");
+        }
+        // The collapsed value won: the user row crossed with the LAST
+        // timestamp, never dropped.
+        let crossed_user = cross_wire_loop_message(&user).unwrap();
+        match crossed_user {
+            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(user)) => {
+                assert_eq!(user.timestamp, 2);
+            }
+            other => panic!("expected standard user, got {other:?}"),
+        }
+    }
+
+    /// Non-ASCII and malformed-wire content through the buffered cross:
+    /// multi-byte text survives byte-identically, and an unmodeled raw
+    /// block (the wire form this version does not model) keeps the old
+    /// crossing's result — crossed as the standard shape when the target
+    /// models it, never dropped.
+    #[test]
+    fn wire_cross_carries_non_ascii_and_raw_blocks_like_the_value_crossing() {
+        use pa_types::ai::{Message, TextContent, UserContent, UserContentBlock, UserMessage};
+        use pa_types::JsonMap;
+
+        let text = "по-русски ✨ マルチバイト \u00e9\u00e8 emoji 🚀";
+        let user = Message::User(UserMessage {
+            content: UserContent::Blocks(vec![
+                UserContentBlock::Text(TextContent {
+                    text: text.to_string(),
+                    text_signature: None,
+                    rest: Default::default(),
+                }),
+                UserContentBlock::Raw(serde_json::json!({"type": "mystery", "keep": [1]})),
+            ]),
+            timestamp: 1,
+            rest: JsonMap::new(),
+        });
+        let old: Option<pa_agent::types::AgentMessage> =
+            serde_json::from_value(serde_json::to_value(&user).unwrap()).ok();
+        let buffered = cross_wire_loop_message(&user);
+        assert_eq!(old.is_some(), buffered.is_some());
+        assert_eq!(old, buffered);
+    }
     /// The live-context crossing after #2810: the rebuilds hand session
     /// rows (user, assistant, tool result, and the session-only roles
     /// that ride the loop as loop `Custom` rows — custom, branch
