@@ -1339,7 +1339,6 @@ impl Supervisor {
     // Client connections (JSONL transport)
     // ------------------------------------------------------------------
 
-
     /// `prepare_update_restart`: accept or poll the prepare transaction.
     ///
     /// The RPC contract: a new `updateId` starts the transaction and waits
@@ -3208,8 +3207,6 @@ fn salvage_command_type(line: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
 }
-
-
 
 /// One resident's roster identity for the `list --all` merge.
 struct ResidentRoot {
