@@ -21,6 +21,7 @@ use pa_types::daemon::{
     DaemonPeerTransportTicket, DaemonWorkerCommand, DaemonWorkerLifecycle, DaemonWorkerPeerGrant,
 };
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
@@ -185,6 +186,7 @@ impl Supervisor {
                 "worker_register_peer_transport",
                 payload,
                 GRANT_REGISTRATION_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
             )
             .await?;
         if !response.success {

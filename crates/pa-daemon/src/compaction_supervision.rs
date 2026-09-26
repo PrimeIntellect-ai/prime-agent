@@ -30,6 +30,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
+use crate::backpressure::RouteAdmission;
+
 /// How long the supervisor waits for the worker's own `compaction_end`
 /// after an abort before declaring the run terminal. A healthy worker
 /// lands the abort race in well under a second; the grace only bounds the
@@ -510,6 +512,7 @@ impl crate::supervisor::Supervisor {
                         "abort_compaction",
                         payload,
                         ABORT_FORWARD_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                     .and_then(|response| {
