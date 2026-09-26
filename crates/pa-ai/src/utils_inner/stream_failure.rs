@@ -3,7 +3,10 @@
 //! into a generic string before it is logged and persisted.
 //! Ported from `packages/ai/src/utils/stream-failure.ts`.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
+use serde_json::Map;
 
 use crate::types::AssistantMessage;
 use crate::utils::diagnostics::{
@@ -524,13 +527,13 @@ pub fn stream_failure_message(info: &StreamFailureInfo, detail: Option<&str>) ->
     }
     let mut message = kind_message(info.kind).to_string();
     if !qualifiers.is_empty() {
-        message += &format!(" ({})", qualifiers.join(", "));
+        let _ = write!(message, " ({})", qualifiers.join(", "));
     }
     if let Some(detail) = detail {
-        message += &format!(": {detail}");
+        let _ = write!(message, ": {detail}");
     }
     if let Some(request_id) = &info.request_id {
-        message += &format!(" [request_id: {request_id}]");
+        let _ = write!(message, " [request_id: {request_id}]");
     }
     message
 }
@@ -898,7 +901,7 @@ pub(crate) fn diagnostic_error_info(error: &ProviderError) -> DiagnosticErrorInf
         message,
         stack: None,
         code,
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -949,6 +952,7 @@ pub fn record_stream_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn classifies_provider_error_types() {
@@ -1062,7 +1066,7 @@ mod tests {
     fn truncates_raw_payload() {
         let long = "x".repeat(2500);
         let truncated = truncate_raw_payload(&long);
-        assert!(truncated.chars().count() == 2001);
+        assert_eq!(truncated.chars().count(), 2001);
         assert!(truncated.ends_with('\u{2026}'));
     }
 
@@ -1306,7 +1310,7 @@ mod tests {
             message: "429 {\"error\":{\"code\":429}}".to_string(),
             status: Some(429),
             body: Some("{\"error\":{\"code\":429}}".to_string()),
-            headers: Default::default(),
+            headers: HashMap::default(),
             request_id: None,
             sdk_name: Some("ApiError".to_string()),
             retry_after_ms: None,
@@ -1359,7 +1363,7 @@ mod tests {
         let mut named = ProviderError::from_http_status_body(
             400,
             "{\"error\":{\"code\":400,\"message\":\"bad\"}}",
-            Default::default(),
+            HashMap::default(),
         );
         if let ProviderError::Http(http) = &mut named {
             http.sdk_name = Some("ApiError".to_string());
@@ -1377,7 +1381,7 @@ mod tests {
         let unnamed = ProviderError::from_http_status_body(
             400,
             "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}",
-            Default::default(),
+            HashMap::default(),
         );
         assert_eq!(
             diagnostic_error_info(&unnamed).name.as_deref(),

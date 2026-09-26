@@ -540,7 +540,7 @@ async fn race_startup(
         Some(signal) => {
             tokio::select! {
                 _ = task => Ok(()),
-                _ = signal.cancelled() => Err(anyhow!("Kernel startup aborted")),
+                () = signal.cancelled() => Err(anyhow!("Kernel startup aborted")),
             }
         }
     }
