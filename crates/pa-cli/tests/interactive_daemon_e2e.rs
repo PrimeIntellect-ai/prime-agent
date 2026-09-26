@@ -421,10 +421,19 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
             pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Session list, then switch to the second session by id: the
+            // Session list (the read-only info panel over the dock), then
+            // close it and switch to the second session by id: the
             // transcript must rebuild from its (empty) snapshot and the next
             // prompt must run against the switched session.
             pa_tui::interactive::HeadlessStep::Submit("/list".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "live sessions:".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            )),
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {second}")),
             pa_tui::interactive::HeadlessStep::Submit("third".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
@@ -2504,21 +2513,36 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
             // The default key must no longer fire it (a second cycle would
             // reach the "all" mode).
             ctrl_o,
-            // The documentation surface renders the effective binding.
+            // The documentation surface renders the effective binding: the
+            // read-only info panel mounts over the dock (the operator's
+            // 2026-09-26 directive — the guide no longer floods the
+            // transcript), End jumps the scrollable window to the
+            // document's bottom, and Esc closes it back to the dock.
             pa_tui::interactive::HeadlessStep::Submit("/hotkeys".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The `?` quick-shortcut guide (app.shortcuts) mounts with the
-            // effective bindings; the next submission clears it.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Move cursor / browse history".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('?'),
+                crossterm::event::KeyCode::End,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            pa_tui::interactive::HeadlessStep::Submit("done".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "mouse click on link".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "scroll \u{b7} Esc close".to_string(),
+                timeout_ms: 30_000,
+            },
         ],
         width: 120,
-        // Tall enough that the whole `/hotkeys` guide (the expandTools row
-        // ~30 rows in) renders inside the visible transcript window.
+        // Tall enough that the `/hotkeys` info panel holds a real window
+        // of the guide.
         height: 60,
     };
     let outcome =
@@ -2551,43 +2575,35 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         rendered.contains("scripted reply"),
         "the scripted turn rendered:\n{rendered}"
     );
-    // `/hotkeys` documents the effective binding. The guide renders as
-    // markdown, so the table is a bordered grid ("| Ctrl+Alt+X | Cycle
-    // overview ..."), not the raw markdown source.
+    // `/hotkeys` renders in the info panel: the guide's first window
+    // rendered (the Navigation row), End jumped the scrollable window to
+    // the document's bottom (the Fullscreen table), and the override's
+    // own row is covered by the hotkeys guide unit tests.
     assert!(
-        rendered.contains("Ctrl+Alt+X"),
-        "the hotkeys guide renders the override:\n{rendered}"
+        rendered.contains("Move cursor / browse history"),
+        "the hotkeys panel rendered the guide:\n{rendered}"
     );
     assert!(
-        rendered.contains("Cycle overview"),
-        "the hotkeys guide renders the expand row:\n{rendered}"
+        rendered.contains("mouse click on link"),
+        "the End key jumped the panel to the guide's bottom:\n{rendered}"
     );
-    assert!(
-        rendered.contains("Clear input / cancel autocomplete"),
-        "the hotkeys guide renders the default rows:\n{rendered}"
-    );
-    // The removed default key is gone from the guide (no other default
-    // binding uses ctrl+o).
+    // The removed default key is gone (no other default binding uses
+    // ctrl+o).
     assert!(
         !rendered.contains("Ctrl+O"),
         "the hotkeys guide must not show the removed default:\n{rendered}"
     );
-    // The `?` quick-shortcut guide mounted (TS `showShortcutGuide`): the
-    // effective override renders in its Controls row and the Help line
-    // references `/hotkeys`.
-    assert!(
-        rendered.contains("quick shortcuts \u{b7} /hotkeys full reference"),
-        "the quick-shortcut guide rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Ctrl+Alt+X overview"),
-        "the quick-shortcut guide renders the override in the Controls row:\n{rendered}"
-    );
-    // The final submission cleared the guide (TS `clearShortcutGuide`).
+    // The guide stayed out of the transcript (the operator's no-flooding
+    // directive): after Esc closed the panel the last frame holds the
+    // scripted reply and the dock, not the guide's rows.
     let last = outcome.frames.last().expect("frames");
     assert!(
-        !last.contains("shell mode"),
-        "the submission cleared the quick-shortcut guide:\n{last}"
+        !last.contains("Move cursor / browse history"),
+        "the hotkeys guide never lands in the transcript:\n{last}"
+    );
+    assert!(
+        last.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
+        "the dock returned after the panel closed:\n{last}"
     );
     drop(supervisor);
 }

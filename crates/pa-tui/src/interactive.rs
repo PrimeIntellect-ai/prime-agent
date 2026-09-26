@@ -110,8 +110,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A menu surface opened (event `tui menu opened`): `menu` names the
-    /// surface (`model`, `mcp`), `source` how it opened (`command` — the
-    /// bare slash submission, `tab` — a typed partial + Tab).
+    /// surface (`model`, `mcp`, `settings`, or a read-only info panel
+    /// command — `context`, `session`, `system-prompt`, `logs`,
+    /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
+    /// (`command` — the bare slash submission, `tab` — a typed partial +
+    /// Tab).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -2226,8 +2229,8 @@ async fn run_interactive_surface(
                 // next applies (a plan step is not a terminal burst, and the
                 // captured frame sequence IS the verifier evidence — a
                 // batched drain would collapse intermediate states like the
-                // quick-shortcut guide or the expanded compaction block out
-                // of the capture). The terminal path keeps the full batch
+                // expanded compaction block or an open panel out of the
+                // capture). The terminal path keeps the full batch
                 // drain, the input-starvation fix.
                 if !renderer.is_terminal() {
                     inputs_pending = false;

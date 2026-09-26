@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::registry::ResidentWorker;
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 use pa_types::daemon::DaemonWorkerDescriptor;
@@ -141,6 +142,7 @@ impl Supervisor {
                 "kill",
                 json!({ "rlmCloseReason": "shutdown" }),
                 ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
             )
             .await
         {
