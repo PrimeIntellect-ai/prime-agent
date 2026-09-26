@@ -790,18 +790,20 @@ impl AgentView {
                     {
                         index
                     }
-                    Some(RunShapeInputs::AssistantGlue(_)) => start,
-                    // A receipt-bearing mutation reshapes the block at
-                    // the captured suffix start - a formed, dissolved,
-                    // or re-counted run moves its rows there (and the
-                    // standalone card's own start IS its index). A
-                    // bare arg/state mutation keeps the slot-based fold:
-                    // a member card moves the BLOCK's rows (they live at
+                    // A boundary flip (the merge/split) and a
+                    // receipt-bearing mutation both reshape the block at
+                    // the captured suffix start - a formed, dissolved, or
+                    // re-counted run moves its rows there (and the
+                    // standalone card's own start IS its index). A bare
+                    // arg/state mutation keeps the slot-based fold: a
+                    // member card moves the BLOCK's rows (they live at
                     // the run's start); a solo card (a short uncondensed
                     // sequence, or a standalone card) moves only its own
                     // rows - the fold lands there, never at the
                     // sequence's first card.
-                    Some(RunShapeInputs::Receipts(_)) => start,
+                    Some(RunShapeInputs::AssistantGlue(_)) | Some(RunShapeInputs::Receipts(_)) => {
+                        start
+                    }
                     None => match self.run_map.slot(index) {
                         Some(
                             crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
