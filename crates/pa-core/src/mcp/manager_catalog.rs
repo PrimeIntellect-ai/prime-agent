@@ -423,7 +423,7 @@ fn disabled_config(config: McpServerConfig) -> McpServerConfig {
             startup_timeout_ms: None,
             call_timeout_ms: None,
         },
-        other => other,
+        other @ McpServerConfig::Stdio { .. } => other,
     }
 }
 
@@ -664,7 +664,7 @@ mod tests {
                 let entries = remote.clone();
                 Some(crate::mcp::catalog_schema::PluginsCatalog {
                     version: 2,
-                    counts: Default::default(),
+                    counts: crate::mcp::catalog_schema::CatalogCounts::default(),
                     entries,
                 })
             })),
@@ -1078,7 +1078,7 @@ mod tests {
         let manager =
             std::sync::Arc::new(std::sync::Mutex::new(McpManager::new(McpManagerOptions {
                 auth_storage: crate::auth::AuthStorage::in_memory(
-                    Default::default(),
+                    crate::auth::types::AuthStorageData::default(),
                     std::sync::Arc::new(crate::auth::manager::NoOAuth),
                 ),
                 get_user_servers: no_user_servers(),
@@ -1089,7 +1089,7 @@ mod tests {
                     let entries = remote.clone();
                     Some(crate::mcp::catalog_schema::PluginsCatalog {
                         version: 2,
-                        counts: Default::default(),
+                        counts: crate::mcp::catalog_schema::CatalogCounts::default(),
                         entries,
                     })
                 })),

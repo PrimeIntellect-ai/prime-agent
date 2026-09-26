@@ -118,10 +118,7 @@ fn the_pill_keeps_the_covered_rows_content() {
         60,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     assert!(
         rendered.starts_with("row content"),
         "the row keeps its leading content: {rendered:?}"
@@ -156,7 +153,7 @@ fn the_pill_lands_right_aligned_and_leaves_other_rows_alone() {
         .iter()
         .map(|line| {
             line.iter()
-                .map(|span| span.content.to_string())
+                .map(|span| span.content.clone())
                 .collect::<String>()
         })
         .collect();
@@ -192,10 +189,7 @@ fn an_overlong_pill_truncates_to_the_frame_width() {
         10,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     assert!(
         crate::width::str_width(&rendered) <= 10,
         "row: {rendered:?}"
@@ -291,10 +285,7 @@ fn a_short_covered_row_keeps_the_pill_at_the_right_edge() {
         width,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     assert!(
         rendered.starts_with("short row"),
         "the covered content stays: {rendered:?}"
@@ -331,10 +322,7 @@ fn a_wide_cluster_at_the_pill_column_still_places_the_pill_at_the_edge() {
         width,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     assert_eq!(
         crate::width::str_width(&rendered),
         width,
@@ -367,10 +355,7 @@ fn a_covered_hyperlink_keeps_its_osc8_pair() {
         80,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     assert!(
         rendered.contains(&crate::hyperlinks::osc8_open(url)),
         "the link's open sequence survives: {rendered:?}"
@@ -407,10 +392,7 @@ fn a_link_cut_open_by_the_pill_closes_before_the_pill() {
         width,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     let close = crate::hyperlinks::OSC8_CLOSE;
     let close_at = rendered
         .find(close)
@@ -452,10 +434,7 @@ fn a_carried_link_region_closes_before_the_pill() {
         width,
         Style::default(),
     );
-    let rendered: String = frame[0]
-        .iter()
-        .map(|span| span.content.to_string())
-        .collect();
+    let rendered: String = frame[0].iter().map(|span| span.content.clone()).collect();
     let close_at = rendered
         .find(crate::hyperlinks::OSC8_CLOSE)
         .expect("the composite closes the region before the pill");

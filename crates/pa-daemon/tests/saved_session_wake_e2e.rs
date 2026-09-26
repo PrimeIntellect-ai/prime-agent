@@ -8,6 +8,7 @@
 //! the woken worker resolves the real engine path hermetically.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -85,7 +86,7 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
         chunk(json!({"role": "assistant", "content": answer}), None),
         chunk(json!({}), Some("stop")),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(

@@ -266,7 +266,7 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
 /// (TS `BrandSplashHeader`; `topPadding` is always on in the chat header).
 pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
-    let padding_x = if safe_width > 1 { 1 } else { 0 };
+    let padding_x = usize::from(safe_width > 1);
     let content_width = safe_width.saturating_sub(padding_x * 2).max(1);
     let logo_raw: Vec<&str> = PRIME_COMPACT_BUTTERFLY_LOGO.split('\n').collect();
     let logo_canvas_width = logo_raw
@@ -375,7 +375,7 @@ pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) ->
     if width < 1 {
         return Vec::new();
     }
-    let padding_x = if width > 2 { 1 } else { 0 };
+    let padding_x = usize::from(width > 2);
     let content_width = width.saturating_sub(padding_x * 2);
     let dim = theme.fg_style(ThemeColor::Dim);
     let label_width = str_width(detail_label);
@@ -892,7 +892,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(text, " ◆ 1, 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
         assert!(!text.contains("idle"), "no category breakdown: {text}");
-        assert!(!text.contains("7"), "the total never renders: {text}");
+        assert!(!text.contains('7'), "the total never renders: {text}");
         // A single running descendant keeps the same shape.
         let dock = ActivityDock {
             subagents_running_direct: 0,

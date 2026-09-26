@@ -229,7 +229,7 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -252,7 +252,7 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     }
 }

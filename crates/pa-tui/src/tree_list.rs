@@ -24,6 +24,7 @@ pub enum FilterMode {
 }
 
 impl FilterMode {
+    #[must_use]
     pub fn cycle_forward(self) -> Self {
         match self {
             Self::Default => Self::NoTools,
@@ -34,6 +35,7 @@ impl FilterMode {
         }
     }
 
+    #[must_use]
     pub fn cycle_backward(self) -> Self {
         match self {
             Self::Default => Self::All,
@@ -1083,6 +1085,7 @@ fn utc_date(secs: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use crate::tree_nodes::{build_tree, TreeNodeData};
+    use serde_json::Map;
 
     fn message_node(id: &str, parent: Option<&str>, timestamp: &str, text: &str) -> TreeNodeData {
         TreeNodeData {
@@ -1090,13 +1093,13 @@ mod tests {
                 message: pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
                     content: pa_types::ai::UserContent::Text(text.to_string()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 base: pa_types::session::EntryBase {
                     id: Some(id.to_string()),
                     parent_id: parent.map(str::to_string),
                     timestamp: Some(timestamp.to_string()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             },
             label: None,
@@ -1121,14 +1124,14 @@ mod tests {
                         stop_reason_raw: None,
                         error_message: None,
                         timestamp: 0,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 ),
                 base: pa_types::session::EntryBase {
                     id: Some(id.to_string()),
                     parent_id: parent.map(str::to_string),
                     timestamp: Some(timestamp.to_string()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             },
             label: None,
@@ -1152,7 +1155,7 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: text.to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )];
         }
@@ -1170,7 +1173,7 @@ mod tests {
                     id: Some(id.to_string()),
                     parent_id: parent.map(str::to_string),
                     timestamp: Some(timestamp.to_string()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             },
             label: None,

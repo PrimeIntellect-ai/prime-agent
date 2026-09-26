@@ -1165,7 +1165,7 @@ mod tests {
         boundary.run_pre_turn(engine, model, None).await?;
         engine
             .session
-            .prompt(&prompt, Default::default())
+            .prompt(&prompt, pa_core::session_engine::PromptOptions::default())
             .await
             .expect("the prompt admits");
         engine.session.agent().wait_for_idle().await;
@@ -1188,7 +1188,7 @@ mod tests {
     ) -> Result<(), String> {
         engine
             .session
-            .prompt(&prompt, Default::default())
+            .prompt(&prompt, pa_core::session_engine::PromptOptions::default())
             .await
             .expect("the prompt admits");
         engine.session.agent().wait_for_idle().await;
@@ -1361,8 +1361,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "recovered reply");
         assert_eq!(last.stop_reason, pa_types::ai::StopReason::Stop);
         assert_eq!(user_texts(&engine).await.len(), 2);
@@ -1595,8 +1594,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "recovered reply");
         // The CLI prompt plus the injected continuation; the overflow
         // retry re-issued without re-adding a user message.
@@ -2218,8 +2216,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "next reply");
     }
 
@@ -2234,7 +2231,7 @@ mod tests {
         let _faux = FAUX_TEST_LOCK.lock().await;
         // Run one: compaction disabled, the crossing turn settles above
         // the headroom (20000-token window, reserve 1) with no compaction.
-        let (engine_a, dir_a, _model_a) = faux_engine_with_settings(
+        let (engine_a, dir_a, model_a) = faux_engine_with_settings(
             json!({
                 "contextWindow": 20000,
                 // A small output budget keeps the combined input+output
@@ -2249,13 +2246,13 @@ mod tests {
         )
         .await;
         let mut boundary = TurnBoundary::new(false);
-        admit(&mut boundary, &engine_a, &_model_a, "seed turn".to_string())
+        admit(&mut boundary, &engine_a, &model_a, "seed turn".to_string())
             .await
             .unwrap();
         admit(
             &mut boundary,
             &engine_a,
-            &_model_a,
+            &model_a,
             format!("crossing turn {}", "x".repeat(100_000)),
         )
         .await

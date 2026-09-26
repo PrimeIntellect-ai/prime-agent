@@ -2,6 +2,7 @@
 //! and background output buffers.
 
 use super::*;
+use std::fmt::Write as _;
 
 // ---------------------------------------------------------------------------
 // Event dispatch
@@ -12,9 +13,8 @@ impl Inner {
         match event {
             Event::Display { id, ref data } => {
                 if let Some(activity) = data.get(BASH_ACTIVITY_DISPLAY_MIME) {
-                    let obj = match activity.as_object() {
-                        Some(obj) => obj,
-                        None => return,
+                    let Some(obj) = activity.as_object() else {
+                        return;
                     };
                     let activity_id = obj.get("id").and_then(Value::as_str).unwrap_or_default();
                     let pid = obj.get("pid").and_then(Value::as_i64).unwrap_or_default();
@@ -196,9 +196,10 @@ impl Inner {
                 if !buffers.stderr.is_empty() {
                     buffers.stderr.push('\n');
                 }
-                buffers.stderr.push_str(&format!(
+                let _ = write!(
+                    buffers.stderr,
                     "attachment dropped: exceeds {MAX_ATTACHMENT_DATA_CHARS} base64 chars"
-                ));
+                );
                 buffers.stderr_chars = buffers.stderr.chars().count();
                 buffers.status = ExecuteStatus::Error;
             }

@@ -72,11 +72,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             // coordinator's invoker owns the telemetry emission.
             let status = tail_status(&status_path).await;
             print_terminal(&status);
-            return Ok(if status.state == UpdateState::Complete {
-                0
-            } else {
-                1
-            });
+            return Ok(i32::from(status.state != UpdateState::Complete));
         }
         AcquireOutcome::Acquired => {}
     }
@@ -239,11 +235,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     phases.finish().await;
     track_update_completed(&status).await;
     print_terminal(&status);
-    Ok(if status.state == UpdateState::Complete {
-        0
-    } else {
-        1
-    })
+    Ok(i32::from(status.state != UpdateState::Complete))
 }
 
 /// The manual/direct install (`--archive <payload>`): no manifest and no
@@ -357,13 +349,13 @@ fn unreported(status_path: &std::path::Path, message: &str) -> UpdateStatus {
         coordinator: None,
         predecessor: None,
         successor: None,
-        counts: Default::default(),
+        counts: pa_types::daemon::update_flow::UpdateStatusCounts::default(),
         failures: Vec::new(),
         message: Some(message.to_string()),
         started_at: String::new(),
         updated_at: String::new(),
         heartbeat_at: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
@@ -567,9 +559,5 @@ pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) ->
     };
     let status = super::coordinator::run(&options).await?;
     print_terminal(&status);
-    Ok(if status.state == UpdateState::Complete {
-        0
-    } else {
-        1
-    })
+    Ok(i32::from(status.state != UpdateState::Complete))
 }

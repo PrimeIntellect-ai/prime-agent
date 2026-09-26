@@ -281,7 +281,7 @@ impl AuthPanelHandle {
         });
         tokio::select! {
             answered = answer => answered.unwrap_or(None),
-            _ = self.cancelled_wait() => None,
+            () = self.cancelled_wait() => None,
         }
     }
 
@@ -306,7 +306,7 @@ impl AuthPanelHandle {
         });
         tokio::select! {
             picked = answer => picked.unwrap_or(PrimeTeamPick::Cancelled),
-            _ = self.cancelled_wait() => PrimeTeamPick::Cancelled,
+            () = self.cancelled_wait() => PrimeTeamPick::Cancelled,
         }
     }
 
@@ -1281,8 +1281,8 @@ mod tests {
         );
         let rows = frame_text(&mut panel);
         let joined = rows.join("\n");
-        assert!(!joined.contains("\u{1b}"), "no escapes render: {joined:?}");
-        assert!(joined.contains("A"), "the scrubbed name still renders");
+        assert!(!joined.contains('\u{1b}'), "no escapes render: {joined:?}");
+        assert!(joined.contains('A'), "the scrubbed name still renders");
     }
 
     /// The OSC 8 link carries the URL as its own display text (an empty
