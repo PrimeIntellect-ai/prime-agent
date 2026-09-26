@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn resolves_the_default_window_and_rejects_unordered_bounds() {
-        let now_ms = 1_789_599_000_000i64; // 2026-09-16T22:30:00Z
+        let now_ms = 1_789_597_800_000i64; // 2026-09-16T22:30:00Z
         let window = resolve_incident_window(&IncidentCommandOptions::default(), now_ms)
             .expect("the default window");
         assert_eq!(
@@ -419,7 +419,9 @@ mod tests {
         assert!(!is_daemon_log_file_name("agent.jsonl.old"));
         assert!(!is_daemon_log_file_name("daemon.sock.log"));
         assert!(!is_daemon_log_file_name("daemon.sock.98ED5CB2.log"));
-        assert!(!is_daemon_log_file_name(".98ed5cb2.log"));
+        // The TS pattern needs only `.` + 8 hex before `.log`, so a bare
+        // hash-only name matches too.
+        assert!(is_daemon_log_file_name(".98ed5cb2.log"));
     }
 }
 

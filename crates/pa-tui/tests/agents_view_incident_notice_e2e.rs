@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
@@ -20,80 +20,88 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct MockSupervisor {
     listener: UnixListener,
+    /// How many view connections to serve before the serve thread ends
+    /// (a run that exits without a selection closes its connection, so a
+    /// multi-run test opens one connection per run).
+    connections: usize,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind(socket: &std::path::Path, connections: usize) -> Self {
         Self {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            connections,
         }
     }
 
-    /// Serve the agents-view connection: hello, then the command loop until
-    /// EOF (the roster snapshot and an empty saved catalog).
+    /// Serve the view connections: hello, then the command loop until EOF
+    /// (the roster snapshot and an empty saved catalog), once per
+    /// connection.
     fn serve(self) {
-        let (stream, _) = self.listener.accept().expect("accept view connection");
-        stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .expect("read timeout");
-        let write_stream = stream.try_clone().expect("clone socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-        write_line(
-            &mut writer,
-            &json!({
-                "type": "daemon_hello",
-                "protocol": { "name": "prime-agent.daemon", "version": 7 },
-                "serverCapabilities": [],
-            }),
-        );
-        loop {
-            let Some(line) = read_line(&mut reader) else {
-                return;
-            };
-            let Ok(envelope) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let id = envelope
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match command_type {
-                "roster_subscribe" => {
-                    let roster = vec![json!({
-                        "agentId": "s1",
-                        "status": "idle",
-                        "summary": {
-                            "sessionId": "s1",
-                            "lifecycle": "live",
-                            "activeSessionId": "s1-live",
-                            "sessionFile": "/tmp/s1.jsonl",
-                            "runtimeKind": "top-level",
-                            "sessionName": "live one",
-                            "messageCount": 2,
-                            "rlmDepth": 0,
-                        },
-                    })];
-                    respond(
-                        &mut writer,
-                        id,
-                        "roster_subscribe",
-                        json!({ "roster": roster }),
-                    );
-                }
-                "list_saved_sessions" => {
-                    respond(&mut writer, id, "list_saved_sessions", json!([]));
-                }
-                "roster_unsubscribe" => {
-                    respond(&mut writer, id, "roster_unsubscribe", json!({}));
-                }
-                _ => {
-                    respond_failure(&mut writer, id, "unknown command");
+        for _ in 0..self.connections {
+            let (stream, _) = self.listener.accept().expect("accept view connection");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("read timeout");
+            let write_stream = stream.try_clone().expect("clone socket");
+            let mut writer = write_stream;
+            let mut reader = BufReader::new(stream);
+            write_line(
+                &mut writer,
+                &json!({
+                    "type": "daemon_hello",
+                    "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                    "serverCapabilities": [],
+                }),
+            );
+            loop {
+                let Some(line) = read_line(&mut reader) else {
+                    break;
+                };
+                let Ok(envelope) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let id = envelope
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let command_type = command
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match command_type {
+                    "roster_subscribe" => {
+                        let roster = vec![json!({
+                            "agentId": "s1",
+                            "status": "idle",
+                            "summary": {
+                                "sessionId": "s1",
+                                "lifecycle": "live",
+                                "activeSessionId": "s1-live",
+                                "sessionFile": "/tmp/s1.jsonl",
+                                "runtimeKind": "top-level",
+                                "sessionName": "live one",
+                                "messageCount": 2,
+                                "rlmDepth": 0,
+                            },
+                        })];
+                        respond(
+                            &mut writer,
+                            id,
+                            "roster_subscribe",
+                            json!({ "roster": roster }),
+                        );
+                    }
+                    "list_saved_sessions" => {
+                        respond(&mut writer, id, "list_saved_sessions", json!([]));
+                    }
+                    "roster_unsubscribe" => {
+                        respond(&mut writer, id, "roster_unsubscribe", json!({}));
+                    }
+                    _ => {
+                        respond_failure(&mut writer, id, "unknown command");
+                    }
                 }
             }
         }
@@ -234,7 +242,7 @@ async fn renders_the_collapsed_worker_crash_notice_line() {
     let _env = env_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
-    let mock = MockSupervisor::bind(&socket);
+    let mock = MockSupervisor::bind(&socket, 1);
     let server = std::thread::spawn(move || mock.serve());
 
     let agent_dir = tempfile::TempDir::new().expect("agent dir");
@@ -299,7 +307,7 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
     let _env = env_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
-    let mock = MockSupervisor::bind(&socket);
+    let mock = MockSupervisor::bind(&socket, 2);
     let server = std::thread::spawn(move || mock.serve());
 
     let agent_dir = tempfile::TempDir::new().expect("agent dir");
@@ -385,7 +393,7 @@ async fn esc_cancels_an_armed_delete_confirmation_and_keeps_the_notice() {
     let _env = env_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
-    let mock = MockSupervisor::bind(&socket);
+    let mock = MockSupervisor::bind(&socket, 1);
     let server = std::thread::spawn(move || mock.serve());
 
     let agent_dir = tempfile::TempDir::new().expect("agent dir");

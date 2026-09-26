@@ -21,15 +21,19 @@ fn log_line(fields: &[(&str, serde_json::Value)]) -> IncidentLogEntry {
 }
 
 fn supervisor_line(ts: &str, msg: &str, extra: &[(&str, serde_json::Value)]) -> IncidentLogEntry {
-    log_line(&[
+    let mut fields: Vec<(&str, serde_json::Value)> = vec![
         ("ts", serde_json::json!(ts)),
         (
             "component",
             serde_json::json!("coding-agent.daemon-supervisor"),
         ),
         ("msg", serde_json::json!(msg)),
-        *extra.first().unwrap_or(&("pid", serde_json::json!(15026))),
-    ])
+        ("pid", serde_json::json!(15026)),
+    ];
+    for (key, value) in extra {
+        fields.push((key, value.clone()));
+    }
+    log_line(&fields)
 }
 
 fn worker_start_line(ts: &str, socket_path: &str, pid: i64) -> IncidentLogEntry {

@@ -5,8 +5,8 @@ use super::*;
 use pa_types::incident::parse_incident_log_line;
 use serde_json::json;
 
-const SINCE_MS: i64 = 1_789_089_600_000; // 2026-09-10T20:00:00Z
-const UNTIL_MS: i64 = 1_789_091_400_000; // 2026-09-10T20:30:00Z
+const SINCE_MS: i64 = 1_789_070_400_000; // 2026-09-10T20:00:00Z
+const UNTIL_MS: i64 = 1_789_072_200_000; // 2026-09-10T20:30:00Z
 
 fn entries(lines: &[String]) -> Vec<IncidentLogEntry> {
     lines
@@ -60,7 +60,7 @@ fn worker_start_line(ts: &str, socket_path: &str, pid: i64) -> String {
 }
 
 fn report_for(lines: &[String]) -> String {
-    report_for_with(lines, &Default::default())
+    report_for_with(lines, &default_options())
 }
 
 fn report_for_with(lines: &[String], options: &IncidentReportOptions) -> String {
@@ -278,8 +278,8 @@ fn reconstructs_the_incident_narrative_in_one_report() {
 #[test]
 fn excludes_events_outside_the_window() {
     let options = IncidentReportOptions {
-        since_ms: 1_789_089_900_000, // 2026-09-10T20:05:00Z
-        until_ms: 1_789_090_200_000, // 2026-09-10T20:10:00Z
+        since_ms: 1_789_070_700_000, // 2026-09-10T20:05:00Z
+        until_ms: 1_789_071_000_000, // 2026-09-10T20:10:00Z
         ..Default::default()
     };
     let text = report_for_with(&incident_fixture_lines(), &options);

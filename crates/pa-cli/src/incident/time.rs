@@ -42,7 +42,7 @@ pub(crate) fn parse_incident_time_bound(
     }
     // `^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}(?::?\d{2})?)?$`
     let mut rest = raw;
-    let Some(year) = take_digits(&mut rest, 4) else {
+    let Some(year) = take_digits(&mut rest, 4).map(i64::from) else {
         return Err(invalid());
     };
     if !rest.starts_with('-') {
@@ -137,8 +137,8 @@ pub(crate) fn parse_incident_time_bound(
         return Err(invalid());
     };
     let base_ms = days * 86_400_000
-        + hour.map(|h| h as i64 * 3_600_000).unwrap_or(0)
-        + minute.map(|m| m as i64 * 60_000).unwrap_or(0)
+        + hour.map_or(0, |h| h as i64 * 3_600_000)
+        + minute.map_or(0, |m| m as i64 * 60_000)
         + second as i64 * 1_000
         + millis;
     // The date must round-trip: `2026-02-31` is not a day, and an hour or
@@ -234,7 +234,7 @@ mod tests {
     use super::*;
 
     /// `new Date("2026-09-16T22:30:00Z")`.
-    const NOW: i64 = 1_789_599_000_000;
+    const NOW: i64 = 1_789_597_800_000; // 2026-09-16T22:30:00Z
 
     fn date_ms(text: &str) -> i64 {
         pa_types::incident::timestamp_to_ms(text).expect("the fixture date parses")

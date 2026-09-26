@@ -437,18 +437,14 @@ fn read_incident_log_lines(
         let last_newline = buffer[..bytes_read]
             .iter()
             .rposition(|byte| *byte == NEWLINE_BYTE);
-        match last_newline {
-            Some(last_newline) if last_newline >= line_start => {
-                end = last_newline + 1;
-            }
-            _ => {
-                return Some(IncidentLogChunk {
-                    lines: Vec::new(),
-                    next_offset: start,
-                    file_id,
-                });
-            }
-        }
+        let Some(last_newline) = last_newline.filter(|newline| *newline >= line_start) else {
+            return Some(IncidentLogChunk {
+                lines: Vec::new(),
+                next_offset: start,
+                file_id,
+            });
+        };
+        end = last_newline + 1;
     }
     let lines: Vec<String> = String::from_utf8_lossy(&buffer[line_start..end])
         .split('\n')

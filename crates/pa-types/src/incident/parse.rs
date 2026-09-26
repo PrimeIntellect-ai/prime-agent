@@ -23,7 +23,7 @@ static DAEMON_LINE: LazyLock<Regex> =
 pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
     let ts = ts.trim();
     let mut rest = ts;
-    let year: i64 = take_digits(&mut rest, 4)?;
+    let year = i64::from(take_digits(&mut rest, 4)?);
     rest = rest.strip_prefix('-')?;
     let month: u32 = take_digits(&mut rest, 2)?;
     rest = rest.strip_prefix('-')?;
@@ -238,33 +238,33 @@ mod tests {
     fn timestamp_parses_the_daemon_shapes() {
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00.000Z"),
-            Some(1_789_089_600_000)
+            Some(1_789_070_400_000)
         );
         // The motivating incident's window (the TS test's `Date.parse`
         // ground truth).
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00Z"),
-            Some(1_789_089_600_000)
+            Some(1_789_070_400_000)
         );
         // Date-only is UTC midnight.
-        assert_eq!(timestamp_to_ms("2026-09-10"), Some(1_789_089_600_000));
+        assert_eq!(timestamp_to_ms("2026-09-10"), Some(1_789_070_400_000));
         // Fractional seconds scale.
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00.7Z"),
-            Some(1_789_089_600_700)
+            Some(1_789_070_400_700)
         );
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00.764Z"),
-            Some(1_789_089_600_764)
+            Some(1_789_070_400_764)
         );
         // A zone offset shifts.
         assert_eq!(
             timestamp_to_ms("2026-09-10T22:02+02:00"),
-            Some(1_789_089_720_000)
+            Some(1_789_070_520_000)
         );
         assert_eq!(
             timestamp_to_ms("2026-09-10T22:02+0200"),
-            Some(1_789_089_720_000)
+            Some(1_789_070_520_000)
         );
         // Pre-epoch timestamps stay exact.
         assert_eq!(timestamp_to_ms("1969-12-31T23:59:59.999Z"), Some(-1));
@@ -289,7 +289,7 @@ mod tests {
             r#"{"ts":"2026-09-10T20:02:53.374Z","level":"error","component":"ai.provider","pid":53615,"msg":"provider stream failure","kind":"rate_limit","status":429}"#,
         )
         .expect("valid line");
-        assert_eq!(entry.time_ms, 1_789_089_773_374);
+        assert_eq!(entry.time_ms, 1_789_070_573_374);
         assert_eq!(entry.level, "error");
         assert_eq!(entry.component, "ai.provider");
         assert_eq!(entry.pid, Some(53615));
@@ -338,7 +338,7 @@ mod tests {
             supervisor.msg,
             "Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach"
         );
-        assert_eq!(supervisor.time_ms, 1_789_089_759_765);
+        assert_eq!(supervisor.time_ms, 1_789_070_559_765);
         assert_eq!(supervisor.level, "warn");
         assert_eq!(supervisor.pid, None);
 

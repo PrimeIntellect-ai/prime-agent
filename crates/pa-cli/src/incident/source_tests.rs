@@ -44,13 +44,14 @@ fn with_agent_dir(body: impl FnOnce(&Path)) {
 #[test]
 fn tolerates_malformed_lines_and_reports_them_as_skipped() {
     with_agent_dir(|agent_dir| {
+        let good = supervisor_line(
+            "2026-09-10T20:02:39.764Z",
+            "Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach",
+        );
         let contents = [
             "this is not json",
             r#"{"noTs":true,"msg":"missing ts"}"#,
-            &supervisor_line(
-                "2026-09-10T20:02:39.764Z",
-                "Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach",
-            ),
+            good.as_str(),
             "",
         ]
         .join("\n");
@@ -64,6 +65,9 @@ fn tolerates_malformed_lines_and_reports_them_as_skipped() {
     });
 }
 
+/// Unix-only: the decoy is a directory carrying a future mtime via
+/// `File::set_times` on a directory handle, which Windows cannot open.
+#[cfg(unix)]
 #[test]
 fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
     with_agent_dir(|agent_dir| {

@@ -393,9 +393,7 @@ fn provider_failure_event(entry: &IncidentLogEntry, worker_pids: &WorkerPidMap) 
         category: IncidentCategory::Anomaly,
         event_class: "provider".to_string(),
         summary: format!("provider stream failure ({kind}{status_text}) for {subject}"),
-        tokens: worker_id
-            .map(|worker_id| vec![worker_id])
-            .unwrap_or_default(),
+        tokens: worker_id.into_iter().collect(),
         subject,
     }
 }
@@ -485,9 +483,10 @@ pub fn classify_incident_entry(
             classified.severity,
             IncidentCategory::Supervisor,
             classified.event_class,
-            worker_id
-                .map(|worker_id| format!("worker {worker_id}"))
-                .unwrap_or_else(|| "worker".to_string()),
+            worker_id.map_or_else(
+                || "worker".to_string(),
+                |worker_id| format!("worker {worker_id}"),
+            ),
             classified.summary,
             // Keep the session ids/names classified out of the error, not
             // just the worker id.
@@ -518,19 +517,16 @@ pub fn classify_incident_entry(
             } else {
                 "command-failure"
             },
-            session_id
-                .map(|session_id| format!("session {session_id}"))
-                .unwrap_or_else(|| daemon_subject(entry)),
+            session_id.map_or_else(
+                || daemon_subject(entry),
+                |session_id| format!("session {session_id}"),
+            ),
             format!(
                 "client catch-up failed{}: {}",
-                session_id
-                    .map(|id| format!(" for session {id}"))
-                    .unwrap_or_default(),
+                session_id.map_or_else(String::new, |id| format!(" for session {id}")),
                 truncate_text(error_message(first_line(err)), 100)
             ),
-            session_id
-                .map(|session_id| vec![session_id.to_string()])
-                .unwrap_or_default(),
+            session_id.map_or_else(Vec::new, |session_id| vec![session_id.to_string()]),
         ));
     }
     if let Some(captures) = HEARTBEATS_LIST.captures(msg) {
@@ -758,9 +754,10 @@ pub fn classify_incident_entry(
             },
             IncidentCategory::Supervisor,
             "diagnostic",
-            worker_id
-                .map(|worker_id| format!("worker {worker_id}"))
-                .unwrap_or_else(|| daemon_subject(entry)),
+            worker_id.map_or_else(
+                || daemon_subject(entry),
+                |worker_id| format!("worker {worker_id}"),
+            ),
             truncate_text(msg, SUMMARY_TRUNCATION),
         ));
     }

@@ -106,7 +106,7 @@ fn command_timeout_line(base_ms: i64, minutes_ago: i64, socket_path: &str) -> In
     ])
 }
 
-const BASE_MS: i64 = 1_789_599_000_000; // 2026-09-16T22:30:00Z
+const BASE_MS: i64 = 1_789_597_800_000; // 2026-09-16T22:30:00Z
 
 #[test]
 fn anchors_each_subjects_timeout_burst_at_its_own_clusters_latest_timeout() {
@@ -413,9 +413,7 @@ fn the_initial_read_drops_a_torn_leading_line_but_keeps_a_boundary_line() {
     }
     lines.push(crash("5b1d3aeb91ee", 120));
     let payload = lines.join("\n") + "\n";
-    use std::io::Write as _;
-    let mut file = std::fs::File::create(&log_path).expect("create log");
-    file.write_all(payload.as_bytes()).expect("write log");
+    std::fs::write(&log_path, &payload).expect("write log");
     let mut state = IncidentNoticeState::new();
     refresh_incident_notice_state(&mut state, &log_path, BASE_MS);
     let notice = state.notice.as_ref().expect("the crash notice");

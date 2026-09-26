@@ -260,7 +260,7 @@ mod tests {
         let daemon_a = "/tmp/prime-agent-501/daemon.sock";
         let daemon_b = "/tmp/other/daemon.sock";
         let minute = 60_000;
-        let base = 1_789_089_600_000; // 2026-09-10T20:00:00Z
+        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let events = vec![
             timeout_event(daemon_a, base + 2 * minute),
             timeout_event(daemon_a, base + 8 * minute),
@@ -272,9 +272,10 @@ mod tests {
         ];
         let anomalies = compute_incident_anomalies(&events);
         let summaries: Vec<&str> = anomalies.iter().map(|a| a.summary.as_str()).collect();
-        assert!(summaries
-            .contains(&"/tmp/prime-agent-501/daemon.sock: 4 command timeouts over 19m" as &str));
-        assert!(summaries.contains(&"/tmp/other/daemon.sock: 3 command timeouts over 27m" as &str));
+        assert!(
+            summaries.contains(&"/tmp/prime-agent-501/daemon.sock: 4 command timeouts over 19m")
+        );
+        assert!(summaries.contains(&"/tmp/other/daemon.sock: 3 command timeouts over 27m"));
         // The stall anchors at the cluster's first timeout.
         let daemon_a_stall = anomalies
             .iter()
@@ -285,7 +286,7 @@ mod tests {
 
     #[test]
     fn isolated_failures_days_apart_never_merge() {
-        let base = 1_789_089_600_000; // 2026-09-10T20:00:00Z
+        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let day = 86_400_000;
         let subject = "/tmp/prime-agent-501/daemon.sock";
         let events = vec![
@@ -306,7 +307,7 @@ mod tests {
 
     #[test]
     fn bursts_of_command_failures_surface_as_warnings() {
-        let base = 1_789_089_600_000; // 2026-09-10T20:00:00Z
+        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let events: Vec<IncidentEvent> = (1..=3)
             .map(|index| burst_event("/tmp/prime-agent-501/daemon.sock", base + index * 60_000))
             .collect();
@@ -318,7 +319,7 @@ mod tests {
 
     #[test]
     fn long_gaps_between_session_events_are_flagged() {
-        let base = 1_789_089_600_000; // 2026-09-10T20:00:00Z
+        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let minute = 60_000;
         let subject = "session aabbccddeeff";
         let events = vec![
@@ -345,7 +346,7 @@ mod tests {
         // dense cluster (three events within 20m of each other), 30/29
         // minutes ago a separate pair; the stall describes the first
         // cluster and anchors at its LATEST timeout (180 minutes ago).
-        let base = 1_789_089_600_000; // 2026-09-10T20:00:00Z
+        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let minute = 60_000;
         let spaced = "spaced";
         let events = vec![
