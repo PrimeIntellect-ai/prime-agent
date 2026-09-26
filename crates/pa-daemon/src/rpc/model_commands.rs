@@ -222,9 +222,16 @@ async fn apply_thinking_level(
         if changed {
             let persistence = handle.engine.session.shared_persistence();
             let mut manager = persistence.lock().await;
-            manager
-                .append_thinking_level_change(wire_level.as_str().unwrap_or("off"))
-                .map_err(|error| format!("{error:#}"))?;
+            // TS `_processAgentEvent`'s persistence failure is swallowed
+            // (the row stays in the in-memory session): the live level
+            // change stands and the response succeeds — never error the
+            // live change out from under its row, and never leave the
+            // caller's retry skipping persistence.
+            if let Err(error) =
+                manager.append_thinking_level_change(wire_level.as_str().unwrap_or("off"))
+            {
+                eprintln!("pa-daemon: thinking level row not persisted: {error}");
+            }
             // TS persists the default when the model can think or the
             // level is a real reasoning request. The cwd comes off the
             // held manager (this scope holds the write and persistence

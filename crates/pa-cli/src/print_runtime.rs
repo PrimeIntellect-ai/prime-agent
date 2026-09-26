@@ -758,10 +758,40 @@ fn build_session_manager_with_lease(
                 let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
                 Ok((manager, Some(lease)))
             }
-            None => Ok((SessionManager::persisted(&cwd, &session_dir), None)),
+            None => Ok(fresh_session_with_lease(&cwd, &session_dir)),
         };
     }
-    Ok((SessionManager::persisted(&cwd, &session_dir), None))
+    Ok(fresh_session_with_lease(&cwd, &session_dir))
+}
+
+/// Build a FRESH persisted manager and lease its eagerly selected file
+/// before the engine can write it (the replacement `New` path's rule —
+/// TS leases the freshly created session too, `acquireReplacementLease`):
+/// another process can never claim the first lease while this one writes.
+fn fresh_session_with_lease(
+    cwd: &std::path::Path,
+    session_dir: &std::path::Path,
+) -> (pa_core::session::manager::SessionManager, Option<pa_daemon::lease::SessionLease>) {
+    let manager = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
+    // A fresh file's lease cannot be contended (its uuid is new); an
+    // acquire failure here is environmental (the lease directory), so
+    // the session proceeds with a warning instead of failing startup.
+    let lease = match manager.get_session_file() {
+        Some(path) => {
+            match pa_daemon::lease::acquire_session_lease(
+                Some(path),
+                &crate::config::get_agent_dir(),
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    eprintln!("prime-agent: could not lease the fresh session file: {error:#}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    (manager, lease)
 }
 
 /// Open a session file with the TS `SessionManager.open` cwd semantics: an

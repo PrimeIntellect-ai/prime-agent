@@ -133,7 +133,11 @@ async fn run_session_command(
             ))
             .await;
     }
-    state.publish_goal_update().await;
+    // The handle guard is still held here (the admitted command's
+    // guard-pass-through): publishing over the held engine's goal state
+    // avoids re-acquiring the handle behind any queued writer.
+    let goal = engine.goal_state().await;
+    state.publish_goal_update_for(&goal).await;
     if let Some(error) = &execution.error {
         return Err(error.clone());
     }

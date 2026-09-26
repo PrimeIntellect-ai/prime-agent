@@ -92,10 +92,20 @@ impl LineWriter {
     }
 
     /// Wait until the writer task has written every queued frame (the
-    /// exit paths call this before `process::exit`, TS parity for
-    /// synchronous writes). Bounded: a broken pipe retires after the
-    /// deadline instead of hanging the exit.
+    /// EOF path calls this before the exit, TS parity for synchronous
+    /// writes: the TS exit blocks behind its writes until the reader
+    /// drains or the pipe breaks — a slow reader is drained, never
+    /// truncated).
     pub async fn drain(&self) {
+        while self.pending.load(Ordering::SeqCst) > 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The signal-exit drain (SIGTERM/SIGHUP): the 143/129 exit codes
+    /// must fire even against a stalled reader, so the wait is bounded
+    /// (a broken or slow pipe retires after the deadline).
+    pub async fn drain_bounded(&self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while self.pending.load(Ordering::SeqCst) > 0 {
             if std::time::Instant::now() >= deadline {
@@ -164,6 +174,11 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
             stream.recv().await;
+            // Serialize with any in-flight whole-session replacement:
+            // the lease holds until the exit, so the handle read below
+            // sees the session that is live NOW and no replacement can
+            // swap under the abort/dispose.
+            let _replacement = terminate_session.replacement_lease().await;
             let engine = terminate_session.handle().await.engine.clone();
             engine.session.agent().abort();
             // Retire the queued-input pumps the instant the abort fires
@@ -172,7 +187,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // queued row while the exit drains.
             terminate_session.retire_pumps();
             terminate_session.dispose().await;
-            terminate_writer.drain().await;
+            terminate_writer.drain_bounded().await;
             exit_with(SIGTERM_EXIT);
         }
     });
@@ -181,6 +196,10 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {
             stream.recv().await;
+            // Serialize with any in-flight whole-session replacement
+            // (the lease holds until the exit): the abort and the
+            // dispose target the session that is live NOW.
+            let _replacement = hangup_session.replacement_lease().await;
             let engine = hangup_session.handle().await.engine.clone();
             engine.session.agent().abort();
             // Retire the queued-input pumps the instant the abort fires
@@ -188,7 +207,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // the aborted turn without running the next queued one.
             hangup_session.retire_pumps();
             hangup_session.dispose().await;
-            hangup_writer.drain().await;
+            hangup_writer.drain_bounded().await;
             exit_with(SIGHUP_EXIT);
         }
     });

@@ -58,6 +58,17 @@ impl RpcState {
         let handle = self.session.handle().await;
         let goal = handle.engine.goal_state().await;
         drop(handle);
+        self.publish_goal_update_for(&goal).await;
+    }
+
+    /// The same publication over an already-held engine's goal state: the
+    /// prompt-admitted session-command path holds the handle guard
+    /// through its execution, and re-acquiring the handle there can
+    /// starve behind a queued writer (a `set_model` or replacement
+    /// waiting on the same guard) — the caller passes the state it
+    /// already holds.
+    pub async fn publish_goal_update_for(&self, goal: &pa_core::goals::GoalState) {
+        let goal = goal.clone();
         let changed = {
             let mut last = self.last_goal.lock().await;
             if *last == goal {

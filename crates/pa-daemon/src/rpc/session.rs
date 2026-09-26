@@ -258,15 +258,32 @@ impl RpcSession {
                 *reuse_lease = true;
             }
         }
-        // Build the replacement BEFORE any teardown: a failed assembly
-        // must leave the live session serving (the old kernel keeps its
-        // subscription and turns; nothing was disposed) — and the
-        // adopted lease goes back on the live handle.
+        // Retire the pumps spawned against the replaced engine BEFORE the
+        // settle: a queued pump that wakes during the wait sees the moved
+        // epoch and returns instead of delivering onto the session this
+        // swap is about to dispose.
+        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
+        // The write guard stays held through the settle, the build, and
+        // the teardown: it waits out every live reader (a
+        // prompt/steer/compact handler holding the handle), so no
+        // command can admit a turn onto the old engine.
+        let mut handle = self.handle.write().await;
+        // Settle the running turn BEFORE the factory opens the file: the
+        // turn's final rows land in the persisted history the
+        // replacement hydrates from (an open before the settle would
+        // read a stale tail), and the finishing turn's final events (its
+        // `agent_end`) still reach the client — the old feed stays
+        // subscribed until after the settle.
+        handle.engine.session.agent().wait_for_idle().await;
+        // Build the replacement after the settle: a failed assembly
+        // leaves the live session serving (idle, subscribed, nothing
+        // disposed — only the settle ran), and the adopted lease goes
+        // back onto the held handle.
         let mut replacement = match factory(request).await {
             Ok(replacement) => replacement,
             Err(error) => {
                 if adopted_lease.is_some() {
-                    self.handle.write().await.session_lease = adopted_lease;
+                    handle.session_lease = adopted_lease;
                 }
                 return Err(error);
             }
@@ -277,19 +294,6 @@ impl RpcSession {
         let subscription =
             Self::engine_subscription(&replacement.engine, &self.pending_outputs, &self.writer)
                 .await;
-        // Retire the pumps spawned against the replaced engine BEFORE the
-        // teardown: a queued pump that wakes during the wait sees the
-        // moved epoch and returns instead of delivering onto the session
-        // this swap is about to dispose.
-        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
-        // The write guard stays held through the whole teardown: it waits
-        // out every live reader (a prompt/steer/compact handler holding
-        // the handle), so no command can admit a turn onto the old
-        // engine between the settle and the dispose.
-        let mut handle = self.handle.write().await;
-        // Wait the running turn out BEFORE unsubscribing: the finishing
-        // turn's final events (its `agent_end`) still reach the client.
-        handle.engine.session.agent().wait_for_idle().await;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
