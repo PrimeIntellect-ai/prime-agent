@@ -779,7 +779,7 @@ pub(crate) async fn sync_python_skills(
 /// runs on every check.
 static RUNTIME_PROBE_MEMO: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 
-fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, ()>>> {
+fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, PathBuf>>> {
     RUNTIME_PROBE_MEMO
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1295,7 +1295,7 @@ mod tests {
         // Invalidation drops both layers.
         invalidate_runtime_probe_cache();
         assert!(
-            !super::disk_memo::disk_memo_path(&venv).exists(),
+            !super::super::disk_memo::disk_memo_path(&venv).exists(),
             "invalidation dropped the on-disk layer too"
         );
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
@@ -1451,7 +1451,7 @@ mod tests {
         // re-probes and DETECTS.
         invalidate_runtime_probe_cache();
         assert!(
-            !super::disk_memo::disk_memo_path(&venv).exists(),
+            !super::super::disk_memo::disk_memo_path(&venv).exists(),
             "the disk layer dropped with the in-process one"
         );
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
@@ -1507,7 +1507,7 @@ mod tests {
 
         // The failed start invalidates both layers...
         invalidate_runtime_probe_cache();
-        assert!(!super::disk_memo::disk_memo_path(&venv).exists());
+        assert!(!super::super::disk_memo::disk_memo_path(&venv).exists());
         // ...while a concurrent process whose probe just passed publishes
         // its verdict between the clear and the retry.
         let (_, raw) = read_bootstrap_version_raw(&venv);
@@ -1517,7 +1517,7 @@ mod tests {
             &raw,
             &installed_runtime_identity(Path::new(&python_str), &venv),
         );
-        super::disk_memo::disk_memo_write(&super::disk_memo::disk_memo_path(&venv), &key);
+        super::super::disk_memo::disk_memo_write(&super::super::disk_memo::disk_memo_path(&venv), &key);
 
         // The retry hits the late entry: benign, honestly earned.
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
@@ -1528,7 +1528,7 @@ mod tests {
         );
         // The next failed start re-invalidates.
         invalidate_runtime_probe_cache();
-        assert!(!super::disk_memo::disk_memo_path(&venv).exists());
+        assert!(!super::super::disk_memo::disk_memo_path(&venv).exists());
     }
 
     /// Env-mutating tests serialize on this lock: the process env is
@@ -1583,7 +1583,7 @@ mod tests {
                     let path = entry.path();
                     if path.is_dir() {
                         walk(&path, found);
-                    } else if path.file_name().is_some_and(|n| n == super::disk_memo::DISK_MEMO_FILE)
+                    } else if path.file_name().is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
                     {
                         found.push(path);
                     }
@@ -1872,7 +1872,7 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
             output.status.success(),
             "closure parse failed: {stderr}"
         );
-        #[derive(serde::Deserialize)]
+        #[derive(Debug, serde::Deserialize)]
         struct ClosureReport {
             closure: Vec<String>,
             violations: Vec<String>,
@@ -1890,7 +1890,7 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
         );
         assert!(
             report.violations.is_empty(),
-            "the probe import closure grew beyond rlm+stdlib (closure {:?}): {violations:?}",
+            "the probe import closure grew beyond rlm+stdlib (closure {:?}): {:?}",
             report.closure,
             report.violations
         );

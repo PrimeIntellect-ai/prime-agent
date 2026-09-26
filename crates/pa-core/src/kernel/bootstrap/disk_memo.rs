@@ -209,7 +209,7 @@ mod tests {
         .unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
         // Corrupt JSON and an empty file.
-        std::fs::write(&path, "{"schema":").unwrap();
+        std::fs::write(&path, "{not-json").unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
         std::fs::write(&path, "").unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
