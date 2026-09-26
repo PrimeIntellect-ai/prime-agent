@@ -154,6 +154,15 @@ impl AgentSessionEngine {
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            // The settlement retries consume the owed flag before they
+            // run, so a handle that settles between the probe above and
+            // this store raced the callback out of its retry (its swap
+            // observed the flag before the store made it visible): with
+            // the pending work already gone, the owed turn would wait for
+            // a wake that already fired — re-arm the retry once.
+            if !self.has_live_background_bash_handles() && !self.has_unsettled_rlm_work().await {
+                self.retry_owed_autonomous_continuation();
+            }
             return Vec::new();
         }
         // The threshold arm: the crossing turn mints the continuation
@@ -296,6 +305,19 @@ impl AgentSessionEngine {
         {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            // The flag was consumed at entry, so a settlement that raced
+            // this re-store also raced the retry that would deliver the
+            // owed turn: with every blocker gone the deferral has no wake
+            // left — re-arm the retry. A queued input or unsettled child
+            // still owns a guaranteed future wake (the pause release, the
+            // settle hook), so only the fully-cleared deferral re-arms and
+            // the loop cannot spin.
+            if !self.has_live_background_bash_handles()
+                && !self.has_unsettled_rlm_work().await
+                && !self.session_input_queued()
+            {
+                self.retry_owed_autonomous_continuation();
+            }
             return;
         }
         if self.goal_owns_continuation_wakeup().await {
@@ -410,6 +432,69 @@ mod tests {
             .background_bash_probe
             .lock()
             .expect("background bash probe lock") = Some(probe);
+    }
+
+    /// The consult's lost-wakeup guard (Macroscope's #2826 review): a
+    /// handle that settles between the consult's probe read and its
+    /// owed-flag store consumed the only settlement wake (the callback's
+    /// flag swap observed `false` before the store made the deferral
+    /// visible), so the consult re-arms the retry when the pending work
+    /// is already gone. The probe flips to settled right after the
+    /// consult's first read, and the owed turn is admitted with NO
+    /// external retry — without the re-arm the flag sits owed forever
+    /// waiting for a wake that already fired.
+    #[test]
+    fn a_handle_settling_between_the_probe_and_the_flag_store_still_wakes() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
+            u64::MAX,
+        );
+        let engine = Arc::new(engine);
+        engine.register_arc();
+        let admitted: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&admitted);
+        engine.set_autonomous_admission(std::sync::Arc::new(move |text| {
+            sink.lock().unwrap().push(text);
+        }));
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "warm".to_string(), &mut events);
+        // The probe reads live exactly once (the consult's gate); every
+        // later read is settled — the settle tail of the raced window.
+        let flip = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flip_read = std::sync::Arc::clone(&flip);
+        set_background_bash_probe(
+            &engine,
+            Arc::new(move || flip_read.swap(false, std::sync::atomic::Ordering::SeqCst)),
+        );
+        admit(
+            &engine,
+            "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
+            &mut events,
+        );
+        admit(&engine, "go".to_string(), &mut events);
+        // No settlement callback ever fires in this harness — the
+        // consult's own re-arm must deliver the owed turn.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while admitted.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let texts = admitted.lock().unwrap().clone();
+        assert_eq!(
+            texts.len(),
+            1,
+            "the re-arm delivered the owed turn without an external retry: {texts:?}"
+        );
+        assert!(texts[0].starts_with("[autonomous-continuation]"));
+        assert!(
+            !engine
+                .autonomous_awaits_rlm_work
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the delivered turn consumed the owed flag"
+        );
     }
 
     /// TS #2465's autonomous rows: a turn that ends while a background

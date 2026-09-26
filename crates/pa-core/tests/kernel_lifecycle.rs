@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pa_core::kernel::bootstrap::build_rlm_bootstrap_code;
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
@@ -396,8 +396,13 @@ async fn background_bash_settlement_fires_the_callback_once() {
     };
     let settled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = std::sync::Arc::clone(&settled);
+    // The callback itself is the observable event: the test awaits its
+    // notice (a later settlement sends into the consumed channel, so the
+    // counter stays the witness for the exactly-once assertions).
+    let (settled_tx, settled_rx) = tokio::sync::oneshot::channel::<()>();
     options.on_background_work_settled = Some(std::sync::Arc::new(move || {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = settled_tx.send(());
     }));
     let manager = started_manager(options).await;
 
@@ -409,12 +414,12 @@ async fn background_bash_settlement_fires_the_callback_once() {
     );
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-    // The handle finishes: the track settles and the callback fires once.
+    // The handle finishes: the settlement callback is the wake-up, so the
+    // test waits for it directly (the timeout only bounds failure).
     execute(&manager, "live.kill()").await;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while manager.has_background_work() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(10), settled_rx)
+        .await
+        .expect("the settlement callback must fire");
     assert!(
         !manager.has_background_work(),
         "the handle's completion must settle the track"
@@ -452,7 +457,8 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     // TS #2053's teardown shape: kill() tears the handles down with the
-    // kernel, and the settlement fires once for the whole track.
+    // kernel, and the settlement fires once for the whole track —
+    // synchronously with the teardown, so the state is assertable here.
     manager.kill().await;
     assert!(!manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
