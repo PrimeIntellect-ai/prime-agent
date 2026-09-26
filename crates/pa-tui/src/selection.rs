@@ -93,7 +93,7 @@ pub(crate) fn highlight_line(line: &Line, from: usize, to: usize) -> Line {
     let from = from.min(width);
     let to = to.min(width);
     if to <= from {
-        return line.to_vec();
+        return line.clone();
     }
     let mut out = slice_line_by_column(line, 0, from);
     let mut selected = slice_line_by_column(line, from, to - from);
@@ -791,7 +791,7 @@ mod tests {
             });
         }
         let frame = v.render_frame(80, 12);
-        let row = (1..1 + v.window_rows)
+        let row = (1..=v.window_rows)
             .find(|row| rendered_row(&frame, *row).contains("original"))
             .unwrap();
         assert!(v.begin_selection(row, 0));
@@ -824,7 +824,7 @@ mod tests {
             kind: crate::chat::StatusKind::Info,
         });
         let frame = v.render_frame(80, 30);
-        let row = (1..1 + v.window_rows)
+        let row = (1..=v.window_rows)
             .find(|row| rendered_row(&frame, *row).contains("short transcript"))
             .unwrap();
         v.scroll_to_top();
@@ -860,7 +860,7 @@ mod tests {
             },
         )));
         let frame = v.render_frame(80, 20);
-        let row = (1..1 + v.window_rows)
+        let row = (1..=v.window_rows)
             .find(|row| rendered_row(&frame, *row).contains("original"))
             .unwrap();
         assert!(v.begin_selection(row, 0));
@@ -888,7 +888,7 @@ mod tests {
             });
         }
         let frame = v.render_frame(80, 12);
-        let row = (1..1 + v.window_rows)
+        let row = (1..=v.window_rows)
             .find(|row| rendered_row(&frame, *row).contains("original"))
             .unwrap();
         assert!(v.begin_selection(row, 0));

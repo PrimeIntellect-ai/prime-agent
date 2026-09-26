@@ -2,7 +2,7 @@
 //! provider stream function. Section of the port of
 //! `packages/ai/src/providers/anthropic.ts`.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::cache_pricing::{
     get_anthropic_cache_write_cost, has_standard_anthropic_cache_pricing,
@@ -129,7 +129,7 @@ pub fn stream_anthropic(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -327,7 +327,7 @@ async fn run_stream(
                                 blocks.blocks.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
                                     text_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -344,7 +344,7 @@ async fn run_stream(
                                         thinking: String::new(),
                                         thinking_signature: Some(String::new()),
                                         redacted: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -367,7 +367,7 @@ async fn run_stream(
                                                 .to_string(),
                                         ),
                                         redacted: Some(true),
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -405,7 +405,7 @@ async fn run_stream(
                                         .cloned()
                                         .unwrap_or_default(),
                                     thought_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
                                 blocks.partial_json.push(String::new());
@@ -624,9 +624,8 @@ async fn run_stream(
     }
 
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         for sse in decoder.push_text(&chunk) {
             handle_sse(&sse, request_id.as_deref(), |event| {

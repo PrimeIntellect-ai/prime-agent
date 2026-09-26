@@ -303,9 +303,8 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
                     Ok(payload) => payload,
                     Err(_) => return self.keep_last_good(scope, generation, opts),
                 };
-                let models = match (self.parse)(&payload, scope) {
-                    Ok(models) => models,
-                    Err(_) => return self.keep_last_good(scope, generation, opts),
+                let Ok(models) = (self.parse)(&payload, scope) else {
+                    return self.keep_last_good(scope, generation, opts);
                 };
                 if !self.is_current(scope, generation, opts) {
                     return None;

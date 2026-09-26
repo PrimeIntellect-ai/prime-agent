@@ -8,6 +8,9 @@
 //! for local gateways, Claude adaptive vs budget-based thinking, and
 //! GovCloud-safe request fields.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
 use serde_json::{json, Value};
 
 mod auth;
@@ -173,7 +176,7 @@ fn bedrock_http_error(
         // (`$metadata.httpStatusCode` is not read).
         status: None,
         body: None,
-        headers: Default::default(),
+        headers: HashMap::default(),
         request_id: None,
         sdk_name: Some(exception_name),
         retry_after_ms: None,
@@ -272,7 +275,7 @@ pub fn stream_bedrock(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -428,7 +431,7 @@ fn encode_model_id(model_id: &str) -> String {
         if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
             encoded.push(c);
         } else {
-            encoded.push_str(&format!("%{byte:02X}"));
+            let _ = write!(encoded, "%{byte:02X}");
         }
     }
     encoded
@@ -660,9 +663,8 @@ async fn run_stream(
     let mut decoder = EventStreamDecoder::new();
     let mut stream_error: Option<ProviderError> = None;
     loop {
-        let chunk = match response.next_bytes().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_bytes().await? else {
+            break;
         };
         for message in decoder.push(&chunk) {
             match handle_event(&message, model, output, writer, &mut state, &request_id) {
@@ -761,7 +763,7 @@ pub fn stream_simple_bedrock(
                     stop_reason_raw: None,
                     error_message: Some(message),
                     timestamp: now_ms(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 };
                 writer.push(AssistantMessageEvent::Error {
                     reason: error_reason(StopReason::Error),
@@ -851,7 +853,7 @@ mod tests {
         let error = bedrock_http_error(
             400,
             "{\"__type\":\"com.amazonaws.bedrock#ValidationException\",\"message\":\"model id is invalid\"}",
-            &Default::default(),
+            &HashMap::default(),
         );
         assert_eq!(error.to_string(), "Validation error: model id is invalid");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
@@ -876,7 +878,7 @@ mod tests {
         let error = bedrock_http_error(
             429,
             "{\"__type\":\"ThrottlingException\",\"message\":\"too many\"}",
-            &Default::default(),
+            &HashMap::default(),
         );
         assert_eq!(error.to_string(), "Throttling error: too many");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
@@ -892,7 +894,7 @@ mod tests {
     /// defaults to "`UnknownError`" like `decorateServiceException`.
     #[test]
     fn bedrock_http_error_generic_fallback() {
-        let error = bedrock_http_error(400, "{\"foo\":1}", &Default::default());
+        let error = bedrock_http_error(400, "{\"foo\":1}", &HashMap::default());
         assert_eq!(error.to_string(), "400: UnknownError");
     }
 
