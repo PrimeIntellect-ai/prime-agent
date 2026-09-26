@@ -48,6 +48,38 @@ pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinking
     }
 }
 
+/// Adapt the loop-level payload hook to the pa-ai hook shape: the two
+/// crates' `Model` values cross by the shared wire shape. A model that
+/// fails the round-trip (a wire-shape mismatch bug) keeps the payload
+/// unchanged — hooks are advisory and must never fail the request.
+fn agent_payload_hook_to_ai(hook: pa_agent::stream::OnPayloadHook) -> pa_ai::types::OnPayloadHook {
+    std::sync::Arc::new(move |payload: serde_json::Value, model: &Model| {
+        match json_round_trip::<_, pa_agent::types::Model>(model) {
+            Some(agent_model) => hook(payload, &agent_model),
+            None => Some(payload),
+        }
+    })
+}
+
+/// Adapt the loop-level response hook to the pa-ai hook shape. The
+/// `{status, headers}` response converts field-by-field; a model that
+/// fails the round-trip drops the hook call (advisory, never fatal).
+fn agent_response_hook_to_ai(
+    hook: pa_agent::stream::OnResponseHook,
+) -> pa_ai::types::OnResponseHook {
+    std::sync::Arc::new(
+        move |response: pa_ai::types::ProviderResponse, model: &Model| {
+            let agent_response = pa_agent::stream::ProviderResponse {
+                status: response.status,
+                headers: response.headers,
+            };
+            if let Some(agent_model) = json_round_trip::<_, pa_agent::types::Model>(model) {
+                hook(agent_response, &agent_model);
+            }
+        },
+    )
+}
+
 /// The mutable provider target a live session's stream reads per call:
 /// daemon `set_model` swaps it without rebuilding the session, and the
 /// provider-failover switch swaps it for the switched-to provider.
@@ -120,8 +152,12 @@ fn stream_once(
             service_tier,
             cache_retention: None,
             session_id: options.session_id.clone(),
-            on_payload: None,
-            on_response: None,
+            // The loop-level request hooks (TS `onPayload`/`onResponse`
+            // riding `SimpleStreamOptions` into the provider client) cross
+            // the crate boundary here: the payload hook may replace the
+            // wire payload, the response hook observes the headers.
+            on_payload: options.on_payload.map(agent_payload_hook_to_ai),
+            on_response: options.on_response.map(agent_response_hook_to_ai),
             headers: None,
             metadata: None,
             timeout_ms: None,

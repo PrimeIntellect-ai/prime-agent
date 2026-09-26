@@ -4134,44 +4134,31 @@ impl Supervisor {
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
-                    if response.success {
-                        // The kill route's own tombstone already persisted
-                        // before the forward, so the stop's durable intent
-                        // stands even when this pass fails; a failure is
-                        // observable (logged) instead of silently
-                        // skipping the retire/registry/passivation tail —
-                        // the boot's tombstoned-stop finalization owns
-                        // whatever this pass could not finish.
+                    // TS's root-kill block wraps the forward in a `finally`
+                    // (daemon-supervisor.ts: `try { response = await
+                    // this.forwardToWorker(...) } finally { await
+                    // this.stopWorker(...) }`): the stop completes on a
+                    // rejected or timed-out forward too — a worker that
+                    // ignores the routed kill would otherwise keep its
+                    // session lease behind a route that never answers (the
+                    // supervisor lives, so no supervisor-lost GC fires) and
+                    // the escalation in `retire_worker_after_stop` would
+                    // never run. The marker-carrying child closes keep the
+                    // success gate: TS forwards them without a stop, and a
+                    // failed cascade is the parent's retry, not a stop.
+                    if plain_kill {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    } else if response.success {
+                        // The cascade stop: a failure is observable (logged)
+                        // instead of silently skipping the
+                        // retire/registry/passivation tail — the boot's
+                        // tombstoned-stop finalization owns whatever this
+                        // pass could not finish.
                         if let Err(error) = self.stop_worker(&resident).await {
                             self.log_line(&format!(
                                 "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
                                 resident.worker_id
                             ));
-                        }
-                        // TS `stopWorkerUntracked`'s archived-stop finalize
-                        // (the plain kill's durable half): the killed
-                        // session tree's scheduled jobs cancel durably and
-                        // the root file carries the `archived` state, so no
-                        // wake pass can revive the stopped session. A
-                        // ledger-tombstoned delete also sweeps the deleted
-                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
-                        // A marker-carrying child close is a cascade, not a
-                        // stop: no finalize (the child's own close arms
-                        // already carried the parent's reason).
-                        if plain_kill {
-                            let deleted_child = rest
-                                .get("rlmLedgerDelete")
-                                .and_then(Value::as_str)
-                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-                                .map(|_| crate::stop_cleanup::DeletedChild {
-                                    child_id: rest
-                                        .get("rlmChildId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                });
-                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
-                                .await;
                         }
                     }
                 }
@@ -4206,16 +4193,84 @@ impl Supervisor {
                 }
                 (vec![response_line(&response)], false)
             }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
+            Err(error) => {
+                // TS's root-kill `finally` runs its stop on a thrown
+                // forward as well (a hung worker never answers the routed
+                // kill): the stop escalates — the bounded `shutdown` route,
+                // then `retire_worker_after_stop`'s SIGTERM -> SIGKILL ->
+                // hard-deadline pass — so the stopped worker's session
+                // lease cannot outlive the command. The marker-carrying
+                // child closes keep TS's plain forward: a failed cascade is
+                // the parent's retry.
+                if plain_kill {
+                    if let DaemonCommand::Kill { rest, .. } = command {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    }
+                }
+                (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &error.to_string(),
+                        None,
+                    ))],
+                    false,
+                )
+            }
         }
+    }
+
+    /// The plain kill's stop aftermath, run on every route outcome: TS's
+    /// root-kill block wraps the forward in a `finally`
+    /// (daemon-supervisor.ts: `try { response = await
+    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
+    /// so a kill a hung worker never answers still completes the stop —
+    /// the graceful `shutdown` route bounded by the route budget, then
+    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
+    /// hard-deadline escalation — and the stopped worker's session lease
+    /// frees through the dead-owner reclaim instead of outliving the
+    /// command behind a route that never answers.
+    ///
+    /// The stop runs first and its failure gates the belt: the only
+    /// `Err` [`Self::stop_worker`] takes is the stop tombstone's persist
+    /// (the stop never durably started — TS's `stopWorkerUntracked`
+    /// throws before any teardown), so the worker stays untouched and
+    /// the kill stays retryable. The belt below must never run against
+    /// a live worker: it cancels the session tree's jobs, archives the
+    /// root file, and sweeps a ledger delete's child artifacts while
+    /// the worker's resident is still serving and its transcript may
+    /// still grow.
+    async fn finish_plain_kill_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        rest: &Map<String, Value>,
+    ) {
+        if let Err(error) = self.stop_worker(resident).await {
+            self.log_line(&format!(
+                "session worker {} stop after kill failed: {error:#}; the stop never durably started and stays retryable",
+                resident.worker_id
+            ));
+            return;
+        }
+        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
+        // kill's durable half): the killed session tree's scheduled jobs
+        // cancel durably and the root file carries the `archived` state,
+        // so no wake pass can revive the stopped session. A
+        // ledger-tombstoned delete also sweeps the deleted child's
+        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        let deleted_child = rest
+            .get("rlmLedgerDelete")
+            .and_then(Value::as_str)
+            .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+            .map(|_| crate::stop_cleanup::DeletedChild {
+                child_id: rest
+                    .get("rlmChildId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        self.finalize_worker_stop(resident, deleted_child.as_ref())
+            .await;
     }
 
     pub(crate) async fn stop_worker(
@@ -5088,6 +5143,174 @@ mod tests {
         assert!(
             supervisor.accept_exit.load(Ordering::SeqCst),
             "the completed stop pass must exit the accept loop"
+        );
+    }
+
+    /// A kill whose stop never durably started — the stop tombstone's
+    /// persist fails, the only `Err` `stop_worker` takes — must not run
+    /// the kill's belt: the worker is untouched and the kill stays
+    /// retryable (TS `stopWorkerUntracked` throws before any teardown).
+    /// The belt otherwise cancels the session tree's jobs, archives the
+    /// root file, and — for a ledger delete — sweeps the child's
+    /// artifacts against a live worker whose resident still serves the
+    /// file (its stores may still grow).
+    #[tokio::test]
+    async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_file = sessions_dir.join("live-1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"version\":3,\"id\":\"live-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+        )
+        .unwrap();
+        // The live child's artifact partition: a ledger delete's belt
+        // would sweep it; the gated belt must leave it in place.
+        let artifacts = agent_dir.join("session-artifacts").join("live-1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: Some(session_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the stop tombstone's
+        // atomic write cannot land there (the rename onto a directory
+        // fails), so the stop never durably starts.
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        // A ledger-delete kill (delete_subagent's shape: the rest carries
+        // the marker, so the plain-kill path owns it).
+        let rest = Map::from_iter([
+            ("rlmLedgerDelete".to_string(), json!("user")),
+            ("rlmChildId".to_string(), json!("child-1")),
+        ]);
+        supervisor.finish_plain_kill_stop(&resident, &rest).await;
+
+        // The stop never started: the resident stays owned (retryable)
+        // and the live child's artifacts survive the belt.
+        assert!(
+            supervisor.registry.get("w-live").await.is_some(),
+            "the stop never durably started, so the worker stays owned"
+        );
+        assert!(
+            artifacts.join("scheduled-jobs.json").is_file(),
+            "a belt gated behind a failed stop must not sweep a live child's artifacts"
+        );
+    }
+
+    /// A plain kill holds the route-side tombstone when its stop's
+    /// redundant re-write fails: the durable intent is already on disk,
+    /// so the stop proceeds (the escalation runs, the registry row goes,
+    /// the stop is intentional) instead of aborting and leaving the
+    /// killed worker running on its session lease until the next boot —
+    /// the finding-#5 symptom. The belt gate stays keyed on the stop
+    /// that never durably started: no tombstone at all still fails.
+    #[tokio::test]
+    async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: None,
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            // The route-side tombstone the plain kill's pre-route persist
+            // wrote before the forward.
+            stop_requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+            archive_on_stop: Some(true),
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the tombstone's redundant
+        // re-write fails (the rename onto a directory cannot land).
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        supervisor
+            .stop_worker(&resident)
+            .await
+            .expect("the durable tombstone must carry the stop past its failed re-write");
+
+        assert!(
+            supervisor.registry.get("w-live").await.is_none(),
+            "the stop completed: the worker left the registry"
+        );
+        assert!(
+            resident.intentional_stop.load(Ordering::SeqCst),
+            "the stop is intentional"
         );
     }
 
