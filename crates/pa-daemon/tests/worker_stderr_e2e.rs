@@ -20,8 +20,6 @@ use serde_json::{json, Value};
 
 struct Daemon {
     child: Child,
-    #[allow(dead_code)]
-    socket: PathBuf,
 }
 
 impl Drop for Daemon {
@@ -66,10 +64,7 @@ impl DaemonBuilder {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if socket.exists() {
-                return Daemon {
-                    child,
-                    socket: socket.to_path_buf(),
-                };
+                return Daemon { child };
             }
             std::thread::sleep(Duration::from_millis(20));
         }

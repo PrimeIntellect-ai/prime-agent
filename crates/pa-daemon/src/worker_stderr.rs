@@ -9,8 +9,9 @@
 //! it holds exactly the current launch's stderr (never the previous
 //! attempt's), and the spawn-time prune keeps only the newest
 //! [`RETAINED_FILES`] worker logs by modified time, deleting the older
-//! ones. The tail a not-ready error carries is the last [`TAIL_BYTES`]
-//! of the file.
+//! ones (the just-opened log is spared if timestamp ties sort it into the
+//! deletion window). The tail a not-ready error carries is the last
+//! [`TAIL_BYTES`] of the file.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -55,16 +56,19 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
         .write(true)
         .open(log_path)
         .with_context(|| format!("open worker stderr log {}", log_path.display()))?;
-    prune_retained(logs_dir);
+    prune_retained(logs_dir, log_path);
     Ok(file)
 }
 
 /// Keep only the newest [`RETAINED_FILES`] worker stderr logs (by modified
 /// time) and delete the rest: worker ids are minted per launch, so without
 /// the prune every session a daemon ever hosted would leave a log behind.
-/// Deletion is best-effort (a live worker's file may be open; an unlinked
-/// file keeps receiving the child's writes until it exits).
-fn prune_retained(logs_dir: &Path) {
+/// The just-opened log (`keep`) is spared if coarse-mtime ties sort it
+/// into the deletion window: the child holds its descriptor, but a later
+/// tail read opens by pathname. Deletion of the rest is best-effort (a
+/// live worker's file may be open; an unlinked file keeps receiving the
+/// child's writes until it exits).
+fn prune_retained(logs_dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         return;
     };
@@ -86,14 +90,25 @@ fn prune_retained(logs_dir: &Path) {
     }
     logs.sort_by_key(|(modified, _)| *modified);
     let excess = logs.len() - RETAINED_FILES;
-    for (_, path) in logs.into_iter().take(excess) {
-        let _ = std::fs::remove_file(&path);
+    let mut deleted = 0;
+    for (_, path) in &logs {
+        if deleted == excess {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        let _ = std::fs::remove_file(path);
+        deleted += 1;
     }
 }
 
 /// Read the last [`TAIL_BYTES`] of a worker stderr log, dropping the
 /// leading partial line when the file is larger than the tail so the tail
-/// starts on a line boundary (the Codex `read_log_tail` shape). Returns
+/// starts on a line boundary (the Codex `read_log_tail` shape). The read
+/// itself is bounded: the not-ready error can fire while the worker is
+/// still running (the auth-budget arm), and an unbounded read would let
+/// the worker's ongoing stderr output grow the tail past the cap. Returns
 /// `Ok(None)` for a missing or empty log.
 ///
 /// # Errors
@@ -120,7 +135,8 @@ fn read_tail(path: &Path) -> Result<Option<String>> {
     file.seek(SeekFrom::Start(start))
         .with_context(|| format!("seek worker stderr log {}", path.display()))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(TAIL_BYTES)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read worker stderr log {}", path.display()))?;
     if start > 0 {
         if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
@@ -288,7 +304,12 @@ mod tests {
         // A foreign file in the logs dir is never pruned (the daemon's
         // own log lives here too).
         let daemon_log = write_log(&logs_dir, "daemon.sock.abcd1234.log", "supervisor line\n");
-        prune_retained(&logs_dir);
+        // The just-opened log is the pathological case Macroscope flagged:
+        // it sorts OLDEST (a coarse-mtime tie would do this), so the prune
+        // must spare it from the deletion window instead of unlinking it
+        // while the worker still holds its descriptor.
+        let keep = logs_dir.join("worker-000.stderr.log");
+        prune_retained(&logs_dir, &keep);
         let mut remaining: Vec<String> = std::fs::read_dir(&logs_dir)
             .expect("read logs dir")
             .filter_map(std::result::Result::ok)
@@ -306,15 +327,19 @@ mod tests {
             .collect();
         assert_eq!(worker_logs.len(), RETAINED_FILES);
         assert!(
+            worker_logs.contains(&"worker-000.stderr.log".to_string()),
+            "the just-opened log survives even when it sorts into the deletion window"
+        );
+        assert!(
             worker_logs.iter().all(|name| {
                 let index: i64 = name
                     .trim_start_matches("worker-")
                     .trim_end_matches(".stderr.log")
                     .parse()
                     .expect("numbered log");
-                index >= 6
+                index == 0 || index >= 7
             }),
-            "the oldest logs were the ones pruned: {remaining:?}"
+            "the oldest logs (past the spared keep) were the ones pruned: {remaining:?}"
         );
         assert_eq!(
             std::fs::read_to_string(&daemon_log).expect("daemon log readable"),
