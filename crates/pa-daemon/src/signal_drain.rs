@@ -14,7 +14,7 @@
 //!
 //! The handlers install only once the accept loop is up ([`Supervisor::run`]
 //! spawns this loop after the socket binds): a signal during boot keeps
-//! today's default disposition, exactly like before this loop existed.
+//! the default disposition.
 
 use std::sync::Arc;
 

@@ -2161,7 +2161,7 @@ fn a_sigterm_exits_the_supervisor_through_the_graceful_drain() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let daemon = spawn_daemon(&socket, &agent_dir);
+    let mut daemon = spawn_daemon(&socket, &agent_dir);
     let (_client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let _ = Command::new("kill")
