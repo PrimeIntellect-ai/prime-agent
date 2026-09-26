@@ -12,6 +12,7 @@ mod adoption;
 mod launch_budget;
 mod options;
 mod routing;
+pub(crate) mod subscribers;
 
 use adoption::{AdoptionBoot, AdoptionOutcome};
 use launch_budget::{
@@ -107,6 +108,12 @@ pub struct Supervisor {
     /// event — the refcount bump is the whole cost for non-matching
     /// connections.
     pub(crate) events: broadcast::Sender<(ClientRouting, std::sync::Arc<Value>)>,
+    /// Session-event subscribers: the send-time routing index (TS parity —
+    /// `handleWorkerFrame` evaluates the attached set in the same pass that
+    /// writes the socket). Session events enqueue to the attached
+    /// connections' per-connection queues here instead of waking every
+    /// connection's ring arm; broadcast-class events keep the ring above.
+    pub(crate) session_subscribers: subscribers::SessionSubscribers,
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
@@ -215,6 +222,7 @@ impl Supervisor {
             telemetry: std::sync::Mutex::new(None),
             registry: SessionRegistry::new(),
             events,
+            session_subscribers: subscribers::SessionSubscribers::new(),
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -335,12 +343,7 @@ impl Supervisor {
                     "sessionId": binding.session_id,
                     "sessionFile": binding.session_file,
                 });
-                let _ = self.events.send((
-                    ClientRouting::AttachedSession {
-                        active_session_id: previous,
-                    },
-                    std::sync::Arc::new(event),
-                ));
+                self.publish_session_event(&previous, std::sync::Arc::new(event));
             }
         }
     }
@@ -360,24 +363,14 @@ impl Supervisor {
         &self,
         selector: &str,
         resident: &Arc<ResidentWorker>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<subscribers::ClientSubscriptions>,
     ) -> String {
         let current = resident.worker_id.clone();
         self.log_line(&format!(
             "rebinding stale session id {selector} -> {current}"
         ));
         self.note_daemon_event("session_rebound", None);
-        let was_attached = {
-            let mut attached = attached.lock().unwrap();
-            let was = attached.iter().any(|id| id == selector);
-            if was {
-                attached.retain(|id| id != selector);
-                if !attached.iter().any(|id| id == &current) {
-                    attached.push(current.clone());
-                }
-            }
-            was
-        };
+        let was_attached = attached.rebind(&self.session_subscribers, selector, &current);
         if was_attached {
             let (session_id, session_file) = {
                 let descriptor = resident.descriptor.lock().await;
@@ -386,20 +379,32 @@ impl Supervisor {
                     descriptor.session_file.clone(),
                 )
             };
-            let _ = self.events.send((
-                ClientRouting::AttachedSession {
-                    active_session_id: current.clone(),
-                },
-                std::sync::Arc::new(json!({
-                    "type": "session_binding",
-                    "previousActiveSessionId": selector,
-                    "activeSessionId": current,
-                    "sessionId": session_id,
-                    "sessionFile": session_file,
-                })),
-            ));
+            self.publish_session_event(&current, std::sync::Arc::new(json!({
+                "type": "session_binding",
+                "previousActiveSessionId": selector,
+                "activeSessionId": current,
+                "sessionId": session_id,
+                "sessionFile": session_file,
+            })));
         }
         current
+    }
+
+    /// Publish one session event to the session's attached connections
+    /// (the send-time delivery pass — TS `handleWorkerFrame`'s fan-out
+    /// evaluates the attached set in the same pass that writes). A full
+    /// queue drops the frame and the stall-cycle transition lands in the
+    /// daemon log (finding 4a visibility).
+    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
+        let outcome = self
+            .session_subscribers
+            .publish(active_session_id, payload);
+        if !outcome.lagged.is_empty() {
+            self.log_line(&format!(
+                "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",
+                outcome.lagged.join(", ")
+            ));
+        }
     }
 
     /// The current resident a superseded selector rebinds to (the
@@ -1374,11 +1379,16 @@ impl Supervisor {
         let mut line = String::new();
         let mut events = self.events.subscribe();
         let connection_id = client_id.clone();
+        // Session events ride this per-connection queue (the subscriber
+        // registry resolves delivery at publish time, TS `handleWorkerFrame`
+        // parity); broadcast-class events keep the ring above.
+        let (targeted_tx, mut targeted_rx) =
+            tokio::sync::mpsc::channel::<Arc<Value>>(crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY);
         // Connection state shared with the per-command dispatch tasks: the
-        // envelope-overridden client id and the attached-session list (the
-        // event arm reads the latter to route session events).
-        let attached: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        // envelope-overridden client id and the attached-session handle
+        // (attach/detach keep the registry and the session list consistent;
+        // the registry insertion is the delivery boundary).
+        let attached = subscribers::ClientSubscriptions::new(connection_id.clone(), targeted_tx);
         let effective_client_id: Arc<std::sync::Mutex<String>> =
             Arc::new(std::sync::Mutex::new(client_id.clone()));
         // Roster subscription flag shared with the per-command dispatch
@@ -1500,6 +1510,34 @@ impl Supervisor {
                         break;
                     }
                 }
+                targeted = targeted_rx.recv() => {
+                    // A session event routed by the subscriber registry at
+                    // publish time: the delivery decision already ran, the
+                    // frame only writes (the queue preserves per-session
+                    // publish order).
+                    if let Some(payload) = targeted {
+                        if let Err(error) = write_line(&mut writer, &payload).await {
+                            // An event-write failure must not strand an
+                            // accepted shutdown: if this connection owns
+                            // the stop, it still starts the pass.
+                            let is_shutdown_owner = self
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && self.shutting_down.load(Ordering::SeqCst)
+                                && !self.accept_exit.load(Ordering::SeqCst)
+                            {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 event = events.recv() => {
                     match event {
                         Ok((routing, payload)) => {
@@ -1508,9 +1546,6 @@ impl Supervisor {
                                 ClientRouting::BroadcastExcept {
                                     connection_id: excluded,
                                 } => excluded.as_str() != connection_id.as_str(),
-                                ClientRouting::AttachedSession { active_session_id } => {
-                                    attached.lock().unwrap().iter().any(|id| id == active_session_id)
-                                }
                                 ClientRouting::RosterSubscribers => {
                                     roster_subscribed.load(std::sync::atomic::Ordering::SeqCst)
                                 }
@@ -1568,8 +1603,12 @@ impl Supervisor {
             self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
-        // not stop the session; the worker keeps running).
-        let attached_sessions = attached.lock().unwrap().clone();
+        // not stop the session; the worker keeps running). The registry
+        // entries go first — no session event may be enqueued for a
+        // connection whose loop has exited — then the worker-side detach
+        // routes run as before.
+        attached.detach_all(&self.session_subscribers);
+        let attached_sessions = attached.session_ids();
         for active_session_id in &attached_sessions {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
@@ -1604,7 +1643,7 @@ impl Supervisor {
         self: &Arc<Self>,
         line: &str,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
@@ -1744,7 +1783,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
@@ -2037,7 +2076,7 @@ impl Supervisor {
                 // marked sessions once it answered (TS supervisor detach
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
-                let attached_ids = attached.lock().unwrap().clone();
+                let attached_ids = attached.session_ids();
                 let marked = self
                     .begin_detach_pause_bookkeeping(
                         connection,

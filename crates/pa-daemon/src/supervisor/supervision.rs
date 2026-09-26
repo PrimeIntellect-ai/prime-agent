@@ -545,7 +545,6 @@ impl Supervisor {
         // Reader: route responses to pending requests, forward session events.
         {
             let reader_resident = Arc::clone(resident);
-            let events = events.clone();
             let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
                 let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
@@ -660,25 +659,34 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, std::sync::Arc::new(payload)));
+                        // The send-time delivery pass (TS handleWorkerFrame
+                        // parity): the session's attached connections get
+                        // the frame through the subscriber registry, other
+                        // connections never wake. A session event without
+                        // an active session id is dropped - TS's
+                        // `!activeSessionId` guard in the same handler, not
+                        // broadcast to every client.
+                        match active_session_id {
+                            Some(active_session_id) => reader_supervisor
+                                .publish_session_event(
+                                    &active_session_id,
+                                    std::sync::Arc::new(payload),
+                                ),
+                            None => {}
+                        }
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, std::sync::Arc::new(payload)));
+                        match active_session_id {
+                            Some(active_session_id) => reader_supervisor
+                                .publish_session_event(
+                                    &active_session_id,
+                                    std::sync::Arc::new(payload),
+                                ),
+                            None => {}
+                        }
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
                         // snapshot can no longer be trusted as fresh (TS
