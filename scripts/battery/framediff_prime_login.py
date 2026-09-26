@@ -209,13 +209,14 @@ def make_side(name: str, binary: str, root: Path, prime_port: int) -> B.Side:
                 "providers": {
                     "prime-inference": {
                         "api": "openai-completions",
-                        "baseUrl": side.base_url(),
+                        # `Side.base_url` is a property (batterylib): no call.
+                        "baseUrl": side.base_url,
                         "models": [
                             {
                                 "id": "mock-1",
                                 "name": "Mock 1",
                                 "api": "openai-completions",
-                                "baseUrl": side.base_url(),
+                                "baseUrl": side.base_url,
                                 "contextWindow": 128000,
                                 "maxTokens": 4096,
                             }

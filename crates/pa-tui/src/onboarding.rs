@@ -259,6 +259,15 @@ impl OnboardingScreen {
                     panel.push_progress(message);
                 }
             }
+            // TS `showWaiting`: the dialog's own method carries no
+            // onboarding guard — the polling device flow's waiting line
+            // renders on this surface too.
+            AuthPanelRequest::Waiting { message } => {
+                let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
+                    return;
+                };
+                panel.push_waiting(message);
+            }
             AuthPanelRequest::AuthUrl { url, instructions } => {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
                     return;
@@ -745,6 +754,50 @@ mod tests {
             text.iter()
                 .any(|row| row.contains("Browser sign-in unavailable (mock).")),
             "the direct fallback line renders: {text:?}"
+        );
+    }
+
+    /// TS `showWaiting` (the Copilot device flow's status): the dialog's
+    /// own method carries no onboarding guard, so the waiting line
+    /// renders on this surface too — below the browser URL block (the
+    /// `onProgress` chatter the fold drops never reaches the panel).
+    #[test]
+    fn the_onboarding_fold_renders_the_device_flow_waiting_line() {
+        let mut screen = OnboardingScreen::welcome();
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+            panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::onboarding(
+                "Login to GitHub Copilot",
+            )),
+            heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+        });
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::AuthUrl {
+            url: "https://fixture.example/device".to_string(),
+            instructions: None,
+        });
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::Waiting {
+            message: "Waiting for browser authentication...".to_string(),
+        });
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let rows = screen.render(&theme, 80, 24, &kb());
+        let text = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let url = text
+            .iter()
+            .position(|row| row.contains("fixture.example/device"))
+            .expect("the url row");
+        let waiting = text
+            .iter()
+            .position(|row| row.contains("Waiting for browser authentication"))
+            .expect("the waiting row");
+        assert!(
+            waiting > url,
+            "the waiting line rides below the URL block: {text:?}"
         );
     }
 

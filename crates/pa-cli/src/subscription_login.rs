@@ -60,7 +60,10 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
         self.panel.auth_url(url, instructions);
         pa_core::platform::browser::open_in_browser(url);
         if self.provider_id == GITHUB_COPILOT_PROVIDER_ID {
-            self.panel.progress(COPILOT_WAITING);
+            // TS `showWaiting` (the dialog's own method, no onboarding
+            // guard — never the `onProgress` chatter arm the onboarding
+            // block drops).
+            self.panel.waiting(COPILOT_WAITING);
         }
     }
 
@@ -674,10 +677,11 @@ mod tests {
             }
             _ => panic!("expected the url block request"),
         }
-        // TS `showWaiting` for the Copilot device flow.
+        // TS `showWaiting` for the Copilot device flow: the dialog's own
+        // method, on every surface — never the `onProgress` chatter arm.
         let waiting = rx.recv().await.expect("the waiting line sends");
         match waiting {
-            pa_tui::auth_panel::AuthPanelRequest::Progress { message, .. } => {
+            pa_tui::auth_panel::AuthPanelRequest::Waiting { message } => {
                 assert_eq!(message, "Waiting for browser authentication...");
             }
             _ => panic!("expected the waiting line request"),

@@ -116,6 +116,12 @@ pub enum AuthPanelRequest {
     /// — while a direct `showProgress` line (the browser-fallback arm,
     /// the OAuth dialogs' chatter) renders on every surface.
     Progress { message: String, chatter: bool },
+    /// TS `dialog.showWaiting`: the polling device flow's waiting line
+    /// (the Copilot browser authentication pend) — the accent row that
+    /// joins above the actions row. It renders on every surface: the
+    /// dialog's own method carries no onboarding guard, unlike the
+    /// `onProgress` chatter arm.
+    Waiting { message: String },
     /// TS `dialog.showAuth`: the browser URL block (the flow launches
     /// the browser itself; the panel only renders).
     AuthUrl {
@@ -284,6 +290,16 @@ impl AuthPanelHandle {
         self.send(AuthPanelRequest::Progress {
             message: message.into(),
             chatter: false,
+        });
+    }
+
+    /// TS `dialog.showWaiting`: the polling device flow's waiting line
+    /// — the accent row above the actions row, rendered on every
+    /// surface (onboarding included; the dialog's own method, never the
+    /// `onProgress` chatter arm the onboarding block drops).
+    pub fn waiting(&self, message: impl Into<String>) {
+        self.send(AuthPanelRequest::Waiting {
+            message: message.into(),
         });
     }
 
@@ -456,6 +472,9 @@ pub struct AuthPanel {
     auth_instructions: Option<String>,
     /// The empty-submit notice row (the token paste panel's arm only).
     notice: Option<String>,
+    /// TS `showWaiting`'s waiting line (the polling device flow's
+    /// status): the accent row above the actions row.
+    waiting: Option<String>,
     /// The active input.
     input: PanelInput,
     /// The URL block's copy outcome (TS the actions row's status text).
@@ -528,6 +547,7 @@ impl AuthPanel {
             auth_url: None,
             auth_instructions: None,
             notice: None,
+            waiting: None,
             input: PanelInput::Working,
             copy_status: None,
             flow_cancel: None,
@@ -572,12 +592,25 @@ impl AuthPanel {
         self.progress.push(scrub_controls(&message));
     }
 
+    /// TS `showWaiting` (the polling device flow's status): the accent
+    /// line replaces any earlier waiting status — one line, the flow's
+    /// current state. One request-fold entry (the session's channel arm
+    /// calls it).
+    pub fn push_waiting(&mut self, message: String) {
+        // The flow's line can quote provider text: the same control
+        // character hygiene every daemon-supplied row carries.
+        self.waiting = Some(scrub_controls(&message));
+    }
+
     /// Whether any content block has landed (TS `contentContainer.children
     /// .length > 0`): the panel renders its leading blank row once
     /// `startContent` ever ran, and the progress section title renders
     /// only before it.
     fn content_open(&self) -> bool {
-        self.progress_open || self.auth_url.is_some() || !matches!(self.input, PanelInput::Working)
+        self.progress_open
+            || self.waiting.is_some()
+            || self.auth_url.is_some()
+            || !matches!(self.input, PanelInput::Working)
     }
 
     /// TS `showAuth`: the URL block replaces the content (the progress
@@ -592,6 +625,7 @@ impl AuthPanel {
         self.copy_status = None;
         self.input = PanelInput::Working;
         self.notice = None;
+        self.waiting = None;
     }
 
     /// TS `showManualInput` / `armManualInput` (muted tone) and
@@ -1031,6 +1065,20 @@ impl AuthPanel {
             }
             PanelInput::Teams { .. } => unreachable!("the team picker returned above"),
         }
+        // TS `showWaiting`: the waiting line joins above the actions row
+        // in the accent colour — its `addSectionSpacer` blank rides only
+        // under already-rendered content (the empty arm's `startContent`
+        // blank is the panel's leading row already).
+        if let Some(waiting) = &self.waiting {
+            if self.progress_open
+                || !self.progress.is_empty()
+                || self.auth_url.is_some()
+                || !matches!(self.input, PanelInput::Working)
+            {
+                lines.push(Vec::new());
+            }
+            lines.push(content_row(theme, width, ThemeColor::Accent, waiting));
+        }
         // TS `getAuthActionsText`: the URL block's actions row rides last —
         // the copy-key hint with the status of the last copy, the submit
         // hint while the paste field is mounted, and the cancel hint.
@@ -1164,7 +1212,10 @@ fn key_hint_row(
 
 /// TS `addInstructions`' code arm (`/^(?:Code|Enter code):\s*(.+)$/i`):
 /// the verification code the browser instructions carry, rendered below
-/// the muted label.
+/// the muted label. The TS `.` stops at line terminators and `$` anchors
+/// the string's end, so a multi-line `Code: ABC\nmore instructions`
+/// matches no code arm at all — the instructions render as provider
+/// text.
 fn verification_code(instructions: &str) -> Option<String> {
     let trimmed = instructions.trim();
     for prefix in ["Enter code:", "Code:"] {
@@ -1176,7 +1227,7 @@ fn verification_code(instructions: &str) -> Option<String> {
                 .collect::<String>()
                 .trim()
                 .to_string();
-            if !code.is_empty() {
+            if !code.is_empty() && !code.contains('\n') && !code.contains('\r') {
                 return Some(code);
             }
         }
@@ -1927,6 +1978,75 @@ mod tests {
             .expect("the code row");
         assert_eq!(rows[code - 1], " Verification code");
         assert_eq!(rows[code - 2], "", "the blank separates link and code");
+    }
+
+    /// TS `addInstructions`' regex (`.` stops at line terminators, `$`
+    /// anchors the string's end): a multi-line `Code: 4242-9911\nMore
+    /// instructions follow.` payload matches no code arm — the whole
+    /// instructions render as provider text, never a verification-code
+    /// block over the extra lines.
+    #[test]
+    fn multi_line_code_instructions_stay_provider_text() {
+        assert_eq!(
+            verification_code("Code: 4242-9911"),
+            Some("4242-9911".to_string())
+        );
+        assert_eq!(
+            verification_code("Code: 4242-9911\nMore instructions follow."),
+            None,
+            "the TS single-line regex matches no code over a newline"
+        );
+        assert_eq!(verification_code("code: a\r\nb"), None);
+        let mut panel = AuthPanel::onboarding("Login to Linear");
+        panel.show_auth_url(
+            "https://fixture.example/authorize".to_string(),
+            Some("Code: 4242-9911\nMore instructions follow.".to_string()),
+        );
+        let rows = frame_text(&mut panel);
+        assert!(
+            !rows.iter().any(|row| row.contains("Verification code")),
+            "no code block over a multi-line payload: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Code: 4242-9911")),
+            "the whole instructions render as provider text: {rows:?}"
+        );
+    }
+
+    /// TS `showWaiting` (the Copilot device flow's status): the waiting
+    /// line joins below the URL block in the accent colour, above the
+    /// actions row, over the section spacer's blank.
+    #[test]
+    fn the_waiting_line_joins_the_url_block_in_the_accent_colour() {
+        let mut panel = AuthPanel::onboarding("Login to GitHub Copilot");
+        panel.show_auth_url("https://fixture.example/device".to_string(), None);
+        panel.push_waiting("Waiting for browser authentication...".to_string());
+        let rows = frame_text(&mut panel);
+        let url = rows
+            .iter()
+            .position(|row| row.contains("fixture.example/device"))
+            .expect("the url row");
+        let waiting = rows
+            .iter()
+            .position(|row| row.contains("Waiting for browser authentication"))
+            .expect("the waiting row");
+        let actions = rows
+            .iter()
+            .position(|row| row.contains("cancel"))
+            .expect("the actions row");
+        assert!(waiting > url, "the waiting line rides below the URL block");
+        assert!(
+            waiting < actions,
+            "the waiting line rides above the actions row"
+        );
+        assert_eq!(rows[waiting - 1], "", "the section spacer rides above");
+        let lines = panel.render(&theme(), 90, &kb());
+        let accent = theme().fg_style(ThemeColor::Accent);
+        assert!(
+            lines[waiting].iter().any(|span| span.style == accent),
+            "the waiting line renders in the accent colour: {:?}",
+            lines[waiting]
+        );
     }
 
     /// TS `cancel()` on a URL screen: the actions row advertises the

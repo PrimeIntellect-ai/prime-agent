@@ -4073,6 +4073,11 @@ impl SessionUi {
                     panel.push_progress(message);
                 }
             }
+            AuthPanelRequest::Waiting { message } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.push_waiting(message);
+                }
+            }
             AuthPanelRequest::AuthUrl { url, instructions } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
                     panel.show_auth_url(url, instructions);
