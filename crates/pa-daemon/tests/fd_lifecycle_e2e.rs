@@ -762,7 +762,13 @@ fn booted_supervisor_persists_its_config() {
     );
     assert_eq!(
         config["defaultSessionDir"].as_str(),
-        Some(agent_dir.join("sessions").to_string_lossy().to_string().as_str()),
+        Some(
+            agent_dir
+                .join("sessions")
+                .to_string_lossy()
+                .to_string()
+                .as_str()
+        ),
         "config carries the resolved default session dir: {config}"
     );
 
@@ -781,4 +787,3 @@ fn booted_supervisor_persists_its_config() {
     client.send_command("l", serde_json::json!({ "type": "list" }));
     assert_eq!(client.read_response("l")["success"], true);
 }
-
