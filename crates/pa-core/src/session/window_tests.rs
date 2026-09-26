@@ -739,13 +739,20 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
     std::fs::write(&path, &body).unwrap();
     for phase in ["cold", "warm"] {
+        // The reference opens FIRST in the cold pass (the adopted open in
+        // the same pass warms the sidecar, which is fine — the parity is
+        // about WHO holds the rows, not which side hit the cache).
+        let reference = WindowedSessionStore::open(&path).unwrap().unwrap();
+        assert_eq!(
+            reference.read_stats().cache_hit,
+            phase == "warm",
+            "{phase} reference open cache state"
+        );
+        assert!(!reference.entries().is_empty());
+        assert!(!reference.raw_entries().is_empty());
         let adopted = WindowedSessionStore::open(&path).unwrap().unwrap();
         let mut manager = super::super::manager::SessionManager::in_memory(dir.path());
         manager.adopt_window(adopted);
-        let reference = WindowedSessionStore::open(&path).unwrap().unwrap();
-        assert_eq!(reference.read_stats().cache_hit, phase == "warm");
-        assert!(!reference.entries().is_empty());
-        assert!(!reference.raw_entries().is_empty());
         let expected = reference.context();
         let actual = manager.active_context();
         let expected_bytes = serde_json::to_vec(&(
@@ -789,7 +796,9 @@ fn detached_window_serves_lookups_but_not_its_own_context() {
     assert!(window.has_non_bootstrap_entries());
     assert!(window.has_thinking_level());
     assert_eq!(window.settings().thinking_level, "high");
-    assert_eq!(window.compaction_count(), 1);
+    // The fixture's on-path compaction AND its off-path sibling both
+    // count (compaction_count is a file-level tally of the walk).
+    assert_eq!(window.compaction_count(), 2);
     assert_eq!(window.leaf_id(), "leaf");
     // The compile-checked no-op: the detached context is the manager's.
     let _ = window.context();
@@ -816,6 +825,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     }
     rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
     rows.push(json!({"type":"message","id":"a1","parentId":"compact","message":{"role":"assistant","provider":"p","model":"m",
+        "api":"openai-completions","stopReason":"stop",
         "content":[{"type":"text","text":"in-window assistant"}],"timestamp":0,
         "usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,
         "cost":{"input":0.01,"output":0.002,"cacheRead":0.0,"cacheWrite":0.0,"total":0.012}}}}));
