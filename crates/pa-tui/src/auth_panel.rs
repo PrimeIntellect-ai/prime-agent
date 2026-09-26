@@ -670,12 +670,6 @@ impl AuthPanel {
         kb: &KeybindingsManager,
         sink: &mut crate::clipboard::OscSink,
     ) {
-        // Ctrl+C cancels the mounted input like Esc (the surfaces that
-        // consume the pair note it handled).
-        if key == "ctrl+c" {
-            self.cancel_input();
-            return;
-        }
         // TS `cancel()` on a URL screen (no mounted input): the dialog's
         // abort signal ends the running login — the actions row's cancel
         // hint is never a dead key.
@@ -796,29 +790,6 @@ impl AuthPanel {
                 picker.refilter();
             }
         }
-    }
-
-    /// Esc/Ctrl+C on the mounted input: the paste prompt answers `None`
-    /// (the flow cancels), the picker answers `Cancelled` (the stored
-    /// selection stays, TS `onCancel`); no input means the flow itself
-    /// cancels (TS `cancel()`).
-    fn cancel_input(&mut self) {
-        match &mut self.input {
-            PanelInput::Working => self.mark_flow_cancelled(),
-            PanelInput::Paste { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(None);
-                }
-                self.input = PanelInput::Working;
-            }
-            PanelInput::Teams { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(PrimeTeamPick::Cancelled);
-                }
-                self.input = PanelInput::Working;
-            }
-        }
-        self.notice = None;
     }
 
     /// Mark the driving flow's cancel signal (TS the dialog's abort):
@@ -1471,7 +1442,7 @@ mod tests {
         // `getAuthActionsText` — pinned by the URL block's tests below).
         assert!(rows
             .iter()
-            .any(|row| row.contains("Enter submit  Esc/Ctrl+C cancel")));
+            .any(|row| row.contains("Enter submit  Esc cancel")));
         for character in "  sk-live  ".chars() {
             panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
