@@ -87,9 +87,7 @@ mod tests {
             .map(|i| {
                 let ran = std::sync::Arc::clone(&ran);
                 move || async move {
-                    if i == 1 {
-                        panic!("one adoption job is allowed to die loudly");
-                    }
+                    assert_ne!(i, 1, "one adoption job is allowed to die loudly");
                     ran.fetch_add(1, Ordering::SeqCst);
                 }
             })

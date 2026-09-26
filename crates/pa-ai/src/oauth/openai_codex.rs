@@ -12,6 +12,7 @@
 //! exited surface never receives a completed login (a task abort cannot
 //! reach a started blocking body).
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -282,10 +283,11 @@ fn generate_pkce() -> (String, String) {
 /// A random, hex CSRF `state` (TS `createState`: 16 random bytes as
 /// hex).
 fn create_state() -> String {
-    random_bytes(16)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let mut state = String::with_capacity(32);
+    for byte in random_bytes(16) {
+        let _ = write!(state, "{byte:02x}");
+    }
+    state
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {

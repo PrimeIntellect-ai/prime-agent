@@ -35,7 +35,7 @@ pub(super) async fn prepare_to_prepared(
                 pa_types::daemon::DaemonCommand::PrepareUpdateRestart {
                     id: None,
                     update_id: Some(update_id.to_string()),
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
                 budget.prepare_rpc_ms.max(1),
             )
@@ -80,7 +80,7 @@ pub(super) async fn commit_update(
             pa_types::daemon::DaemonCommand::CommitUpdateRestart {
                 id: None,
                 update_id: Some(update_id.to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             budget.prepare_rpc_ms + budget.worker_stop_ms + budget.worker_stop_extension_ms,
         )
@@ -137,7 +137,7 @@ pub(super) async fn restore_report(
                 .request_ok(pa_types::daemon::DaemonCommand::UpdateRestoreStatus {
                     id: None,
                     update_id: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })
                 .await;
             if let Ok(data) = response {

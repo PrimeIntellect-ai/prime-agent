@@ -452,7 +452,7 @@ pub fn editor_chunk_highlights(
         ));
     }
     if let Some(command) = command {
-        if command_takes_argument && !cursor_col.is_some_and(|cursor| cursor < command.end) {
+        if command_takes_argument && cursor_col.is_none_or(|cursor| cursor >= command.end) {
             out.push((command.start, command.end, ThemeColor::Accent));
         }
     }
@@ -557,7 +557,7 @@ mod tests {
 
     fn spans(line: &Line) -> Vec<(String, Style)> {
         line.iter()
-            .map(|span| (span.content.to_string(), span.style))
+            .map(|span| (span.content.clone(), span.style))
             .collect()
     }
 
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(
             restored
                 .iter()
-                .map(|s| (s.content.to_string(), s.style))
+                .map(|s| (s.content.clone(), s.style))
                 .collect::<Vec<_>>(),
             vec![
                 ("fix ".to_string(), Style::default()),
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(
             restored
                 .iter()
-                .map(|s| s.content.to_string())
+                .map(|s| s.content.clone())
                 .collect::<Vec<_>>(),
             vec!["plain \u{E123} text".to_string()]
         );
@@ -933,7 +933,7 @@ mod tests {
             .iter()
             .map(|span| {
                 (
-                    span.content.to_string(),
+                    span.content.clone(),
                     span.style.add_modifier.contains(Modifier::REVERSED),
                 )
             })
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(
             styled
                 .iter()
-                .map(|span| (span.content.to_string(), span.style))
+                .map(|span| (span.content.clone(), span.style))
                 .collect::<Vec<_>>(),
             vec![
                 ("/n".to_string(), accent()),
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(
             styled
                 .iter()
-                .map(|span| (span.content.to_string(), span.style))
+                .map(|span| (span.content.clone(), span.style))
                 .collect::<Vec<_>>(),
             vec![
                 ("/new".to_string(), accent()),
@@ -1000,7 +1000,7 @@ mod tests {
         assert_eq!(
             styled
                 .iter()
-                .map(|span| (span.content.to_string(), span.style))
+                .map(|span| (span.content.clone(), span.style))
                 .collect::<Vec<_>>(),
             vec![
                 ("he".to_string(), bg),

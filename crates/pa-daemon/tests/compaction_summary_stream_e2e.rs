@@ -9,6 +9,7 @@
 //! streamed (the streamed block resolves into the final summary entry).
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -165,19 +166,21 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         // chunk at a time: the daemon forwards each as one
         // `compaction_summary_delta` in generation order.
         for piece in SUMMARY_CHUNKS {
-            payload.push_str(&format!(
+            let _ = write!(
+                payload,
                 "data: {}\n\n",
                 chunk(
                     json!({"role": "assistant", "content": piece}),
                     None,
                     Value::Null
                 )
-            ));
+            );
         }
-        payload.push_str(&format!(
+        let _ = write!(
+            payload,
             "data: {}\n\n",
             chunk(json!({}), Some("stop"), small_usage())
-        ));
+        );
         payload.push_str("data: [DONE]\n\n");
     } else {
         // Turn 2 (the crossing turn) reports the over-threshold usage;
@@ -205,7 +208,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
             })
             .to_string(),
         ] {
-            payload.push_str(&format!("data: {data}\n\n"));
+            let _ = write!(payload, "data: {data}\n\n");
         }
         payload.push_str("data: [DONE]\n\n");
     }

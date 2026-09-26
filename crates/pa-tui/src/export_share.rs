@@ -69,9 +69,8 @@ pub enum GhAuthStatus {
 /// a non-zero exit means not logged in, a spawn failure means not
 /// installed. The probe never opens a window (hidden spawn).
 pub fn probe_gh_auth() -> GhAuthStatus {
-    let output = match gh_probe_command().args(["auth", "status"]).output() {
-        Ok(output) => output,
-        Err(_) => return GhAuthStatus::NotInstalled,
+    let Ok(output) = gh_probe_command().args(["auth", "status"]).output() else {
+        return GhAuthStatus::NotInstalled;
     };
     if output.status.success() {
         GhAuthStatus::Ok

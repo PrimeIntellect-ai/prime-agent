@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use pa_types::daemon::DaemonCommand;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -246,7 +246,7 @@ impl RegistrationTask {
             worker_instance_id: self.identity.worker_instance_id.clone(),
             token: self.identity.token.clone(),
             pid: std::process::id() as u64,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let envelope = json!({
             "type": "command",

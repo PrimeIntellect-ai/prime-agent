@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::engine::{CompactionOutcome, CompactionRequest, SessionEngine};
 use crate::protocol::DaemonOutbound;
@@ -328,7 +328,7 @@ impl CompactionManager {
             active_session_id: self.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);

@@ -39,7 +39,7 @@ fn user(text: &str) -> AgentMessage {
     AgentMessage::User(pa_types::ai::UserMessage {
         content: pa_types::ai::UserContent::Text(text.to_string()),
         timestamp: 0,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
