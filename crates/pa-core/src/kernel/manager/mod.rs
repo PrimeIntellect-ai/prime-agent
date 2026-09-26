@@ -286,7 +286,7 @@ impl Inner {
         let Some(callback) = self.options.on_background_work_settled.clone() else {
             return;
         };
-        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback())) {
             let reason = panic
                 .downcast_ref::<&str>()
                 .map(|message| (*message).to_string())
