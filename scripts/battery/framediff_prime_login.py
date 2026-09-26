@@ -193,7 +193,9 @@ def make_side(name: str, binary: str, root: Path, prime_port: int) -> B.Side:
     # `scrubbed_env` keeps the ambient environment apart from the worker
     # markers: an operator-pinned PRIME_TEAM_ID would skip the team
     # question (the flow answers the pin instead), so the harness drops
-    # it — the frame-diff drives the full question.
+    # it — and `tmux_launch` unsets it in the pane (a key that only
+    # inherits from the tmux server is neither an assignment nor on the
+    # scrub list) — the frame-diff drives the full question.
     side.env.pop("PRIME_TEAM_ID", None)
     # A real user terminal: both sides render their full styled surface.
     side.env["COLORTERM"] = "truecolor"
@@ -259,7 +261,7 @@ def run_side(
         str(side.daemon_socket),
         "--offline",
     ]
-    B.tmux_launch(session, argv, side.env, side.work_dir)
+    B.tmux_launch(session, argv, side.env, side.work_dir, unset_keys=("PRIME_TEAM_ID",))
     frames: dict[str, str] = {}
     try:
         wait_for(session, "Log in with Prime Intellect")
