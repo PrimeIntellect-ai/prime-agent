@@ -184,17 +184,27 @@ impl TreeList {
         let Some(leaf) = self.current_leaf_id.clone() else {
             return;
         };
+        // An id-indexed walk (TS `entryMap`): a linear session nests one
+        // level per entry, and a scan per hop turns the walk quadratic.
+        // The visited set terminates a corrupted parent cycle instead of
+        // spinning.
+        let index_by_id: HashMap<&str, usize> = self
+            .flat
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.data.entry.id().map(|id| (id, index)))
+            .collect();
+        let mut visited: HashSet<usize> = HashSet::new();
         let mut current = Some(leaf);
         while let Some(id) = current {
-            let Some(node) = self
-                .flat
-                .iter()
-                .find(|node| node.data.entry.id() == Some(id.as_str()))
-            else {
+            let Some(&index) = index_by_id.get(id.as_str()) else {
                 break;
             };
-            self.active_path.insert(id.clone());
-            current = node.data.entry.parent_id().map(str::to_string);
+            if !visited.insert(index) {
+                break;
+            }
+            self.active_path.insert(id);
+            current = self.flat[index].data.entry.parent_id().map(str::to_string);
         }
     }
 
@@ -444,12 +454,19 @@ impl TreeList {
             .iter()
             .filter_map(|index| self.flat[*index].data.entry.id().map(str::to_string))
             .collect();
-        let parent_of = |id: &str| -> Option<String> {
-            self.flat
-                .iter()
-                .find(|node| node.data.entry.id() == Some(id))
-                .and_then(|node| node.data.entry.parent_id().map(str::to_string))
-        };
+        // An id-keyed parent map (TS `entryMap`) replaces the per-hop
+        // linear scans: a deep chain's ancestor walks stay linear. The
+        // per-node visited set terminates a corrupted parent cycle.
+        let parent_of: HashMap<String, String> = self
+            .flat
+            .iter()
+            .filter_map(|node| {
+                Some((
+                    node.data.entry.id()?.to_string(),
+                    node.data.entry.parent_id()?.to_string(),
+                ))
+            })
+            .collect();
         for index in 0..self.flat.len() {
             let id = match self.flat[index].data.entry.id() {
                 Some(id) => id.to_string(),
@@ -463,16 +480,23 @@ impl TreeList {
             }
             // Nearest visible ancestor.
             let mut ancestor: Option<String> = None;
-            let mut current = parent_of(&id);
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut current = parent_of.get(&id).cloned();
             while let Some(candidate) = current {
+                if !visited.insert(candidate.clone()) {
+                    break;
+                }
                 if visible.contains(&candidate) {
                     ancestor = Some(candidate);
                     break;
                 }
-                current = parent_of(&candidate);
+                current = parent_of.get(&candidate).cloned();
             }
             self.visible_parent.insert(id.clone(), ancestor.clone());
-            self.visible_children.entry(ancestor).or_default().push(id);
+            self.visible_children
+                .entry(ancestor)
+                .or_default()
+                .push(id.clone());
         }
         let visible_root_ids = self
             .visible_children
@@ -495,6 +519,14 @@ impl TreeList {
                 self.multiple_roots,
             ));
         }
+        // The DFS resolves each visited id's row through one index map
+        // (TS `filteredNodeMap`), not a scan per node.
+        let index_by_id: HashMap<String, usize> = self
+            .flat
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.data.entry.id().map(|id| (id.to_string(), index)))
+            .collect();
         while let Some((
             id,
             indent,
@@ -505,12 +537,7 @@ impl TreeList {
             is_virtual_root_child,
         )) = stack.pop()
         {
-            let Some(index) = self
-                .filtered
-                .iter()
-                .copied()
-                .find(|index| self.flat[*index].data.entry.id() == Some(id.as_str()))
-            else {
+            let Some(index) = index_by_id.get(id.as_str()).copied() else {
                 continue;
             };
             let node = &mut self.flat[index];
@@ -576,16 +603,28 @@ impl TreeList {
                 self.flat[*index].data.entry.id().map(|id| (id, position))
             })
             .collect();
+        // The same id-indexed walk as [`Self::build_active_path`]: Map
+        // lookups per hop (TS `entryMap`), with the visited set
+        // terminating a corrupted parent cycle.
+        let index_by_id: HashMap<&str, usize> = self
+            .flat
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.data.entry.id().map(|id| (id, index)))
+            .collect();
+        let mut visited: HashSet<usize> = HashSet::new();
         let mut current = entry_id.map(str::to_string);
         while let Some(id) = current {
             if let Some(position) = visible_positions.get(id.as_str()) {
                 return *position;
             }
-            current = self
-                .flat
-                .iter()
-                .find(|node| node.data.entry.id() == Some(id.as_str()))
-                .and_then(|node| node.data.entry.parent_id().map(str::to_string));
+            let Some(&index) = index_by_id.get(id.as_str()) else {
+                break;
+            };
+            if !visited.insert(index) {
+                break;
+            }
+            current = self.flat[index].data.entry.parent_id().map(str::to_string);
         }
         self.filtered.len() - 1
     }
@@ -1417,5 +1456,61 @@ mod tests {
         assert_eq!(tree.label_of("u1").as_deref(), Some("checkpoint"));
         tree.update_node_label("u1", None, "");
         assert_eq!(tree.label_of("u1"), None);
+    }
+
+    #[test]
+    fn deep_chain_walks_and_renders() {
+        // A linear session nests one level per entry: the parent-chain
+        // walks (the active path, the nearest-visible selection) are
+        // id-indexed, so the full depth stays linear instead of scanning
+        // the list once per hop.
+        let depth = 5_000;
+        let mut flat: Vec<TreeNodeData> = Vec::with_capacity(depth);
+        let mut parent: Option<String> = None;
+        for step in 0..depth {
+            let id = format!("n{step}");
+            flat.push(message_node(
+                &id,
+                parent.as_deref(),
+                "2024-01-01T00:00:00.000Z",
+                &format!("m{step}"),
+            ));
+            parent = Some(id);
+        }
+        let leaf = format!("n{}", depth - 1);
+        let tree = list(flat, Some(&leaf));
+        assert_eq!(tree.selected_id().as_deref(), Some(leaf.as_str()));
+        assert_eq!(tree.active_path.len(), depth);
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let rows = tree.render(&theme, 80);
+        assert_eq!(rows.len(), 41, "max_visible rows plus the counter");
+        let text: Vec<String> = rows
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        let counter = text.last().map(String::as_str).unwrap_or_default();
+        assert!(counter.contains("(5000/5000)"), "counter: {text:?}");
+    }
+
+    #[test]
+    fn zero_and_tiny_widths_render_wide_glyphs() {
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        // Wide glyphs at the cut boundary exercise the grapheme-aware
+        // truncation: no row may exceed the budget, not even at zero.
+        let flat = vec![
+            message_node("u1", None, "2024-01-01T00:00:01.000Z", "wide 漢字 text"),
+            message_node("u2", Some("u1"), "2024-01-01T00:00:02.000Z", "second"),
+        ];
+        let tree = list(flat, Some("u2"));
+        for width in [0, 1, 3] {
+            let rows = tree.render(&theme, width);
+            for (row_index, row) in rows.iter().enumerate() {
+                let rendered: usize = row.iter().map(|span| str_width(&span.content)).sum();
+                assert!(
+                    rendered <= width,
+                    "row {row_index} wider than {width}: {rendered}"
+                );
+            }
+        }
     }
 }
