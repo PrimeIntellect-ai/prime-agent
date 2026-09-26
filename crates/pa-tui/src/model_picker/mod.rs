@@ -230,6 +230,11 @@ pub struct ModelPicker {
     visible_items: usize,
     /// The query the filtered view was built for (TS `searchQuery`).
     last_query: String,
+    /// The version runs parsed from each `all_models` entry's id, indexed
+    /// alike (the search sort's recency tier: the catalog carries no
+    /// release-date metadata, so the id's version stands in for release
+    /// recency).
+    version_keys: Vec<Vec<String>>,
 }
 
 impl ModelPicker {
@@ -257,6 +262,7 @@ impl ModelPicker {
             render_width: 80,
             visible_items: 8,
             last_query: String::new(),
+            version_keys: Vec::new(),
         };
         picker.load_models(options.models);
         let query = picker.search.value().to_string();
@@ -464,6 +470,11 @@ impl ModelPicker {
         let mut models = models;
         models.sort_by(|a, b| self.compare(a, b));
         self.all_models = models;
+        self.version_keys = self
+            .all_models
+            .iter()
+            .map(|model| version_key(&model.id))
+            .collect();
         self.resolve_effort_defaults();
         let current_index = self
             .all_models
@@ -529,8 +540,9 @@ impl ModelPicker {
 
     /// Rebuild the filtered view (TS `filterModels`): a non-empty query
     /// scores every model and orders the matches by configured provider,
-    /// pin, match quality, score, currency, recent rank, and key. The
-    /// selection resets to the top only when the query changed.
+    /// pin, match quality, score, version descending, currency, recent
+    /// rank, and key. The selection resets to the top only when the query
+    /// changed.
     fn filter_models(&mut self, query: &str) {
         let query_changed = query != self.last_query;
         self.last_query = query.to_string();
@@ -570,6 +582,14 @@ impl ModelPicker {
                         .score
                         .partial_cmp(&b_match.score)
                         .unwrap_or(Ordering::Equal);
+                }
+                // The version tier: newer releases first. The catalog
+                // carries no release-date metadata, so the version runs
+                // parsed from the ids stand in for release recency.
+                let order =
+                    version_desc(&self.version_keys[*a_index], &self.version_keys[*b_index]);
+                if order != Ordering::Equal {
+                    return order;
                 }
                 match (self.is_current(b), self.is_current(a)) {
                     (true, false) => return Ordering::Greater,
@@ -889,6 +909,41 @@ impl ModelPicker {
         self.search.prefill(query);
         self.filter_models(query);
     }
+}
+
+/// The version run parsed from a model id: every digit group of the id,
+/// in order, kept as text so components longer than `u64` still compare
+/// by numeric value. Covers the catalog's id formats — hyphen-joined
+/// (`claude-opus-5-5` -> `["5", "5"]`), dot-joined (`glm-5.3` ->
+/// `["5", "3"]`), letter-glued (`qwen3`, `m2.7`, `glm-5p2` -> `["5", "2"]`),
+/// dated snapshots (`claude-opus-4-5-20251101` -> `["4", "5", "20251101"]`),
+/// and namespaced ids (`anthropic/claude-opus-4.7` -> `["4", "7"]`). Ids
+/// without digits (`claude-opus-latest`) parse to an empty run.
+fn version_key(id: &str) -> Vec<String> {
+    id.split(|character: char| !character.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Version-descending order for the search sort's recency tier: higher
+/// versions first, over an equal prefix the longer, more specific run
+/// (the dated snapshot over its alias) first, ids without a version last.
+/// Components compare by numeric value — leading zeros aside, digit
+/// length first, then text — so no `u64` bound applies.
+fn version_desc(a: &[String], b: &[String]) -> std::cmp::Ordering {
+    for (a_part, b_part) in a.iter().zip(b.iter()) {
+        let a_part = a_part.trim_start_matches('0');
+        let b_part = b_part.trim_start_matches('0');
+        let order = match a_part.len().cmp(&b_part.len()) {
+            std::cmp::Ordering::Equal => a_part.cmp(b_part),
+            other => other,
+        };
+        if order != std::cmp::Ordering::Equal {
+            return order.reverse();
+        }
+    }
+    b.len().cmp(&a.len())
 }
 
 /// Numeric-aware string compare: digit runs compare by value, everything
@@ -1448,6 +1503,299 @@ mod tests {
                 model_id: "mock-1".to_string(),
                 effort: None,
             }))
+        );
+    }
+
+    /// The ids of the filtered (search-ordered) rows.
+    fn filtered_ids(picker: &ModelPicker) -> Vec<String> {
+        picker
+            .filtered
+            .iter()
+            .map(|&index| picker.all_models[index].id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn version_key_parses_the_catalog_id_formats() {
+        // Hyphen- and dot-joined releases, letter-glued versions, dated
+        // snapshots, namespaced ids, and digit-free ids.
+        assert_eq!(version_key("claude-opus-5-5"), vec!["5", "5"]);
+        assert_eq!(version_key("claude-opus-5.5"), vec!["5", "5"]);
+        assert_eq!(version_key("glm-5.3"), vec!["5", "3"]);
+        assert_eq!(version_key("glm-5p2"), vec!["5", "2"]);
+        assert_eq!(version_key("qwen3.5-plus"), vec!["3", "5"]);
+        assert_eq!(version_key("deepseek-v4"), vec!["4"]);
+        assert_eq!(version_key("minimax-m2.7"), vec!["2", "7"]);
+        assert_eq!(version_key("mimo-v2.5"), vec!["2", "5"]);
+        assert_eq!(version_key("kimi-k2.7-code"), vec!["2", "7"]);
+        assert_eq!(version_key("o3-mini"), vec!["3"]);
+        assert_eq!(version_key("x-ai/grok-4.20"), vec!["4", "20"]);
+        assert_eq!(
+            version_key("gpt-4o-2024-05-13"),
+            vec!["4", "2024", "05", "13"]
+        );
+        assert_eq!(
+            version_key("claude-opus-4-5-20251101"),
+            vec!["4", "5", "20251101"]
+        );
+        assert_eq!(version_key("anthropic/claude-opus-4.7"), vec!["4", "7"]);
+        assert_eq!(
+            version_key("us.anthropic.claude-opus-4-6-v1:0"),
+            vec!["4", "6", "1", "0"]
+        );
+        assert_eq!(version_key("claude-opus-latest"), Vec::<String>::new());
+        assert_eq!(version_key("auto-beta"), Vec::<String>::new());
+        // Overlong digit runs (beyond `u64`) are preserved, not dropped.
+        assert_eq!(
+            version_key("model-18446744073709551616"),
+            vec!["18446744073709551616"]
+        );
+    }
+
+    #[test]
+    fn version_desc_orders_runs_newest_first() {
+        // Higher versions first; digit value, not text.
+        assert_eq!(
+            version_desc(&version_key("model-5.5"), &version_key("model-4.7")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            version_desc(&version_key("model-2"), &version_key("model-10")),
+            std::cmp::Ordering::Greater
+        );
+        // The dated snapshot of a release leads its undated alias.
+        assert_eq!(
+            version_desc(
+                &version_key("model-4-5-20251101"),
+                &version_key("model-4-5")
+            ),
+            std::cmp::Ordering::Less
+        );
+        // Ids without a version trail every versioned match.
+        assert_eq!(
+            version_desc(&version_key("model-latest"), &version_key("model-3-8")),
+            std::cmp::Ordering::Greater
+        );
+        // Leading zeros compare by value.
+        assert_eq!(
+            version_desc(&version_key("model-05"), &version_key("model-5")),
+            std::cmp::Ordering::Equal
+        );
+        // Digit runs beyond `u64` keep their numeric order.
+        assert_eq!(
+            version_desc(
+                &version_key("model-18446744073709551616"),
+                &version_key("model-2")
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            version_desc(&version_key("model-4-7"), &version_key("model-4-7")),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn search_ranks_version_descending() {
+        // Searching `opus` lists 5.5 before 4.7; both id spellings of 5.5
+        // tie on their version run, and the dated snapshot of the older
+        // 4.5 stays below the newer 4.7.
+        let catalog = vec![
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4.7",
+                "Claude Opus 4.7",
+                false,
+                None,
+            ),
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-5.5",
+                "Claude Opus 5.5",
+                false,
+                None,
+            ),
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-5-5",
+                "Claude Opus 5 5",
+                false,
+                None,
+            ),
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4-5-20251101",
+                "Claude Opus 4.5 Snapshot",
+                false,
+                None,
+            ),
+        ];
+        let mut picker = ModelPicker::new(picker_options(catalog));
+        picker.set_query("opus");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec![
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-opus-5.5",
+                "anthropic/claude-opus-4.7",
+                "anthropic/claude-opus-4-5-20251101",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_keeps_logged_in_providers_above_newer_matches() {
+        // The logged-in tier outranks text match and version: the
+        // configured provider's older model leads the unconfigured
+        // provider's newer, better-scoring match.
+        let catalog = vec![
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4.7",
+                "Claude Opus 4.7",
+                false,
+                None,
+            ),
+            model("other", "opus-9.9", "Opus 9.9", false, None),
+        ];
+        let mut options = picker_options(catalog);
+        options.current = None;
+        let mut picker = ModelPicker::new(options);
+        picker.set_query("opus");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["anthropic/claude-opus-4.7", "opus-9.9"]
+        );
+    }
+
+    #[test]
+    fn search_ranks_version_above_the_current_model() {
+        // The version tier outranks the current-model marker: searching
+        // `opus` lists 4.8 first even when 4.7 is the session's model.
+        let catalog = vec![
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4.7",
+                "Claude Opus 4.7",
+                false,
+                None,
+            ),
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4.8",
+                "Claude Opus 4.8",
+                false,
+                None,
+            ),
+        ];
+        let mut options = picker_options(catalog);
+        options.current = Some(CurrentModel {
+            provider: "prime-inference".to_string(),
+            model_id: "anthropic/claude-opus-4.7".to_string(),
+        });
+        let mut picker = ModelPicker::new(options);
+        picker.set_query("opus");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["anthropic/claude-opus-4.8", "anthropic/claude-opus-4.7"]
+        );
+    }
+
+    #[test]
+    fn search_keeps_recent_use_within_an_equal_version() {
+        // Equal version runs keep the sub-tier tiebreakers: the recent-use
+        // rank leads `4.7` over the id-sorted-first `4-7` spelling.
+        let catalog = vec![
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4-7",
+                "Claude Opus 4 7",
+                false,
+                None,
+            ),
+            model(
+                "prime-inference",
+                "anthropic/claude-opus-4.7",
+                "Claude Opus 4.7",
+                false,
+                None,
+            ),
+        ];
+        let mut options = picker_options(catalog);
+        options.current = None;
+        options.recent_models = vec!["prime-inference/anthropic/claude-opus-4.7".to_string()];
+        let mut picker = ModelPicker::new(options);
+        picker.set_query("opus");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["anthropic/claude-opus-4.7", "anthropic/claude-opus-4-7"]
+        );
+    }
+
+    #[test]
+    fn search_compares_version_numbers_and_leaves_unversioned_ids_last() {
+        // Digit runs compare by value (10 over 2) and ids without a
+        // version trail every versioned match.
+        let catalog = vec![
+            model("prime-inference", "z-model-2", "Z Model 2", false, None),
+            model("prime-inference", "z-model-10", "Z Model 10", false, None),
+            model(
+                "prime-inference",
+                "z-model-next",
+                "Z Model Next",
+                false,
+                None,
+            ),
+        ];
+        let mut picker = ModelPicker::new(picker_options(catalog));
+        picker.set_query("model");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["z-model-10", "z-model-2", "z-model-next"]
+        );
+    }
+
+    #[test]
+    fn search_ranks_preview_suffixed_ids_by_their_version() {
+        // A prerelease suffix never hides the version: `hy4-preview`
+        // outranks `hy3`.
+        let catalog = vec![
+            model("prime-inference", "tencent/hy3", "HY3", false, None),
+            model(
+                "prime-inference",
+                "tencent/hy4-preview",
+                "HY4 Preview",
+                false,
+                None,
+            ),
+        ];
+        let mut picker = ModelPicker::new(picker_options(catalog));
+        picker.set_query("hy");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["tencent/hy4-preview", "tencent/hy3"]
+        );
+    }
+
+    #[test]
+    fn search_preserves_overlong_version_runs() {
+        // A digit run beyond `u64` is a version like any other: the
+        // oversized newer release leads, not trails, when text scores tie.
+        let catalog = vec![
+            model("prime-inference", "model-2", "Model Two", false, None),
+            model(
+                "prime-inference",
+                "model-18446744073709551616",
+                "Model Oversized",
+                false,
+                None,
+            ),
+        ];
+        let mut picker = ModelPicker::new(picker_options(catalog));
+        picker.set_query("model");
+        assert_eq!(
+            filtered_ids(&picker),
+            vec!["model-18446744073709551616", "model-2"]
         );
     }
 }

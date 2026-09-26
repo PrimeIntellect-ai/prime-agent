@@ -632,6 +632,17 @@ impl DaemonClient {
             .await
     }
 
+    /// The refusal for a supervisor reader that already ended: its
+    /// close-time failure pass has run (or is imminent), so nothing can
+    /// ever answer a request registered now — TS `requestWire` refuses
+    /// a destroyed socket the same way.
+    fn dead_reader_error(&self) -> anyhow::Error {
+        anyhow!(
+            "the daemon connection is closed. Socket: {}.",
+            self.socket_path.display()
+        )
+    }
+
     /// One JSONL envelope on the supervisor connection, under the caller's
     /// own envelope id: the streamed `session_list_item` frames of
     /// `list_saved_sessions` carry it, so the caller can attribute the
@@ -643,8 +654,9 @@ impl DaemonClient {
     /// # Errors
     ///
     /// Returns `Err` when the envelope cannot be serialized, the writer
-    /// send fails (the connection is already closed), the reader task
-    /// dies before resolving, or the timeout elapses.
+    /// send fails (the connection is already closed), the supervisor
+    /// reader has already died (nothing can ever resolve the request),
+    /// the reader task dies before resolving, or the timeout elapses.
     ///
     /// # Panics
     ///
@@ -656,6 +668,9 @@ impl DaemonClient {
         id: &str,
         timeout_ms: u64,
     ) -> Result<DaemonResponse> {
+        if *self.reader_dead_rx.borrow() {
+            return Err(self.dead_reader_error());
+        }
         let id = id.to_string();
         let envelope = DaemonCommandEnvelope {
             frame_type: DaemonCommandFrameType::Command,
@@ -667,6 +682,17 @@ impl DaemonClient {
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared.pending.lock().unwrap().insert(id.clone(), tx);
+        // The reader runs on another worker: it can die (and run its
+        // failure sweep) between the entry check and this registration,
+        // and the writer channel outlives the reader's EOF — an entry
+        // the sweep missed would ride the caller's whole timeout.
+        // Re-check after inserting: a death the sweep already served
+        // resolves the oneshot on the Err half, a death it missed is
+        // caught here.
+        if *self.reader_dead_rx.borrow() {
+            self.shared.pending.lock().unwrap().remove(&id);
+            return Err(self.dead_reader_error());
+        }
         self.writer
             .send(line)
             .map_err(|_| anyhow!("the daemon connection is closed"))?;
@@ -1155,6 +1181,78 @@ mod tests {
             .to_string()
             .contains(socket.display().to_string().as_str()));
         // A transport failure is never a rejection.
+        assert!(!is_daemon_rejection(&error));
+    }
+
+    #[tokio::test]
+    async fn a_request_after_the_reader_died_refuses_instead_of_riding_the_budget() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // A daemon that greets, then drops the socket: the client's reader
+        // task ends and its close-time failure pass runs.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut writer = stream;
+            let mut hello = json!({
+                "type": "daemon_hello",
+                "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                "clientId": "srv",
+                "serverCapabilities": [],
+            })
+            .to_string();
+            hello.push('\n');
+            writer.write_all(hello.as_bytes()).await.unwrap();
+            drop(writer);
+        });
+        let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
+        // Observable readiness: wait for the reader's death watch before
+        // sending (the failure pass has run by then, so the request would
+        // register after it — the exact race the refusal closes).
+        let mut reader_dead = client.reader_dead();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !*reader_dead.borrow_and_update() {
+                reader_dead
+                    .changed()
+                    .await
+                    .expect("the death watch stays live");
+            }
+        })
+        .await
+        .expect("the reader death watch fires when the socket closes");
+        // A request budget far beyond the refusal bound: without the
+        // refusal the send would ride it out and this await would outlive
+        // the one-second failure bound.
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.request_with_timeout(
+                DaemonCommand::List {
+                    id: None,
+                    all: None,
+                    cwd: None,
+                    session_dir: None,
+                    include_client_owned: None,
+                    rest: Map::default(),
+                },
+                30_000,
+            ),
+        )
+        .await
+        .expect("a dead reader refuses the send instead of riding the budget")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the daemon connection is closed"),
+            "unexpected error: {error}"
+        );
+        assert!(error
+            .to_string()
+            .contains(socket.display().to_string().as_str()));
+        // The refusal is a transport failure: transient for the submit
+        // path (the pane stays mounted for the reconnect driver), never
+        // a daemon rejection.
+        assert!(is_daemon_unreachable(&error));
         assert!(!is_daemon_rejection(&error));
     }
 

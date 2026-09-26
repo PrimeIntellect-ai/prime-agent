@@ -388,6 +388,9 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot tray effort suffix for the next rebuild (the attach
+    /// state's level; `None` clears it).
+    pending_thinking_suffix: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -396,6 +399,10 @@ pub(crate) struct SessionUi {
     /// Context usage + cost refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
     cost_usd: Option<f64>,
+    /// The aggregate descendant-subagent spend from the same stats (the
+    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
+    /// split fields).
+    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
@@ -756,10 +763,12 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
             cost_usd: None,
+            subagents_cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
             steering_mode: "all".to_string(),
@@ -1088,6 +1097,7 @@ impl SessionUi {
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
         self.spawn_bash_activity_refresh();
         self.pending_model = reconstructed.model_id;
+        self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1184,10 +1194,38 @@ impl SessionUi {
             (!self.session_id.is_empty()).then(|| self.session_id.clone()),
             self.session_file.clone(),
         );
-        let counts = crate::subagents::count_descendants(&self.roster, &identity);
-        self.subagent_counts = counts;
+        self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
+        let dock = self.activity_dock_state();
+        // A focused selection must stay on a rendered group: the arrows
+        // visit every group an empty one included, so the selection
+        // only moves when its group leaves the row (the goal row ends
+        // with the goal) — and a dock that unmounts entirely (nothing
+        // left to show) returns the focus to the editor.
+        if self.subagents_focused {
+            if !dock.visible() {
+                self.subagents_focused = false;
+            } else if !dock.groups().contains(&self.activity_group) {
+                self.activity_group =
+                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+            }
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+            ..dock
+        });
+        if let Some(bash_view) = view.bash_view.as_mut() {
+            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
+                &self.bash_activities,
+            ));
+        }
+    }
 
-        let goal = &self.goal_view.goal;
+    /// The dock's feed state: the live counts, the goal row's label, and
+    /// the selection/focus the caller owns. The row render, the focus
+    /// hand-off, and the arrows' traversal all read this one mapping —
+    /// a group renders exactly when it stays traversable.
+    fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
         // The dock is the goal's one chrome surface (the operator's
         // 2026-09-24 directive moved it off the line below the prompt
         // bar): every live state renders its row — pursuing reads the
@@ -1196,7 +1234,7 @@ impl SessionUi {
         // here too (the tray's TS cluster no longer exists to carry
         // them; terminal states carry no row). The token budget lives
         // inside the goal panel the row opens, not on the bar.
-        let goal_label = tray_goal_label(goal);
+        let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1212,10 +1250,10 @@ impl SessionUi {
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
-        let dock = crate::chrome::ActivityDock {
-            subagents_running_direct: counts.running_direct,
-            subagents_running_nested: counts.running_nested,
-            subagents_total: counts.total,
+        crate::chrome::ActivityDock {
+            subagents_running_direct: self.subagent_counts.running_direct,
+            subagents_running_nested: self.subagent_counts.running_nested,
+            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1223,57 +1261,6 @@ impl SessionUi {
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
-        };
-        // A focused selection must stay actionable: when its feed empties
-        // (or never had rows), move to the first selectable group; with
-        // nothing selectable the dock stays a read-only indicator and
-        // releases the focus.
-        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
-            self.activity_group = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group))
-            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
-            if !self.activity_selectable(self.activity_group) {
-                self.subagents_focused = false;
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
-            selected: self.activity_group,
-            focused: self.subagents_focused,
-            ..dock
-        });
-        if let Some(bash_view) = view.bash_view.as_mut() {
-            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
-                &self.bash_activities,
-            ));
-        }
-    }
-
-    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
-        match group {
-            crate::chrome::ActivityGroup::Subagents => {
-                // The group stays openable while any descendant exists
-                // (finished subagents are browsable history in the agents
-                // view); the dock's rendered count is live-only.
-                self.return_to_agents_view && self.subagent_counts.total > 0
-            }
-            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
-            // Any catalogued bash row keeps the dock's bash group
-            // reachable — the dock stays mounted (bash_total) whenever a
-            // row exists, so a selected group never binds to a hidden
-            // surface, and the bash view lists the finished rows.
-            crate::chrome::ActivityGroup::Bash => {
-                !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
-            }
-            // The goal group rides the dock's goal row: it stays
-            // selectable exactly while that row renders — every live
-            // state (the same gate as the row itself).
-            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 
@@ -1287,18 +1274,20 @@ impl SessionUi {
         if self.tray_override(view).is_some() {
             return false;
         }
-        if !self.activity_selectable(self.activity_group) {
-            let Some(group) = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group)) else {
-                return false;
-            };
-            self.activity_group = group;
+        // The dock owns the hand-off exactly while it renders: a session
+        // with nothing to show (no subagent history, heartbeats, shells,
+        // or live goal) keeps the dock unmounted and the focus in the
+        // editor. Every group the row renders is traversable, empty
+        // ones included, so no feed gate remains here.
+        let dock = self.activity_dock_state();
+        if !dock.visible() {
+            return false;
+        }
+        if !dock.groups().contains(&self.activity_group) {
+            // Only the goal group leaves with its row: the selection
+            // steps back to the group that now ends the row.
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -1383,6 +1372,10 @@ impl SessionUi {
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
         }
+        // The tray's effort suffix moves with the same snapshot: an
+        // attach's state either carries the session's level or reports a
+        // model without reasoning, and the bare name wins in both cases.
+        view.chrome.thinking_suffix = self.pending_thinking_suffix.take();
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -1392,6 +1385,7 @@ impl SessionUi {
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
@@ -1576,15 +1570,24 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        // The top bar's spend is the FULL session+subagents total
-        // (`totalCost`, the /context root totalUsage's fold): the TS
-        // active-region `cost` drops pre-compaction spend, which reads
-        // as an inaccurate title after every compaction. Older daemons
-        // without the field fall back to the TS shape.
-        self.cost_usd = data
-            .get("totalCost")
-            .and_then(Value::as_f64)
-            .or_else(|| data.get("cost").and_then(Value::as_f64));
+        // The title shows the session's own spend plus the aggregate of
+        // its subagents (`ownCost`/`subagentsCost`, the split of the
+        // full session+subagents total): the TS active-region `cost`
+        // drops pre-compaction spend, which reads as an inaccurate
+        // title after every compaction. The split lands together; a
+        // daemon without `ownCost` serves the combined `totalCost`
+        // (or the TS `cost`), and a subagent suffix next to that would
+        // double-count — the suffix only rides the split's own half.
+        if let Some(own) = data.get("ownCost").and_then(Value::as_f64) {
+            self.cost_usd = Some(own);
+            self.subagents_cost_usd = data.get("subagentsCost").and_then(Value::as_f64);
+        } else {
+            self.cost_usd = data
+                .get("totalCost")
+                .and_then(Value::as_f64)
+                .or_else(|| data.get("cost").and_then(Value::as_f64));
+            self.subagents_cost_usd = None;
+        }
         self.dirty = true;
     }
 
@@ -1592,6 +1595,7 @@ impl SessionUi {
     pub(crate) fn rebuild_tray(&mut self, view: &mut AgentView) {
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         view.chrome.chat_name = self.session_display();
         self.dirty = true;
     }
@@ -2812,6 +2816,11 @@ impl SessionUi {
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
                 self.attach_session(&id).await?;
+                // The title's pair is session-scoped: fetch the new
+                // session's stats before the rebuild copies them into
+                // the chrome, or the rebind would ride the session being
+                // left's own cost and subagent aggregate.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
             }
@@ -3210,13 +3219,21 @@ impl SessionUi {
             // `/context` and its `/usage` alias (TS
             // `handleContextCommand` over `formatContextTree`): the agent
             // tree with own token/cost columns and context utilization.
+            // The optional `all` argument is a deliberate TS delta (TS
+            // takes none): over the row budget the default view collapses
+            // to the highest-usage agents plus a summary row and the
+            // expand hint, and `all` renders the whole tree.
             "context" => {
                 self.track_command_used("context");
-                if !resolved.args.is_empty() {
-                    view.editor.set_text(text);
-                    self.error_row("Usage: /context", view);
-                    return Ok(());
-                }
+                let scope = match resolved.args.as_str() {
+                    "" => info_commands::ContextTreeScope::Collapsed,
+                    "all" => info_commands::ContextTreeScope::EveryAgent,
+                    _ => {
+                        view.editor.set_text(text);
+                        self.error_row("Usage: /context [all]", view);
+                        return Ok(());
+                    }
+                };
                 view.push_entry(ChatEntry::User {
                     text: text.to_string(),
                 });
@@ -3235,7 +3252,7 @@ impl SessionUi {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
                         view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::context_tree_rows(&tree, width),
+                            rows: info_commands::context_tree_rows(&tree, width, scope),
                         });
                         self.dirty = true;
                     }
@@ -3644,6 +3661,11 @@ impl SessionUi {
         // renders from scratch, then the status row lands.
         self.rebuild_transcript(view).await;
         self.refresh_stats().await;
+        // The transcript rebuild ran before the refresh, so the refreshed
+        // pair rides the chrome through this tray rebuild — without it
+        // the title keeps the pre-import own cost and subagent aggregate
+        // until the next settled turn.
+        self.rebuild_tray(view);
         self.note(&format!("Session imported from: {input_path}"), view);
         Ok(())
     }
@@ -4513,6 +4535,7 @@ impl SessionUi {
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
+        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
@@ -5012,6 +5035,17 @@ impl SessionUi {
             "Fullscreen rendering off".to_string()
         };
         self.note(&status, view);
+    }
+
+    /// TS #2709: the Ctrl+O cycle saves the new level as the global
+    /// `chatDetail` setting (`settingsManager.setChatDetail`), so every
+    /// later chat opens at it. A failed save only lands in the settings
+    /// store's own diagnostics (TS `save` -> `recordError`): the chat
+    /// keeps the applied level either way, so the keybind shows no error.
+    fn save_chat_detail(&self, view: &AgentView) {
+        if let Some(settings) = &self.client_settings {
+            let _ = settings.set_chat_detail(view.detail.wire_name());
+        }
     }
 
     /// `/speed on/off`: toggles the footer tok/sec readout for this
@@ -6001,6 +6035,9 @@ impl SessionUi {
         self.stash_draft_for_switch(view);
         match self.attach_session(&id).await {
             Ok(()) => {
+                // Session-scoped stats again: the rebuilt title must show
+                // the switched-to session's pair, not the one being left.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head (if one was
@@ -7323,7 +7360,8 @@ impl SessionUi {
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
     /// `set_thinking_level` command switches the session's level (durable
     /// row and settings default included), then the client records the
-    /// `Thinking level: <level>` status row.
+    /// `Thinking level: <level>` status row and the tray's `model:effort`
+    /// label follows the effective level.
     async fn apply_thinking_level(&mut self, level: &str, view: &mut AgentView) {
         let switched = self
             .bounded_request(
@@ -7337,7 +7375,39 @@ impl SessionUi {
             )
             .await;
         match switched {
-            Ok(_) => self.note(&format!("Thinking level: {level}"), view),
+            Ok(_) => {
+                // The tray's effort suffix follows the level the switch
+                // wrote: the daemon clamps the request (TS `setThinkingLevel`
+                // emits the effective level; the Rust daemon answers no such
+                // event, so the client re-reads the state `/effort` targets).
+                // A failed read falls back to the requested level, never the
+                // previous model's stale suffix.
+                let state = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::GetState {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await;
+                match state {
+                    Ok(data) => {
+                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                    }
+                    // The switch succeeded; the state read did not. TS
+                    // `applyThinkingLevel` patches the requested level into
+                    // the connection state (the `thinking_level_changed`
+                    // event corrects it later), so render the requested
+                    // level — never the previous model's stale suffix.
+                    Err(_) => {
+                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
+                            .map(|parsed| parsed.wire_name().to_string());
+                    }
+                }
+                self.note(&format!("Thinking level: {level}"), view);
+            }
             Err(error) => {
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
@@ -7350,13 +7420,16 @@ impl SessionUi {
     }
 
     /// The session's connection state (TS `AgentConnectionState`): the
-    /// worker's `get_state` response. `None` surfaces the failure as a
-    /// note; callers keep the transcript unchanged then.
+    /// worker's `get_connection_state` response, which carries the
+    /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
+    /// `steeringMode`, `serviceTier`, ...) — `get_state` serves the
+    /// roster summary instead. `None` surfaces the failure as a note;
+    /// callers keep the transcript unchanged then.
     async fn connection_state(&mut self, view: &mut AgentView) -> Option<Value> {
         match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetState {
+                DaemonCommand::GetConnectionState {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     rest: Map::default(),
@@ -7387,6 +7460,9 @@ impl SessionUi {
     /// that omits it falls back to the picked model (`state.model ??
     /// fallbackModel`) — the switch already succeeded, so the label must
     /// move even when the worker's summary cannot re-resolve the model.
+    /// The tray's effort suffix follows the same read: a switch clamps
+    /// the level (a model without the old level re-resolves it), and a
+    /// model without reasoning renders the bare id.
     async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
         let state = self
             .bounded_request(
@@ -7398,15 +7474,22 @@ impl SessionUi {
                 },
             )
             .await;
-        let model_id = match state {
-            Ok(data) => data
+        if let Ok(data) = state {
+            let model_id = data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string),
-            Err(_) => picked_model_id.to_string(),
-        };
-        view.chrome.model_id = Some(model_id);
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            view.chrome.model_id = Some(model_id);
+            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+        } else {
+            // The picked model's effort is unknown when the read fails:
+            // a stale suffix would pair the new model with the old
+            // model's level (a combination TS never renders), so the
+            // bare id wins.
+            view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.thinking_suffix = None;
+        }
         self.dirty = true;
     }
 
@@ -7744,8 +7827,8 @@ impl SessionUi {
         }
         // The activity dock owns focus while focused: Enter (and a second
         // Alt+A) opens the focused group's own view directly (the
-        // operator's direct-navigation redesign), left/right move the
-        // dock's group, up/cancel/back returns to the editor, expand
+        // operator's direct-navigation redesign), left/right step the
+        // dock's groups, up/cancel/back returns to the editor, expand
         // cycles the conversation detail and KEEPS the focus, and every
         // other key falls through after releasing the focus (TS
         // `onChatAction` -> `focusEditor` -> the editor handles it).
@@ -7759,29 +7842,22 @@ impl SessionUi {
                 return Ok(());
             }
             if id == "left" || id == "right" {
-                let groups = [
-                    crate::chrome::ActivityGroup::Subagents,
-                    crate::chrome::ActivityGroup::Heartbeats,
-                    crate::chrome::ActivityGroup::Bash,
-                    crate::chrome::ActivityGroup::Goal,
-                ];
-                let current = groups
-                    .iter()
-                    .position(|group| *group == self.activity_group)
-                    .unwrap_or(0);
-                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
-                    Box::new(groups[..current].iter().rev())
+                // One press, one group: the step lands on the
+                // neighboring rendered group and wraps at the row's
+                // ends, so an empty group is still visited (the
+                // operator's 2026-09-26 muscle-memory directive — an
+                // empty group never skips) and N groups take N
+                // presses to cycle.
+                let direction = if id == "left" {
+                    crate::chrome::ActivityDirection::Prev
                 } else {
-                    Box::new(groups[current + 1..].iter())
+                    crate::chrome::ActivityDirection::Next
                 };
-                if let Some(next) = candidates
-                    .copied()
-                    .find(|group| self.activity_selectable(*group))
-                {
-                    self.activity_group = next;
-                    self.update_subagent_summary(view);
-                    self.dirty = true;
-                }
+                self.activity_group = self
+                    .activity_dock_state()
+                    .step(self.activity_group, direction);
+                self.update_subagent_summary(view);
+                self.dirty = true;
                 return Ok(());
             }
             if kb.matches(&id, "tui.select.up")
@@ -7795,6 +7871,7 @@ impl SessionUi {
             }
             if kb.matches(&id, "app.tools.expand") {
                 view.detail = view.detail.next();
+                self.save_chat_detail(view);
                 self.dirty = true;
                 return Ok(());
             }
@@ -7966,8 +8043,10 @@ impl SessionUi {
         }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
-            // detail: overview -> details -> all -> overview.
+            // detail: overview -> details -> all -> overview, and #2709
+            // saves the new level as the `chatDetail` setting.
             view.detail = view.detail.next();
+            self.save_chat_detail(view);
             // TS `applyChatExpansion` also re-flags the side-question pane
             // (the pane has no bash rows here, so the flag is the only
             // carried state).
@@ -7977,8 +8056,8 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // TS `app.subagents.focus` (default alt+a): the summary line takes
-        // focus when it is selectable.
+        // TS `app.subagents.focus` (default alt+a): the dock takes focus
+        // while it renders (an unmounted dock keeps the editor's focus).
         if view
             .editor
             .keybindings()
@@ -8173,10 +8252,9 @@ impl SessionUi {
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
         // of the prompt — no autocomplete open, no history browse, the
-        // cursor at the last line's end — hands the focus to the subagent
-        // summary line when it is selectable; every other Down falls
-        // through to the editor's cursor motion (a non-selectable line
-        // never takes it).
+        // cursor at the last line's end — hands the focus to the dock
+        // while it renders; every other Down falls through to the
+        // editor's cursor motion (an unmounted dock never takes it).
         if view
             .editor
             .keybindings()

@@ -415,13 +415,13 @@ output, prompt, or goal content is collected.
 ### `tui menu opened`
 
 A menu surface opened (adoption of the unified menu panel): `source` is
-`command` (the bare slash submission — `/model`, `/mcp`) or `tab` (a typed
-partial + Tab in the command's argument context, opening the menu filtered
-to the match). Never carries prompt or search content.
+`command` (the bare slash submission — `/model`, `/mcp`, `/settings`) or
+`tab` (a typed partial + Tab in the command's argument context, opening the
+menu filtered to the match). Never carries prompt or search content.
 
 | property | type | notes |
 |---|---|---|
-| `menu` | string | `model` / `mcp` |
+| `menu` | string | `model` / `mcp` / `settings` |
 | `source` | string | `command` / `tab` |
 
 ### `tui prompt stash`
