@@ -498,6 +498,78 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     );
 }
 
+/// A tiny real ELF split into the paired shipped image + decoder that the
+/// fail-closed Linux packer/assembler require (`scripts/release/`
+/// `test_catalog_assets.py` stages the same fixture shape). The directory
+/// must outlive the invocation; the caller keeps it.
+struct PairedFixture {
+    dir: tempfile::TempDir,
+    shipped: std::path::PathBuf,
+    decoder: std::path::PathBuf,
+}
+
+fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixture {
+    let dir = tempfile::TempDir::new().expect("split fixture dir");
+    let source = dir.path().join("prime-agent.c");
+    // The packer's version pin runs `--version` and compares the output:
+    // the fixture answers like a real build at the pinned version.
+    let program = format!(
+        "#include <stdio.h>\nint main(int argc, char **argv) {{ (void)argc; (void)argv; puts(\"{version}\"); return 0; }}\n"
+    );
+    std::fs::write(&source, program).expect("fixture source");
+    let raw = dir.path().join("cargo-prime-agent");
+    let compiled = Command::new("gcc")
+        .arg("-g")
+        .arg("-Wl,--build-id")
+        .arg("-o")
+        .arg(&raw)
+        .arg(&source)
+        .output()
+        .expect("compile the fixture");
+    assert_eq!(
+        compiled.status.code(),
+        Some(0),
+        "fixture gcc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let shipped = dir.path().join("prime-agent");
+    let split = Command::new("python3")
+        .arg(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join("split_debug.py"),
+        )
+        .arg("--binary")
+        .arg(&raw)
+        .arg("--shipped")
+        .arg(&shipped)
+        .arg("--out")
+        .arg(dir.path())
+        .arg("--version")
+        .arg(version)
+        .arg("--target")
+        .arg(target)
+        .output()
+        .expect("split the fixture");
+    assert_eq!(
+        split.status.code(),
+        Some(0),
+        "fixture split failed: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let decoder = dir
+        .path()
+        .join(format!("prime-agent-{version}-{alias}.debug.gz"));
+    assert!(shipped.is_file(), "shipped fixture missing");
+    assert!(decoder.is_file(), "decoder fixture missing");
+    PairedFixture {
+        dir,
+        shipped,
+        decoder,
+    }
+}
+
 /// The packaging dry-run produces the release artifact: staged layout,
 /// tarball, manifest, integrity sums — and no dev caches (a stale `.venv`
 /// must not ride the artifact).
@@ -579,18 +651,43 @@ fn packaging_dry_run_produces_artifact() {
     );
 
     let out = tempfile::TempDir::new().expect("packaging out dir");
-    let result = Command::new("python3")
+    // Linux fail-closed: the packer accepts only a paired shipped ELF +
+    // decoder from split_debug.py, so the dry run first splits a tiny real
+    // ELF fixture — the same artifact shape the CI channel ships. The
+    // split fixture dir must outlive the invocation (_split_dir below).
+    let (staged_binary, staged_decoder, _split_dir): (
+        std::ffi::OsString,
+        Option<std::ffi::OsString>,
+        Option<tempfile::TempDir>,
+    ) = if std::env::consts::OS == "linux" {
+        let fixture = split_paired_fixture(
+            env!("CARGO_PKG_VERSION"),
+            "x86_64-unknown-linux-gnu",
+            "linux-x64",
+        );
+        (
+            fixture.shipped.into(),
+            Some(fixture.decoder.into_os_string()),
+            Some(fixture.dir),
+        )
+    } else {
+        (env!("CARGO_BIN_EXE_prime-agent").into(), None, None)
+    };
+    let mut command = Command::new("python3");
+    command
         .arg(repo_root().join("scripts").join("package_release.py"))
         .arg("--root")
         .arg(tree.path())
         .arg("--binary")
-        .arg(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg(&staged_binary)
         .arg("--catalog-assets")
         .arg(assets.path())
         .arg("--out-dir")
-        .arg(out.path())
-        .output()
-        .expect("run the packaging script");
+        .arg(out.path());
+    if let Some(decoder) = staged_decoder {
+        command.arg("--decoder").arg(decoder);
+    }
+    let result = command.output().expect("run the packaging script");
     assert_eq!(
         result.status.code(),
         Some(0),

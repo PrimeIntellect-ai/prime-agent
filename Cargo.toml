@@ -107,11 +107,25 @@ unnecessary_literal_bound = "warn"
 unnecessary_semicolon = "warn"
 used_underscore_binding = "warn"
 
-# Shipping posture, pinned: symbols kept (the TS binary ships unstripped too),
-# thin LTO plus 4 codegen units for cross-crate inlining in the hot render
-# path, line tables so release backtraces stay actionable.
+# Shipping posture, pinned (Kevin, Option C): thin LTO plus 4 codegen
+# units for cross-crate inlining in the hot render path. Builds emit line
+# tables and do NOT strip at link: the release pipeline's split_debug step
+# produces the SHIPPED binary (objcopy --strip-debug — DWARF gone, function
+# names stay) and the split-debug decoder sidecar (objcopy
+# --only-keep-debug, gzipped) from the SAME linked image, so the decoder's
+# addresses match the shipped binary exactly. A second unstripped build
+# would NOT match: link-stage layout differs when stripping runs at link
+# (measured: .text sha256 differs between the link-strip and no-strip
+# builds of the same source). TRADEOFF, stated explicitly: the shipped
+# binary's panic backtraces keep function names but lose file:line; the
+# decoder restores file:line offline and ships as a SEPARATE release
+# asset, never install payload (assemble_artifacts.py hard-fails on
+# decoder sidecars). .dynsym survives stripping, so dynamic linking and
+# the release GLIBC baseline gate are unaffected. macOS is unchanged:
+# darwin builds keep line tables in the executable (dSYM extraction is a
+# documented follow-up); byte claims are measured on Linux x86_64 ELF
+# only.
 [profile.release]
 lto = "thin"
 codegen-units = 4
 debug = "line-tables-only"
-strip = false

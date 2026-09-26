@@ -166,18 +166,27 @@ class SyntheticRepo:
         (kernel / "src" / "rlm").mkdir(parents=True)
         (kernel / "pyproject.toml").write_text("[project]\nname='rlm'\n")
         (kernel / "src" / "rlm" / "repl.py").write_text("# repl\n")
-        # The fake binary: prints the version the verifier expects.
         printed = version if sha is None else f"{version}-continuous.{sha}"
         (runtime / "src" / "repl.py").write_text("# repl\n")
+        source = root / "prime-agent.c"
+        source.write_text(f'#include <stdio.h>\nint main(void) {{ puts("{printed}"); return 0; }}\n')
+        self.raw_binary = root / "bin" / "cargo-prime-agent"
+        self.raw_binary.parent.mkdir()
+        subprocess.run(["gcc", "-g", "-Wl,--build-id", "-o",
+                        str(self.raw_binary), str(source)], check=True)
         self.binary = root / "bin" / "prime-agent"
-        self.binary.parent.mkdir()
-        self.binary.write_text(f"#!/bin/sh\necho {printed}\n")
-        self.binary.chmod(0o755)
+        self.decoder = root / "bin" / f"prime-agent-{version}-{HOST_ARCHIVE_PLATFORM}.debug.gz"
+        split = run_cli(SCRIPTS_DIR / "split_debug.py", [
+            "--binary", str(self.raw_binary), "--shipped", str(self.binary),
+            "--out", str(self.binary.parent), "--version", version, "--target", HOST_TARGET])
+        if split.returncode:
+            raise AssertionError(split.stderr)
 
     def assemble(self, out_dir, catalog_assets=None, sha=None, target=HOST_TARGET):
         args = [
             "--repo-root", str(self.root), "--version", self.version,
             "--target", target, "--binary", str(self.binary),
+            "--decoder", str(self.decoder),
             "--runtime-dir", str(self.root / "runtime"),
             "--out-dir", str(out_dir),
         ]
@@ -670,8 +679,8 @@ class PackerGates(unittest.TestCase):
         # package_release.py (the exe-adjacent kernel packaging) fails without
         # assets and ships them beside the binary when they are valid.
         args = ["--root", str(self.repo.root), "--version", "9.9.9",
-                "--binary", str(self.repo.binary), "--skip-build",
-                "--out-dir", str(self.tmp / "release-package")]
+                "--binary", str(self.repo.binary), "--decoder", str(self.repo.decoder),
+                "--skip-build", "--out-dir", str(self.tmp / "release-package")]
         without = run_cli(PACKER, args)
         self.assertNotEqual(without.returncode, 0)
         self.assertIn("missing bundled catalog assets", without.stderr)
@@ -680,6 +689,53 @@ class PackerGates(unittest.TestCase):
         staged = self.tmp / "release-package" / "prime-agent-9.9.9-linux-x64"
         self.assertTrue((staged / "models.bundled.json").is_file())
         self.assertTrue((staged / "mcp-services.bundled.json").is_file())
+
+    def test_kernel_packer_rejects_decoder_leak(self):
+        leaked = self.repo.root / "prime-agent-runtime" / "leak.debug.gz"
+        leaked.write_bytes(b"decoder-like payload")
+        out = self.tmp / "release-package-leak"
+        result = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
+                                  "--binary", str(self.repo.binary),
+                                  "--decoder", str(self.repo.decoder), "--out-dir", str(out),
+                                  "--catalog-assets", str(self.assets)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("decoder-like sidecar", result.stderr)
+        self.assertFalse(list(out.glob("*.tar.gz")))
+
+    def test_kernel_packer_requires_decoder_for_explicit_linux_binary(self):
+        result = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
+                                  "--binary", str(self.repo.binary),
+                                  "--out-dir", str(self.tmp / "release-package-raw"),
+                                  "--catalog-assets", str(self.assets)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --decoder", result.stderr)
+
+    def test_linux_assembler_requires_split_binary_and_decoder(self):
+        base = ["--repo-root", str(self.repo.root), "--version", "9.9.9",
+                "--target", HOST_TARGET, "--runtime-dir", str(self.repo.root / "runtime"),
+                "--catalog-assets", str(self.assets), "--out-dir", str(self.tmp / "invalid")]
+        wrong_dir = self.tmp / "wrong-decoder"
+        wrong_dir.mkdir()
+        wrong_source = wrong_dir / "wrong.c"
+        wrong_source.write_text('int main(void) { return 17; }\n')
+        wrong_raw = wrong_dir / "cargo-prime-agent"
+        subprocess.run(["gcc", "-g", "-Wl,--build-id", "-o", str(wrong_raw),
+                        str(wrong_source)], check=True)
+        split = run_cli(SCRIPTS_DIR / "split_debug.py", [
+            "--binary", str(wrong_raw), "--shipped", str(wrong_dir / "prime-agent"),
+            "--out", str(wrong_dir), "--version", "9.9.9", "--target", HOST_TARGET])
+        self.assertEqual(split.returncode, 0, split.stderr)
+        wrong_decoder = wrong_dir / self.repo.decoder.name
+        for flags, error in (([], "requires explicit --binary"),
+                             (["--binary", str(self.repo.binary)], "requires explicit --binary"),
+                             (["--binary", str(self.repo.raw_binary),
+                               "--decoder", str(self.repo.decoder)], "still has DWARF"),
+                             (["--binary", str(self.repo.binary),
+                               "--decoder", str(wrong_decoder)], "build ID does not match")):
+            result = run_cli(ASSEMBLER, [*base, *flags])
+            self.assertNotEqual(result.returncode, 0, flags)
+            self.assertIn(error, result.stderr)
+        self.assertFalse(list((self.tmp / "invalid").glob("*.tar.gz")))
 
 
 if __name__ == "__main__":

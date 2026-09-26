@@ -23,8 +23,10 @@ runtime (PI_PACKAGE_DIR override, else the directory of the executable):
   docs/                  user-facing docs
 
 Run it as the packaging dry-run: it builds (or takes) the binary, stages,
-validates, version-pins, hashes, and tars the artifact locally. No network
-publishing happens here.
+validates, version-pins, hashes, and tars the artifact locally. On Linux the
+native default splits the Cargo ELF into a separate shipped image and decoder;
+an explicit --binary requires its paired --decoder. The decoder stays outside
+the tarball and binaries.json. No network publishing happens here.
 
 `--catalog-assets <dir>` supplies the generated bundled catalog assets
 (scripts/release/bundle_catalog.py generates them); the packer hard-fails
@@ -50,6 +52,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # code the assemble_artifacts.py pipeline packs with).
 sys.path.insert(0, str(ROOT / "scripts" / "release"))
 from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir  # noqa: E402
+from assemble_artifacts import (debug_sections, decoder_facts,
+                                fail_if_decoder_in_archive, fail_if_decoder_in_tree)  # noqa: E402
 # `--root` re-anchors asset discovery (workspace version, prime-agent-runtime,
 # skills, docs, README) so integration tests can package synthetic trees.
 
@@ -93,6 +97,7 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", help="release version (default: workspace Cargo.toml)")
     parser.add_argument("--binary", type=Path, help="stage this binary instead of building")
+    parser.add_argument("--decoder", type=Path, help="separate Linux decoder for --binary")
     parser.add_argument("--skip-build", action="store_true",
                         help="reuse target/release/prime-agent without building")
     parser.add_argument("--out-dir", type=Path, help="output directory (default: target/release-package)")
@@ -313,17 +318,45 @@ def main(argv=None):
         subprocess.run(["cargo", "build", "--release", "-p", "pa-cli"], cwd=ROOT, check=True)
         binary = root / "target" / "release" / "prime-agent"
 
+    if tag.startswith("linux-"):
+        if tag != release_platform():
+            raise SystemExit("error: Linux packager target must match the native host")
+        targets = {"linux-x64": "x86_64-unknown-linux-gnu",
+                   "linux-arm64": "aarch64-unknown-linux-gnu"}
+        if tag not in targets:
+            raise SystemExit(f"error: unsupported Linux platform: {tag}")
+        if not args.binary:
+            shipped_dir = root / "target" / "release" / "dist"
+            shipped = shipped_dir / "prime-agent"
+            target = targets[tag]
+            subprocess.run([sys.executable, str(ROOT / "scripts/release/split_debug.py"),
+                            "--binary", str(binary), "--shipped", str(shipped),
+                            "--out", str(shipped_dir), "--version", version,
+                            "--target", target], cwd=ROOT, check=True)
+            binary = shipped
+            args.decoder = shipped_dir / f"prime-agent-{version}-{tag}.debug.gz"
+        if args.decoder is None:
+            raise SystemExit("error: Linux --binary requires --decoder from split_debug.py")
+        if debug_sections(binary):
+            raise SystemExit(f"error: Linux shipped binary still has DWARF: {binary}")
+        decoder_facts(argparse.Namespace(target=targets[tag], version=version,
+                                        decoder=args.decoder, binary=binary))
+    elif args.decoder is not None:
+        raise SystemExit("error: decoder is only supported for Linux")
+
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     catalog_assets = resolve_catalog_assets(args)
     stage(root, binary, version, stage_dir, catalog_assets)
     validate(stage_dir, version)
+    fail_if_decoder_in_tree(stage_dir)
     pin_version(binary, stage_dir, version)
 
     archive = out_dir / f"{stage_dir.name}.tar.gz"
     if archive.exists():
         archive.unlink()
     write_tar(stage_dir, archive)
+    fail_if_decoder_in_archive(archive)
 
     archive_sha = sha256_file(archive)
     executable_sha = sha256_file(stage_dir / "prime-agent")

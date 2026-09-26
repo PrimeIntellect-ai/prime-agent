@@ -848,7 +848,11 @@ model-surface row still compares against the TS binary:
   `package.json` post-build via `setBinaryVersion`), `SHA256SUMS` +
   `binaries.json` (`{platform, file, sha256, executableSha256}`), and a
   flat tarball `prime-agent-<version>-<platform>.tar.gz`. `make package` is
-  the entry point; `--root` re-anchors assets for the e2e's synthetic tree.
+  the entry point; direct invocation is supported. Native Linux calls the same
+  split-debug helper as CI and packages only the stripped shipped ELF; the
+  decoder stays separate from this tarball and `binaries.json`. Explicit Linux
+  `--binary` requires a matching `--decoder`. `--root` re-anchors assets
+  for the e2e's synthetic tree (using a tiny split-debug ELF fixture).
 - `--version` reads the packaged `package.json` at runtime (TS `VERSION`
   is `getPackageJsonPath()`-based) with the compiled-in version as the
   fallback (dev checkouts). `--prime-agent-bootstrap` is the TS
