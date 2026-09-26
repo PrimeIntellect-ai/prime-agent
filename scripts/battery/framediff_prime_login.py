@@ -36,7 +36,6 @@ import difflib
 import http.server
 import json
 import re
-import shutil
 import sys
 import threading
 import time
@@ -179,9 +178,7 @@ def make_side(name: str, binary: str, root: Path, prime_port: int) -> B.Side:
     mock = B.MockProvider(root, [])
     mock.set_responses([{"text": "framediff reply"}])
     mock.start()
-    tmpdir = Path("/tmp") / f"plfd-{name}"
-    if tmpdir.exists():
-        shutil.rmtree(tmpdir)
+    tmpdir = root / "tmp"
     tmpdir.mkdir(parents=True)
     side = B.Side(
         name=name,
@@ -264,8 +261,7 @@ def run_side(
     finally:
         B.tmux_kill(session)
         side.mock.stop()
-        if side.daemon_proc and side.daemon_proc.poll() is None:
-            side.daemon_proc.terminate()
+        side.stop_daemon()
     (out / name).mkdir(parents=True, exist_ok=True)
     for state, frame in frames.items():
         (out / name / f"{name}-{state}.txt").write_text(frame)

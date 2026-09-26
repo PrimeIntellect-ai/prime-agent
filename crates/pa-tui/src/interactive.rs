@@ -873,19 +873,22 @@ async fn run_onboarding_phase(
         // A composition root without the Prime row has no sign-in to run.
         return Ok(false);
     };
+    let prime_panel = session.auth_panel_handle();
+    let prime_cancel = prime_panel.cancel_signal();
     // TS `loginDialogOptions()`'s onboarding shape: the panel mounts
     // chrome-less (`topRule: false, hideTitle: true`) — the splash's
     // heading names the step — and the actions row reads the same
-    // resolved keybindings the pane answers with.
+    // resolved keybindings the pane answers with; the panel carries the
+    // flow's cancel signal, so the row's cancel hint ends the login (TS
+    // the dialog's abort signal).
     let mut prime_dialog =
         crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", prime_row.name));
     prime_dialog.set_keybindings(drive.keybindings.clone());
+    prime_dialog.set_cancel_signal(prime_cancel.clone());
     screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
         panel: std::boxed::Box::new(prime_dialog),
         heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
     });
-    let prime_panel = session.auth_panel_handle();
-    let prime_cancel = prime_panel.cancel_signal();
     let prime_row_for_flow = prime_row.clone();
     let prime_auth = provider_auth.clone();
     let prime_flow = OnboardingFlowTask::spawn(
@@ -1019,15 +1022,16 @@ async fn run_onboarding_phase(
         // TS `loginProvider`: the row's flow — the panel-prompted key,
         // or the panel-driven flow.
         if row.flow == crate::provider_auth::AuthFlow::ApiKeyPrompt {
+            let panel = session.auth_panel_handle();
+            let prompt_cancel = panel.cancel_signal();
             let mut api_key_dialog =
                 crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
             api_key_dialog.set_keybindings(drive.keybindings.clone());
+            api_key_dialog.set_cancel_signal(prompt_cancel.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
                 panel: std::boxed::Box::new(api_key_dialog),
                 heading: None,
             });
-            let panel = session.auth_panel_handle();
-            let prompt_cancel = panel.cancel_signal();
             let prompt_cancel_body = prompt_cancel.clone();
             let provider_id = row.id.clone();
             let row = row.clone();
@@ -1093,15 +1097,16 @@ async fn run_onboarding_phase(
             // keeps the unavailable ones inert). The panel mounts
             // chrome-less (TS the onboarding `loginDialogOptions`) with
             // the pane's resolved keybindings.
+            let panel = session.auth_panel_handle();
+            let service_cancel = panel.cancel_signal();
             let mut service_dialog =
                 crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
             service_dialog.set_keybindings(drive.keybindings.clone());
+            service_dialog.set_cancel_signal(service_cancel.clone());
             screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
                 panel: std::boxed::Box::new(service_dialog),
                 heading: None,
             });
-            let panel = session.auth_panel_handle();
-            let service_cancel = panel.cancel_signal();
             let provider_id = row.id.clone();
             let row = row.clone();
             let service_auth = provider_auth.clone();

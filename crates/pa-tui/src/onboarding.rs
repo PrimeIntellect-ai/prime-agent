@@ -70,9 +70,17 @@ pub(crate) fn team_question_options(
         label: PERSONAL_ACCOUNT_LABEL.to_string(),
         detail: None,
     }];
-    options.extend(teams.iter().map(|team| OnboardingChoiceOption {
-        label: team.name.clone(),
-        detail: team.slug.clone(),
+    options.extend(teams.iter().map(|team| {
+        OnboardingChoiceOption {
+            // The team fields are provider-supplied: the same control
+            // character hygiene every daemon-supplied row carries (the
+            // session team picker scrubs them the same way).
+            label: crate::menu_panel::scrub_controls(&team.name),
+            detail: team
+                .slug
+                .clone()
+                .map(|slug| crate::menu_panel::scrub_controls(&slug)),
+        }
     }));
     options
 }

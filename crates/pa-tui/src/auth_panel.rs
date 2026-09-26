@@ -92,7 +92,7 @@ pub enum PastePromptTone {
 
 /// Which surface mounts the panel: TS `loginDialogOptions()` per surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelSurface {
+enum PanelSurface {
     /// The session's prompt dock (TS the non-onboarding shape):
     /// `topRule: true, hideTitle: false` — the borderMuted rule and the
     /// muted one-space title open the panel.
@@ -445,6 +445,11 @@ pub struct AuthPanel {
     /// `getKeybindings()` live; the mounts sync the panel from the
     /// surface's manager).
     keybindings: KeybindingsManager,
+    /// The flow's cooperative cancel signal (TS the dialog's
+    /// `abortController`): Esc/ctrl+c on a URL screen with no mounted
+    /// input cancels the running login — the actions row's cancel hint
+    /// is never a dead key.
+    flow_cancel: Option<FlowCancel>,
 }
 
 /// TS `copyAuthUrl`'s status arm.
@@ -519,6 +524,7 @@ impl AuthPanel {
             actions_live: false,
             copy_state: None,
             keybindings: KeybindingsManager::new(),
+            flow_cancel: None,
         }
     }
 
@@ -538,6 +544,14 @@ impl AuthPanel {
     /// resolved manager so the row matches the user's bindings).
     pub fn set_keybindings(&mut self, keybindings: KeybindingsManager) {
         self.keybindings = keybindings;
+    }
+
+    /// Arm the flow's cooperative cancel signal (TS the dialog's
+    /// `abortController`): the mounts pass the driving flow's signal so
+    /// the panel's cancel keys end a running login, not just a mounted
+    /// input.
+    pub fn set_cancel_signal(&mut self, cancel: FlowCancel) {
+        self.flow_cancel = Some(cancel);
     }
 
     /// TS `showProgress`: the first line lands under the section title
@@ -613,6 +627,13 @@ impl AuthPanel {
         self.title = TEAM_PANEL_TITLE.to_string();
         self.subtitle = Some(TEAM_PANEL_SUBTITLE.to_string());
         self.progress.clear();
+        // The picker is its own panel (TS `PrimeTeamSelectorComponent`):
+        // the login dialog's whole content state goes with it — a stale
+        // section title, actions row, or copy status must never bleed
+        // into the frame the pick leaves behind.
+        self.progress_open = false;
+        self.actions_live = false;
+        self.copy_state = None;
         self.auth_url = None;
         self.auth_instructions = None;
         self.notice = None;
@@ -641,6 +662,13 @@ impl AuthPanel {
         // consume the pair note it handled).
         if key == "ctrl+c" {
             self.cancel_input();
+            return;
+        }
+        // TS `cancel()` on a URL screen (no mounted input): the dialog's
+        // abort signal ends the running login — the actions row's cancel
+        // hint is never a dead key.
+        if matches!(self.input, PanelInput::Working) && kb.matches(key, "tui.select.cancel") {
+            self.mark_flow_cancelled();
             return;
         }
         // TS `copyAuthUrl`: the copy binding on the mounted URL (the
@@ -741,11 +769,11 @@ impl AuthPanel {
 
     /// Esc/Ctrl+C on the mounted input: the paste prompt answers `None`
     /// (the flow cancels), the picker answers `Cancelled` (the stored
-    /// selection stays, TS `onCancel`); no input means nothing to
-    /// cancel.
+    /// selection stays, TS `onCancel`); no input means the flow itself
+    /// cancels (TS `cancel()`).
     fn cancel_input(&mut self) {
         match &mut self.input {
-            PanelInput::Working => {}
+            PanelInput::Working => self.mark_flow_cancelled(),
             PanelInput::Paste { reply, .. } => {
                 if let Some(reply) = reply.take() {
                     let _ = reply.send(None);
@@ -760,6 +788,15 @@ impl AuthPanel {
             }
         }
         self.notice = None;
+    }
+
+    /// Mark the driving flow's cancel signal (TS the dialog's abort):
+    /// a running login ends between its poll steps; a signal that was
+    /// never armed is a flow that owns no cancel path.
+    fn mark_flow_cancelled(&mut self) {
+        if let Some(cancel) = &self.flow_cancel {
+            cancel.mark();
+        }
     }
 
     /// TS `copyAuthUrl`: the mounted URL to the clipboard, the actions
@@ -1833,6 +1870,27 @@ mod tests {
             .expect("the code row");
         assert_eq!(rows[code - 1], " Verification code");
         assert_eq!(rows[code - 2], "", "the blank separates link and code");
+    }
+
+    /// TS `cancel()` on a URL screen: the actions row advertises the
+    /// cancel keys and Esc ends the running login through the flow's
+    /// cooperative cancel signal (never a dead hint).
+    #[test]
+    fn escape_on_a_url_screen_marks_the_flow_cancelled() {
+        let mut panel = AuthPanel::onboarding("Login to Prime Inference");
+        let handle = AuthPanelHandle::new(mpsc::unbounded_channel().0);
+        let cancel = handle.cancel_signal();
+        panel.set_cancel_signal(cancel.clone());
+        panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
+        assert!(
+            !cancel.cancelled(),
+            "the flow starts live: the URL screen alone cancels nothing"
+        );
+        panel.handle_key("escape", &kb());
+        assert!(
+            cancel.cancelled(),
+            "Esc on the URL screen ends the running login (TS the dialog's abort)"
+        );
     }
 
     /// TS `copyAuthUrl`: the copy binding on the mounted URL carries the

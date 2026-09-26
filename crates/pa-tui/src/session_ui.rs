@@ -3787,11 +3787,11 @@ impl SessionUi {
         auth: crate::provider_auth::ProviderAuthCommandsHandle,
         view: &mut AgentView,
     ) {
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            provider.name
-        )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut session_dialog =
+            crate::auth_panel::AuthPanel::new(format!("Login to {}", provider.name));
+        session_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(session_dialog);
         // A still-running previous flow ends before its replacement arms:
         // its flag marks the blocking body out of the way, and its late
         // settle is skipped below so it can never close the newer panel.
@@ -4259,10 +4259,10 @@ impl SessionUi {
             return;
         };
         self.traces_login_run = Some(intent);
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
-            "Login to Prime Agent Traces",
-        ));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
+        traces_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(traces_dialog);
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
             panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
@@ -5707,8 +5707,10 @@ impl SessionUi {
             self.note("/mcp is not available in this client yet", view);
             return;
         };
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut mcp_dialog = crate::auth_panel::AuthPanel::new(intent.title);
+        mcp_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(mcp_dialog);
         let args = intent.args;
         tokio::spawn(async move {
             let note =

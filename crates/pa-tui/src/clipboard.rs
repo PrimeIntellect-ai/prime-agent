@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The OSC 52 payload channel: stdout in the terminal, a captured buffer in
 /// headless verification runs.
@@ -85,9 +86,13 @@ impl Env {
     }
 }
 
-/// Run `program` with `text` on its stdin (TS `execSyncHidden` with the 5s
-/// timeout; the pipe write plus process wait are quick enough that a
-/// synchronous call matches the TS behavior).
+/// TS `execSyncHidden`'s helper wait cap: a hung clipboard tool is a
+/// failed copy, never a blocked UI.
+const PIPE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run `program` with `text` on its stdin (TS `execSyncHidden` with the
+/// 5s timeout): a helper that does not finish inside the cap is killed
+/// and reported as a failed copy.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     let Ok(mut child) = Command::new(program)
         .args(args)
@@ -102,8 +107,13 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    match child.wait() {
-        Ok(status) => status.success() && wrote,
+    match child.wait_timeout(PIPE_TIMEOUT) {
+        Ok(Some(status)) => status.success() && wrote,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
         Err(_) => false,
     }
 }
