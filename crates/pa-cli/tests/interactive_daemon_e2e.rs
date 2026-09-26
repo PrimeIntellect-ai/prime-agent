@@ -4439,12 +4439,10 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
         height: 30,
     };
     let started = Instant::now();
+    let mode = pa_tui::interactive::UiMode::Headless(plan);
     let outcome = tokio::time::timeout(
         Duration::from_secs(120),
-        pa_tui::interactive::run_interactive(
-            options,
-            pa_tui::interactive::UiMode::Headless(plan),
-        ),
+        pa_tui::interactive::run_interactive(options, mode),
     )
     .await
     .expect("the parked loop still services events and ends on its own")
