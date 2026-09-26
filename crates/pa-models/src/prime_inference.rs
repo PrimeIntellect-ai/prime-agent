@@ -637,6 +637,13 @@ impl PrimeInferenceCatalog {
         )
     }
 
+    /// The scope recorded in the stored disk snapshot, when one exists (the
+    /// auth-scope observation's first-request seed; a login or logout that
+    /// predates the process is still detected).
+    pub fn stored_scope(&self) -> Option<String> {
+        self.cache.stored_scope()
+    }
+
     /// The last-good snapshot for a scope, or None (callers fall back to the
     /// compiled offline entries).
     pub fn get(&self, credentials: &PrimeInferenceCredentials) -> Option<Vec<Model>> {
