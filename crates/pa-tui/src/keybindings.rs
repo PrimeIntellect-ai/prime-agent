@@ -339,7 +339,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.input.clear",
         def!(&["escape"], "Interrupt response or clear prompt"),
     ),
-    ("app.shortcuts", def!(&["?"], "Show keyboard shortcuts")),
     ("app.exit", def!(&["ctrl+d"], "Exit when editor is empty")),
     ("app.suspend", def!(&["ctrl+z"], "Suspend to background")),
     ("app.model.select", def!(&["ctrl+l"], "Open model selector")),

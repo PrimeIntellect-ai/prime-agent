@@ -930,9 +930,33 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         }
         // break overlong words; escape sequences copy through atomically
         // at zero width (OSC 8 sequences must never split mid-sequence)
-        let mut rest = text.clone();
         let style = *style;
-        while str_width(&rest) + col > width {
+        let mut rest: &str = text.as_str();
+        // The break loop used to re-measure `str_width(&rest)` and clone the
+        // remaining tail on EVERY emitted row, so one unbroken token longer
+        // than the wrap width (a padded fixture row, a base64 blob, a long
+        // path) wrapped in O(token_len * rows) time — the first transcript
+        // frame of a resumed session paid seconds per megabyte of such
+        // tokens. The remaining width is tracked arithmetically instead:
+        // measured once (the caller's `w`), decremented by each row's
+        // emitted width, with `rest` sliced in place (no tail clones). For
+        // content whose per-char widths sum to its grapheme width — every
+        // printable-ASCII/escape/tab token, the catastrophic class — the
+        // arithmetic is exact; a row split inside a multi-char grapheme
+        // cluster is the one non-additive case, so a tentative exit is
+        // confirmed against one true measure before the leftover is
+        // pushed (the correctness backstop, never the hot path: an exact
+        // run leaves at most `width` columns to re-measure).
+        let mut rest_width = w;
+        loop {
+            if rest_width + col <= width {
+                if str_width(rest) + col <= width {
+                    break;
+                }
+                // A non-additive cluster split drifted the arithmetic:
+                // re-sync from the true measure and keep breaking.
+                rest_width = str_width(rest);
+            }
             let mut take = String::new();
             let mut tw = 0usize;
             let mut taken = 0usize;
@@ -957,10 +981,11 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
             out.push(&take, style);
             out.finish_row(/*trim*/ false);
             col = 0;
-            rest = rest[taken..].to_string();
+            rest = &rest[taken..];
+            rest_width -= tw;
         }
-        col += str_width(&rest);
-        out.push(&rest, style);
+        col += str_width(rest);
+        out.push(rest, style);
         i += 1;
     }
     out.finish_row(/*trim*/ false);
@@ -1021,6 +1046,249 @@ pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-fix overlong-word break loop, verbatim from origin/rust
+    /// (the quadratic re-measure version): the output oracle for
+    /// [`wrap_spans_into`]'s arithmetic-tracked rewrite. Every corpus below
+    /// must wrap to byte- and style-identical `Line`s on both algorithms —
+    /// the rewrite is a complexity fix, never a layout change. The oracle
+    /// stays quadratic, so differential corpora are bounded (~4KiB
+    /// tokens); the linear rewrite gets its own unbounded stress test.
+    fn legacy_wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<'_>) {
+        if width == 0 {
+            for span in spans {
+                out.push(&span.content, span.style);
+            }
+            out.finish_row(/*trim*/ false);
+            return;
+        }
+        // TS `wrapSingleLine` returns a fitting line UNCHANGED (`visibleLength
+        // <= width`), so its spacing never re-tokenizes.
+        let joined_width: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        if joined_width <= width {
+            for span in spans {
+                out.push(&span.content, span.style);
+            }
+            out.finish_row(/*trim*/ false);
+            return;
+        }
+        // tokens: (text, style); alternating words and whitespace-run gaps. TS
+        // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a
+        // span boundary joins the previous gap token), never collapsing it to a
+        // single space.
+        let mut tokens: Vec<(String, Style)> = Vec::new();
+        for span in spans {
+            let mut word = String::new();
+            for ch in span.content.chars() {
+                if ch == ' ' {
+                    if !word.is_empty() {
+                        tokens.push((std::mem::take(&mut word), span.style));
+                    }
+                    match tokens.last_mut() {
+                        Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
+                        _ => tokens.push((" ".to_string(), span.style)),
+                    }
+                } else {
+                    word.push(ch);
+                }
+            }
+            if !word.is_empty() {
+                tokens.push((word, span.style));
+            }
+        }
+
+        let mut col = 0usize;
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let (text, style) = &tokens[i];
+            let w = str_width(text);
+            if col + w > width && out.has_content {
+                // A wrapped row never carries its trailing gap: TS
+                // wrapTextWithAnsi drops the boundary space, so the styled
+                // content ends at the last word and the plain padding follows.
+                out.finish_row(/*trim*/ true);
+                col = 0;
+                // drop leading whitespace at the new line start
+                if text.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+            }
+            // break overlong words; escape sequences copy through atomically
+            // at zero width (OSC 8 sequences must never split mid-sequence)
+            let mut rest = text.clone();
+            let style = *style;
+            while str_width(&rest) + col > width {
+                let mut take = String::new();
+                let mut tw = 0usize;
+                let mut taken = 0usize;
+                while taken < rest.len() {
+                    if let Some(len) = crate::width::escape_len(&rest[taken..]) {
+                        take.push_str(&rest[taken..taken + len]);
+                        taken += len;
+                        continue;
+                    }
+                    let c = rest[taken..].chars().next().expect("char at boundary");
+                    let cw = crate::width::char_width(c);
+                    if tw + cw + col > width {
+                        break;
+                    }
+                    take.push(c);
+                    tw += cw;
+                    taken += c.len_utf8();
+                }
+                if take.is_empty() {
+                    break;
+                }
+                out.push(&take, style);
+                out.finish_row(/*trim*/ false);
+                col = 0;
+                rest = rest[taken..].to_string();
+            }
+            col += str_width(&rest);
+            out.push(&rest, style);
+            i += 1;
+        }
+        out.finish_row(/*trim*/ false);
+    }
+
+    fn legacy_wrap_spans(spans: &[Span], width: usize, out: &mut Vec<Line>) {
+        legacy_wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
+    }
+
+    /// Full-structure parity: every span's content AND style, and the row
+    /// count the layout caches must equal the rendered rows on both the
+    /// legacy oracle and the rewrite.
+    fn assert_wrap_parity(spans: &[Span], widths: &[usize]) {
+        for &width in widths {
+            let mut legacy: Vec<Line> = Vec::new();
+            legacy_wrap_spans(spans, width, &mut legacy);
+            let mut current: Vec<Line> = Vec::new();
+            wrap_spans(spans, width, Style::default(), &mut current);
+            assert_eq!(
+                legacy, current,
+                "wrap parity (styled spans) broke at width {width}: spans={spans:?}"
+            );
+            let mut counter = geometry::WrapOutput::count();
+            wrap_spans_into(spans, width, &mut counter);
+            assert_eq!(
+                counter.rows,
+                current.len(),
+                "row count vs render broke at width {width}: spans={spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_parity_ascii_monowords_bounded() {
+        // the catastrophic class, bounded for the O(n^2) oracle
+        for len in [81usize, 160, 1024, 4096] {
+            let spans = vec![Span::styled("x".repeat(len), Style::default())];
+            assert_wrap_parity(&spans, &[1, 2, 3, 7, 79, 80, 81, 200]);
+        }
+        // a monoword behind an ordinary word (a mid-row break: col > 0)
+        let spans = vec![Span::styled(
+            format!("lead {}", "b".repeat(4000)),
+            Style::default(),
+        )];
+        assert_wrap_parity(&spans, &[3, 7, 20, 80, 81]);
+    }
+
+    #[test]
+    fn wrap_parity_zwj_family_and_affixes() {
+        // the reviewer's cluster-split repro class (retracted underflow
+        // concern; the tentative-exit true measure resyncs the arithmetic):
+        // the exact token plus prefixes/suffixes across widths
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        for token in [
+            format!("aa{family}aaa"),
+            family.to_string(),
+            format!("a{family}"),
+            format!("{family}a"),
+            format!("aa{family}aa"),
+            format!("\u{200D}{family}"),
+            format!("{family}\u{200D}"),
+            format!("aaa {family} aaa"),
+        ] {
+            let spans = vec![Span::styled(token, Style::default())];
+            assert_wrap_parity(&spans, &[1, 2, 3, 4, 5, 6, 7, 8, 12, 40]);
+        }
+    }
+
+    #[test]
+    fn wrap_parity_mixed_unicode_escapes_tabs() {
+        // ZWJ + skin tone, regional flags, combining and prepending
+        // marks, tabs (char_width expands to 3 like str_width), malformed
+        // ANSI (a lone ESC, an unterminated CSI), a well-formed OSC 8
+        // hyperlink, and multispan styling at span boundaries.
+        let bodies = [
+            format!("{}  ", "\u{1F468}\u{1F3FD}\u{200D}\u{1F33E}".repeat(64)),
+            format!("{} ", "\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}".repeat(64)),
+            format!("{} ", "e\u{0301}".repeat(300)),
+            format!("{} a", "\u{0605}".repeat(120)),
+            "a\tb c\t\td ".repeat(64),
+            format!("\u{1b} lone {}", "y".repeat(300)),
+            format!("\u{1b}[31 unterminated {}", "m".repeat(300)),
+            format!(
+                "\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ {}",
+                "z".repeat(300)
+            ),
+        ];
+        for body in bodies {
+            let spans = vec![Span::styled(body, Style::default())];
+            assert_wrap_parity(&spans, &[1, 2, 3, 4, 5, 7, 9, 12, 40, 80]);
+        }
+        // multispan: distinct styles and a monoword at a span boundary
+        let spans = vec![
+            Span::styled(
+                "intro ".to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "q".repeat(2000),
+                Style::default().add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(" tail words here".to_string(), Style::default()),
+        ];
+        assert_wrap_parity(&spans, &[1, 2, 4, 9, 17, 60, 80]);
+    }
+
+    #[test]
+    fn wrap_parity_fits_exactly_and_edges() {
+        // rows that fit whole, exactly-width tokens, and width 0 (no wrap)
+        let spans = vec![Span::styled("abcdefgh".to_string(), Style::default())];
+        assert_wrap_parity(&spans, &[0, 1, 7, 8, 9, 100]);
+        let spans = vec![Span::styled(String::new(), Style::default())];
+        assert_wrap_parity(&spans, &[0, 1, 80]);
+    }
+
+    #[test]
+    fn wrap_stress_megabyte_monoword_candidate_only() {
+        // The rewrite must wrap a 1MiB unbroken token in one linear pass:
+        // content round-trips exactly (hard breaks never trim) and the
+        // ASCII row count is exact. This test finishes only because the
+        // rewrite is linear — the legacy loop needed ~30s for this input
+        // (the first-frame transcript blow-up) — but the speed evidence
+        // belongs to the recorded benchmark pair, not a wall-clock assert
+        // in a deterministic unit test.
+        let token = "x".repeat(1 << 20);
+        let spans = vec![Span::styled(token.clone(), Style::default())];
+        let width = 80usize;
+        let mut current: Vec<Line> = Vec::new();
+        wrap_spans(&spans, width, Style::default(), &mut current);
+        // 1048576 chars at 80 columns: CEIL rows (a floor here fails the
+        // 16-char remainder)
+        assert_eq!(
+            current.len(),
+            token.len().div_ceil(width),
+            "exact ASCII row count"
+        );
+        let joined: String = current
+            .iter()
+            .flat_map(|line| line.iter().map(|span| span.content.as_str()))
+            .collect();
+        assert_eq!(joined, token, "hard-broken rows round-trip");
+    }
 
     #[test]
     fn heading_and_paragraph() {

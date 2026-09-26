@@ -82,10 +82,7 @@ impl AgentView {
             | ChatEntry::ShellCompletion(_)
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
-            | ChatEntry::CustomPanel(_)
-            | ChatEntry::ClientMarkdown { .. }
-            | ChatEntry::ClientText { .. }
-            | ChatEntry::ChangelogPanel { .. } => true,
+            | ChatEntry::CustomPanel(_) => true,
             ChatEntry::Assistant(message) => !message.streaming,
             ChatEntry::Tool(card) => !matches!(
                 crate::tool_card::panel_status(card),
@@ -144,10 +141,7 @@ impl AgentView {
             ChatEntry::Status { .. }
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
-            | ChatEntry::CustomPanel(_)
-            | ChatEntry::ClientMarkdown { .. }
-            | ChatEntry::ClientText { .. }
-            | ChatEntry::ChangelogPanel { .. } => false,
+            | ChatEntry::CustomPanel(_) => false,
         }
     }
 
@@ -234,27 +228,9 @@ impl AgentView {
 
     pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
         let mut tail: Vec<Line> = Vec::new();
-        // The `?` quick-shortcut guide renders right below the chat rows
-        // (TS mounts `shortcutGuideContainer` between the chat and the
-        // status area, inside the scrollable main view): `Spacer(1)` then
-        // `new Markdown(guide, 1, 1)` — one blank, the markdown paddingY
-        // blank, the content, and the closing paddingY blank.
-        if let Some(guide) = &self.shortcut_guide {
-            tail.push(Vec::new());
-            tail.push(Vec::new());
-            let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-            md.code_block_indent.clone_from(&self.code_block_indent);
-            tail.extend(crate::chat::render_markdown_block(
-                guide,
-                &md,
-                width,
-                &mut crate::markdown::MarkdownBlockCache::default(),
-            ));
-            tail.push(Vec::new());
-        }
         // In-flight bash output for the current turn renders ABOVE the
         // execution indicator (TS `pendingMessagesContainer` sits between
-        // the shortcut guide and the status area) and flushes into the
+        // the chat rows and the status area) and flushes into the
         // transcript when the turn settles.
         if !self.pending_bash.is_empty() {
             // TS `keyText("tui.select.cancel")`: every key of the
