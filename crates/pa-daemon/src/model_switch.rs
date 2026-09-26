@@ -564,7 +564,7 @@ mod tests {
             .first()
             .copied()
             .expect("the generated catalog has anthropic models");
-        (model.provider.to_string(), model.id.to_string())
+        (model.provider.clone(), model.id.clone())
     }
 
     #[test]

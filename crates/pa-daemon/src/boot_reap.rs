@@ -475,7 +475,7 @@ pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool
     normalize_socket_spelling(Path::new(path).parent().unwrap_or(Path::new(path)))
         == normalize_socket_spelling(&crate::platform::socket_dir())
         && name.starts_with(&format!("worker-{key}-"))
-        && name.ends_with(".sock")
+        && Path::new(name).extension().is_some_and(|ext| ext == "sock")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -762,11 +762,10 @@ fn read_proc_environ(pid: u32) -> Option<Vec<String>> {
 #[cfg(target_os = "linux")]
 fn exe_is_product_binary(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
         // The kernel appends " (deleted)" to a replaced binary's exe link
         // (an in-place upgrade while the worker lives) - the product
         // binary is still the product binary.
-        .is_some_and(|exe| {
+        .is_ok_and(|exe| {
             let name = exe.to_string_lossy();
             let name = name.trim_end_matches(" (deleted)");
             is_product_binary(name)
@@ -821,7 +820,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_abandoned_id_filter_matches_the_stamped_env_only() {
-        let _unstamped_guard = ReapOnDrop(
+        let unstamped_guard = ReapOnDrop(
             std::process::Command::new("sleep")
                 .arg("300")
                 .env_remove(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV)
@@ -831,7 +830,7 @@ mod tests {
         );
         assert!(
             !proc_environ_names_active_session(
-                _unstamped_guard
+                unstamped_guard
                     .0
                     .as_ref()
                     .expect("guard holds the child")

@@ -414,7 +414,8 @@ pub fn merge_refinement_history(
     global: &[RefinementResult],
     session: &[RefinementResult],
 ) -> Vec<RefinementResult> {
-    let mut by_id: std::collections::BTreeMap<String, RefinementResult> = Default::default();
+    let mut by_id: std::collections::BTreeMap<String, RefinementResult> =
+        std::collections::BTreeMap::default();
     for result in global {
         by_id.insert(result.id.clone(), result.clone());
     }
@@ -519,9 +520,9 @@ mod tests {
             content: content.to_string(),
             path: format!("/h/{id}"),
             scope: Some(scope),
-            reference: Default::default(),
-            arguments: Default::default(),
-            metadata: Default::default(),
+            reference: serde_json::Map::default(),
+            arguments: serde_json::Map::default(),
+            metadata: serde_json::Map::default(),
             source: "test".to_string(),
             created_at: "2024-01-01T00:00:00.000Z".to_string(),
             updated_at: "2024-01-01T00:00:00.000Z".to_string(),

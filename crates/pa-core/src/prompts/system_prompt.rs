@@ -442,8 +442,8 @@ mod tests {
         let prompt = &breakdown.assembled;
         // Static layers lead, in order.
         assert!(prompt.starts_with("# prime-agent harness"));
-        assert!(breakdown.segments[0].kind == SegmentKind::Static);
-        assert!(breakdown.segments[0].name == "core");
+        assert_eq!(breakdown.segments[0].kind, SegmentKind::Static);
+        assert_eq!(breakdown.segments[0].name, "core");
         let names: Vec<&str> = breakdown
             .segments
             .iter()

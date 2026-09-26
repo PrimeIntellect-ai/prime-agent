@@ -25,6 +25,7 @@
 //!   un-compacted context.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -348,7 +349,7 @@ fn write_sse(stream: &mut TcpStream, reply: String, usage: Value) -> std::io::Re
         })
         .to_string(),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        let _ = write!(payload, "data: {data}\n\n");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -724,7 +725,7 @@ fn seed_mega_session(client: &mut TimedClient, session_id: &str, mock: &StallMoc
 /// durable summary persist (trace), a prompt admitted mid-review runs
 /// against the compacted context, and the session file stays consistent.
 #[test]
-#[ignore] // seeds ~12MB; asserts the compaction completion contract
+#[ignore = "seeds ~12MB; asserts the compaction completion contract"]
 fn mocked_slow_review_never_holds_the_settled_compaction() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
@@ -869,7 +870,7 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
 /// un-compacted context — the interruptible/idempotent contract the
 /// post-summary bookkeeping must keep.
 #[test]
-#[ignore] // seeds ~12MB; asserts the interrupted-compaction contract
+#[ignore = "seeds ~12MB; asserts the interrupted-compaction contract"]
 fn interrupted_threshold_compaction_settles_consistent() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
@@ -1013,7 +1014,7 @@ fn interrupted_threshold_compaction_settles_consistent() {
 /// untouched, and the retained review runs its refinement at the next
 /// serviced boundary without a new review model call.
 #[test]
-#[ignore] // seeds ~12MB; asserts the deferred-refinement contract
+#[ignore = "seeds ~12MB; asserts the deferred-refinement contract"]
 fn approving_review_while_a_turn_streams_defers_its_refinement() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");

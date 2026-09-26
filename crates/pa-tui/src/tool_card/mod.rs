@@ -166,7 +166,7 @@ pub(crate) fn panel_status(card: &ToolCallCard) -> PanelStatus {
 
 /// The panel header row: `label · status` (TS `panelHeader`).
 pub(crate) fn panel_header(card: &ToolCallCard, frame: usize, theme: &Theme) -> Line {
-    use crate::theme::ThemeColor::*;
+    use crate::theme::ThemeColor::{BashMode, Dim, Error, Muted, Success};
     let muted = theme.fg_style(Muted);
     let dim = theme.fg_style(Dim);
     let mut header: Line = vec![Span::styled(card.name.clone(), muted)];

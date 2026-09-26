@@ -230,7 +230,7 @@ mod tests {
             pid: 4_000_000,
             process_start_id: pa_daemon::lease::get_process_start_id(1),
             heartbeat_at: "t".to_string(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         write_atomically(&update_intent_path(&socket_dir), &dead).unwrap();
         let update_id = UpdateId::from("u1".to_string());
