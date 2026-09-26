@@ -138,6 +138,18 @@ impl EffortPicker {
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         self.selector.render(theme, width, kb)
     }
+
+    /// The level rows the picker's list window renders (the click
+    /// surface's item-row span).
+    pub fn visible_window(&self) -> (usize, usize) {
+        self.selector.visible_window()
+    }
+
+    /// Move the selection to one filtered row (the click grammar's row
+    /// select — the arrow keys' exact movement, no apply).
+    pub fn select_position(&mut self, position: usize) {
+        self.selector.select_position(position);
+    }
 }
 
 #[cfg(test)]
