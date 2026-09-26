@@ -269,6 +269,12 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
                 copy_runtime_tree(source, target_path)
             elif name == "docs":
                 copy_shipped_docs(source, target_path)
+            elif name == "skills":
+                shutil.copytree(source, target_path, ignore=lambda _directory, names: {
+                    entry for entry in names
+                    if entry in RUNTIME_EXCLUDED_NAMES
+                    or entry.endswith(RUNTIME_EXCLUDED_SUFFIXES)
+                })
             else:
                 shutil.copytree(source, target_path)
         else:
