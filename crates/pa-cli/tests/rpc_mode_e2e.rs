@@ -870,17 +870,30 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
     // The steer parks behind the running turn.
     let steer = client.request(&json!({ "type": "steer", "message": "steer me" }));
     assert_eq!(steer["success"], true, "the steer queues: {steer}");
-    // The missing file fails the switch AFTER the settle: the
-    // replacement retired the pump, its assembly failed, and the
-    // restart must hand the parked rows back to a live pump.
+    // The switch fails its assembly AFTER the settle: the crafted
+    // header stores a cwd that no longer exists (a merely missing file
+    // lazily opens as a new session instead), so the factory's
+    // missing-cwd guard refuses deterministically. The replacement
+    // retired the pump, the assembly failed, and the restart must hand
+    // the parked rows back to a live pump.
+    let bad_file = client.agent_dir().join("bad-cwd-session.jsonl");
+    std::fs::write(
+        &bad_file,
+        concat!(
+            "{\"type\":\"session\",\"id\":\"bad-cwd\",",
+            "\"timestamp\":\"2026-09-26T00:00:00.000Z\",",
+            "\"cwd\":\"/definitely/missing/project\"}\n"
+        ),
+    )
+    .expect("write the crafted session");
     let bad = client.command(&json!({
         "type": "switch_session",
-        "sessionPath": "/nonexistent/no-such-session.jsonl"
+        "sessionPath": bad_file.to_string_lossy()
     }));
     let (failed, _) = client.wait_response(&bad, TIMEOUT);
     assert_eq!(
         failed["success"], false,
-        "the missing file fails the switch"
+        "the stale-cwd session fails the switch: {failed}"
     );
     // The parked steer delivers as the live session's next turn.
     let deadline = Instant::now() + TIMEOUT;
