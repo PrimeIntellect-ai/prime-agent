@@ -2087,7 +2087,7 @@ mod tests {
             "id": "faux-1", "provider": "faux", "reasoning": true
         });
         attach["snapshot"]["state"]["thinkingLevel"] = json!("high");
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach.clone()).unwrap();
         let view = reconstruct(&data);
         assert_eq!(view.model_id.as_deref(), Some("faux-1"));
         assert_eq!(
@@ -2099,7 +2099,7 @@ mod tests {
             "id": "faux-plain", "provider": "faux", "reasoning": false
         });
         attach["snapshot"]["state"]["thinkingLevel"] = json!("off");
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.thinking_suffix, None,
