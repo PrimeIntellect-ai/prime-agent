@@ -632,10 +632,7 @@ impl AgentsViewMode {
                 .is_some_and(|anchor| !anchor.is_empty());
         // TS `persistentState.incidentNoticeState ??= createIncidentNoticeState()`:
         // the first run starts fresh; later runs continue the carried state.
-        let incident_notice_state = options
-            .incident_notice_state
-            .take()
-            .unwrap_or_else(crate::incident_notices::IncidentNoticeState::new);
+        let incident_notice_state = options.incident_notice_state.take().unwrap_or_default();
         AgentsViewMode {
             options,
             theme,
