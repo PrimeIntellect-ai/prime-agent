@@ -546,7 +546,7 @@ fn packaging_dry_run_produces_artifact() {
     std::fs::create_dir_all(&docs).expect("docs tree");
     // Every user-facing doc is REQUIRED payload content (SHIPPED_DOC_ENTRIES
     // / package_release.py REQUIRED_FILES): the synthetic tree stages all three.
-    for doc in ["MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md"] {
+    for doc in ["MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md", "FEATURE_PARITY.md"] {
         std::fs::write(docs.join(doc), "# doc\n").unwrap();
     }
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
