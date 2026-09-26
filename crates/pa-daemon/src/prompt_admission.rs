@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success, DaemonResponse};
 use crate::supervisor::{
     client_command_payload, Supervisor, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
@@ -338,7 +339,13 @@ impl Supervisor {
         // prompt still lands exactly once (the generic client route's
         // contract).
         let response = self
-            .route_command_ready(&resident, command_type, payload, timeout)
+            .route_command_ready(
+                &resident,
+                command_type,
+                payload,
+                timeout,
+                RouteAdmission::ClientRequest,
+            )
             .await;
         let mut response = match response {
             Ok(response) => response,
@@ -460,6 +467,7 @@ impl Supervisor {
                         "cancel_prompt_admission",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                 {

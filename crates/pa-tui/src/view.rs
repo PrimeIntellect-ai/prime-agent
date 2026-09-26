@@ -169,10 +169,11 @@ pub struct AgentView {
     /// The `/settings` inline menu (TS `SettingsSelectorComponent`):
     /// mounted in the editor dock like the tree and fork selectors.
     pub settings_menu: Option<crate::settings_menu::SettingsMenu>,
-    /// The `?` quick-shortcut guide (TS `shortcutGuideContainer`): while
-    /// set, its markdown renders at the transcript tail, above the dock;
-    /// the next submission clears it (TS `clearShortcutGuide`).
-    pub shortcut_guide: Option<String>,
+    /// The read-only info panel (the operator's 2026-09-26 directive:
+    /// the `/context`-family client info displays render as the docked
+    /// popup panel instead of flooding the transcript): while set, it
+    /// owns the editor dock like the `/model` and `/effort` pickers.
+    pub info_panel: Option<crate::info_panel::InfoPanel>,
     /// The `terminal.showImages` setting (TS `getShowImages`, default
     /// true): image blocks render their metadata rows when set, their
     /// `[Image: ...]` text placeholders otherwise.
@@ -188,6 +189,16 @@ pub struct AgentView {
     /// a visible cursor across the pane (`positionHardwareCursor` and the
     /// paint tail move it while hidden).
     pub show_hardware_cursor: bool,
+    /// The brand splash never renders while set (the operator's
+    /// 2026-09-26 zero-layout-shift ruling): a chat that opens or rebinds
+    /// directly into a non-empty transcript suppresses it — TS mounts the
+    /// chat over an already-attached connection (its first visible frame
+    /// is the content, and the tail-anchored fullscreen viewport scrolls
+    /// the splash out of reach), so the splash never dwells or shifts a
+    /// row under the pinned title bar. Every empty chat keeps it (TS
+    /// `BrandSplashHeader` is the new chat's header, `quietStartup` and
+    /// the onboarding `getHidden` are TS's own suppression gates).
+    pub splash_suppressed: bool,
     pub(crate) scroll_top: usize,
     following: bool,
     /// The transcript-tail offset of the last composed frame (TS
@@ -261,6 +272,10 @@ pub struct AgentView {
     /// Rows of the last composed frame (frame-selection geometry; TS
     /// `lastFrameVisibleHeight`).
     pub(crate) frame_rows: usize,
+    /// The last composed frame's clickable link ranges (TS the
+    /// viewport's `hyperlinkAt` over `lastFrame`): the click dispatch
+    /// resolves a screen cell to its URL through these.
+    pub(crate) frame_links: Vec<crate::hyperlinks::LinkRange>,
     /// In-app mouse text selection (TS `FullscreenViewport`'s selection
     /// state): anchor/head points, the mode, and the frame snapshot.
     pub(crate) selection: crate::selection::SelectionState,
@@ -358,10 +373,11 @@ impl AgentView {
             reload_box: None,
             side_pane: None,
             settings_menu: None,
-            shortcut_guide: None,
+            info_panel: None,
             show_images: true,
             fullscreen: true,
             show_hardware_cursor: false,
+            splash_suppressed: false,
             scroll_top: 0,
             following: true,
             last_max_scroll: 0,
@@ -380,6 +396,7 @@ impl AgentView {
             layout_options: None,
             flushed_frame: Vec::new(),
             frame_rows: 0,
+            frame_links: Vec::new(),
             selection: crate::selection::SelectionState::default(),
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
@@ -1216,39 +1233,6 @@ impl AgentView {
             ChatEntry::CustomPanel(row) => {
                 crate::custom_message::render::render_custom_panel(row, &self.theme, width)
             }
-            // TS `/hotkeys`: `Spacer(1)` then `new Markdown(guide, 1, 1)`
-            // — the markdown component's `paddingY=1` renders one blank row
-            // above and below the content (one margin column each side,
-            // rows padded to the full width, like the assistant blocks).
-            ChatEntry::ClientMarkdown { text } => {
-                let mut rows: Vec<Line> = Vec::new();
-                rows.push(Vec::new());
-                rows.push(Vec::new());
-                let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                md.code_block_indent.clone_from(&self.code_block_indent);
-                rows.extend(crate::chat::render_markdown_block(
-                    text,
-                    &md,
-                    width,
-                    &mut crate::markdown::MarkdownBlockCache::default(),
-                ));
-                rows.push(Vec::new());
-                rows
-            }
-            // TS `Spacer(1)` + `Text(info, 1, 0)` blocks: one blank row,
-            // then the styled source lines wrapped with a one-column
-            // margin on each side (the info displays).
-            ChatEntry::ClientText { rows } => {
-                crate::info_commands::render_client_text(rows, &self.theme, width)
-            }
-            // The `/changelog` panel: border, the accent `What's New`
-            // title, and the entries markdown between the closing border.
-            ChatEntry::ChangelogPanel { markdown } => crate::info_commands::render_changelog_panel(
-                markdown,
-                &self.theme,
-                &self.code_block_indent,
-                width,
-            ),
         }
     }
 
@@ -1513,17 +1497,28 @@ impl AgentView {
         // render): the frame repaints on every tick, and re-emitting an
         // image placement each paint would corrupt the display. Graphics
         // placements belong to the inline paint path only.
-        crate::image_component::with_fullscreen_image_fallback(|| {
+        let frame = crate::image_component::with_fullscreen_image_fallback(|| {
             self.render_frame_inner(width, height)
-        })
+        });
+        // The composed frame is the click surface (TS `hyperlinkAt` reads
+        // the last painted frame's OSC 8 sequences): one scan serves every
+        // pane — the transcript window, the dock, and the onboarding splash
+        // all carry their links in span content.
+        self.frame_links = crate::hyperlinks::frame_link_ranges(&frame);
+        frame
     }
 
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
-        // no top bar, transcript, or prompt dock behind it.
+        // no top bar, transcript, or prompt dock behind it. The pane is a
+        // frame surface like the TS overlay (its rows select; TS's
+        // `beginFrameSelection` falls through to the overlay's rows), so
+        // the frame-selection regions span the whole frame.
         if let Some(screen) = self.onboarding.as_mut() {
-            let frame = screen.render(&self.theme, width, height);
+            let kb = self.editor.keybindings();
+            let mut frame = screen.render(&self.theme, width, height, kb);
             self.frame_rows = frame.len();
+            self.apply_frame_selection(&mut frame, 0, width);
             return frame;
         }
         // The `/model` and `/effort` pickers mount in the editor dock (TS
@@ -1531,6 +1526,10 @@ impl AgentView {
         // tree and fork selectors: the prompt context (the detail hint)
         // stays above the pane and the transcript stays mounted above it.
         let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
+        // The read-only info panel's CURRENT row budget (a terminal resize
+        // re-budgets an open panel every frame, never a stale open-time
+        // value): read before the panel borrow below.
+        let info_viewport_rows = crate::session_ui::picker_viewport_rows(self.terminal_rows());
         let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
@@ -1560,6 +1559,16 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
+        } else if let Some(panel) = self.info_panel.as_mut() {
+            let mut dock = prompt_context;
+            dock.extend(panel.render(
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+                &self.code_block_indent,
+                info_viewport_rows,
+            ));
+            Some(dock)
         } else {
             None
         };
@@ -1580,7 +1589,7 @@ impl AgentView {
             // part, so the hint stays above the pane.
             let mut dock = render_prompt_context(&self.detail_label(), &self.theme, width);
             if let Some(selector) = self.tree_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.fork_selector.as_ref() {
                 dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(loader) = self.share_loader.as_ref() {
@@ -1588,9 +1597,10 @@ impl AgentView {
             } else if let Some(confirm) = self.confirm.as_ref() {
                 dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.provider_auth.as_mut() {
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(panel) = self.auth_panel.as_mut() {
-                dock.extend(panel.render(&self.theme, width));
+                let kb = self.editor.keybindings();
+                dock.extend(panel.render(&self.theme, width, kb));
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
@@ -1672,7 +1682,11 @@ impl AgentView {
             }
         }
         self.frame_rows = frame.len();
-        self.apply_frame_selection(&mut frame, width);
+        self.apply_frame_selection(
+            &mut frame,
+            crate::selection::HEADER_ROWS + self.window_rows,
+            width,
+        );
         // The action toasts overlay the transcript window's top rows
         // (newest at the bottom of the stack), above the selection restyle
         // so the transient text stays legible. The overlay never runs
@@ -1771,6 +1785,7 @@ impl AgentView {
             || self.heartbeats_picker.is_some()
             || self.goal_panel.is_some()
             || self.bash_view.is_some()
+            || self.info_panel.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()
@@ -3089,16 +3104,14 @@ mod tests {
         // A transcript taller than the window puts real content on the
         // window's top row (the tail-aligned window), so the pill lands
         // over a covered row that has content to keep.
-        let mut view = view_with(vec![ChatEntry::ClientText {
-            rows: (0..40)
-                .map(|index| {
-                    vec![crate::info_commands::ClientSpan {
-                        text: format!("covered line {index}"),
-                        color: None,
-                    }]
+        let mut view = view_with(
+            (0..40)
+                .map(|index| ChatEntry::Status {
+                    text: format!("covered line {index}"),
+                    kind: crate::chat::StatusKind::Info,
                 })
                 .collect(),
-        }]);
+        );
         view.toasts.push("Copied to clipboard");
         let frame = view.render_frame(60, 24);
         let rows: Vec<String> = frame

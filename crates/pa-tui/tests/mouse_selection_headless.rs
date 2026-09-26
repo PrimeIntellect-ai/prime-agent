@@ -301,11 +301,13 @@ fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize
         .next_back()
 }
 
-/// The transcript window at the top after `ScrollTop`: the splash rows sit
-/// at 2-8, the first user message's text at row 11 (`  row 0`), its spacer
-/// rows at 12-13, and the first assistant answer at row 14 — the layout
-/// the selection coordinates below target (the geometry is asserted, not
-/// assumed, before each drag).
+/// The transcript window at the top after `ScrollTop`: the chat opened
+/// directly into content, so the brand splash is suppressed (the
+/// operator's 2026-09-26 zero-shift directive) — the first user
+/// message's text sits at row 2 (`  row 0`), its spacer rows at 3-4,
+/// and the first assistant answer at row 5 — the layout the selection
+/// coordinates below target (the geometry is asserted, not assumed,
+/// before each drag).
 fn top_layout() -> (usize, usize, usize, usize, usize, usize) {
     let probe = run_plan(vec![HeadlessStep::ScrollTop], true).0;
     let (_, row0, col0, _) = locate(&probe, "row 0").expect("row 0 rendered at the top");
@@ -321,8 +323,8 @@ fn press_drag_release_copies_the_spanned_transcript_text() {
     let (row0, col0, ..) = top_layout();
     assert_eq!(
         (row0, col0),
-        (11, 2),
-        "the first user message renders at 11:2"
+        (2, 2),
+        "the first user message renders at 2:2"
     );
     // Drag across the first user message's text: press at its first text
     // column, drag to its end, release — the copy is the text slice.

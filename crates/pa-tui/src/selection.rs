@@ -17,7 +17,7 @@ use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
 
 /// Rows above the transcript window (the pinned top bar; TS `headerHeight`).
-const HEADER_ROWS: usize = 1;
+pub(crate) const HEADER_ROWS: usize = 1;
 
 /// A selection endpoint (TS `SelectionPoint`): a transcript line index plus
 /// a visible column.
@@ -653,11 +653,25 @@ impl AgentView {
         self.selection.transcript_highlight_span(transcript_line)
     }
 
+    /// The URL of the link covering one screen cell of the last composed
+    /// frame (TS `viewport.hyperlinkAt`), or `None` when the position is
+    /// not over a link.
+    pub(crate) fn hyperlink_at(&self, row: usize, col: usize) -> Option<String> {
+        crate::hyperlinks::url_at(&self.frame_links, row, col)
+    }
+
     /// Apply frame-selection highlights to a freshly composed frame and
-    /// record its plain rows (TS `applyFrameSelection` + the dock regions).
-    pub(crate) fn apply_frame_selection(&mut self, frame: &mut [Line], width: usize) {
+    /// record its plain rows (TS `applyFrameSelection` + the region scan).
+    /// `first_dock_row` bounds where the selectable regions start: the
+    /// transcript window's bottom on the session surface, row 0 when a
+    /// pane (the onboarding splash) owns the whole frame.
+    pub(crate) fn apply_frame_selection(
+        &mut self,
+        frame: &mut [Line],
+        first_dock_row: usize,
+        width: usize,
+    ) {
         let rows: Vec<String> = frame.iter().map(|line| row_text(line)).collect();
-        let first_dock_row = HEADER_ROWS + self.window_rows;
         self.selection.note_frame(rows, first_dock_row, width);
         if self.selection.mode != Some(SelectionMode::Frame) {
             return;
@@ -1150,5 +1164,47 @@ mod tests {
             .map(|s| s.content.as_str())
             .collect();
         assert_eq!(reversed, "lo wor");
+    }
+
+    /// The onboarding pane owns the whole frame (TS's splash is a 100%
+    /// overlay, and TS's frame selection falls through to the overlay's
+    /// rows): a press-drag over the mounted login URL copies it, and the
+    /// URL's OSC 8 wrap resolves through the same frame the click
+    /// dispatch reads — the first-run surface can select AND click the
+    /// Prime login URL, the exact row the operator could not copy before.
+    #[test]
+    fn onboarding_pane_rows_select_and_its_url_link_resolves() {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let mut v = view();
+        let mut screen = crate::onboarding::OnboardingScreen::welcome();
+        let mut panel = crate::auth_panel::AuthPanel::new("Login to Prime Inference");
+        panel.show_auth_url("https://fixture.example/auth".to_string(), None);
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+            panel: std::boxed::Box::new(panel),
+            heading: None,
+        });
+        v.onboarding = Some(screen);
+        let frame = v.render_frame(80, 24);
+        crate::hyperlinks::set_hyperlinks_override(None);
+        let url = "https://fixture.example/auth";
+        let row = (0..frame.len())
+            .find(|row| rendered_row(&frame, *row).contains(url))
+            .expect("the URL row rendered");
+        let col = rendered_row(&frame, row)
+            .find(url)
+            .expect("the URL text present");
+        // The pane's rows are frame regions (the region scan spans the
+        // whole splash), so a drag over the URL copies its text.
+        assert!(v.begin_frame_selection(row, col));
+        v.extend_active_selection(row, col + url.len());
+        let text = v.end_active_selection().expect("the dragged text");
+        assert_eq!(text, url.to_string());
+        // The URL's cells carry its OSC 8 target: a click there opens it.
+        assert_eq!(v.hyperlink_at(row, col + 4), Some(url.to_string()));
+        assert_eq!(
+            v.hyperlink_at(row, col.saturating_sub(1)),
+            None,
+            "before the link"
+        );
     }
 }

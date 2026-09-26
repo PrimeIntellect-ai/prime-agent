@@ -2157,3 +2157,43 @@ fn create_with_continue_recent_is_refused() {
         "the plain create opened a fresh session, not the saved one"
     );
 }
+
+/// The OS-signal drain, end to end: a SIGTERM to the live supervisor is
+/// the graceful drain, not the default signal death - the process exits 0
+/// (a signal kill reports no exit code) and cleans its socket file up
+/// behind it. A connected client rides the drain; the in-crate
+/// supervisor tests hold the closing/settle semantics.
+#[test]
+fn a_sigterm_exits_the_supervisor_through_the_graceful_drain() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let mut daemon = spawn_daemon(&socket, &agent_dir);
+    let (_client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(daemon.child.id().to_string())
+        .status()
+        .expect("SIGTERM the supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the drained supervisor must exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.success(),
+        "the drain must end in a clean exit 0, not a signal death: {status}"
+    );
+    assert!(
+        !socket.exists(),
+        "the drained supervisor cleans its socket file up"
+    );
+}

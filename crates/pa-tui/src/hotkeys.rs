@@ -55,7 +55,6 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let clear = key_display(kb, "app.clear");
     let clear_input = key_display(kb, "app.input.clear");
     let interrupt = key_display(kb, "app.interrupt");
-    let shortcuts_key = key_display(kb, "app.shortcuts");
     let exit = key_display(kb, "app.exit");
     let select_model = key_display(kb, "app.model.select");
     let expand_tools = key_display(kb, "app.tools.expand");
@@ -74,6 +73,12 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let viewport_page_down = key_display(kb, "tui.viewport.pageDown");
     let viewport_top = key_display(kb, "tui.viewport.top");
     let viewport_follow = key_display(kb, "tui.viewport.follow");
+    let suspend = key_display(kb, "app.suspend");
+    let select_paragraph_up = key_display(kb, "tui.editor.selectParagraphUp");
+    let select_paragraph_down = key_display(kb, "tui.editor.selectParagraphDown");
+    let select_doc_start = key_display(kb, "tui.editor.selectDocStart");
+    let select_doc_end = key_display(kb, "tui.editor.selectDocEnd");
+    let browse_queue_newer = key_display(kb, "app.message.navigateNewer");
 
     let mut hotkeys = format!(
         r"
@@ -111,6 +116,8 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | Shift+arrows | Select by character / line |
 | `{select_word_left}` / `{select_word_right}` | Select by word |
 | `{select_line_start}` / `{select_line_end}` | Select to line start / end |
+| `{select_paragraph_up}` / `{select_paragraph_down}` | Select one paragraph |
+| `{select_doc_start}` / `{select_doc_end}` | Select to start / end of text |
 | `{select_all}` | Select all text |
 | `{cut_selection}` | Cut selection |
 | `{copy_selection}` | Copy selection |
@@ -126,12 +133,10 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     if !interrupt.is_empty() {
         let _ = writeln!(hotkeys, "| `{interrupt}` | Interrupt current operation |");
     }
-    if !shortcuts_key.is_empty() {
-        let _ = writeln!(hotkeys, "| `{shortcuts_key}` | Show quick shortcuts |");
-    }
     let _ = writeln!(
         hotkeys,
         r"| `{exit}` | Exit (when editor is empty) |
+| `{suspend}` | Suspend to background |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |"
     );
@@ -141,7 +146,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
 | `{follow_up}` | Queue follow-up message |
-| `{browse_queue}` | Browse and edit queued messages |
+| `{browse_queue}` / `{browse_queue_newer}` | Browse and edit queued messages |
 | `{reorder_queue}` | Reorder the selected queued message |
 | `{paste_image}` | Paste image from clipboard |
 | `/` | Slash commands |
@@ -159,42 +164,6 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     hotkeys
 }
 
-/// The `?` quick-shortcut guide (TS `getShortcutGuide`), rendered as the
-/// transient overlay above the editor (`app.shortcuts`, default `?`, only
-/// with an empty editor): TS `showShortcutGuide` mounts it and the next
-/// submission clears it.
-pub fn shortcut_guide(kb: &KeybindingsManager) -> String {
-    let tab = key_display(kb, "tui.input.tab");
-    let new_line = key_display(kb, "tui.input.newLine");
-    let clear_input = key_display(kb, "app.input.clear");
-    let shortcuts_key = key_display(kb, "app.shortcuts");
-    let select_model = key_display(kb, "app.model.select");
-    let expand_tools = key_display(kb, "app.tools.expand");
-    let external_editor = key_display(kb, "app.editor.external");
-    let prompt_stash = key_display(kb, "app.prompt.stash");
-    let paste_image = key_display(kb, "app.clipboard.pasteImage");
-    let shortcuts_prefix = if shortcuts_key.is_empty() {
-        String::new()
-    } else {
-        format!("`{shortcuts_key}` quick shortcuts · ")
-    };
-    format!(
-        r"**Prompt**
-`!` shell mode · `/` commands · `@` file paths
-`{tab}` complete paths · `{new_line}` new line
-`{clear_input}` interrupt · press twice to rewind or clear the prompt
-
-**Controls**
-`{select_model}` select model · `/effort` set reasoning · `{expand_tools}` overview → thinking + diffs → all output
-`{prompt_stash}` stash prompt · `{external_editor}` edit in `$EDITOR`
-`{paste_image}` paste image
-
-**Help**
-{shortcuts_prefix}`/hotkeys` full reference
-"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,9 +179,29 @@ mod tests {
         );
         // The interrupt row is conditional: no default binding, no row.
         assert!(!guide.contains("Interrupt current operation |"), "{guide}");
-        assert!(guide.contains("| `?` | Show quick shortcuts |"), "{guide}");
+        // The `?` quick-shortcut overlay is removed (the operator's
+        // 2026-09-26 directive): the guide keeps no reference to it.
+        assert!(!guide.contains("quick shortcuts"), "{guide}");
         assert!(
             guide.contains("**Fullscreen mode (`/fullscreen`)**"),
+            "{guide}"
+        );
+        // The completeness audit's additions: the suspend binding and
+        // the paragraph/doc selection pairs gained rows, and the queue
+        // browse row names both of its keys.
+        assert!(
+            guide.contains("| `Ctrl+Z` | Suspend to background |"),
+            "{guide}"
+        );
+        assert!(
+            guide.contains(
+                "| `Shift+Ctrl+\u{2191}` / `Shift+Alt+\u{2193}` | Select one paragraph |"
+            ),
+            "{guide}"
+        );
+        assert!(guide.contains("Select to start / end of text"), "{guide}");
+        assert!(
+            guide.contains("| `Alt+\u{2191}` / `Alt+\u{2193}` | Browse and edit queued messages |"),
             "{guide}"
         );
     }
@@ -231,31 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_guide_renders_keys_and_help_prefix() {
-        let kb = KeybindingsManager::new();
-        let guide = shortcut_guide(&kb);
-        assert!(guide.contains("`Tab` complete paths"), "{guide}");
-        assert!(guide.contains("`Esc` interrupt"), "{guide}");
-        assert!(
-            guide.contains("`?` quick shortcuts · `/hotkeys` full reference"),
-            "{guide}"
-        );
-        // A disabled shortcuts binding drops the prefix but keeps the
-        // `/hotkeys` reference.
-        let mut cfg = crate::keybindings::KeybindingsConfig::new();
-        cfg.insert("app.shortcuts".to_string(), Vec::new());
-        let kb = KeybindingsManager::with_user_bindings(cfg);
-        let guide = shortcut_guide(&kb);
-        assert!(guide.contains("`/hotkeys` full reference"), "{guide}");
-        assert!(!guide.contains("quick shortcuts ·"), "{guide}");
-    }
-
-    #[test]
     fn guide_renders_disabled_binding_with_empty_key_cell() {
         // TS renders the expandTools row unconditionally: a disabled
         // binding (an empty user override) keeps the row with an empty
-        // key cell; only `app.interrupt` / `app.shortcuts` are
-        // conditional (their rows omit when unbound).
+        // key cell; only `app.interrupt` is conditional (its row omits
+        // when unbound).
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         cfg.insert("app.tools.expand".to_string(), Vec::new());
         let kb = KeybindingsManager::with_user_bindings(cfg);

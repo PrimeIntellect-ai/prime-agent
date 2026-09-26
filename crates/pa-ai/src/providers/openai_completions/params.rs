@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_prime_team_id;
+use crate::models::supports_thinking;
 use crate::providers::openai_completions::convert::{convert_messages, convert_tools};
 use crate::providers::openai_completions::has_tool_history;
 use crate::providers::openai_completions::{
@@ -89,7 +90,7 @@ pub(crate) fn build_params(
         params.insert("tool_choice".into(), tool_choice.to_json());
     }
 
-    if model.reasoning {
+    if supports_thinking(model) {
         match compat.thinking_format {
             crate::types::ThinkingFormat::Zai | crate::types::ThinkingFormat::Qwen => {
                 params.insert(
@@ -506,5 +507,29 @@ mod tests {
     fn keeps_the_zai_thinking_toggle_on_direct_zai_routes() {
         let params = compiled_params("zai", "glm-4.7", ModelThinkingLevel::High);
         assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
+    }
+
+    /// A `reasoning: false` model whose map addresses levels (the live
+    /// catalog's `gpt-5.3-chat-latest` / `openai/gpt-5.2-chat` shape) is
+    /// thinking-capable: the requested level clamps through the map and
+    /// the request carries the mapped reasoning parameter. The flag alone
+    /// must not veto a route that declares addressable levels.
+    #[test]
+    fn a_map_addressable_model_sends_reasoning_without_the_flag() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "openai/gpt-5.2-chat", "name": "GPT-5.2 Chat",
+            "api": "openai-completions", "provider": "openrouter",
+            "baseUrl": "https://openrouter.ai/api/v1", "reasoning": false,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 4_096
+        }))
+        .unwrap();
+        // An unlisted level sends its wire name (the implicit default).
+        let params = reasoning_params_for(&model, ModelThinkingLevel::High);
+        assert_eq!(params.get("reasoning"), Some(&json!({ "effort": "high" })));
+        // The clamped ladder stops at the map's addressable top.
+        let params = reasoning_params_for(&model, ModelThinkingLevel::Max);
+        assert_eq!(params.get("reasoning"), Some(&json!({ "effort": "xhigh" })));
     }
 }

@@ -17,6 +17,7 @@ use anyhow::{anyhow, Result};
 use pa_types::daemon::{DaemonCommand, DaemonWorkerCommand};
 use serde_json::{json, Map, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
@@ -140,6 +141,7 @@ impl Supervisor {
                 "worker_deliver_message",
                 payload,
                 WORKER_REQUEST_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
             )
             .await;
         match response {
@@ -160,7 +162,13 @@ impl Supervisor {
     /// downgrades an unreachable worker to a recovering row instead).
     async fn source_worker_summary(&self, resident: &Arc<ResidentWorker>) -> Result<Value> {
         let state = self
-            .route_command(resident, "get_state", json!({}), WORKER_REQUEST_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                WORKER_REQUEST_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await?;
         if !state.success {
             return Err(anyhow!(
