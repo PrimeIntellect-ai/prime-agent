@@ -913,18 +913,16 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         if frame.get("type").and_then(Value::as_str) != Some("agent_end") {
             return false;
         }
-        frame["messages"]
-            .as_array()
-            .is_some_and(|messages| {
-                messages.iter().any(|message| {
-                    message["content"]
-                        .as_array()
-                        .and_then(|content| content.first())
-                        .and_then(|part| part.get("text"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| text.contains("steer answer"))
-                })
+        frame["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["content"]
+                    .as_array()
+                    .and_then(|content| content.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains("steer answer"))
             })
+        })
     };
     if before.iter().any(steer_answer_landed) {
         return;
