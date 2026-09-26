@@ -2237,21 +2237,26 @@ impl AgentsViewMode {
             segments.push(format!("{keys} {right_action}"));
         }
         // The stop-or-delete slot rides the selected row's arming target
-        // (the same gate the handler takes): the word matches what the
-        // second press would do, and a row with no target — a summary
-        // row, or no selection — drops the slot instead of advertising
-        // a no-op.
-        if let (Some(pending), Some(key)) = (
-            self.delete_arm_target(),
-            self.keybindings.first_key("app.agents.delete"),
-        ) {
-            let word = if pending.stop { "stop" } else { "delete" };
-            segments.push(format!(
-                "{} {word}",
-                crate::keybindings::format_key_text(&key)
-            ));
+        // and the handler's empty-search gate (the key is inert while a
+        // query is active): the word matches what the second press would
+        // do, the segment carries every configured key (dispatch takes
+        // the whole set), and a row with no target — a summary row, or
+        // no selection — or an emptied binding drops the slot instead
+        // of advertising a no-op.
+        if self.query.is_empty() {
+            if let Some(pending) = self.delete_arm_target() {
+                let keys = self.keybindings.get_keys("app.agents.delete");
+                if !keys.is_empty() {
+                    let word = if pending.stop { "stop" } else { "delete" };
+                    segments.push(format!(
+                        "{} {word}",
+                        crate::keybindings::format_key_text(&keys.join("/"))
+                    ));
+                }
+            }
         }
-        if self.scope_active {
+        // The parent key shares the handler's empty-search gate.
+        if self.scope_active && self.query.is_empty() {
             if let Some(back) = first("app.agents.back") {
                 segments.push(format!("{back} parent"));
             }
@@ -4769,6 +4774,43 @@ the holder exits.";
         mode.scope_active = true;
         let hints = flat(&mode.render_hints(120, None));
         assert!(!hints.contains("parent"), "{hints}");
+        // A multi-key delete override names every configured key (the
+        // dispatch takes the whole set).
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert(
+            "app.agents.delete".to_string(),
+            vec!["ctrl+x".to_string(), "ctrl+d".to_string()],
+        );
+        let mut mode = mode_with_parent_and_child();
+        mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(hints.contains("Ctrl+X/Ctrl+D stop"), "{hints}");
+    }
+
+    /// The delete and parent slots share the handler's empty-search
+    /// gate: their keys are inert while a query is active, so the bar
+    /// drops them until the search clears.
+    #[test]
+    fn hints_drop_the_query_gated_actions_while_searching() {
+        let mut mode = mode_with_parent_and_child();
+        mode.query = "p".to_string();
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(
+            !hints.contains("Ctrl+X"),
+            "the delete slot drops during a search: {hints}"
+        );
+        let mut mode = mode_with_parent_and_child();
+        mode.scope_active = true;
+        mode.query = "p".to_string();
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(
+            !hints.contains("parent"),
+            "the parent slot drops during a search: {hints}"
+        );
+        // The search cleared, the slots return.
+        mode.query.clear();
+        let hints = flat(&mode.render_hints(120, None));
+        assert!(hints.contains("parent"), "{hints}");
     }
 
     #[test]
