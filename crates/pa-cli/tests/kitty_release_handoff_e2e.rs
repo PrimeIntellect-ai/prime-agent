@@ -487,7 +487,10 @@ impl MockSupervisor {
     /// handoff — a single-accept mock would refuse the second.
     fn serve(self) {
         for stream in self.listener.incoming() {
-            Self::serve_connection(stream);
+            match stream {
+                Ok(stream) => Self::serve_connection(stream),
+                Err(_) => return,
+            }
         }
     }
 
