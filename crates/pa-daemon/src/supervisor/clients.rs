@@ -938,6 +938,13 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::supervisor::SupervisorOptions;
+    use pa_types::platform::transport::TransportStream;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// A client that falls behind the shared event ring loses events (the
     /// broadcast's defined backpressure), but never silently anymore
     /// (finding 4a): the loss becomes a durable daemon-log line naming the
     /// client and the dropped count. Drives a real connection loop
