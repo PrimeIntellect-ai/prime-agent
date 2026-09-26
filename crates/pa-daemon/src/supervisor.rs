@@ -540,15 +540,12 @@ impl Supervisor {
             .append(&format!("supervisor started pid {}", std::process::id()));
 
         // The OS-signal drain (SIGTERM/SIGINT; the loop lives in
-        // `crate::signal_drain`): installed once the socket owns its
-        // identity. From here on, the first signal drains (new work
+        // `crate::signal_drain`): `install` registers the handlers
+        // synchronously here - before the boot passes below and their
+        // first await - so no signal can land with the default disposition
+        // still active. From here on, the first signal drains (new work
         // refused, running turns settled) and a later signal force-exits.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::signal_drain::run_signal_drain(supervisor).await;
-            });
-        }
+        tokio::spawn(crate::signal_drain::install(Arc::clone(&self)));
 
         // The boot reap (the operator's same-socket predecessor rule): this
         // daemon now owns the socket's lineage, so leftover worker processes
