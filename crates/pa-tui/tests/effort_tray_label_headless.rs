@@ -22,11 +22,14 @@ use serde_json::{json, Value};
 
 /// The session the mock serves: the `model` state block (with its
 /// `reasoning` flag), the available thinking levels, and the live level
-/// (the value `set_thinking_level` moves).
+/// (the value `set_thinking_level` moves). `fail_state_after_switch`
+/// makes every state read AFTER a thinking switch fail, pinning the
+/// client's failed-read fallback (no stale suffix survives a switch).
 struct MockSession {
     model: Value,
     levels: Vec<String>,
     level: String,
+    fail_state_after_switch: bool,
 }
 
 /// A reasoning model at the default level (the engine's `medium`, TS
@@ -42,6 +45,7 @@ fn reasoning_session() -> MockSession {
             "high".to_string(),
         ],
         level: "medium".to_string(),
+        fail_state_after_switch: false,
     }
 }
 
@@ -56,6 +60,7 @@ fn plain_session() -> MockSession {
         }),
         levels: vec!["off".to_string()],
         level: "off".to_string(),
+        fail_state_after_switch: false,
     }
 }
 
@@ -81,6 +86,9 @@ impl MockSupervisor {
     /// Serve one connection: attach an empty session, then answer the
     /// state reads and the thinking switch off the live level.
     fn serve(mut self) {
+        // Armed by `set_thinking_level` when the session pins the
+        // failed-read fallback: every later state read refuses.
+        let mut state_reads_fail = false;
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
@@ -133,12 +141,26 @@ impl MockSupervisor {
                     write_json(&mut writer, &self.attach_data(id));
                 }
                 "get_state" | "get_connection_state" => {
-                    write_json(&mut writer, &self.state_data(id, &command_type));
+                    if state_reads_fail {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": command_type,
+                                "success": false,
+                                "error": "the state read failed",
+                            }),
+                        );
+                    } else {
+                        write_json(&mut writer, &self.state_data(id, &command_type));
+                    }
                 }
                 "set_thinking_level" => {
                     if let Some(level) = command.get("level").and_then(Value::as_str) {
                         self.session.level = level.to_string();
                     }
+                    state_reads_fail = self.session.fail_state_after_switch;
                     write_json(
                         &mut writer,
                         &json!({
@@ -338,11 +360,46 @@ fn effort_command_moves_the_tray_model_label() {
     );
 }
 
+/// A successful `/effort` switch whose state re-read fails still moves the
+/// label: the requested level renders (TS `applyThinkingLevel` patches the
+/// connection state with the requested level), never the previous model's
+/// stale suffix.
+#[test]
+fn effort_switch_with_failed_state_read_never_keeps_the_stale_suffix() {
+    let mut session = reasoning_session();
+    session.fail_state_after_switch = true;
+    let steps = vec![
+        HeadlessStep::Submit("/effort high".to_string()),
+        HeadlessStep::WaitRender {
+            needle: "Thinking level: high".to_string(),
+            timeout_ms: 10_000,
+        },
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan(session, steps);
+    let switched = frames
+        .iter()
+        .rev()
+        .find(|frame| frame.contains("Thinking level: high"))
+        .expect("the switch's status note rendered");
+    assert!(
+        switched.contains("glm-5.3:high"),
+        "the failed read falls back to the requested level:\n{switched}"
+    );
+    assert!(
+        !switched.contains("glm-5.3:medium"),
+        "the pre-switch suffix never survives a switch:\n{switched}"
+    );
+}
+
 /// A model without reasoning renders the bare id: the state's level is
 /// "off" but the tray never carries a suffix.
 #[test]
 fn tray_label_stays_bare_without_reasoning() {
-    let steps = vec![HeadlessStep::WaitMs(300)];
+    let steps = vec![HeadlessStep::WaitRender {
+        needle: "gpt-4o-mini".to_string(),
+        timeout_ms: 10_000,
+    }];
     let frames = run_plan(plain_session(), steps);
     let all = frames.join("\n---\n");
     assert!(

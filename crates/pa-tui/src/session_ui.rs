@@ -7352,8 +7352,8 @@ impl SessionUi {
                 // wrote: the daemon clamps the request (TS `setThinkingLevel`
                 // emits the effective level; the Rust daemon answers no such
                 // event, so the client re-reads the state `/effort` targets).
-                // A failed read keeps the previous suffix while the note
-                // below still reports the level.
+                // A failed read falls back to the requested level, never the
+                // previous model's stale suffix.
                 let state = self
                     .bounded_request(
                         Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -7364,8 +7364,19 @@ impl SessionUi {
                         },
                     )
                     .await;
-                if let Ok(data) = state {
-                    view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                match state {
+                    Ok(data) => {
+                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                    }
+                    // The switch succeeded; the state read did not. TS
+                    // `applyThinkingLevel` patches the requested level into
+                    // the connection state (the `thinking_level_changed`
+                    // event corrects it later), so render the requested
+                    // level — never the previous model's stale suffix.
+                    Err(_) => {
+                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
+                            .map(|parsed| parsed.wire_name().to_string());
+                    }
                 }
                 self.note(&format!("Thinking level: {level}"), view);
             }
@@ -7442,9 +7453,14 @@ impl SessionUi {
                 view.chrome.model_id = Some(model_id);
                 view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
             }
-            // A failed read keeps the previous suffix: TS's patched
-            // connection state survives a failed refresh the same way.
-            Err(_) => view.chrome.model_id = Some(picked_model_id.to_string()),
+            // The picked model's effort is unknown when the read fails:
+            // a stale suffix would pair the new model with the old
+            // model's level (a combination TS never renders), so the
+            // bare id wins.
+            Err(_) => {
+                view.chrome.model_id = Some(picked_model_id.to_string());
+                view.chrome.thinking_suffix = None;
+            }
         }
         self.dirty = true;
     }
