@@ -377,20 +377,23 @@ impl Supervisor {
         if let Err(error) =
             crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
         {
-            // A failed persist rolls the in-memory mutation back: a later
-            // descriptor write must not carry a tombstone the rejected
-            // stop never durably set (adoption would finish a stop nobody
-            // requested). The rollback is a no-op when the tombstone
-            // already existed — the mutation touched nothing — and the
-            // existing tombstone carries the stop through: it is the
-            // durable intent itself, already on disk from the earlier
-            // persist, so the stop proceeds to its escalation instead of
-            // failing behind a redundant re-write.
-            descriptor.stop_requested_at = old_stop_requested_at;
-            descriptor.archive_on_stop = old_archive_on_stop;
             if old_stop_requested_at.is_none() {
+                // No durable intent anywhere: roll the in-memory mutation
+                // back (a later descriptor write must not carry a
+                // tombstone the rejected stop never durably set —
+                // adoption would finish a stop nobody requested) and
+                // fail the stop.
+                descriptor.stop_requested_at = old_stop_requested_at;
+                descriptor.archive_on_stop = old_archive_on_stop;
                 return Err(error);
             }
+            // The durable intent already exists — the plain kill's
+            // route-side persist put it on disk before the forward — so
+            // this re-write's failure must not abort the stop: the
+            // mutation touched only what the existing tombstone already
+            // carried, and the stop proceeds to its escalation instead of
+            // leaving the killed worker running on its session lease
+            // until the next boot.
         }
         drop(descriptor);
         resident
