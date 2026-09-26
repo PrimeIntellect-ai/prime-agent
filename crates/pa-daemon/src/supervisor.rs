@@ -1030,7 +1030,7 @@ impl Supervisor {
         let _permit = match admission {
             RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
                 Ok(permit) => permit,
-                Err(_) => {
+                Err(_saturated) => {
                     self.note_daemon_event("worker_overloaded", None);
                     return Ok(crate::backpressure::overloaded_response(
                         command_type,
@@ -1041,10 +1041,11 @@ impl Supervisor {
             RouteAdmission::SupervisorInternal => {
                 match tokio::time::timeout_at(deadline, inflight.acquire_owned()).await {
                     Ok(Ok(permit)) => permit,
-                    // A saturated worker never frees a slot inside the
-                    // caller's budget: the budget error, the same one a
-                    // wedged worker's silent route produces.
-                    _ => return Err(anyhow!("Session worker timed out")),
+                    // Both remaining shapes are budget exhaustion: the
+                    // wait elapsed, or the semaphore closed with its
+                    // resident. The budget error is the same one a wedged
+                    // worker's silent route produces.
+                    Ok(Err(_)) | Err(_) => return Err(anyhow!("Session worker timed out")),
                 }
             }
         };
@@ -1090,11 +1091,11 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal => {
                     match tokio::time::timeout_at(deadline, cmd_tx.send(unsent)).await {
                         Ok(Ok(())) => {}
-                        Ok(Err(_)) => {
+                        Ok(Err(_channel_closed)) => {
                             resident.pending.lock().await.remove(&request_id);
                             return Err(anyhow!(WORKER_NOT_CONNECTED));
                         }
-                        Err(_) => {
+                        Err(_budget_elapsed) => {
                             resident.pending.lock().await.remove(&request_id);
                             return Err(anyhow!("Session worker timed out"));
                         }
