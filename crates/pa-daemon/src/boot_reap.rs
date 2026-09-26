@@ -58,6 +58,14 @@ use crate::supervisor::Supervisor;
 const TERM_GRACE: Duration = Duration::from_secs(2);
 /// Verify window after SIGKILL before the reap reports the survivor.
 const KILL_VERIFY: Duration = Duration::from_secs(1);
+/// Hard deadline after SIGKILL on the intentional-stop path (Codex
+/// app-server-daemon's `STOP_FORCE_TIMEOUT`): the force window a killed
+/// worker's teardown may still take — a D-state exit, a huge address
+/// space — before the stop reports the survivor, so the stopped
+/// session's lease frees through the dead-owner reclaim inside one
+/// bounded stop instead of waiting out a false survivor to the next
+/// boot.
+const STOP_FORCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The reap poll cadence.
 const POLL: Duration = Duration::from_millis(25);
 
@@ -173,16 +181,25 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
 
 /// Stop one worker process by identity: the supervisor's terminal-stop
 /// escalation (a worker that missed its routed `shutdown`). Same contract as
-/// [`reap_predecessors`]'s targets: identity-gated SIGTERM, grace, SIGKILL,
-/// verify. `None` as the start id trusts liveness alone (the same
-/// conservative gate the lease's stale-owner rule applies).
+/// [`reap_predecessors`]'s targets — identity-gated SIGTERM, grace, SIGKILL,
+/// verify — on the intentional stop's own budgets: the post-SIGKILL window
+/// is the Codex `STOP_FORCE_TIMEOUT` hard deadline, not the boot reap's
+/// fast verify (a killed worker's teardown may outlast a second, and
+/// reporting a still-tearing-down process as the survivor leaves the
+/// session lease held behind a worker that is provably dying). `None` as
+/// the start id trusts liveness alone (the same conservative gate the
+/// lease's stale-owner rule applies).
 pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutcome {
-    stop_target(&ReapTarget {
-        pid,
-        start_id,
-        worker_socket: None,
-        kind: ReapKind::Worker,
-    })
+    stop_target_within(
+        &ReapTarget {
+            pid,
+            start_id,
+            worker_socket: None,
+            kind: ReapKind::Worker,
+        },
+        TERM_GRACE,
+        STOP_FORCE_TIMEOUT,
+    )
     .await
 }
 
@@ -268,12 +285,23 @@ fn identity_current(target: &ReapTarget) -> bool {
     }
 }
 
-/// Stop one target: gone check, SIGTERM, grace, SIGKILL, verify. The
-/// signals ride the kernel-held process handle (pidfd): a numeric pid
-/// recycled in the check-then-signal window must never receive the
-/// signal meant for the process that exited - the fd pins the exact
-/// process, whatever the pid table does afterwards.
+/// Stop one target on the boot reap's budgets (the TS
+/// `stopWorkerUntracked` force shapes: a two-second TERM grace, a
+/// one-second kill verify — the boot's predecessor cleanup stays fast).
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
+    stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
+}
+
+/// Stop one target with explicit escalation budgets: gone check, SIGTERM,
+/// grace, SIGKILL, verify. The signals ride the kernel-held process
+/// handle (pidfd): a numeric pid recycled in the check-then-signal window
+/// must never receive the signal meant for the process that exited - the
+/// fd pins the exact process, whatever the pid table does afterwards.
+async fn stop_target_within(
+    target: &ReapTarget,
+    term_grace: Duration,
+    kill_verify: Duration,
+) -> ReapOutcome {
     // The handle opens BEFORE the identity check and the check runs WHILE
     // it is held: a target that dies and has its pid recycled in between
     // would otherwise leave the handle pinning the REPLACEMENT - open
@@ -297,12 +325,12 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
         return ReapOutcome::AlreadyGone;
     }
     if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
-        if await_gone(target, TERM_GRACE).await {
+        if await_gone(target, term_grace).await {
             pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Term;
         }
         if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Kill)
-            && await_gone(target, KILL_VERIFY).await
+            && await_gone(target, kill_verify).await
         {
             pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Kill;
@@ -905,6 +933,31 @@ mod tests {
         let outcome = stop_target(&target(pid)).await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
+    }
+
+    /// A worker that ignores the graceful stop dies to the intentional
+    /// stop's escalation: SIGTERM pends through the whole TERM grace, the
+    /// SIGKILL lands inside the post-kill hard deadline, and the stop
+    /// reports the kill. The `bash` ignores SIGTERM without spawning any
+    /// child (a leaked grandchild would outlive the guard's kill). LINUX
+    /// ONLY: the signals ride the pidfd, which opens only where the
+    /// kernel provides it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_term_ignoring_process_dies_to_the_stop_escalation() {
+        let child = std::process::Command::new("bash")
+            .args(["-c", "trap '' TERM; while :; do :; done"])
+            .spawn()
+            .expect("spawn term-ignoring bash");
+        let guard = ReapOnDrop(Some(child));
+        let pid = guard.0.as_ref().expect("guard holds the child").id();
+        let outcome = stop_process(pid, crate::lease::get_process_start_id(pid)).await;
+        drop(guard);
+        assert_eq!(
+            outcome,
+            ReapOutcome::Kill,
+            "the stop escalation must SIGKILL a term-ignoring worker"
+        );
     }
 
     /// A SIGKILL-survivor (a stopped, unkillable task) reports Survived -

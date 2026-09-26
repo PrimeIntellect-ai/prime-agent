@@ -4143,44 +4143,31 @@ impl Supervisor {
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
-                    if response.success {
-                        // The kill route's own tombstone already persisted
-                        // before the forward, so the stop's durable intent
-                        // stands even when this pass fails; a failure is
-                        // observable (logged) instead of silently
-                        // skipping the retire/registry/passivation tail —
-                        // the boot's tombstoned-stop finalization owns
-                        // whatever this pass could not finish.
+                    // TS's root-kill block wraps the forward in a `finally`
+                    // (daemon-supervisor.ts: `try { response = await
+                    // this.forwardToWorker(...) } finally { await
+                    // this.stopWorker(...) }`): the stop completes on a
+                    // rejected or timed-out forward too — a worker that
+                    // ignores the routed kill would otherwise keep its
+                    // session lease behind a route that never answers (the
+                    // supervisor lives, so no supervisor-lost GC fires) and
+                    // the escalation in `retire_worker_after_stop` would
+                    // never run. The marker-carrying child closes keep the
+                    // success gate: TS forwards them without a stop, and a
+                    // failed cascade is the parent's retry, not a stop.
+                    if plain_kill {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    } else if response.success {
+                        // The cascade stop: a failure is observable (logged)
+                        // instead of silently skipping the
+                        // retire/registry/passivation tail — the boot's
+                        // tombstoned-stop finalization owns whatever this
+                        // pass could not finish.
                         if let Err(error) = self.stop_worker(&resident).await {
                             self.log_line(&format!(
                                 "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
                                 resident.worker_id
                             ));
-                        }
-                        // TS `stopWorkerUntracked`'s archived-stop finalize
-                        // (the plain kill's durable half): the killed
-                        // session tree's scheduled jobs cancel durably and
-                        // the root file carries the `archived` state, so no
-                        // wake pass can revive the stopped session. A
-                        // ledger-tombstoned delete also sweeps the deleted
-                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
-                        // A marker-carrying child close is a cascade, not a
-                        // stop: no finalize (the child's own close arms
-                        // already carried the parent's reason).
-                        if plain_kill {
-                            let deleted_child = rest
-                                .get("rlmLedgerDelete")
-                                .and_then(Value::as_str)
-                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-                                .map(|_| crate::stop_cleanup::DeletedChild {
-                                    child_id: rest
-                                        .get("rlmChildId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                });
-                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
-                                .await;
                         }
                     }
                 }
@@ -4215,16 +4202,80 @@ impl Supervisor {
                 }
                 (vec![response_line(&response)], false)
             }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
+            Err(error) => {
+                // TS's root-kill `finally` runs its stop on a thrown
+                // forward as well (a hung worker never answers the routed
+                // kill): the stop escalates — the bounded `shutdown` route,
+                // then `retire_worker_after_stop`'s SIGTERM -> SIGKILL ->
+                // hard-deadline pass — so the stopped worker's session
+                // lease cannot outlive the command. The marker-carrying
+                // child closes keep TS's plain forward: a failed cascade is
+                // the parent's retry.
+                if plain_kill {
+                    if let DaemonCommand::Kill { rest, .. } = command {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    }
+                }
+                (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &error.to_string(),
+                        None,
+                    ))],
+                    false,
+                )
+            }
         }
+    }
+
+    /// The plain kill's stop aftermath, run on every route outcome: TS's
+    /// root-kill block wraps the forward in a `finally`
+    /// (daemon-supervisor.ts: `try { response = await
+    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
+    /// so a kill a hung worker never answers still completes the stop —
+    /// the graceful `shutdown` route bounded by the route budget, then
+    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
+    /// hard-deadline escalation — and the stopped worker's session lease
+    /// frees through the dead-owner reclaim instead of outliving the
+    /// command behind a route that never answers.
+    ///
+    /// The kill route's own tombstone already persisted before the
+    /// forward, so the stop's durable intent stands even when this pass
+    /// fails; a failure is observable (logged) instead of silently
+    /// skipping the retire/registry/passivation tail — the boot's
+    /// tombstoned-stop finalization owns whatever this pass could not
+    /// finish.
+    async fn finish_plain_kill_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        rest: &Value,
+    ) {
+        if let Err(error) = self.stop_worker(resident).await {
+            self.log_line(&format!(
+                "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
+                resident.worker_id
+            ));
+        }
+        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
+        // kill's durable half): the killed session tree's scheduled jobs
+        // cancel durably and the root file carries the `archived` state,
+        // so no wake pass can revive the stopped session. A
+        // ledger-tombstoned delete also sweeps the deleted child's
+        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        let deleted_child = rest
+            .get("rlmLedgerDelete")
+            .and_then(Value::as_str)
+            .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+            .map(|_| crate::stop_cleanup::DeletedChild {
+                child_id: rest
+                    .get("rlmChildId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        self.finalize_worker_stop(resident, deleted_child.as_ref())
+            .await;
     }
 
     pub(crate) async fn stop_worker(
