@@ -632,6 +632,17 @@ impl DaemonClient {
             .await
     }
 
+    /// The refusal for a supervisor reader that already ended: its
+    /// close-time failure pass has run (or is imminent), so nothing can
+    /// ever answer a request registered now — TS `requestWire` refuses
+    /// a destroyed socket the same way.
+    fn dead_reader_error(&self) -> anyhow::Error {
+        anyhow!(
+            "the daemon connection is closed. Socket: {}.",
+            self.socket_path.display()
+        )
+    }
+
     /// One JSONL envelope on the supervisor connection, under the caller's
     /// own envelope id: the streamed `session_list_item` frames of
     /// `list_saved_sessions` carry it, so the caller can attribute the
@@ -657,16 +668,8 @@ impl DaemonClient {
         id: &str,
         timeout_ms: u64,
     ) -> Result<DaemonResponse> {
-        // A supervisor reader that already ended can never resolve this
-        // request: its close-time failure pass ran before this
-        // registration, so nothing would answer it until the caller's
-        // whole timeout. Refuse the send instead — TS `requestWire`
-        // refuses a destroyed socket the same way.
         if *self.reader_dead_rx.borrow() {
-            return Err(anyhow!(
-                "the daemon connection is closed. Socket: {}.",
-                self.socket_path.display()
-            ));
+            return Err(self.dead_reader_error());
         }
         let id = id.to_string();
         let envelope = DaemonCommandEnvelope {
@@ -679,6 +682,17 @@ impl DaemonClient {
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared.pending.lock().unwrap().insert(id.clone(), tx);
+        // The reader runs on another worker: it can die (and run its
+        // failure sweep) between the entry check and this registration,
+        // and the writer channel outlives the reader's EOF — an entry
+        // the sweep missed would ride the caller's whole timeout.
+        // Re-check after inserting: a death the sweep already served
+        // resolves the oneshot on the Err half, a death it missed is
+        // caught here.
+        if *self.reader_dead_rx.borrow() {
+            self.shared.pending.lock().unwrap().remove(&id);
+            return Err(self.dead_reader_error());
+        }
         self.writer
             .send(line)
             .map_err(|_| anyhow!("the daemon connection is closed"))?;
