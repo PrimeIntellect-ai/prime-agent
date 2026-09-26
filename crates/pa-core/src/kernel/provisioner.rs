@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::anyhow;
 
 use crate::kernel::bootstrap::{
-    build_rlm_bootstrap_code, KernelBootstrapProgressHandler, KernelPythonSkill,
+    build_rlm_bootstrap_code, parse_unavailable_python_skills, KernelBootstrapProgressHandler,
+    KernelPythonSkill, UnavailablePythonSkills,
 };
 use crate::kernel::cancellation::AbortSignal;
 use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
@@ -82,6 +83,10 @@ where
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
+/// Publishes the skills that failed to import into a freshly started
+/// kernel (import name -> import error), once the kernel is usable.
+pub type UnavailableSkillsCallback = Arc<dyn Fn(&UnavailablePythonSkills) + Send + Sync>;
+
 /// Outcome of one full kernel bootstrap (spawn + handshake + namespace
 /// restore + runtime bootstrap), reported once per actual boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +131,11 @@ pub struct IpythonKernelProvisionerOptions {
     pub ready_gate: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
+    /// Fires once per kernel start when installed Python skills failed to
+    /// import into the kernel (skill import name -> import error), so the
+    /// session can tell the model before it wastes turns calling them
+    /// (TS `IpythonToolOptions.onUnavailableSkills`).
+    pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
     /// Publishes the per-boot result for `kernel bootstrap` telemetry.
     /// Telemetry only; kernel behavior never depends on it.
     pub on_bootstrap_result: Option<KernelBootstrapResultHandler>,
@@ -718,7 +728,17 @@ async fn start_kernel_impl(
                 .await;
             return Err(anyhow!("Kernel provisioner disposed during startup"));
         }
-        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {}
+        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {
+            // Broken skill imports stay importable-looking placeholders;
+            // report them so the model learns before its first call, not
+            // from the placeholder's error (TS startKernel).
+            let unavailable = parse_unavailable_python_skills(&bootstrap.stdout);
+            if let (Some(on_unavailable_skills), Some(errors)) =
+                (&inner.options.on_unavailable_skills, unavailable)
+            {
+                on_unavailable_skills(&errors);
+            }
+        }
         Ok(bootstrap) => {
             // The kernel booted but its runtime did not initialize: the venv
             // is the prime suspect, so drop the memoized runtime-ready result
