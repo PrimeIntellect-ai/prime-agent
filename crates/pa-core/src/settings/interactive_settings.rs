@@ -354,6 +354,17 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
+    /// `chatDetail` setter (TS #2709 `setChatDetail`: the Ctrl+O cycle
+    /// saves the level); TS writes the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_chat_detail(&mut self, detail: &str) -> Result<()> {
+        self.global_mut().chat_detail = Some(detail.to_string());
+        self.save_global_scope()
+    }
+
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the
     /// persisted model-scope patterns (`None` is no filter).
     pub fn get_enabled_models(&self) -> Option<Vec<String>> {

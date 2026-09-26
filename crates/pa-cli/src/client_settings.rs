@@ -171,6 +171,12 @@ impl ClientSettings for CliClientSettings {
         get_tree_filter_mode,
         set_tree_filter_mode
     );
+    str_setting!(
+        chat_detail,
+        set_chat_detail,
+        get_chat_detail,
+        set_chat_detail
+    );
     setting!(
         warnings_anthropic_extra_usage,
         set_warnings_anthropic_extra_usage,
