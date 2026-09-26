@@ -246,9 +246,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     // The active session's cwd when the command passed
                     // one (TS `runtimeHost.newSession` over `this.cwd`),
                     // else the CLI startup directory.
-                    let cwd = cwd
-                        .clone()
-                        .unwrap_or_else(|| options.config.cwd.clone());
+                    let cwd = cwd.clone().unwrap_or_else(|| options.config.cwd.clone());
                     let manager = match parent_session {
                         Some(parent) => {
                             let mut manager = pa_core::session::manager::SessionManager::persisted(
@@ -261,10 +259,9 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                             });
                             manager
                         }
-                        None => pa_core::session::manager::SessionManager::persisted(
-                            &cwd,
-                            &session_dir,
-                        ),
+                        None => {
+                            pa_core::session::manager::SessionManager::persisted(&cwd, &session_dir)
+                        }
                     };
                     // TS `acquireReplacementLease(sessionManager.getSessionFile())`:
                     // the fresh session's file is leased BEFORE the
@@ -297,7 +294,10 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     let lease = if *reuse_lease {
                         None
                     } else {
-                        Some(session_open_guard(options.daemon_socket.as_deref(), session_path)?)
+                        Some(session_open_guard(
+                            options.daemon_socket.as_deref(),
+                            session_path,
+                        )?)
                     };
                     // A failed open's early return drops the lease
                     // (released), so errors never leave an orphaned hold.

@@ -95,7 +95,11 @@ async fn run_session_command(
         state.compacting.store(true, Ordering::SeqCst);
         state
             .session
-            .write_connection_output(compaction_frame("compaction_start", frame_instructions, None))
+            .write_connection_output(compaction_frame(
+                "compaction_start",
+                frame_instructions,
+                None,
+            ))
             .await;
     }
     let execution = {
@@ -122,7 +126,11 @@ async fn run_session_command(
         });
         state
             .session
-            .write_connection_output(compaction_frame("compaction_end", frame_instructions, result.as_ref()))
+            .write_connection_output(compaction_frame(
+                "compaction_end",
+                frame_instructions,
+                result.as_ref(),
+            ))
             .await;
     }
     state.publish_goal_update().await;

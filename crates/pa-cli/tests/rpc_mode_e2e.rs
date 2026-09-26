@@ -170,7 +170,6 @@ impl RpcChild {
         response
     }
 
-
     /// Log the child's stderr once the Drop reaps it (a live read would
     /// block until exit; the drain moves to the post-kill site like the
     /// sibling ACP harness).

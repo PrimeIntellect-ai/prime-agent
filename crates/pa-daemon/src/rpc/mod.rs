@@ -170,7 +170,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // (the dispose bumps again — idempotent): a pump that wakes
             // as the aborted turn settles must not deliver the next
             // queued row while the exit drains.
-            terminate_session.pump_epoch.fetch_add(1, Ordering::SeqCst);
+            terminate_session.retire_pumps();
             terminate_session.dispose().await;
             terminate_writer.drain().await;
             exit_with(SIGTERM_EXIT);
@@ -186,7 +186,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // Retire the queued-input pumps the instant the abort fires
             // (the dispose bumps again — idempotent): the exit settles
             // the aborted turn without running the next queued one.
-            hangup_session.pump_epoch.fetch_add(1, Ordering::SeqCst);
+            hangup_session.retire_pumps();
             hangup_session.dispose().await;
             hangup_writer.drain().await;
             exit_with(SIGHUP_EXIT);

@@ -1431,7 +1431,10 @@ impl AgentSessionEngine {
     pub(crate) fn resolve_request_key_and_headers(
         &self,
         model: &Model,
-    ) -> (Option<String>, Option<std::collections::BTreeMap<String, String>>) {
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+    ) {
         if let Some(api_key) = &self.current_selection().api_key {
             return (Some(api_key.clone()), model.headers.clone());
         }

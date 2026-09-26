@@ -204,6 +204,14 @@ impl RpcSession {
             .await
     }
 
+    /// Retire the queued-input pumps (the pump epoch bump): the signal
+    /// exit paths call this the instant the abort fires, so a pump
+    /// waking as the aborted turn settles never delivers the next
+    /// queued row before the exit.
+    pub fn retire_pumps(&self) {
+        self.pump_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Acquire the whole-session replacement lease (TS
     /// `acquireReplacementLease`): one replacement flow at a time. The
     /// fork path holds it across its read/branch/swap so a concurrent
@@ -232,7 +240,11 @@ impl RpcSession {
         // cross-process claim window opens.
         let mut adopted_lease = None;
         let mut request = request;
-        if let RpcEngineRequest::Open { session_path, reuse_lease } = &mut request {
+        if let RpcEngineRequest::Open {
+            session_path,
+            reuse_lease,
+        } = &mut request
+        {
             let canonical = crate::lease::canonical_session_path(session_path);
             let same_path = {
                 let current = self.handle.write().await;

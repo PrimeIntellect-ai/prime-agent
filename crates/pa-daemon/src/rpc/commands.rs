@@ -87,7 +87,8 @@ impl RpcState {
     pub async fn settings_cwd(&self) -> std::path::PathBuf {
         let handle = self.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
-        persistence.lock().await.get_cwd().to_path_buf()
+        let manager = persistence.lock().await;
+        manager.get_cwd().to_path_buf()
     }
 }
 
@@ -212,7 +213,8 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
     let cwd = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
-        persistence.lock().await.get_cwd().to_path_buf()
+        let manager = persistence.lock().await;
+        manager.get_cwd().to_path_buf()
     };
     state
         .session
