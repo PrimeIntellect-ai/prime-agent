@@ -16,6 +16,27 @@ fn toasts_expire_on_their_ttl() {
     assert!(toasts.entries.is_empty());
 }
 
+/// The parked idle tick schedules at the earliest expiry: None with no
+/// toasts, the earliest stacked toast otherwise (the run loop wakes
+/// there so the pre-gate prune repaints the dismissal at its TTL).
+#[test]
+fn next_expiry_is_none_when_empty_and_earliest_when_stacked() {
+    let mut toasts = Toasts::default();
+    assert_eq!(toasts.next_expiry(), None);
+    toasts.push("first");
+    // Age the first toast so the second, pushed later, expires strictly
+    // later: the scheduler must pick the earlier one.
+    toasts.age_by(TOAST_TTL / 2);
+    toasts.push("second");
+    let expected = toasts.entries.iter().map(|t| t.expires_at).min();
+    assert_eq!(toasts.next_expiry(), expected);
+    assert_eq!(toasts.next_expiry(), Some(toasts.entries[0].expires_at));
+    // Once everything expired and pruned, the park deadline is gone.
+    toasts.age_by(TOAST_TTL + Duration::from_millis(1));
+    toasts.prune_expired(now());
+    assert_eq!(toasts.next_expiry(), None);
+}
+
 /// Pruning with nothing to drop reports no change.
 #[test]
 fn pruning_a_fresh_stack_reports_no_change() {

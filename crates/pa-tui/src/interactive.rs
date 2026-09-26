@@ -1259,6 +1259,36 @@ enum UiInput {
 /// next frame, capping the render rate at ~60fps however fast the stream
 /// delivers).
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
+/// The idle tick's cadence while a consumer needs it: a parked
+/// autocomplete request materializes on the first tick after typing
+/// pauses (TS resolves suggestions asynchronously after the keystroke
+/// batch), and TS's selection-drag timer is a 150 ms hold + this
+/// interval.
+const IDLE_TICK_CADENCE: Duration = Duration::from_millis(50);
+/// The kernel-bash-activity dock poll cadence (the tick body's own
+/// gate; the parked-tick arm only schedules its deadline).
+const BASH_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The idle tick's next wakeup (the parked-tick scheduler): 50 ms out
+/// while a parked autocomplete request or an armed selection
+/// auto-scroll needs the cadence, else the earliest of the
+/// bash-activity refresh deadline and the next toast expiry. With
+/// nothing pending the loop parks on its real event sources instead of
+/// waking 20x/s; a toast's dismissal still repaints at its TTL (the
+/// pre-gate prune below), and the Ctrl+C exit hint and the spinner keep
+/// their separate `render_deadline` arm.
+fn next_idle_tick_deadline(
+    autocomplete_pending: bool,
+    selection_auto_scroll_armed: bool,
+    last_bash_refresh: Instant,
+    next_toast_expiry: Option<Instant>,
+) -> Instant {
+    if autocomplete_pending || selection_auto_scroll_armed {
+        return Instant::now() + IDLE_TICK_CADENCE;
+    }
+    let bash_deadline = last_bash_refresh + BASH_ACTIVITY_REFRESH_INTERVAL;
+    next_toast_expiry.map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
+}
 /// The spinner's wall-clock cadence (TS `Loader` `DEFAULT_INTERVAL_MS`):
 /// the animation phase advances one frame per 80ms of animating time
 /// regardless of the render rate.
@@ -2173,24 +2203,16 @@ async fn run_interactive_surface(
         }
 
         let was_active = session.turn_active;
-        // The idle tick's next wakeup, computed here so the select's arm
+        // Computed here (not inside the arm's future) so the select's arm
         // captures only a Copy deadline: the headless harness spawns this
         // whole surface, so a select future must not hold view/session
         // borrows (Editor's autocomplete provider is Send but not Sync).
-        // While a parked autocomplete request or an armed selection
-        // auto-scroll needs the 50 ms cadence, the deadline is 50 ms out;
-        // otherwise the loop parks until the next due idle work - the
-        // 2 s bash-activity refresh, or a toast's expiry when one
-        // dismisses sooner (the pre-gate prune below repaints it away).
-        let idle_tick_deadline =
-            if view.editor.has_pending_autocomplete() || session.selection_auto_scroll_active() {
-                Instant::now() + Duration::from_millis(50)
-            } else {
-                let bash_deadline = last_bash_refresh + Duration::from_secs(2);
-                view.toasts
-                    .next_expiry()
-                    .map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
-            };
+        let idle_tick_deadline = next_idle_tick_deadline(
+            view.editor.has_pending_autocomplete(),
+            session.selection_auto_scroll_active(),
+            last_bash_refresh,
+            view.toasts.next_expiry(),
+        );
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
@@ -2733,7 +2755,7 @@ async fn run_interactive_surface(
                 // input arrives, which is the only time this arm runs at
                 // that cadence.
                 session.selection_auto_scroll_tick(&mut view);
-                if last_bash_refresh.elapsed() >= Duration::from_secs(2) {
+                if last_bash_refresh.elapsed() >= BASH_ACTIVITY_REFRESH_INTERVAL {
                     last_bash_refresh = Instant::now();
                     session.spawn_bash_activity_refresh();
                 }
@@ -3536,6 +3558,50 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parked-tick scheduler keeps every consumer's timing: the 50 ms
+    /// cadence while a parked autocomplete request or an armed selection
+    /// auto-scroll needs it, the 2 s bash-activity refresh deadline when
+    /// fully idle, and a sooner toast expiry when one is on screen.
+    #[test]
+    fn idle_tick_deadline_tracks_its_consumers() {
+        let now = Instant::now();
+        // A parked autocomplete request: the dropdown materializes on the
+        // first tick after typing pauses (the old sleep's exact window).
+        let deadline = next_idle_tick_deadline(true, false, now, None);
+        assert!(deadline > now && deadline <= now + IDLE_TICK_CADENCE);
+        // An armed selection auto-scroll (a drag holding the edge): the
+        // same cadence drives the 150 ms hold + tick scroll.
+        let deadline = next_idle_tick_deadline(false, true, now, None);
+        assert!(deadline > now && deadline <= now + IDLE_TICK_CADENCE);
+        // Fully idle: the bash-activity refresh deadline, exactly 2 s out
+        // from the last refresh.
+        let last_refresh = now - Duration::from_secs(1);
+        assert_eq!(
+            next_idle_tick_deadline(false, false, last_refresh, None),
+            last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL
+        );
+        // A toast on screen wakes at its own expiry when that is due
+        // sooner, so the pre-gate prune repaints it away at its TTL.
+        let toast_expiry = last_refresh + Duration::from_millis(1500);
+        assert_eq!(
+            next_idle_tick_deadline(false, false, last_refresh, Some(toast_expiry)),
+            toast_expiry
+        );
+        // A toast past its expiry fires immediately (the tick body's
+        // prune drops it and the recomputed deadline parks again).
+        let expired = now - Duration::from_millis(1);
+        assert_eq!(
+            next_idle_tick_deadline(false, false, last_refresh, Some(expired)),
+            expired
+        );
+        // A toast outliving the refresh deadline never delays the poll.
+        let late_toast = last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL * 2;
+        assert_eq!(
+            next_idle_tick_deadline(false, false, last_refresh, Some(late_toast)),
+            last_refresh + BASH_ACTIVITY_REFRESH_INTERVAL
+        );
+    }
 
     #[tokio::test]
     async fn headless_error_returns_never_touch_the_terminal() {
