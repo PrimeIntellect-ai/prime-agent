@@ -623,7 +623,6 @@ impl Worker {
             Some(serde_json::to_value(&status).unwrap_or(Value::Null)),
         )
     }
-
 }
 /// The session summary for one core (TS `summaryForActiveSession`): the
 /// shared shape `get_state`, the roster, and list rows all serve. Free so

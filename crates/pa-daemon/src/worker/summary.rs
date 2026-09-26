@@ -1,7 +1,7 @@
 //! The worker's client-visible surface: summaries, snapshots, the
 //! roster push, and the event emission family.
-use super::*;
 use super::lifecycle::active_lifecycle;
+use super::*;
 
 use crate::types::SessionSummary;
 
