@@ -2129,16 +2129,9 @@ impl Worker {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
-                // One durable write lands the fully-assembled session: the
-                // creation prefix and the `active` state are in-memory
-                // appends (nothing between the lease and this point reads
-                // the file back), so persisting the intermediate header-only
-                // session first only paid a second fsync per launch. A
-                // crash mid-create now leaves no session file (the lease is
-                // reclaimed after the stale window, and the replay from the
-                // durable create command recreates the session) instead of
-                // the header-only file — both states refuse a concurrent
-                // open through the same lease.
+                if let Err(error) = created.rewrite() {
+                    return response_failure(None, "create", &error.to_string(), None);
+                }
                 append_creation_prefix(
                     &mut created,
                     self.engine.as_ref(),
