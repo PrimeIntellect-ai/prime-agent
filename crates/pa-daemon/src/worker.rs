@@ -7166,7 +7166,7 @@ mod agent_message_tests {
     }
 
     /// The attach response's wire shape is the TS `createAttachResult`
-    /// key order (serde_json keeps insertion order), for slim and plain
+    /// key order (`serde_json` keeps insertion order), for slim and plain
     /// clients: the slim response carries the messages exactly once
     /// (inside the snapshot) and the non-slim duplicate is byte-identical
     /// to the snapshot's copy.
