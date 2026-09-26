@@ -454,19 +454,38 @@ impl TreeList {
             .iter()
             .filter_map(|index| self.flat[*index].data.entry.id().map(str::to_string))
             .collect();
-        // An id-keyed parent map (TS `entryMap`) replaces the per-hop
-        // linear scans: a deep chain's ancestor walks stay linear. The
-        // per-node visited set terminates a corrupted parent cycle.
-        let parent_of: HashMap<String, String> = self
+        // Nearest visible ancestors resolve in one pass over the
+        // parent-index graph: hidden chains memoize (a later walk through
+        // the same chain stops at the memo instead of re-walking it), and
+        // the stamp array closes corrupted parent cycles without
+        // per-node allocations.
+        let index_by_id: HashMap<&str, usize> = self
             .flat
             .iter()
-            .filter_map(|node| {
-                Some((
-                    node.data.entry.id()?.to_string(),
-                    node.data.entry.parent_id()?.to_string(),
-                ))
+            .enumerate()
+            .filter_map(|(index, node)| node.data.entry.id().map(|id| (id, index)))
+            .collect();
+        let parent_index_of: Vec<Option<usize>> = self
+            .flat
+            .iter()
+            .map(|node| {
+                node.data
+                    .entry
+                    .parent_id()
+                    .and_then(|id| index_by_id.get(id).copied())
             })
             .collect();
+        let visible_at: Vec<bool> = self
+            .flat
+            .iter()
+            .map(|node| node.data.entry.id().is_some_and(|id| visible.contains(id)))
+            .collect();
+        // `memo[node]` holds `Some(outcome)` once resolved (the visible
+        // ancestor's flat index, `None` when no visible ancestor exists);
+        // `stamp[node]` marks the chain the current walk already walked.
+        let mut memo: Vec<Option<Option<usize>>> = vec![None; self.flat.len()];
+        let mut stamp: Vec<u32> = vec![0; self.flat.len()];
+        let mut generation = 0u32;
         for index in 0..self.flat.len() {
             let id = match self.flat[index].data.entry.id() {
                 Some(id) => id.to_string(),
@@ -478,20 +497,36 @@ impl TreeList {
             if !visible.contains(&id) {
                 continue;
             }
-            // Nearest visible ancestor.
-            let mut ancestor: Option<String> = None;
-            let mut visited: HashSet<String> = HashSet::new();
-            let mut current = parent_of.get(&id).cloned();
-            while let Some(candidate) = current {
-                if !visited.insert(candidate.clone()) {
+            generation += 1;
+            let mut path: Vec<usize> = Vec::new();
+            let mut outcome: Option<usize> = None;
+            let mut current = parent_index_of[index];
+            loop {
+                let Some(next) = current else {
+                    break;
+                };
+                if let Some(cached) = memo[next] {
+                    outcome = cached;
                     break;
                 }
-                if visible.contains(&candidate) {
-                    ancestor = Some(candidate);
+                if visible_at[next] {
+                    outcome = Some(next);
                     break;
                 }
-                current = parent_of.get(&candidate).cloned();
+                if stamp[next] == generation {
+                    break;
+                }
+                stamp[next] = generation;
+                path.push(next);
+                current = parent_index_of[next];
             }
+            for hidden in path {
+                memo[hidden] = Some(outcome);
+            }
+            let ancestor = outcome
+                .map(|resolved| self.flat[resolved].data.entry.id())
+                .flatten()
+                .map(str::to_string);
             self.visible_parent.insert(id.clone(), ancestor.clone());
             self.visible_children
                 .entry(ancestor)
