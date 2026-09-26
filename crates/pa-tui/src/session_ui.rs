@@ -388,6 +388,9 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot tray effort suffix for the next rebuild (the attach
+    /// state's level; `None` clears it).
+    pending_thinking_suffix: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -396,6 +399,10 @@ pub(crate) struct SessionUi {
     /// Context usage + cost refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
     cost_usd: Option<f64>,
+    /// The aggregate descendant-subagent spend from the same stats (the
+    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
+    /// split fields).
+    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
@@ -630,6 +637,15 @@ pub(crate) struct SessionUi {
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
+    /// TS `fullscreenPressedHyperlink`: the link under the last plain left
+    /// press; a release without a drag opens it.
+    pressed_hyperlink: Option<String>,
+    /// TS `fullscreenLeftMouseDragged`: the left press turned into a drag,
+    /// so its release ends the selection instead of opening the link.
+    left_mouse_dragged: bool,
+    /// Links opened by clicks this run (headless runs have no terminal to
+    /// hand a browser to; the verifier reads these).
+    pub(crate) opened_urls: Vec<String>,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
@@ -662,8 +678,29 @@ enum DockFocusSource {
     /// The editor's Down at the prompt's end (TS `onMoveBelowPrompt`
     /// -> `focusSubagentSummary`): the subagents box's affordance.
     PromptDown,
-    /// The `app.subagents.focus` key: any selectable dock group.
+    /// The `app.subagents.focus` key: any rendered dock group.
     Shortcut,
+}
+
+/// How the attach settles the dock's data before the rebuild renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockFold {
+    /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
+    /// responses into the session before the attach returns: the dock
+    /// (the panel and its divider under the prompt bar) is first-frame
+    /// geometry — its visibility must be final when the first content
+    /// frame renders (open, switch, rebind), never a late layout shift.
+    FirstFrame,
+    /// Clear and hand the dock to the background refreshes: a brand-new
+    /// session (`/new`) owns nothing, so its dock is deterministically
+    /// empty — the fold cannot change geometry, and waiting on two
+    /// registry reads would only delay the new chat's first frame.
+    Fresh,
+    /// Hold the dock's data and let the background refreshes update it: a
+    /// same-session re-attach of an already-up surface (the §10.4
+    /// recovery, the session reconnect) must not flicker its dock away,
+    /// and the attach's budget must cover the attach alone.
+    Held,
 }
 
 /// The attached snapshot's bash slot state, captured by `attach_session`
@@ -768,10 +805,12 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
             cost_usd: None,
+            subagents_cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
             steering_mode: "all".to_string(),
@@ -846,9 +885,12 @@ impl SessionUi {
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
             copies: Vec::new(),
+            pressed_hyperlink: None,
+            left_mouse_dragged: false,
+            opened_urls: Vec::new(),
         };
         session
-            .attach_session(&active_session_id)
+            .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
         Ok(session)
@@ -899,7 +941,11 @@ impl SessionUi {
             self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        let attach = tokio::time::timeout(
+            REATTACH_BUDGET,
+            self.attach_session(&durable, DockFold::Held),
+        )
+        .await;
         match attach {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -978,7 +1024,11 @@ impl SessionUi {
     /// locally bound but server-detached - the previous subscription stays
     /// until the new one exists, and the next supersede notice or the
     /// submit-path retry re-attaches when a worker can serve the session.
-    pub(crate) async fn attach_session(&mut self, active_session_id: &str) -> Result<()> {
+    pub(crate) async fn attach_session(
+        &mut self,
+        active_session_id: &str,
+        dock_fold: DockFold,
+    ) -> Result<()> {
         let previous = self.active_session_id.clone();
         // A direct link is bound to one session: drop it when switching.
         if self
@@ -1084,22 +1134,50 @@ impl SessionUi {
         self.roster.clear();
         self.subagents_focused = false;
         self.subscribe_roster().await;
-        // The heartbeat catalog is scoped to the session: drop the old
-        // session's rows and fetch fresh ones in the background (TS
-        // refreshes the catalog on every chat open).
-        self.heartbeat_catalog.clear();
-        self.spawn_heartbeat_refresh();
+        // The dock's heartbeat rows follow `dock_fold` (the enum's
+        // contract): a first-content-frame attach folds the fresh fetch
+        // BEFORE the attach returns — the dock's visibility (the panel
+        // and its divider under the prompt bar) is first-frame geometry,
+        // never a late layout shift (the operator's 2026-09-26
+        // zero-shift ruling). TS guarantees the same for its dock: the
+        // counts seed from the attach snapshot (`seedSubagentSummary`)
+        // and the roster subscription is awaited before the first
+        // content render; TS's own heartbeat fetch stays fire-and-forget
+        // only because its summary line renders no heartbeat rows.
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
+            // The held dock keeps its data: an already-up surface's dock
+            // must not flicker away while the background refresh runs.
+            DockFold::Held => {}
+        }
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_heartbeat_catalog().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_heartbeat_refresh(),
+        }
         // The slash-command catalog is session-scoped too (TS
         // `refreshConnectionCatalog` fetches `get_commands` on every
         // rebind): the skill commands land in the autocomplete provider
         // when the response arrives.
         self.spawn_command_catalog_refresh();
-        // The bash registry is kernel-owned and session-scoped: the previous
-        // session's rows are not this one's (the next poll refills).
-        self.bash_activities = serde_json::json!({"activities": []});
+        // The dock's bash rows follow the same `dock_fold` contract; the
+        // capability gate matches the background refresh (older daemons
+        // never see the request), and a failed fold fetch leaves the
+        // cleared registry (the 2s poll refills).
+        match dock_fold {
+            DockFold::FirstFrame | DockFold::Fresh => {
+                self.bash_activities = serde_json::json!({"activities": []});
+            }
+            // The held dock keeps its registry for the same reason it
+            // keeps the heartbeat catalog above.
+            DockFold::Held => {}
+        }
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
-        self.spawn_bash_activity_refresh();
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_bash_activities().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
+        }
         self.pending_model = reconstructed.model_id;
+        self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1196,10 +1274,38 @@ impl SessionUi {
             (!self.session_id.is_empty()).then(|| self.session_id.clone()),
             self.session_file.clone(),
         );
-        let counts = crate::subagents::count_descendants(&self.roster, &identity);
-        self.subagent_counts = counts;
+        self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
+        let dock = self.activity_dock_state();
+        // A focused selection must stay on a rendered group: the arrows
+        // visit every group an empty one included, so the selection
+        // only moves when its group leaves the row (the goal row ends
+        // with the goal) — and a dock that unmounts entirely (nothing
+        // left to show) returns the focus to the editor.
+        if self.subagents_focused {
+            if !dock.visible() {
+                self.subagents_focused = false;
+            } else if !dock.groups().contains(&self.activity_group) {
+                self.activity_group =
+                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+            }
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+            ..dock
+        });
+        if let Some(bash_view) = view.bash_view.as_mut() {
+            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
+                &self.bash_activities,
+            ));
+        }
+    }
 
-        let goal = &self.goal_view.goal;
+    /// The dock's feed state: the live counts, the goal row's label, and
+    /// the selection/focus the caller owns. The row render, the focus
+    /// hand-off, and the arrows' traversal all read this one mapping —
+    /// a group renders exactly when it stays traversable.
+    fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
         // The dock is the goal's one chrome surface (the operator's
         // 2026-09-24 directive moved it off the line below the prompt
         // bar): every live state renders its row — pursuing reads the
@@ -1208,7 +1314,7 @@ impl SessionUi {
         // here too (the tray's TS cluster no longer exists to carry
         // them; terminal states carry no row). The token budget lives
         // inside the goal panel the row opens, not on the bar.
-        let goal_label = tray_goal_label(goal);
+        let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1224,10 +1330,10 @@ impl SessionUi {
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
-        let dock = crate::chrome::ActivityDock {
-            subagents_running_direct: counts.running_direct,
-            subagents_running_nested: counts.running_nested,
-            subagents_total: counts.total,
+        crate::chrome::ActivityDock {
+            subagents_running_direct: self.subagent_counts.running_direct,
+            subagents_running_nested: self.subagent_counts.running_nested,
+            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1235,57 +1341,6 @@ impl SessionUi {
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
-        };
-        // A focused selection must stay actionable: when its feed empties
-        // (or never had rows), move to the first selectable group; with
-        // nothing selectable the dock stays a read-only indicator and
-        // releases the focus.
-        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
-            self.activity_group = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group))
-            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
-            if !self.activity_selectable(self.activity_group) {
-                self.subagents_focused = false;
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
-            selected: self.activity_group,
-            focused: self.subagents_focused,
-            ..dock
-        });
-        if let Some(bash_view) = view.bash_view.as_mut() {
-            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
-                &self.bash_activities,
-            ));
-        }
-    }
-
-    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
-        match group {
-            crate::chrome::ActivityGroup::Subagents => {
-                // The group stays openable while any descendant exists
-                // (finished subagents are browsable history in the agents
-                // view); the dock's rendered count is live-only.
-                self.return_to_agents_view && self.subagent_counts.total > 0
-            }
-            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
-            // Any catalogued bash row keeps the dock's bash group
-            // reachable — the dock stays mounted (bash_total) whenever a
-            // row exists, so a selected group never binds to a hidden
-            // surface, and the bash view lists the finished rows.
-            crate::chrome::ActivityGroup::Bash => {
-                !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
-            }
-            // The goal group rides the dock's goal row: it stays
-            // selectable exactly while that row renders — every live
-            // state (the same gate as the row itself).
-            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 
@@ -1308,25 +1363,30 @@ impl SessionUi {
                 // take this Down; their shortcut stays
                 // `app.subagents.focus`, so the prompt's arrows keep the
                 // input-history recall in every session shape.
-                if !self.activity_selectable(crate::chrome::ActivityGroup::Subagents) {
+                if !(self.return_to_agents_view && self.subagent_counts.total > 0) {
                     return false;
                 }
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
-            DockFocusSource::Shortcut => {}
-        }
-        if !self.activity_selectable(self.activity_group) {
-            let Some(group) = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group)) else {
-                return false;
-            };
-            self.activity_group = group;
+            DockFocusSource::Shortcut => {
+                // The dock owns the hand-off exactly while it renders: a
+                // session with nothing to show (no subagent history,
+                // heartbeats, shells, or live goal) keeps the dock
+                // unmounted and the focus in the editor. Every group the
+                // row renders is traversable, empty ones included, so no
+                // feed gate remains here.
+                let dock = self.activity_dock_state();
+                if !dock.visible() {
+                    return false;
+                }
+                if !dock.groups().contains(&self.activity_group) {
+                    // Only the goal group leaves with its row: the
+                    // selection steps back to the group that now ends the
+                    // row.
+                    self.activity_group =
+                        dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+                }
+            }
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -1411,6 +1471,10 @@ impl SessionUi {
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
         }
+        // The tray's effort suffix moves with the same snapshot: an
+        // attach's state either carries the session's level or reports a
+        // model without reasoning, and the bare name wins in both cases.
+        view.chrome.thinking_suffix = self.pending_thinking_suffix.take();
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS
@@ -1420,6 +1484,7 @@ impl SessionUi {
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
@@ -1490,6 +1555,24 @@ impl SessionUi {
         }
         view.follow();
         self.update_fast_filter(view);
+        // An open `/heartbeats` picker follows the rebuilt session's
+        // catalog (the channel fold's `apply_catalog` path, which the
+        // attach-time inline fold replaced): without this, a rebind
+        // leaves the picker showing the previous session's rows, and
+        // its Manage actions would target the stale active session.
+        if let Some(picker) = view.heartbeats_picker.as_mut() {
+            picker.apply_catalog(self.heartbeat_catalog.clone(), None);
+        }
+        // The brand splash is the EMPTY chat's header (TS mounts
+        // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
+        // non-empty transcript suppresses it — the chat opened or
+        // switched directly into content, where TS's own direct opens
+        // attach before mount and the tail-anchored viewport scrolls the
+        // splash out of reach — while every rebuild into an empty chat
+        // keeps it (a new session shows its header; the incremental
+        // first-turn growth never passes through here, so a new chat's
+        // splash scrolls away exactly like TS).
+        view.splash_suppressed = !view.chat.is_empty();
         self.dirty = true;
     }
 
@@ -1604,15 +1687,24 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        // The top bar's spend is the FULL session+subagents total
-        // (`totalCost`, the /context root totalUsage's fold): the TS
-        // active-region `cost` drops pre-compaction spend, which reads
-        // as an inaccurate title after every compaction. Older daemons
-        // without the field fall back to the TS shape.
-        self.cost_usd = data
-            .get("totalCost")
-            .and_then(Value::as_f64)
-            .or_else(|| data.get("cost").and_then(Value::as_f64));
+        // The title shows the session's own spend plus the aggregate of
+        // its subagents (`ownCost`/`subagentsCost`, the split of the
+        // full session+subagents total): the TS active-region `cost`
+        // drops pre-compaction spend, which reads as an inaccurate
+        // title after every compaction. The split lands together; a
+        // daemon without `ownCost` serves the combined `totalCost`
+        // (or the TS `cost`), and a subagent suffix next to that would
+        // double-count — the suffix only rides the split's own half.
+        if let Some(own) = data.get("ownCost").and_then(Value::as_f64) {
+            self.cost_usd = Some(own);
+            self.subagents_cost_usd = data.get("subagentsCost").and_then(Value::as_f64);
+        } else {
+            self.cost_usd = data
+                .get("totalCost")
+                .and_then(Value::as_f64)
+                .or_else(|| data.get("cost").and_then(Value::as_f64));
+            self.subagents_cost_usd = None;
+        }
         self.dirty = true;
     }
 
@@ -1620,6 +1712,7 @@ impl SessionUi {
     pub(crate) fn rebuild_tray(&mut self, view: &mut AgentView) {
         view.chrome.context = self.context;
         view.chrome.cost_usd = self.cost_usd;
+        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         view.chrome.chat_name = self.session_display();
         self.dirty = true;
     }
@@ -2527,7 +2620,11 @@ impl SessionUi {
                     {
                         rebind_available = false;
                         let durable = self.session_id.clone();
-                        if self.attach_session(&durable).await.is_ok() {
+                        if self
+                            .attach_session(&durable, DockFold::FirstFrame)
+                            .await
+                            .is_ok()
+                        {
                             // The fresh attach snapshot owns the transcript;
                             // the replayed prompt renders on top of it.
                             self.rebuild_view(view, RebuildKind::Rebind);
@@ -2839,7 +2936,12 @@ impl SessionUi {
             }
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id).await?;
+                self.attach_session(&id, DockFold::Fresh).await?;
+                // The title's pair is session-scoped: fetch the new
+                // session's stats before the rebuild copies them into
+                // the chrome, or the rebind would ride the session being
+                // left's own cost and subagent aggregate.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
             }
@@ -3238,13 +3340,21 @@ impl SessionUi {
             // `/context` and its `/usage` alias (TS
             // `handleContextCommand` over `formatContextTree`): the agent
             // tree with own token/cost columns and context utilization.
+            // The optional `all` argument is a deliberate TS delta (TS
+            // takes none): over the row budget the default view collapses
+            // to the highest-usage agents plus a summary row and the
+            // expand hint, and `all` renders the whole tree.
             "context" => {
                 self.track_command_used("context");
-                if !resolved.args.is_empty() {
-                    view.editor.set_text(text);
-                    self.error_row("Usage: /context", view);
-                    return Ok(());
-                }
+                let scope = match resolved.args.as_str() {
+                    "" => info_commands::ContextTreeScope::Collapsed,
+                    "all" => info_commands::ContextTreeScope::EveryAgent,
+                    _ => {
+                        view.editor.set_text(text);
+                        self.error_row("Usage: /context [all]", view);
+                        return Ok(());
+                    }
+                };
                 view.push_entry(ChatEntry::User {
                     text: text.to_string(),
                 });
@@ -3263,7 +3373,7 @@ impl SessionUi {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
                         view.push_entry(ChatEntry::ClientText {
-                            rows: info_commands::context_tree_rows(&tree, width),
+                            rows: info_commands::context_tree_rows(&tree, width, scope),
                         });
                         self.dirty = true;
                     }
@@ -3672,6 +3782,11 @@ impl SessionUi {
         // renders from scratch, then the status row lands.
         self.rebuild_transcript(view).await;
         self.refresh_stats().await;
+        // The transcript rebuild ran before the refresh, so the refreshed
+        // pair rides the chrome through this tray rebuild — without it
+        // the title keeps the pre-import own cost and subagent aggregate
+        // until the next settled turn.
+        self.rebuild_tray(view);
         self.note(&format!("Session imported from: {input_path}"), view);
         Ok(())
     }
@@ -3862,7 +3977,7 @@ impl SessionUi {
         }
         let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_key(&id, kb);
+            panel.handle_key(&id, kb, &mut self.osc_sink);
         }
         // A cancel key on an armed panel flow ends it cooperatively
         // (#2770): the flag marks the blocking body (no credential write
@@ -4541,6 +4656,7 @@ impl SessionUi {
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
+        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
@@ -6038,8 +6154,11 @@ impl SessionUi {
         // so the switch lands on an empty prompt (the draft returns on a
         // switch back).
         self.stash_draft_for_switch(view);
-        match self.attach_session(&id).await {
+        match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
+                // Session-scoped stats again: the rebuilt title must show
+                // the switched-to session's pair, not the one being left.
+                self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head (if one was
@@ -6176,28 +6295,29 @@ impl SessionUi {
         Ok(())
     }
 
-    /// A mouse report (TS `handleFullscreenInput`'s selection branches):
+    /// A mouse report (TS `handleFullscreenInput`'s mouse branches):
     /// wheel turns scroll the transcript window by three lines; a left
-    /// press starts a selection (transcript, or the dock's frame surface
-    /// when the press is outside the window), a drag extends it with
-    /// edge auto-scroll, and a release copies the spanned text out
-    /// through OSC 52. Reports are consumed even while a picker, selector,
-    /// or loader owns the frame (the TS overlay-focus gate) — the wheel
-    /// never scrolls behind one, but its rows select; while tracking is
-    /// inactive every report is consumed without a dispatch. The onboarding
-    /// pane replaces the whole frame, so its runs consume reports without
-    /// a selection surface (a known deviation from the TS inline block).
+    /// press starts a selection (transcript, or the frame surface when the
+    /// press is outside the window), a drag extends it with edge
+    /// auto-scroll, and a release copies the spanned text out through OSC
+    /// 52. A release without a drag opens the link under the press
+    /// position (TS `fullscreenPressedHyperlink`: terminals gate native
+    /// link handling while mouse reporting is active, so clicks the TUI
+    /// consumes must open their OSC 8 targets themselves). Reports are
+    /// consumed even while a picker, selector, or loader owns the frame
+    /// (the TS overlay-focus gate) — the wheel never scrolls behind one,
+    /// but its rows select; while tracking is inactive every report is
+    /// consumed without a dispatch. The onboarding pane owns the frame the
+    /// same way (TS's splash is a 100% overlay): its rows select as frame
+    /// regions and its links open, but no transcript scrolls behind it.
     pub(crate) fn handle_mouse(&mut self, event: crate::mouse::MouseEvent, view: &mut AgentView) {
         if !crate::mouse_tracking::active() {
             return;
         }
-        if view.onboarding.is_some() {
-            return;
-        }
         // TS `isFullscreenOverlayFocused`: the `/model` and `/effort`
         // pickers, the `/tree` and `/fork` selectors, the `/mcp`
-        // connections view, and the `/share` loader own the frame like the
-        // TS overlays.
+        // connections view, the `/share` loader, and the onboarding splash
+        // own the frame like the TS overlays.
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
@@ -6206,7 +6326,21 @@ impl SessionUi {
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
-            || view.mcp_view.is_some();
+            || view.mcp_view.is_some()
+            || view.onboarding.is_some();
+        // TS records the press state before the dispatch: a drag report
+        // marks the press, a plain press remembers the link under it.
+        let left = event.button == crate::mouse::BUTTON_LEFT;
+        let release_was_drag = left && !event.press && self.left_mouse_dragged;
+        // Screen cells are one-based in the report (TS passes `event.y - 1`).
+        let row = event.y.saturating_sub(1) as usize;
+        let col = event.x.saturating_sub(1) as usize;
+        if left && event.press {
+            self.left_mouse_dragged = event.motion;
+            if !event.motion {
+                self.pressed_hyperlink = view.hyperlink_at(row, col);
+            }
+        }
         // Wheel turns scroll only on the session surface; a pane owns the
         // frame, the turn is consumed without scrolling.
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
@@ -6216,10 +6350,8 @@ impl SessionUi {
             }
             return;
         }
-        // Screen cells are one-based in the report (TS passes `event.y - 1`).
-        let row = event.y.saturating_sub(1) as usize;
-        let col = event.x.saturating_sub(1) as usize;
-        let left_press = event.press && event.button == crate::mouse::BUTTON_LEFT;
+        let left_press = event.press && left;
+        let mut open_pressed_link = false;
         if overlay_focused {
             // TS tries the frame surface first while an overlay owns the
             // frame (its rows are the selectable spans), then the window.
@@ -6240,10 +6372,9 @@ impl SessionUi {
                 self.dirty = true;
             } else if !event.press {
                 view.clear_selection();
+                open_pressed_link = left && !event.motion && !release_was_drag;
             }
-            return;
-        }
-        if left_press && !event.motion {
+        } else if left_press && !event.motion {
             self.stop_selection_auto_scroll();
             // TS `beginSelection` then the `beginFrameSelection` fallback.
             if !view.begin_selection(row, col) {
@@ -6264,6 +6395,40 @@ impl SessionUi {
         } else if !event.press {
             self.stop_selection_auto_scroll();
             view.clear_selection();
+            open_pressed_link = left && !event.motion && !release_was_drag;
+        }
+        // TS opens `fullscreenPressedHyperlink ?? hyperlinkAt(release)`
+        // on a plain left release: the pressed position wins, and a
+        // release over another link still opens that link (a plain click
+        // moves no cells).
+        if open_pressed_link {
+            let url = self
+                .pressed_hyperlink
+                .take()
+                .or_else(|| view.hyperlink_at(row, col));
+            if let Some(url) = url {
+                self.open_hyperlink(&url);
+            }
+        }
+        // TS clears the press state after every left release, so a later
+        // release can never open a stale press.
+        if left && !event.press {
+            self.left_mouse_dragged = false;
+            self.pressed_hyperlink = None;
+        }
+    }
+
+    /// Open one clicked link (TS `openHyperlink`): the href guard admits
+    /// only web and file locations, then the platform opener launches it
+    /// fire-and-forget. A headless run has no terminal — and no browser to
+    /// hand one to — so it records the URL for its verifier instead.
+    fn open_hyperlink(&mut self, url: &str) {
+        let Some(href) = crate::hyperlinks::openable_href(url) else {
+            return;
+        };
+        self.opened_urls.push(href.clone());
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            crate::browser::open_in_browser(&href);
         }
     }
 
@@ -6406,9 +6571,41 @@ impl SessionUi {
         Ok(())
     }
 
-    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
-        if !self
-            .client
+    /// The open-time kernel-bash fold: the first `list_kernel_bash`
+    /// response lands in the registry synchronously with the attach
+    /// (capability-gated and bounded like the background refresh), so
+    /// the dock's bash rows ride the first content frame instead of
+    /// popping in late. A failed fetch leaves the just-cleared registry
+    /// — the 2s poll refills.
+    async fn fetch_bash_activities(&mut self) {
+        if !self.kernel_bash_supported() {
+            return;
+        }
+        // Advance the epoch so a poll still in flight from before the
+        // attach (the 2s cadence's spawned list) never overwrites this
+        // fold with its older registry: the epoch check drops it at
+        // fold time.
+        self.bash_list_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        self.bash_activities = data;
+    }
+
+    /// Whether the daemon advertises the kernel-bash registry (older
+    /// daemons never see the list requests).
+    fn kernel_bash_supported(&self) -> bool {
+        self.client
             .hello()
             .get("serverCapabilities")
             .and_then(Value::as_array)
@@ -6416,7 +6613,10 @@ impl SessionUi {
                 caps.iter()
                     .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
             })
-        {
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
+        if !self.kernel_bash_supported() {
             return;
         }
         // The 2s poll, the view open, and the post-kill refresh can
@@ -6878,6 +7078,37 @@ impl SessionUi {
             (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
+    }
+
+    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
+    /// response scopes and sorts into the catalog synchronously with the
+    /// attach (bounded like every UI request), so the dock's heartbeat
+    /// rows ride the first content frame instead of popping in late. A
+    /// failed or timed-out fetch leaves the just-cleared catalog — the
+    /// same empty-open state the background refresh's failure arm
+    /// produces, and the next `heartbeats_changed` event refills.
+    async fn fetch_heartbeat_catalog(&mut self) {
+        // Advance the epoch so a refresh still in flight from before the
+        // attach (a `heartbeats_changed` burst's spawned fetch) never
+        // overwrites this fold with its older catalog: the epoch's
+        // staleness check drops it at fold time.
+        self.heartbeat_refresh_epoch += 1;
+        let Ok(data) = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::HeartbeatsList {
+                    id: None,
+                    active_session_id: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
+        sort_heartbeats(&mut heartbeats);
+        self.heartbeat_catalog = heartbeats;
     }
 
     /// Fire a background heartbeat-catalog refresh (TS
@@ -7362,7 +7593,8 @@ impl SessionUi {
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
     /// `set_thinking_level` command switches the session's level (durable
     /// row and settings default included), then the client records the
-    /// `Thinking level: <level>` status row.
+    /// `Thinking level: <level>` status row and the tray's `model:effort`
+    /// label follows the effective level.
     async fn apply_thinking_level(&mut self, level: &str, view: &mut AgentView) {
         let switched = self
             .bounded_request(
@@ -7376,7 +7608,39 @@ impl SessionUi {
             )
             .await;
         match switched {
-            Ok(_) => self.note(&format!("Thinking level: {level}"), view),
+            Ok(_) => {
+                // The tray's effort suffix follows the level the switch
+                // wrote: the daemon clamps the request (TS `setThinkingLevel`
+                // emits the effective level; the Rust daemon answers no such
+                // event, so the client re-reads the state `/effort` targets).
+                // A failed read falls back to the requested level, never the
+                // previous model's stale suffix.
+                let state = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::GetState {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await;
+                match state {
+                    Ok(data) => {
+                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+                    }
+                    // The switch succeeded; the state read did not. TS
+                    // `applyThinkingLevel` patches the requested level into
+                    // the connection state (the `thinking_level_changed`
+                    // event corrects it later), so render the requested
+                    // level — never the previous model's stale suffix.
+                    Err(_) => {
+                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
+                            .map(|parsed| parsed.wire_name().to_string());
+                    }
+                }
+                self.note(&format!("Thinking level: {level}"), view);
+            }
             Err(error) => {
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
@@ -7389,13 +7653,16 @@ impl SessionUi {
     }
 
     /// The session's connection state (TS `AgentConnectionState`): the
-    /// worker's `get_state` response. `None` surfaces the failure as a
-    /// note; callers keep the transcript unchanged then.
+    /// worker's `get_connection_state` response, which carries the
+    /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
+    /// `steeringMode`, `serviceTier`, ...) — `get_state` serves the
+    /// roster summary instead. `None` surfaces the failure as a note;
+    /// callers keep the transcript unchanged then.
     async fn connection_state(&mut self, view: &mut AgentView) -> Option<Value> {
         match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetState {
+                DaemonCommand::GetConnectionState {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     rest: Map::default(),
@@ -7426,6 +7693,9 @@ impl SessionUi {
     /// that omits it falls back to the picked model (`state.model ??
     /// fallbackModel`) — the switch already succeeded, so the label must
     /// move even when the worker's summary cannot re-resolve the model.
+    /// The tray's effort suffix follows the same read: a switch clamps
+    /// the level (a model without the old level re-resolves it), and a
+    /// model without reasoning renders the bare id.
     async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
         let state = self
             .bounded_request(
@@ -7437,15 +7707,22 @@ impl SessionUi {
                 },
             )
             .await;
-        let model_id = match state {
-            Ok(data) => data
+        if let Ok(data) = state {
+            let model_id = data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string),
-            Err(_) => picked_model_id.to_string(),
-        };
-        view.chrome.model_id = Some(model_id);
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            view.chrome.model_id = Some(model_id);
+            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
+        } else {
+            // The picked model's effort is unknown when the read fails:
+            // a stale suffix would pair the new model with the old
+            // model's level (a combination TS never renders), so the
+            // bare id wins.
+            view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.thinking_suffix = None;
+        }
         self.dirty = true;
     }
 
@@ -7783,8 +8060,8 @@ impl SessionUi {
         }
         // The activity dock owns focus while focused: Enter (and a second
         // Alt+A) opens the focused group's own view directly (the
-        // operator's direct-navigation redesign), left/right move the
-        // dock's group, up/cancel/back returns to the editor, expand
+        // operator's direct-navigation redesign), left/right step the
+        // dock's groups, up/cancel/back returns to the editor, expand
         // cycles the conversation detail and KEEPS the focus, and every
         // other key falls through after releasing the focus (TS
         // `onChatAction` -> `focusEditor` -> the editor handles it).
@@ -7798,29 +8075,22 @@ impl SessionUi {
                 return Ok(());
             }
             if id == "left" || id == "right" {
-                let groups = [
-                    crate::chrome::ActivityGroup::Subagents,
-                    crate::chrome::ActivityGroup::Heartbeats,
-                    crate::chrome::ActivityGroup::Bash,
-                    crate::chrome::ActivityGroup::Goal,
-                ];
-                let current = groups
-                    .iter()
-                    .position(|group| *group == self.activity_group)
-                    .unwrap_or(0);
-                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
-                    Box::new(groups[..current].iter().rev())
+                // One press, one group: the step lands on the
+                // neighboring rendered group and wraps at the row's
+                // ends, so an empty group is still visited (the
+                // operator's 2026-09-26 muscle-memory directive — an
+                // empty group never skips) and N groups take N
+                // presses to cycle.
+                let direction = if id == "left" {
+                    crate::chrome::ActivityDirection::Prev
                 } else {
-                    Box::new(groups[current + 1..].iter())
+                    crate::chrome::ActivityDirection::Next
                 };
-                if let Some(next) = candidates
-                    .copied()
-                    .find(|group| self.activity_selectable(*group))
-                {
-                    self.activity_group = next;
-                    self.update_subagent_summary(view);
-                    self.dirty = true;
-                }
+                self.activity_group = self
+                    .activity_dock_state()
+                    .step(self.activity_group, direction);
+                self.update_subagent_summary(view);
+                self.dirty = true;
                 return Ok(());
             }
             if kb.matches(&id, "tui.select.up")
@@ -8019,8 +8289,8 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // TS `app.subagents.focus` (default alt+a): the summary line takes
-        // focus when it is selectable.
+        // TS `app.subagents.focus` (default alt+a): the dock takes focus
+        // while it renders (an unmounted dock keeps the editor's focus).
         if view
             .editor
             .keybindings()

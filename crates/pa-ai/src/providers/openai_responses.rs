@@ -10,7 +10,7 @@ use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
-use crate::models::clamp_thinking_level;
+use crate::models::{clamp_thinking_level, supports_thinking};
 use crate::providers::openai_responses_shared::{
     apply_service_tier_pricing, convert_responses_messages, convert_responses_tools,
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ReasoningSummary,
@@ -238,7 +238,7 @@ fn build_params(model: &Model, context: &Context, options: &OpenAIResponsesOptio
             );
         }
     }
-    if model.reasoning {
+    if supports_thinking(model) {
         if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
             let effort = match options.reasoning_effort {
                 Some(effort) => model
@@ -534,5 +534,30 @@ mod tests {
         let compat = get_responses_compat(&plain);
         assert!(compat.send_session_id_header);
         assert!(compat.supports_long_cache_retention);
+    }
+
+    /// A `reasoning: false` model whose map addresses levels (the live
+    /// catalog's `gpt-5.3-chat-latest` shape, served over the Responses
+    /// API) is thinking-capable: the requested effort reaches the request
+    /// with the map's value. The flag alone must not veto a route that
+    /// declares addressable levels.
+    #[test]
+    fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-5.3-chat-latest", "name": "GPT-5.3 Chat (latest)",
+            "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1", "reasoning": false,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = OpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.reasoning_effort = Some(ModelThinkingLevel::Xhigh);
+        let params = build_params(&model, &Context::default(), &options);
+        assert_eq!(
+            params.get("reasoning"),
+            Some(&json!({ "effort": "xhigh", "summary": "auto" }))
+        );
     }
 }
