@@ -264,6 +264,7 @@ async fn deliver_message_respects_the_pending_capacity() {
         response.error.as_deref(),
         Some("Target session has too many pending messages: 20 unfinished, limit is 20")
     );
+}
 
 /// The attach response's wire shape is the TS `createAttachResult`
 /// key order (`serde_json` keeps insertion order), for slim and plain
