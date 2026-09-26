@@ -1,10 +1,10 @@
 //! The supervisor's client accept loop: transient accept errors warn
 //! and retry instead of killing the process.
 //!
-//! The pre-fix loop returned any accept error out of `run`, and the
-//! process exit orphaned every hosted session's worker into the
-//! five-minute supervisor-lost window. The error policy mirrors Codex's
-//! control-socket acceptor (`run_control_socket_acceptor` in
+//! An accept error must not exit the process: the exit would orphan
+//! every hosted session's worker into the five-minute supervisor-lost
+//! window. The error policy mirrors Codex's control-socket acceptor
+//! (`run_control_socket_acceptor` in
 //! `app-server-transport/src/transport/unix_socket.rs`): recoverable
 //! transport noise warns and retries immediately, and every other error
 //! logs and retries after a backoff. Two deliberate divergences from
@@ -13,9 +13,8 @@
 //! hot), and the retries are bounded by [`GIVE_UP_AFTER`] consecutive
 //! failures, because this supervisor owns the socket-path singleton:
 //! a listener that failed every accept for a solid minute is
-//! permanently broken, and exiting with the error (the pre-fix path)
-//! releases the bind for a fresh supervisor instead of spinning deaf
-//! forever.
+//! permanently broken, and exiting with the error releases the bind
+//! for a fresh supervisor instead of spinning deaf forever.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -29,8 +28,7 @@ use super::*;
 pub(super) const BACKOFF: Duration = Duration::from_secs(1);
 
 /// Consecutive non-recoverable accept failures the loop survives; the
-/// [`GIVE_UP_AFTER`]-th escalates the transport error out of `run` (the
-/// pre-fix exit path).
+/// [`GIVE_UP_AFTER`]-th escalates the transport error out of `run`.
 ///
 /// Sixty 1s-backoff retries keep the supervisor alive through transient
 /// fd-pressure storms, while a listener that failed every accept for a
@@ -183,12 +181,11 @@ mod tests {
         Box::new(accepted)
     }
 
-    /// A recoverable transport error must not exit the accept loop (the
-    /// pre-fix behavior killed the supervisor - and every hosted
-    /// session's supervision - on the first one), and scattered noise
-    /// below [`RECOVERABLE_STORM_AFTER`] must not burn the backoff:
-    /// the loop retries immediately, like Codex's control-socket
-    /// acceptor.
+    /// A recoverable transport error must not exit the accept loop (an
+    /// exit orphans every hosted session's worker), and scattered
+    /// noise below [`RECOVERABLE_STORM_AFTER`] must not burn the
+    /// backoff: the loop retries immediately, like Codex's
+    /// control-socket acceptor.
     #[tokio::test(start_paused = true)]
     async fn recoverable_accept_errors_do_not_exit_the_loop() {
         let dir = TempDir::new().unwrap();
@@ -326,9 +323,9 @@ mod tests {
 
     /// A listener that failed every accept for the whole give-up budget
     /// is permanently broken: the loop escalates the transport error
-    /// (the pre-fix exit) so the process releases the singleton socket
-    /// bind for a fresh supervisor - and it stops at exactly the
-    /// budget, neither earlier nor later.
+    /// so the process releases the singleton socket bind for a fresh
+    /// supervisor - and it stops at exactly the budget, neither earlier
+    /// nor later.
     #[tokio::test(start_paused = true)]
     async fn permanent_accept_failure_escalates_after_the_budget() {
         let dir = TempDir::new().unwrap();
