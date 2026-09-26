@@ -657,5 +657,10 @@ impl Worker {
         if let Err(error) = self.write_frame(&sink.writer, &header, &payload).await {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
+        // A large frame (an attach snapshot, a full-history tree) carried
+        // big transient Value trees; the frame is out, so return their
+        // freed heap to the OS instead of letting the arenas hold the
+        // phase's peak for the process lifetime.
+        pa_types::memory_release::trim_freed_heap_if_large(payload.len());
     }
 }
