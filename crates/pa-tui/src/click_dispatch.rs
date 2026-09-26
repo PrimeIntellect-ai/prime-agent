@@ -23,10 +23,9 @@ pub(crate) struct PressedClick {
 
 impl SessionUi {
     /// Record the click target under a plain left press (TS
-    /// `fullscreenPressedClick`): hyperlinks win over component regions
-    /// at the press position, and shift/alt/ctrl presses stay
-    /// selection-only. A motion press (the drag's first report) marks
-    /// the click as dragged and records nothing.
+    /// `fullscreenPressedClick`): a hyperlink wins over component
+    /// regions at the press position (the press-state block recorded
+    /// one), and shift/alt/ctrl presses stay selection-only.
     pub(crate) fn record_pressed_click(
         &mut self,
         view: &AgentView,
@@ -34,12 +33,11 @@ impl SessionUi {
     ) {
         let row = event.y.saturating_sub(1) as usize;
         let col = event.x.saturating_sub(1) as usize;
-        self.click_dragged = event.motion;
         if !event.motion
             && !event.shift
             && !event.alt
             && !event.ctrl
-            && crate::hyperlinks::frame_link_at(row, col).is_none()
+            && self.pressed_hyperlink.is_none()
         {
             self.pressed_click = view
                 .click_target_at(row, col)
@@ -47,23 +45,15 @@ impl SessionUi {
         }
     }
 
-    /// A left drag report kills the pending click (TS
-    /// `fullscreenLeftMouseDragged`).
-    pub(crate) fn note_click_drag(&mut self) {
-        self.click_dragged = true;
-    }
-
     /// Fire the click recorded at the press (TS `dispatchFullscreenClick`):
-    /// a release after a drag never fires, and the release must land on
-    /// the pressed target's own row.
+    /// a release after a drag never fires (TS `fullscreenLeftMouseDragged`
+    /// marks the press), and the release must land on the pressed
+    /// target's own row.
     pub(crate) fn dispatch_plain_click(&mut self, view: &mut AgentView, row: usize) {
-        let pressed = self.pressed_click.take();
-        let dragged = self.click_dragged;
-        self.click_dragged = false;
-        let Some(pressed) = pressed else {
+        let Some(pressed) = self.pressed_click.take() else {
             return;
         };
-        if dragged || pressed.row != row {
+        if self.left_mouse_dragged || pressed.row != row {
             return;
         }
         match pressed.action {
