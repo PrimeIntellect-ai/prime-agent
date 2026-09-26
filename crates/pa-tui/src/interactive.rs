@@ -339,6 +339,12 @@ pub struct InteractiveOptions {
     /// Whether the opened session had direct children (TS
     /// `sessionHasChildren`).
     pub session_has_children: bool,
+    /// The agents view handed the pane back from the dock's scoped panel
+    /// (TS `scope_back`: the parent key and escape both reopen the scope
+    /// root's chat): the reopened chat starts with the dock focused on
+    /// the panel's own group — the Subagents item — at its first paint
+    /// after the attach, instead of the prompt bar.
+    pub restore_dock_focus: bool,
     /// The client-process settings the interactive commands read and
     /// persist (`/settings`, `/fullscreen`). The
     /// composition root implements the seam over the real store; `None`
@@ -3811,6 +3817,7 @@ mod tests {
             session_rlm_depth: None,
             prompt_stash: std::sync::Arc::default(),
             session_has_children: false,
+            restore_dock_focus: false,
             client_settings: None,
         }
     }

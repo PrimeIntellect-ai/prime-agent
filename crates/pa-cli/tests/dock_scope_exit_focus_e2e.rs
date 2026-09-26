@@ -1,10 +1,12 @@
-//! End-to-end verifier for the subagent panel's keyboard path from the main
-//! chat (Kevin's live-dogfood ruling, TS parity): the attached session with a
-//! ledger-seeded child renders the subagent summary box; Down at the end of
-//! the prompt hands the focus to the panel (the unfocused `↓ select` hint
-//! flips to `Enter/→ open`); Enter opens the scoped agents view listing the
-//! child; Enter drills into the child's transcript (the ancestor carry); and
-//! the agents-back key returns from the child to the agents view.
+//! End-to-end verifier for the dock's Subagents panel exit (the
+//! operator's 2026-09-26 ruling): entering the scoped agents view from
+//! the dock and leaving it with ESC/left reopens the scope root's chat
+//! with the dock focused on the SUBAGENTS item — the panel's own dock
+//! icon — not the prompt bar. Proven behaviorally: in the reopened chat
+//! a bare Enter re-opens the scoped view (an Enter on the empty prompt
+//! bar submits nothing), and the scoped view's outcome carries
+//! `scope_back` (the flag the agents-view flow wires into the reopened
+//! run's options).
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -15,8 +17,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
-use pa_tui::interactive::SessionSelection;
-use pa_tui::interactive::UiMode;
+use pa_tui::interactive::{
+    HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
+};
 
 struct Supervisor {
     child: Child,
@@ -106,8 +109,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 }
 
 /// One saved-session fixture: a session header whose `parentSession` and
-/// `rlmDepth` give the catalog the subagent linkage, a display name, and a
-/// user/assistant exchange.
+/// `rlmDepth` give the catalog the subagent linkage, a display name, and
+/// a user/assistant exchange.
 fn write_fixture(
     dir: &Path,
     id: &str,
@@ -142,45 +145,16 @@ fn write_fixture(
     path
 }
 
-/// The first frame showing `marker` (the state before the later keystrokes
-/// mutate it).
-fn first_frame_of(frames: &[String], marker: &str) -> String {
-    frames
-        .iter()
-        .find(|frame| frame.contains(marker))
-        .unwrap_or_else(|| {
-            panic!(
-                "no frame shows {marker:?}; frames:\n{}",
-                frames.join("\n---frame---\n")
-            )
-        })
-        .clone()
-}
-
-/// The last frame showing `marker`.
-fn frame_of(frames: &[String], marker: &str) -> String {
-    frames
-        .iter()
-        .rev()
-        .find(|frame| frame.contains(marker))
-        .unwrap_or_else(|| {
-            panic!(
-                "no frame shows {marker:?}; frames:\n{}",
-                frames.join("\n---frame---\n")
-            )
-        })
-        .clone()
-}
-
-/// The interactive options for one fixture session.
+/// The interactive options for one fixture session; `restore_dock_focus`
+/// rides the scope-back reopen exactly the way the agents-view flow
+/// passes it.
 fn session_options(
     socket: &Path,
     session_dir: &Path,
     session: SessionSelection,
-    rlm_depth: Option<u32>,
-    has_children: bool,
-) -> pa_tui::interactive::InteractiveOptions {
-    pa_tui::interactive::InteractiveOptions {
+    restore_dock_focus: bool,
+) -> InteractiveOptions {
+    InteractiveOptions {
         socket_path: socket.to_path_buf(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),
@@ -189,7 +163,7 @@ fn session_options(
         default_thinking_level: None,
         session_dir: Some(session_dir.to_path_buf()),
         script_path: None,
-        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_selection: ModelSelection::default(),
         no_session: false,
         session,
         initial_message: None,
@@ -209,74 +183,71 @@ fn session_options(
         client_settings: None,
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: rlm_depth,
+        session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
-        session_has_children: has_children,
-        restore_dock_focus: false,
+        session_has_children: true,
+        restore_dock_focus,
     }
 }
 
-#[tokio::test]
-async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
+/// One full scope-back cycle: the parent's chat opens with the dock's
+/// Subagents group selectable (one ledger-seeded child), the scoped
+/// agents view is entered from the dock and left with `exit_key`, and
+/// the reopened chat proves its dock holds the focus — the next bare
+/// Enter re-opens the scoped view (an Enter on the empty prompt bar
+/// submits nothing).
+async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The family fixture: a parent with a transcript, and a child under it
-    // (the linkage the ledger edge carries, with the child's own exchange
-    // for its transcript frames).
     let parent_path = write_fixture(
         &session_dir,
-        "panel-nav-parent",
-        "panel nav parent",
+        "scope-exit-parent",
+        "scope exit parent",
         None,
         0,
         &[("dispatch the worker", "worker dispatched")],
     );
     let child_path = write_fixture(
         &session_dir,
-        "panel-nav-worker",
-        "panel nav worker",
+        "scope-exit-worker",
+        "scope exit worker",
         Some(&parent_path),
         1,
         &[("do the work", "work complete alpha")],
     );
-    // The durable spawn edge: the roster surfaces the child as the parent's
-    // passive descendant (the `roster_subscribe` seed walks it), so the
-    // attached parent renders the subagent summary box from the real daemon.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
         .append_spawn(pa_daemon::rlm_ledger::RlmSpawnInput {
-            child_id: "panel-nav-child".to_string(),
+            child_id: "scope-exit-child".to_string(),
             parent: parent_path.to_string_lossy().to_string(),
             child: child_path.to_string_lossy().to_string(),
             depth: 1,
-            name: "panel nav worker".to_string(),
+            name: "scope exit worker".to_string(),
         })
         .expect("append spawn edge");
 
-    // Run 1 — the attached parent's main chat: Down at the end of the empty
-    // prompt focuses the activity dock, and Enter opens the scoped agents
-    // view DIRECTLY (the operator's direct-navigation redesign — the
-    // grouped activity panel is gone, no intermediate step).
-    let parent_options = session_options(
+    // Run 1 — the attached parent's chat: Down focuses the dock (the
+    // ledger-seeded child makes the Subagents group the first selectable
+    // one) and Enter opens the scoped agents view (the panel).
+    let options = session_options(
         &supervisor.socket,
         &session_dir,
-        SessionSelection::Resume(parent_path.clone()),
-        None,
-        true,
+        SessionSelection::Resume(parent_path),
+        false,
     );
-    let parent_plan = pa_tui::interactive::HeadlessPlan {
+    let plan = HeadlessPlan {
         steps: vec![
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 15_000 },
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            HeadlessStep::WaitIdle { timeout_ms: 15_000 },
+            HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Down,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            pa_tui::interactive::HeadlessStep::WaitMs(300),
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            HeadlessStep::WaitMs(300),
+            HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
             )),
@@ -284,43 +255,31 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         width: 120,
         height: 36,
     };
-    let parent_run =
-        pa_tui::interactive::run_interactive(parent_options, UiMode::Headless(parent_plan))
-            .await
-            .expect("parent session run");
-
-    // The dock renders at attach as the one-line activity row (unfocused,
-    // hint-free by design; Enter is the direct launcher). The subagents
-    // segment reads `\u{25c6} N subagents` — one consolidated item (the
-    // operator's 2026-09-25 consolidation), the running count riding
-    // the label in the dock's color: the passivated child is finished,
-    // so the count reads zero — the dock stays mounted and selectable
-    // because the child remains browsable history.
-    let attached = first_frame_of(&parent_run.frames, "subagent");
+    let run = pa_tui::interactive::run_interactive(options, UiMode::Headless(plan))
+        .await
+        .expect("parent session run");
     assert!(
-        attached.contains("\u{25c6} 0 subagents"),
-        "the unfocused dock shows the consolidated subagents segment:\n{attached}"
-    );
-    // The single Enter opened the scoped agents view directly: no
-    // grouped panel frame ever renders.
-    assert!(
-        !parent_run
-            .frames
-            .iter()
-            .any(|frame| frame.contains("Activity")),
-        "the grouped activity panel never opens (the direct-navigation redesign)"
+        run.frames.iter().any(|frame| frame.contains("subagent")),
+        "the parent renders the dock's subagents segment"
     );
     assert!(
-        parent_run.return_to_agents_view,
+        run.return_to_agents_view,
         "the dock's Enter hands the pane to the scoped agents view"
     );
-    let scope = parent_run
+    let scope = run
         .agents_view_scope
         .clone()
         .expect("the open came from the dock's direct navigation (scoped)");
+    let parent_active = scope
+        .active_session_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .expect("the scope names the parent's live session");
 
-    // Run 2 — the scoped agents view: the child lists as the root's direct
-    // child, and Enter drills into its transcript.
+    // Run 2 — the scoped agents view (the Subagents panel): the exit key
+    // hands the pane back to the scope root's chat, and the outcome
+    // carries `scope_back` (the flag the flow wires into the reopened
+    // run's options).
     let view_options = AgentsViewOptions {
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),
@@ -340,7 +299,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     let view_plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
-            AgentsStep::Key("enter".to_string()),
+            AgentsStep::Key(exit_key.to_string()),
         ],
         width: 120,
         height: 36,
@@ -353,60 +312,63 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     .await
     .expect("scoped agents view run")
     .outcome;
-    let scoped = frame_of(&view.frames, "panel nav worker");
-    assert!(
-        scoped.contains("panel nav parent") || scoped.contains("subagent"),
-        "the scoped view lists the child under the parent's subtree:\n{scoped}"
-    );
     assert_eq!(
         view.selection,
-        Some(SessionSelection::Resume(child_path.clone())),
-        "Enter on the child row opened the child's transcript"
+        Some(SessionSelection::Attach(parent_active.clone())),
+        "the exit key reopens the scope root's chat"
     );
-    // The scoped view lists the child as a top-level row (the scope root is
-    // excluded from its own subtree), so the open carries no ancestor
-    // expansion chain — the return re-entry lands back in the scope frame
-    // (TS `openSelected` on a direct scoped child).
     assert!(
-        view.expanded_ancestors.is_empty(),
-        "a direct scoped child carries no expansion ancestors: {:?}",
-        view.expanded_ancestors
+        view.scope_back,
+        "the scoped panel's exit marks the reopen (the flag the flow passes on)"
     );
-    assert_eq!(view.opened_rlm_depth, Some(1), "the child's rlmDepth");
 
-    // Run 3 — the child's transcript: its rows render with the `depth 1`
-    // tray label, and the agents-back key returns to the agents view (the
-    // TS escape path back from the nested transcript).
-    let child_options = session_options(
+    // Run 3 — the reopened chat: the scope-back flag rides the options
+    // (the flow's own wiring), so the dock starts focused on the
+    // Subagents item. The bare Enter re-opens the scoped view.
+    let options = session_options(
         &supervisor.socket,
         &session_dir,
-        SessionSelection::Resume(child_path.clone()),
-        view.opened_rlm_depth,
-        view.opened_has_children,
+        SessionSelection::Attach(parent_active.clone()),
+        true,
     );
-    let child_plan = pa_tui::interactive::HeadlessPlan {
+    let plan = HeadlessPlan {
         steps: vec![
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 15_000 },
-            pa_tui::interactive::HeadlessStep::ScrollTop,
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Left,
+            HeadlessStep::WaitIdle { timeout_ms: 15_000 },
+            HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
             )),
         ],
         width: 120,
         height: 36,
     };
-    let child_run =
-        pa_tui::interactive::run_interactive(child_options, UiMode::Headless(child_plan))
-            .await
-            .expect("child session run");
-    let child_frame = frame_of(&child_run.frames, "work complete alpha");
+    let run = pa_tui::interactive::run_interactive(options, UiMode::Headless(plan))
+        .await
+        .expect("reopened session run");
     assert!(
-        child_frame.contains("\u{2190} manage  depth 1"),
-        "the drilled-in child tray shows the manage hint and its depth:\n{child_frame}"
+        run.frames.iter().any(|frame| frame.contains("subagent")),
+        "the reopened chat renders the dock's subagents segment"
     );
     assert!(
-        child_run.return_to_agents_view,
-        "the agents-back key returned to the view"
+        run.return_to_agents_view,
+        "the reopened chat's dock held the focus on the Subagents item: a bare Enter re-opened the scoped view (the prompt bar would have swallowed it)"
     );
+    let reopened_scope = run
+        .agents_view_scope
+        .expect("the re-open came from the dock's Subagents item");
+    assert_eq!(
+        Some(parent_active.as_str()),
+        reopened_scope.active_session_id.as_deref(),
+        "the re-opened scope is the same session's subtree"
+    );
+}
+
+#[tokio::test]
+async fn scoped_view_escape_returns_to_the_subagents_dock_item() {
+    scope_exit_keeps_the_subagents_item("escape").await;
+}
+
+#[tokio::test]
+async fn scoped_view_left_returns_to_the_subagents_dock_item() {
+    scope_exit_keeps_the_subagents_item("left").await;
 }

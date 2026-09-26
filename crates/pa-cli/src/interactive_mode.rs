@@ -724,6 +724,11 @@ async fn run_agents_view_flow(
         session_options.session = selection;
         session_options.session_rlm_depth = view.opened_rlm_depth;
         session_options.session_has_children = view.opened_has_children;
+        // The scoped panel's own exit (the parent key or escape) reopened
+        // the scope root's chat: it starts with the dock focused on the
+        // panel's own group (the Subagents item), not the prompt bar —
+        // a plain row open keeps the editor's focus.
+        session_options.restore_dock_focus = view.scope_back;
         // The opened session's own directory rides the options: the
         // session run anchors its cwd (and the file-completion base) on
         // the attached session's directory, not the launch directory the
@@ -945,9 +950,11 @@ fn build_tui_options(
         prompt_stash,
         // RLM depth metadata comes from the agents view when it opens a row
         // (TS `sessionDepth`/`sessionHasChildren`); a direct CLI session is
-        // a root run.
+        // a root run. A direct launch never reopens from the scoped panel,
+        // so the dock's focus restore stays off (the editor owns it).
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     })
 }
 

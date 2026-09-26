@@ -145,6 +145,11 @@ pub struct AgentsViewOutcome {
     /// `resolveAgentsViewScopeFrames` dropping a frame): the flow drops the
     /// scope frame.
     pub scope_dropped: bool,
+    /// The scoped panel handed the pane back to its scope root's chat
+    /// (the parent key with pop, escape without — TS `scope_back` in
+    /// both arms): the reopened chat starts with the dock focused on the
+    /// panel's own group (the Subagents item), not the prompt bar.
+    pub scope_back: bool,
     /// Session ids of the opened row's ancestors, root-most first (TS
     /// `expandedAncestorSessionIds`): the flow feeds the next view run so
     /// the tree re-expands to the drilled row.
@@ -547,6 +552,11 @@ struct AgentsViewMode {
     /// The view exited through its parent key (TS `scope_back`): the flow
     /// pops the scope frame.
     scope_popped: bool,
+    /// The scoped panel handed the pane back to its scope root's chat
+    /// (the parent key with pop, escape without): the reopened chat
+    /// restores the dock focus on the panel's own group instead of the
+    /// prompt bar.
+    scope_back: bool,
     /// The open action the run ended with (`None` while the view runs).
     opened: Option<OpenedRow>,
     /// ctrl+n requested a fresh session (TS `app.agents.new`).
@@ -643,6 +653,7 @@ impl AgentsViewMode {
             pulse: 0,
             running: true,
             scope_popped: false,
+            scope_back: false,
             opened: None,
             new_session: false,
             saved_fetch_failed: false,
@@ -1451,6 +1462,7 @@ impl AgentsViewMode {
             return;
         };
         self.scope_popped = pop;
+        self.scope_back = true;
         let summary = self
             .records()
             .iter()
@@ -3089,6 +3101,7 @@ async fn run_agents_view_surface(
             query: (!mode.query.is_empty()).then(|| mode.query.clone()),
             scope_popped: mode.scope_popped,
             scope_dropped: mode.scope_dropped,
+            scope_back: mode.scope_back,
             expanded_ancestors: opened
                 .as_ref()
                 .map(|row| row.expanded_ancestors.clone())

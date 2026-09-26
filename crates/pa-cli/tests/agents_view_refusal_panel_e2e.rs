@@ -164,6 +164,7 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
