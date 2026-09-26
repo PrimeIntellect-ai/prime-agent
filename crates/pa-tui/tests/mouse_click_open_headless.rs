@@ -360,6 +360,12 @@ fn click_on_plain_text_opens_nothing() {
         HeadlessStep::Mouse(release(col + 1, row + 1)),
     ];
     let (_, opened, copies) = run_plan(steps);
-    assert!(opened.is_empty(), "a plain-text click opens nothing: {opened:?}");
-    assert!(copies.is_empty(), "the zero-width click copies nothing: {copies:?}");
+    assert!(
+        opened.is_empty(),
+        "a plain-text click opens nothing: {opened:?}"
+    );
+    assert!(
+        copies.is_empty(),
+        "the zero-width click copies nothing: {copies:?}"
+    );
 }

@@ -6256,7 +6256,10 @@ impl SessionUi {
         // release over another link still opens that link (a plain click
         // moves no cells).
         if open_pressed_link {
-            let url = self.pressed_hyperlink.take().or_else(|| view.hyperlink_at(row, col));
+            let url = self
+                .pressed_hyperlink
+                .take()
+                .or_else(|| view.hyperlink_at(row, col));
             if let Some(url) = url {
                 self.open_hyperlink(&url);
             }
