@@ -1335,21 +1335,35 @@ pub struct SessionInfo {
 /// TS `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`: the transcript search-text cap.
 pub const SESSION_LIST_SEARCH_TEXT_MAX_CHARS: usize = 64 * 1024;
 
+/// The roster fold's read-buffer size: the default 8 KiB chunks a grown
+/// session file into one read syscall per 8 KiB (a 1,000-file cold scan
+/// paid thousands of extra reads); one 64 KiB fill reads the typical
+/// session in a single syscall. Line semantics are `BufRead::read_line`'s
+/// either way - only the syscall chunking changes, never the folded
+/// bytes or the resume cursor.
+const SESSION_SCAN_READ_BUF_BYTES: usize = 64 * 1024;
+
 /// TS `appendCappedSearchText`: space-join the texts, cut the final
-/// addition so the corpus never grows past the cap.
-fn append_capped_search_text(current: &mut String, text: &str) {
+/// addition so the corpus never grows past the cap. `used` is the corpus's
+/// char count before this append; the returned count is the corpus's char
+/// count after it, so the fold keeps an O(1) running counter instead of
+/// re-counting the capped string for every message.
+fn append_capped_search_text(current: &mut String, text: &str, used: usize) -> usize {
     if text.is_empty() {
-        return;
+        return used;
     }
-    let used = current.chars().count();
     if used >= SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
-        return;
+        return used;
     }
-    if used > 0 {
+    let mut count = used;
+    if count > 0 {
         current.push(' ');
+        count += 1;
     }
-    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - current.chars().count();
-    current.extend(text.chars().take(remaining));
+    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - count;
+    let mut taken = 0;
+    current.extend(text.chars().take(remaining).inspect(|_| taken += 1));
+    count + taken
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1512,6 +1526,11 @@ struct SessionScanAccumulator {
     message_count: usize,
     first_message: String,
     all_messages_text: String,
+    /// [`SessionScanAccumulator::all_messages_text`]'s char count, kept in
+    /// lockstep by the only writer (`append_capped_search_text`): the cap
+    /// guard and the append read this O(1) counter instead of re-counting
+    /// the capped string per message (an O(messages x cap) fold tax).
+    search_text_chars: usize,
     last_activity_ms: Option<u64>,
     usage_scan: crate::session_usage::UsageScan,
 }
@@ -1558,6 +1577,7 @@ impl SessionScanState {
                 message_count: self.acc.message_count,
                 first_message: self.acc.first_message.clone(),
                 all_messages_text: self.acc.all_messages_text.clone(),
+                search_text_chars: self.acc.search_text_chars,
                 last_activity_ms: self.acc.last_activity_ms,
                 usage_scan: self.acc.usage_scan.clone(),
             },
@@ -1723,7 +1743,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
         return None;
     }
-    let mut reader = std::io::BufReader::new(&mut file);
+    let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut file);
     let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
     // `modified`, captured from the open file like TS captures it at
@@ -1949,8 +1969,7 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                 }
                 if (role == Some("user") && acc.first_message.is_empty())
                     || (matches!(role, Some("user" | "assistant"))
-                        && acc.all_messages_text.chars().count()
-                            < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
+                        && acc.search_text_chars < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
                 {
                     if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
                         if let Some(message) = full.fields.get("message") {
@@ -1961,9 +1980,10 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                                 }
                             }
                             if matches!(role, Some("user" | "assistant")) {
-                                append_capped_search_text(
+                                acc.search_text_chars = append_capped_search_text(
                                     &mut acc.all_messages_text,
                                     &message_text(message),
+                                    acc.search_text_chars,
                                 );
                             }
                         }
@@ -2698,6 +2718,214 @@ mod tests {
         assert!(info.all_messages_text.starts_with("0 xxx"));
         assert!(info.all_messages_text.contains("1 xxx"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_text_char_counter_stays_in_lockstep_with_the_corpus() {
+        // The O(1) running counter must equal `chars().count()` of the
+        // corpus at every fold step - including multibyte text, the cap
+        // cut mid-message, and post-cap appends - or the cap guard drifts
+        // from the TS corpus it bounds.
+        let mut acc = SessionScanAccumulator::default();
+        let texts = [
+            "fix the login bug".to_string(),
+            "ünïcödé — multibyte ✓ chars".to_string(),
+            "x".repeat(66 * 1024),
+            "post-cap tail that must not move the corpus".to_string(),
+            "y".repeat(10),
+        ];
+        for (index, text) in texts.iter().enumerate() {
+            let entry = json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": format!("{}", index + 1),
+                "message": {"role": "user", "content": text}
+            });
+            fold_scan_entry(&mut acc, &entry.to_string()).unwrap();
+            assert_eq!(
+                acc.search_text_chars,
+                acc.all_messages_text.chars().count(),
+                "counter drift after fold {index}"
+            );
+            assert!(acc.all_messages_text.chars().count() <= SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+        }
+        assert_eq!(acc.first_message, "fix the login bug");
+        assert_eq!(acc.message_count, 5);
+        // The cap cut mid-message: the corpus holds exactly the limit.
+        assert_eq!(acc.search_text_chars, SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn search_text_char_counter_matches_the_legacy_append() {
+        // The reference append (the pre-counter shape: count, then extend)
+        // must produce the same corpus for the same sequence of texts.
+        let mut corpus = String::new();
+        let mut count = 0usize;
+        let texts = [
+            String::new(),
+            "one".to_string(),
+            "twö with multibyte".to_string(),
+            "z".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS + 10),
+            "post-cap".to_string(),
+        ];
+        for text in &texts {
+            let mut legacy = corpus.clone();
+            if !text.is_empty() {
+                let used = legacy.chars().count();
+                if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                    if used > 0 {
+                        legacy.push(' ');
+                    }
+                    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - legacy.chars().count();
+                    legacy.extend(text.chars().take(remaining));
+                }
+            }
+            count = append_capped_search_text(&mut corpus, text, count);
+            assert_eq!(corpus, legacy);
+            assert_eq!(count, legacy.chars().count());
+        }
+    }
+
+    #[test]
+    fn search_text_counter_lockstep_names_every_corpus_mutation_path() {
+        // Every path that can mutate the capped corpus, at the accumulator
+        // level. Any other path is read-only (build_info derives, the wire
+        // serializes); eviction drops the whole state (counter and corpus
+        // together, so it cannot desync) and store_state keeps it whole.
+        // The paths: (1) a fresh fold's appends, (2) the resume copy a
+        // grown file folds into (clone_for_resume travels the counter),
+        // (3) the torn-tail SNAPSHOT fold (build_info folds the tail into
+        // a clone, the durable accumulator untouched), and (4) a rewritten
+        // file (generation mismatch re-folds from a fresh accumulator).
+        let header_line = session_header_line(&SessionHeader {
+            version: None,
+            id: "s1".to_string(),
+            timestamp: "2026-09-26T00:00:00.000Z".to_string(),
+            cwd: "/repo".to_string(),
+            parent_session: None,
+            rlm_depth: None,
+            git: None,
+            rest: serde_json::Map::default(),
+        })
+        .to_string();
+        let message = |text: &str, index: u64| {
+            json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": index.to_string(),
+                "message": {"role": "user", "content": text}
+            })
+            .to_string()
+        };
+
+        // (1) fresh fold, past the cap.
+        let generation = SessionInfoGeneration {
+            len: 4096,
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        };
+        let mut state = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut state.acc, &header_line).unwrap();
+        fold_scan_entry(&mut state.acc, &message("first user turn", 1)).unwrap();
+        fold_scan_entry(
+            &mut state.acc,
+            &message(&"x".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS), 2),
+        )
+        .unwrap();
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            state.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (2) the resume copy: the grown file's next appends fold into
+        // clone_for_resume's accumulator - the counter travels with the
+        // corpus and stays in lockstep for post-cap appends.
+        let mut resumed = state.clone_for_resume();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        fold_scan_entry(&mut resumed.acc, &message("appended after cap", 3)).unwrap();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            resumed.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (3) the torn-tail snapshot: build_info folds the torn final
+        // line into a CLONE, so the durable accumulator's counter stays
+        // untouched; an uncapped snapshot's row gains the tail's text,
+        // the capped one cannot (the tail arm is under the same cap).
+        let durable_before = state.acc.clone();
+        let capped_info = state
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            capped_info.all_messages_text, durable_before.all_messages_text,
+            "the cap bounds the snapshot fold too - a torn tail past it changes no corpus byte"
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            durable_before.search_text_chars
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        let mut uncapped = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut uncapped.acc, &header_line).unwrap();
+        fold_scan_entry(&mut uncapped.acc, &message("user turn one", 1)).unwrap();
+        let uncapped_durable = uncapped.acc.clone();
+        let uncapped_info = uncapped
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            uncapped_info.all_messages_text,
+            "user turn one user turn two"
+        );
+        assert_eq!(
+            uncapped.acc.all_messages_text,
+            uncapped_durable.all_messages_text
+        );
+        assert_eq!(
+            uncapped.acc.search_text_chars,
+            uncapped_durable.search_text_chars
+        );
+
+        // (4) a rewritten file re-folds from a fresh accumulator: both
+        // corpus and counter restart at zero together.
+        let mut rewritten = SessionScanState::fresh(generation);
+        assert_eq!(rewritten.acc.search_text_chars, 0);
+        assert!(rewritten.acc.all_messages_text.is_empty());
+        fold_scan_entry(&mut rewritten.acc, &header_line).unwrap();
+        fold_scan_entry(&mut rewritten.acc, &message("rewrite from zero", 1)).unwrap();
+        assert_eq!(
+            rewritten.acc.search_text_chars,
+            rewritten.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            rewritten.acc.all_messages_text, "rewrite from zero",
+            "a rewritten file's corpus is the fresh fold's, not the old session's"
+        );
     }
 
     #[test]
