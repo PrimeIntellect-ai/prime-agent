@@ -47,6 +47,18 @@ pub(super) const GIVE_UP_AFTER: u32 = 60;
 /// lines per second (the log's rotation bounds the disk side).
 pub(super) const RECOVERABLE_STORM_AFTER: u32 = 8;
 
+/// The 1s pause between retries, ended early by a shutdown wake: the
+/// loop may not hold the daemon exit (and the socket-path release
+/// behind it) hostage to the full backoff. Both wake sites store the
+/// accept-loop exit flag before the notify, so a consumed wake always
+/// means the loop is exiting.
+async fn retry_backoff(supervisor: &Supervisor) {
+    tokio::select! {
+        () = tokio::time::sleep(BACKOFF) => {}
+        () = supervisor.shutdown_notify.notified() => {}
+    }
+}
+
 /// Serve clients until `begin_shutdown` completes its stop pass and
 /// sets the accept-loop exit flag.
 ///
@@ -80,7 +92,7 @@ pub(super) async fn serve(
                         ));
                         recoverable_streak += 1;
                         if recoverable_streak >= RECOVERABLE_STORM_AFTER {
-                            tokio::time::sleep(BACKOFF).await;
+                            retry_backoff(supervisor).await;
                             recoverable_streak = 0;
                         }
                         continue;
@@ -98,7 +110,7 @@ pub(super) async fn serve(
                     supervisor.log_line(&format!(
                         "supervisor accept error {consecutive_failures}/{GIVE_UP_AFTER}, retrying: {error}"
                     ));
-                    tokio::time::sleep(BACKOFF).await;
+                    retry_backoff(supervisor).await;
                     continue;
                 }
             },
@@ -123,6 +135,7 @@ mod tests {
     use std::io;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use pa_types::platform::transport::{AcceptFuture, TransportStream};
     use tempfile::TempDir;
@@ -384,6 +397,37 @@ mod tests {
         assert!(
             scripted.results.lock().unwrap().is_empty(),
             "every error continued immediately"
+        );
+    }
+
+    /// A shutdown wake must end an in-flight backoff early: the loop may
+    /// not hold the daemon exit (and the socket-path release behind it)
+    /// hostage to the full second (Macroscope review).
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_wake_ends_the_backoff_early() {
+        let dir = TempDir::new().unwrap();
+        let supervisor = test_supervisor(&dir);
+        let scripted = ScriptedAccepts {
+            results: Mutex::new(vec![accept_error(ErrorKind::Other, "hard error")].into()),
+            supervisor: Arc::clone(&supervisor),
+        };
+        // The terminal wake fires mid-backoff: after a 100ms pause the
+        // accept-loop exit flag and its notify arrive, exactly like
+        // `begin_shutdown` finishing its stop pass.
+        let shutting_down = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            shutting_down.accept_exit.store(true, Ordering::SeqCst);
+            shutting_down.shutdown_notify.notify_one();
+        });
+        let started = tokio::time::Instant::now();
+        serve(&supervisor, &scripted)
+            .await
+            .expect("the shutdown wake ends the loop");
+        assert!(
+            started.elapsed() < BACKOFF,
+            "the backoff ended at the wake, not the full second (elapsed {:?})",
+            started.elapsed()
         );
     }
 }
