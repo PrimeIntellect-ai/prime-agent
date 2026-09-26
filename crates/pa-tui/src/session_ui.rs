@@ -1194,10 +1194,38 @@ impl SessionUi {
             (!self.session_id.is_empty()).then(|| self.session_id.clone()),
             self.session_file.clone(),
         );
-        let counts = crate::subagents::count_descendants(&self.roster, &identity);
-        self.subagent_counts = counts;
+        self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
+        let dock = self.activity_dock_state();
+        // A focused selection must stay on a rendered group: the arrows
+        // visit every group an empty one included, so the selection
+        // only moves when its group leaves the row (the goal row ends
+        // with the goal) — and a dock that unmounts entirely (nothing
+        // left to show) returns the focus to the editor.
+        if self.subagents_focused {
+            if !dock.visible() {
+                self.subagents_focused = false;
+            } else if !dock.groups().contains(&self.activity_group) {
+                self.activity_group =
+                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+            }
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+            ..dock
+        });
+        if let Some(bash_view) = view.bash_view.as_mut() {
+            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
+                &self.bash_activities,
+            ));
+        }
+    }
 
-        let goal = &self.goal_view.goal;
+    /// The dock's feed state: the live counts, the goal row's label, and
+    /// the selection/focus the caller owns. The row render, the focus
+    /// hand-off, and the arrows' traversal all read this one mapping —
+    /// a group renders exactly when it stays traversable.
+    fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
         // The dock is the goal's one chrome surface (the operator's
         // 2026-09-24 directive moved it off the line below the prompt
         // bar): every live state renders its row — pursuing reads the
@@ -1206,7 +1234,7 @@ impl SessionUi {
         // here too (the tray's TS cluster no longer exists to carry
         // them; terminal states carry no row). The token budget lives
         // inside the goal panel the row opens, not on the bar.
-        let goal_label = tray_goal_label(goal);
+        let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1222,10 +1250,10 @@ impl SessionUi {
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
-        let dock = crate::chrome::ActivityDock {
-            subagents_running_direct: counts.running_direct,
-            subagents_running_nested: counts.running_nested,
-            subagents_total: counts.total,
+        crate::chrome::ActivityDock {
+            subagents_running_direct: self.subagent_counts.running_direct,
+            subagents_running_nested: self.subagent_counts.running_nested,
+            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1233,57 +1261,6 @@ impl SessionUi {
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
-        };
-        // A focused selection must stay actionable: when its feed empties
-        // (or never had rows), move to the first selectable group; with
-        // nothing selectable the dock stays a read-only indicator and
-        // releases the focus.
-        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
-            self.activity_group = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group))
-            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
-            if !self.activity_selectable(self.activity_group) {
-                self.subagents_focused = false;
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
-            selected: self.activity_group,
-            focused: self.subagents_focused,
-            ..dock
-        });
-        if let Some(bash_view) = view.bash_view.as_mut() {
-            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
-                &self.bash_activities,
-            ));
-        }
-    }
-
-    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
-        match group {
-            crate::chrome::ActivityGroup::Subagents => {
-                // The group stays openable while any descendant exists
-                // (finished subagents are browsable history in the agents
-                // view); the dock's rendered count is live-only.
-                self.return_to_agents_view && self.subagent_counts.total > 0
-            }
-            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
-            // Any catalogued bash row keeps the dock's bash group
-            // reachable — the dock stays mounted (bash_total) whenever a
-            // row exists, so a selected group never binds to a hidden
-            // surface, and the bash view lists the finished rows.
-            crate::chrome::ActivityGroup::Bash => {
-                !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
-            }
-            // The goal group rides the dock's goal row: it stays
-            // selectable exactly while that row renders — every live
-            // state (the same gate as the row itself).
-            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 
@@ -1297,18 +1274,20 @@ impl SessionUi {
         if self.tray_override(view).is_some() {
             return false;
         }
-        if !self.activity_selectable(self.activity_group) {
-            let Some(group) = [
-                crate::chrome::ActivityGroup::Subagents,
-                crate::chrome::ActivityGroup::Heartbeats,
-                crate::chrome::ActivityGroup::Bash,
-                crate::chrome::ActivityGroup::Goal,
-            ]
-            .into_iter()
-            .find(|group| self.activity_selectable(*group)) else {
-                return false;
-            };
-            self.activity_group = group;
+        // The dock owns the hand-off exactly while it renders: a session
+        // with nothing to show (no subagent history, heartbeats, shells,
+        // or live goal) keeps the dock unmounted and the focus in the
+        // editor. Every group the row renders is traversable, empty
+        // ones included, so no feed gate remains here.
+        let dock = self.activity_dock_state();
+        if !dock.visible() {
+            return false;
+        }
+        if !dock.groups().contains(&self.activity_group) {
+            // Only the goal group leaves with its row: the selection
+            // steps back to the group that now ends the row.
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -7800,8 +7779,8 @@ impl SessionUi {
         }
         // The activity dock owns focus while focused: Enter (and a second
         // Alt+A) opens the focused group's own view directly (the
-        // operator's direct-navigation redesign), left/right move the
-        // dock's group, up/cancel/back returns to the editor, expand
+        // operator's direct-navigation redesign), left/right step the
+        // dock's groups, up/cancel/back returns to the editor, expand
         // cycles the conversation detail and KEEPS the focus, and every
         // other key falls through after releasing the focus (TS
         // `onChatAction` -> `focusEditor` -> the editor handles it).
@@ -7815,29 +7794,22 @@ impl SessionUi {
                 return Ok(());
             }
             if id == "left" || id == "right" {
-                let groups = [
-                    crate::chrome::ActivityGroup::Subagents,
-                    crate::chrome::ActivityGroup::Heartbeats,
-                    crate::chrome::ActivityGroup::Bash,
-                    crate::chrome::ActivityGroup::Goal,
-                ];
-                let current = groups
-                    .iter()
-                    .position(|group| *group == self.activity_group)
-                    .unwrap_or(0);
-                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
-                    Box::new(groups[..current].iter().rev())
+                // One press, one group: the step lands on the
+                // neighboring rendered group and wraps at the row's
+                // ends, so an empty group is still visited (the
+                // operator's 2026-09-26 muscle-memory directive — an
+                // empty group never skips) and N groups take N
+                // presses to cycle.
+                let direction = if id == "left" {
+                    crate::chrome::ActivityDirection::Prev
                 } else {
-                    Box::new(groups[current + 1..].iter())
+                    crate::chrome::ActivityDirection::Next
                 };
-                if let Some(next) = candidates
-                    .copied()
-                    .find(|group| self.activity_selectable(*group))
-                {
-                    self.activity_group = next;
-                    self.update_subagent_summary(view);
-                    self.dirty = true;
-                }
+                self.activity_group = self
+                    .activity_dock_state()
+                    .step(self.activity_group, direction);
+                self.update_subagent_summary(view);
+                self.dirty = true;
                 return Ok(());
             }
             if kb.matches(&id, "tui.select.up")
@@ -8036,8 +8008,8 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // TS `app.subagents.focus` (default alt+a): the summary line takes
-        // focus when it is selectable.
+        // TS `app.subagents.focus` (default alt+a): the dock takes focus
+        // while it renders (an unmounted dock keeps the editor's focus).
         if view
             .editor
             .keybindings()
@@ -8232,10 +8204,9 @@ impl SessionUi {
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
         // of the prompt — no autocomplete open, no history browse, the
-        // cursor at the last line's end — hands the focus to the subagent
-        // summary line when it is selectable; every other Down falls
-        // through to the editor's cursor motion (a non-selectable line
-        // never takes it).
+        // cursor at the last line's end — hands the focus to the dock
+        // while it renders; every other Down falls through to the
+        // editor's cursor motion (an unmounted dock never takes it).
         if view
             .editor
             .keybindings()
