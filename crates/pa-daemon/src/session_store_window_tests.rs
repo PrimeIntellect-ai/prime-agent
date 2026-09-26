@@ -306,8 +306,7 @@ fn fold_reference_scalars(store: &SessionFile) -> (Option<u64>, u64, u64, f64, u
 }
 
 fn assert_scan_matches_fold(label: &str, store: &SessionFile) {
-    let (last_timestamp, input_tokens, output_tokens, cost, count) =
-        fold_reference_scalars(store);
+    let (last_timestamp, input_tokens, output_tokens, cost, count) = fold_reference_scalars(store);
     let scalars = store.scan_message_scalars();
     assert_eq!(
         scalars.last_timestamp_ms, last_timestamp,
@@ -362,7 +361,10 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
             "custom_message",
             json!({"customType": "goal_context", "content": "ctx", "usage": usage_of(999, 999, 0, 99.0)}),
         );
-        store.append_entry("custom", json!({"customType": "thread_goal_state", "data": {"x": 1}}));
+        store.append_entry(
+            "custom",
+            json!({"customType": "thread_goal_state", "data": {"x": 1}}),
+        );
         store.append_message(assistant(usage_of(7, 1, 0, 0.2), 400));
         store.append_message(json!({"role": "toolResult", "toolCallId": "c", "content": []}));
         assert_scan_matches_fold("plain", &store);
@@ -389,7 +391,8 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         store.append_message(json!({"role": "user", "content": "gone", "timestamp": 1u64}));
-        let kept = store.append_message(json!({"role": "user", "content": "kept", "timestamp": 50u64}));
+        let kept =
+            store.append_message(json!({"role": "user", "content": "kept", "timestamp": 50u64}));
         store.append_message(assistant(usage_of(4, 5, 6, 0.3), 60));
         store.append_entry(
             "compaction",
@@ -466,7 +469,10 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         assert_scan_matches_fold("empty session", &store);
-        assert_eq!(store.scan_message_scalars(), Default::default());
+        assert_eq!(
+            store.scan_message_scalars(),
+            MessageWindowScalars::default()
+        );
     }
 
     // Degenerate rows: a `message` entry without its persisted message
@@ -495,7 +501,10 @@ fn walk_pins_the_compaction_boundary_sequences() {
     let mut store = SessionFile::create("/tmp", None, 0);
     store.set_path(path);
     store.append_message(json!({"role": "user", "content": "u1", "timestamp": 1u64}));
-    store.append_entry("custom", json!({"customType": "thread_goal_state", "data": {}}));
+    store.append_entry(
+        "custom",
+        json!({"customType": "thread_goal_state", "data": {}}),
+    );
     let kept = store.append_message(json!({"role": "user", "content": "u2", "timestamp": 2u64}));
     store.append_entry(
         "custom_message",
@@ -511,9 +520,17 @@ fn walk_pins_the_compaction_boundary_sequences() {
     let messages = store.messages();
     let roles: Vec<&str> = messages
         .iter()
-        .map(|message| message.get("role").and_then(Value::as_str).unwrap_or_default())
+        .map(|message| {
+            message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        })
         .collect();
-    assert_eq!(roles, ["compactionSummary", "user", "custom", "assistant", "user"]);
+    assert_eq!(
+        roles,
+        ["compactionSummary", "user", "custom", "assistant", "user"]
+    );
     assert_eq!(messages[0]["retainedMessageCount"], json!(3));
     assert_eq!(messages[0]["tokensBefore"], json!(9));
     assert_eq!(messages[1]["content"], "u2");

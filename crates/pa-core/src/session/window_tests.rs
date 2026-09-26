@@ -843,7 +843,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
             pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text("live prompt".to_owned()),
                 timestamp: 5,
-                rest: Default::default(),
+                rest: pa_types::JsonMap::default(),
             },
         ))
         .unwrap();
