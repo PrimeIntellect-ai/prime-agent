@@ -397,8 +397,8 @@ mod tests {
         let response = list(payload(serde_json::json!({ "type": "rlm_heartbeat.list" })))
             .await
             .unwrap();
-        assert!(response["heartbeats"].as_array().unwrap().len() == 1);
-        assert!(mutations.lock().await.len() == 1);
+        assert_eq!(response["heartbeats"].as_array().unwrap().len(), 1);
+        assert_eq!(mutations.lock().await.len(), 1);
 
         // A pause withdraws the queued fire (TS `updateRlmHeartbeatForState`).
         let update = handlers.get("rlm_heartbeat.update").unwrap().clone();

@@ -299,7 +299,7 @@ impl Worker {
             return false;
         }
         core.forced_all_steering = true;
-        for item in core.steering.iter_mut() {
+        for item in &mut core.steering {
             if armable(item) {
                 item.forced_batch = true;
             }

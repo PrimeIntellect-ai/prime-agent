@@ -112,7 +112,7 @@ impl SessionManager {
                 content,
                 display,
                 details,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             base,
         })?;
@@ -320,7 +320,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -328,7 +328,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 

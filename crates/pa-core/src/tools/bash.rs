@@ -5,6 +5,7 @@
 //! excluded; execution, guard, truncation, and formatting are identical).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -211,21 +212,24 @@ fn format_output(
             } else {
                 String::new()
             };
-            text.push_str(&format!(
+            let _ = write!(
+                text,
                 "\n\n[Showing last {} of line {start_line}{line_size}{location}]",
                 format_size(truncation.output_bytes)
-            ));
+            );
         } else if truncation.truncated_by == Some(TruncatedBy::Lines) {
-            text.push_str(&format!(
+            let _ = write!(
+                text,
                 "\n\n[Showing lines {start_line}-{end_line} of {}{location}]",
                 truncation.total_lines
-            ));
+            );
         } else {
-            text.push_str(&format!(
+            let _ = write!(
+                text,
                 "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit){location}]",
                 truncation.total_lines,
                 format_size(DEFAULT_MAX_BYTES)
-            ));
+            );
         }
     }
     FormattedOutput { text, details }
@@ -389,8 +393,8 @@ pub async fn execute_bash(
             None
         };
         tokio::select! {
-            _ = notify.notified() => {}
-            _ = async {
+            () = notify.notified() => {}
+            () = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
                     None => std::future::pending::<()>().await,

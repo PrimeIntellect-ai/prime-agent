@@ -7,6 +7,7 @@
 //! pass precedes the folds), so the newest session is the FIRST frame.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -125,18 +126,21 @@ fn write_fixture(
     let mut content = format!(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\",\"rlmDepth\":0}}\n"
     );
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
-    content.push_str(&format!(
-        "{{\"type\":\"message\",\"id\":\"{id}-mu\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"run the drill\",\"timestamp\":0}}}}\n"
-    ));
+    let _ = writeln!(
+        content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
+    let _ = writeln!(
+        content,
+        "{{\"type\":\"message\",\"id\":\"{id}-mu\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"run the drill\",\"timestamp\":0}}}}"
+    );
     for index in 0..grown_lines {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:01.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}],\"provider\":\"p\",\"model\":\"m\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(
+            content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:01.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}],\"provider\":\"p\",\"model\":\"m\",\"timestamp\":{}}}}}",
             "grown line of transcript text ".repeat(6),
             index as u64
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     let file = std::fs::File::options()

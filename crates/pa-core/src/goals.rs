@@ -212,7 +212,7 @@ pub fn create_goal_context_message(
             continuations_used: goal.continuations_used,
         })?),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
@@ -363,7 +363,7 @@ mod tests {
         let at_limit = "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS);
         assert!(validate_goal_objective(&at_limit).is_ok());
         assert!(validate_goal_budget(None).unwrap().is_none());
-        assert!(validate_goal_budget(Some(10)).unwrap() == Some(10));
+        assert_eq!(validate_goal_budget(Some(10)).unwrap(), Some(10));
         assert!(validate_goal_budget(Some(0)).is_err());
     }
 

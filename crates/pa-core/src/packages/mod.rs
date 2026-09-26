@@ -31,6 +31,7 @@ pub use resolve::{
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// The TS `CONFIG_DIR_NAME` (project-local settings/packages root).
@@ -122,10 +123,10 @@ pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(format!("{prefix}-{}", suffix.unwrap_or_default()).as_bytes());
     let digest = hasher.finalize();
-    let hash: String = digest[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hash: String = digest[..4].iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    });
     std::env::temp_dir()
         .join("pi-extensions")
         .join(prefix)

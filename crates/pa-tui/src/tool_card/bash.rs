@@ -295,7 +295,7 @@ mod tests {
         let rows = render(&card, 0, Detail::All, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(
-            flat.iter().any(|r| r.trim_end().ends_with("1")),
+            flat.iter().any(|r| r.trim_end().ends_with('1')),
             "got: {flat:?}"
         );
         assert!(

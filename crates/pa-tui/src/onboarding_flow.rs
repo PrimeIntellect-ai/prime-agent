@@ -518,7 +518,7 @@ mod tests {
     }
 
     fn row_text(line: &Line) -> String {
-        line.iter().map(|span| span.content.to_string()).collect()
+        line.iter().map(|span| span.content.clone()).collect()
     }
 
     #[test]
