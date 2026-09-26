@@ -521,9 +521,9 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn fast_options<'a>(
-        prime_cli_config_path: Option<&'a std::path::Path>,
-    ) -> PrimeAgentTracesLoginOptions<'a> {
+    fn fast_options(
+        prime_cli_config_path: Option<&std::path::Path>,
+    ) -> PrimeAgentTracesLoginOptions<'_> {
         let mut options = PrimeAgentTracesLoginOptions::new(prime_cli_config_path);
         // The pending status poll's interval stays real: keep it short so
         // the tests yield without waiting the product's 5s window.

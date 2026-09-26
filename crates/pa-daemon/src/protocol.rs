@@ -254,9 +254,7 @@ fn parse_daemon_command_value(
         .unwrap_or("unknown");
     // Keep the tag for the error after deserialization consumes the command value.
     let type_name = type_name.to_string();
-    let command = if let Ok(command) = serde_json::from_value::<DaemonCommand>(command_value) {
-        command
-    } else {
+    let Ok(command) = serde_json::from_value::<DaemonCommand>(command_value) else {
         if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
             return Err(EnvelopeParseError::UnknownCommand(type_name));
         }

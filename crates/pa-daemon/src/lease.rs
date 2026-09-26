@@ -105,8 +105,11 @@ fn lease_directory(agent_dir: &Path, session_path: &Path) -> PathBuf {
     let canonical = canonical_session_path(session_path);
     let key = Sha256::digest(canonical.to_string_lossy().as_bytes())
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+        .fold(String::new(), |mut key, b| {
+            use std::fmt::Write;
+            write!(key, "{b:02x}").expect("write to String");
+            key
+        });
     agent_dir.join("session-leases").join(format!("{key}.lock"))
 }
 
@@ -692,7 +695,7 @@ mod tests {
         // bound allows that setup gap.
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= STALE_GUARD_AFTER - Duration::from_millis(250),
+            elapsed >= STALE_GUARD_AFTER.saturating_sub(Duration::from_millis(250)),
             "the fresh guard was not waited out: {elapsed:?}"
         );
         // Generous ceiling: the reclaim fires right after the window, and

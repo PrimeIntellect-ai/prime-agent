@@ -579,7 +579,7 @@ impl RlmSpawnLedger {
         // preserves it), so a snapshot the reader would reject rides as
         // absent - the tombstone still lands bare (the historical-gap
         // zero).
-        if !(usage.cost.is_finite() && !usage.cost.is_sign_negative()) {
+        if !usage.cost.is_finite() || usage.cost.is_sign_negative() {
             return self.append_delete(child_id, child, reason);
         }
         let usage = serde_json::to_value(usage)
@@ -1050,9 +1050,8 @@ impl RlmSpawnLedger {
         if self.path.exists() {
             return Ok(());
         }
-        let root_entries = match fs::read_dir(&self.canonical_sessions_dir) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(()),
+        let Ok(root_entries) = fs::read_dir(&self.canonical_sessions_dir) else {
+            return Ok(());
         };
         let mut queue: Vec<(PathBuf, u32)> = root_entries
             .flatten()
@@ -1407,7 +1406,7 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].name, "renamed");
         assert_eq!(edges[0].depth, 1);
-        assert!(ledger.live_edges().unwrap().len() == 1);
+        assert_eq!(ledger.live_edges().unwrap().len(), 1);
         ledger
             .append_delete(
                 "sub-1",
@@ -2137,7 +2136,11 @@ mod tests {
                 "childId": "x2", "child": child.to_string_lossy(), "reason": "user",
             }),
         ];
-        let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let body = lines.iter().fold(String::new(), |mut body, line| {
+            use std::fmt::Write;
+            writeln!(body, "{line}").expect("write to String");
+            body
+        });
         let path = rlm_ledger_path(&dir, &sessions);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();

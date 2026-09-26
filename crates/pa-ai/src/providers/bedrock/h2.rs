@@ -88,7 +88,7 @@ impl H2Response {
             Some(signal) => {
                 let next = futures::StreamExt::next(&mut self.body);
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                    () = signal.cancelled() => return Err(ProviderError::Aborted),
                     chunk = next => chunk,
                 }
             }
@@ -139,7 +139,7 @@ async fn select_cancel(
     match signal {
         Some(signal) => {
             tokio::select! {
-                _ = signal.cancelled() => Err(ProviderError::Aborted),
+                () = signal.cancelled() => Err(ProviderError::Aborted),
                 result = future => result,
             }
         }

@@ -1204,7 +1204,7 @@ async fn shutdown_stale_daemon(
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await;
     let busy = sessions.map_or(true, |data| {
@@ -1228,7 +1228,7 @@ async fn shutdown_stale_daemon(
             .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
                 id: None,
                 force: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .await;
         client.close();
@@ -1291,6 +1291,7 @@ mod tests {
     // The sink's answers flow through the pa-tui trait; the tests call the
     // trait methods directly (the impl header alone does not import them).
     use pa_tui::interactive::OnboardingSink;
+    use serde_json::Map;
 
     #[test]
     fn session_flags_map_to_selections() {
@@ -1344,7 +1345,7 @@ mod tests {
                 agent_dir: dir.join("agent"),
                 ..Default::default()
             },
-            session: Default::default(),
+            session: crate::mode::SessionOptions::default(),
             messages: Vec::new(),
             file_args: Vec::new(),
             daemon_socket: None,
@@ -1520,7 +1521,7 @@ mod tests {
                     agent_dir: dir.join("agent"),
                     ..Default::default()
                 },
-                session: Default::default(),
+                session: crate::mode::SessionOptions::default(),
                 messages: Vec::new(),
                 file_args: Vec::new(),
                 daemon_socket: None,
@@ -1724,7 +1725,7 @@ mod tests {
                     agent_dir: dir.join("agent"),
                     ..Default::default()
                 },
-                session: Default::default(),
+                session: crate::mode::SessionOptions::default(),
                 messages: Vec::new(),
                 file_args: Vec::new(),
                 daemon_socket: None,
@@ -1749,7 +1750,7 @@ mod tests {
         let options = build_tui_options(
             &run_options(dir.path()),
             dir.path().join("d.sock"),
-            Default::default(),
+            std::sync::Arc::default(),
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "    ");
@@ -1760,7 +1761,7 @@ mod tests {
         let options = build_tui_options(
             &run_options(bare.path()),
             bare.path().join("d.sock"),
-            Default::default(),
+            std::sync::Arc::default(),
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "  ");
@@ -1786,11 +1787,11 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: user_text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )]),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .expect("write user message");
         session
@@ -1799,7 +1800,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "the answer".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -1813,7 +1814,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .expect("write assistant message");
         let id = session.get_session_id().to_string();
@@ -2074,8 +2075,12 @@ mod tests {
         options.config.agent_dir = dir.path().join("agent");
         options.session.fork = Some(id);
         options.session.session_dir = Some(session_dir.clone());
-        let tui = build_tui_options(&options, dir.path().join("d.sock"), Default::default())
-            .expect("the interactive launch forks instead of refusing");
+        let tui = build_tui_options(
+            &options,
+            dir.path().join("d.sock"),
+            std::sync::Arc::default(),
+        )
+        .expect("the interactive launch forks instead of refusing");
 
         let SessionSelection::Resume(fork) = &tui.session else {
             panic!(

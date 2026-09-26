@@ -201,9 +201,7 @@ pub async fn mcp_login(
         let callback = Arc::clone(&callback);
         let state = state.clone();
         tokio::spawn(async move {
-            let input = if let Some(input) = manual.await {
-                input
-            } else {
+            let Some(input) = manual.await else {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 callback.cancel().await;
                 return ManualOutcome::Cancelled;
