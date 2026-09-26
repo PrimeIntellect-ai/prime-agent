@@ -539,8 +539,8 @@ mod tests {
             flat(&rows[1]).trim_end(),
             " Python skills unavailable \u{b7} websearch, edit"
         );
-        assert_eq!(rows[1][0].style, theme().fg_style(ThemeColor::Muted));
-        assert_eq!(rows[1][1].style, theme().fg_style(ThemeColor::Dim));
+        assert_eq!(rows[1][1].style, theme().fg_style(ThemeColor::Muted));
+        assert_eq!(rows[1][2].style, theme().fg_style(ThemeColor::Dim));
         // Expanded: no hint, the full report renders as the body.
         let rows = render_injected_prompt(&row, Detail::All, &theme(), 80);
         assert!(rows.len() > 2, "body renders expanded: {rows:?}");
