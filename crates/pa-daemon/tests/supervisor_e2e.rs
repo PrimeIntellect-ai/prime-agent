@@ -670,6 +670,11 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // included). The scripted turn's spend is the whole session here, so
     // it equals the active `cost`.
     assert_eq!(data["totalCost"], 0.0);
+    // The title's own/subagent split: no attributed child spend in this
+    // scripted turn, so the own half carries the whole bill and the
+    // subagent aggregate is zero.
+    assert_eq!(data["ownCost"], 0.0);
+    assert_eq!(data["subagentsCost"], 0.0);
     let stats_keys: Vec<&str> = data
         .as_object()
         .expect("stats object")
@@ -678,8 +683,9 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         .collect();
     // TS `SessionStats` key order (sessionFile, sessionId, userMessages,
     // assistantMessages, toolCalls, toolResults, totalMessages, tokens,
-    // cost) with this port's `totalCost` appended after `cost`: the JSON
-    // map preserves insertion order.
+    // cost) with this port's `totalCost` plus the title split
+    // (`ownCost`, `subagentsCost`) appended after `cost`: the JSON map
+    // preserves insertion order.
     assert_eq!(
         stats_keys,
         vec![
@@ -693,6 +699,8 @@ fn session_stats_and_header_match_live_daemon_goldens() {
             "tokens",
             "cost",
             "totalCost",
+            "ownCost",
+            "subagentsCost",
         ]
     );
 
@@ -2147,5 +2155,45 @@ fn create_with_continue_recent_is_refused() {
     assert_ne!(
         session_id, "saved00000000000000000000000001",
         "the plain create opened a fresh session, not the saved one"
+    );
+}
+
+/// The OS-signal drain, end to end: a SIGTERM to the live supervisor is
+/// the graceful drain, not the default signal death - the process exits 0
+/// (a signal kill reports no exit code) and cleans its socket file up
+/// behind it. A connected client rides the drain; the in-crate
+/// supervisor tests hold the closing/settle semantics.
+#[test]
+fn a_sigterm_exits_the_supervisor_through_the_graceful_drain() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let mut daemon = spawn_daemon(&socket, &agent_dir);
+    let (_client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(daemon.child.id().to_string())
+        .status()
+        .expect("SIGTERM the supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the drained supervisor must exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.success(),
+        "the drain must end in a clean exit 0, not a signal death: {status}"
+    );
+    assert!(
+        !socket.exists(),
+        "the drained supervisor cleans its socket file up"
     );
 }
