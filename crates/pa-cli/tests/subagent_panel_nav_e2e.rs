@@ -335,6 +335,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let view_plan = AgentsHeadlessPlan {
         steps: vec![

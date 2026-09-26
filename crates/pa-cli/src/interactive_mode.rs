@@ -663,6 +663,10 @@ async fn run_agents_view_flow(
         Option<SessionSelection>,
     )> = Vec::new();
     let mut query: Option<String> = None;
+    // The view/session loop's carried incident notice state (TS
+    // `persistentState.incidentNoticeState`): a dismissal survives the
+    // next view run, and the 30s poll continues from the consumed offset.
+    let mut incident_notice_state: Option<pa_tui::incident_notices::IncidentNoticeState> = None;
     let mut expanded_ancestors: Vec<String> = Vec::new();
     let mut selected_row_identity: Option<String> = None;
     let mut selected_key: Option<pa_tui::agents_view::AgentsViewSelectionKey> = None;
@@ -691,6 +695,11 @@ async fn run_agents_view_flow(
                 .client_settings
                 .as_ref()
                 .is_some_and(|settings| settings.show_hardware_cursor()),
+            // TS `persistentState.incidentNoticeState`: the incident
+            // notice state survives leaving and re-entering the view (a
+            // dismissed incident never comes back, and the poll does not
+            // re-read consumed bytes).
+            incident_notice_state: incident_notice_state.take(),
         };
         let view_run = pa_tui::agents_view::run_agents_view(
             view_options,
@@ -716,6 +725,7 @@ async fn run_agents_view_flow(
         selected_row_identity = view.selected_row_identity.clone();
         selected_key = view.selected_key.clone();
         status_message = view.status_message.clone();
+        incident_notice_state = Some(view.incident_notice_state);
         query = if scope_frame_popped { None } else { view.query };
         // The opened row's depth metadata rides the session run (TS
         // `sessionDepth`/`sessionHasChildren`): a drilled-in child renders

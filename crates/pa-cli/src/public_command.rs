@@ -171,6 +171,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "schedule" => run_nested_agent_command("schedule", "cron", &rest),
         "status" => run_status(&rest),
         "doctor" => run_doctor(&rest),
+        "incident" => run_incident_command(&rest),
         "shutdown" => run_shutdown(&rest),
         "package" => run_package(&rest),
         "mcp" => run_mcp(&rest),
@@ -475,6 +476,39 @@ fn run_doctor(args: &[String]) -> PublicCommandResult {
         daemon_discovery::run_ps(
             options.contains("--json"),
             &daemon_discovery::current_state_root(),
+        );
+    }
+    handled()
+}
+
+/// `prime-agent incident` (TS `runIncidentCommand`): parse the options,
+/// resolve the window once, and print the timeline.
+fn run_incident_command(args: &[String]) -> PublicCommandResult {
+    let options = match crate::incident::parse_incident_options(args) {
+        Ok(options) => options,
+        Err(error) => {
+            return fail(
+                error.to_string(),
+                Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
+            )
+        }
+    };
+    // Resolve once: re-resolving later can cross UTC midnight and render a
+    // different window than the one that was validated.
+    let now_ms = crate::util_time::now_ms() as i64;
+    let window = match crate::incident::resolve_incident_window(&options, now_ms) {
+        Ok(window) => window,
+        Err(error) => {
+            return fail(
+                error.to_string(),
+                Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
+            )
+        }
+    };
+    if let Err(error) = crate::incident::run_incident(&options, Some(window)) {
+        return fail(
+            error.to_string(),
+            Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
         );
     }
     handled()
@@ -798,6 +832,87 @@ fn require_operand_count(
         None,
     );
     false
+}
+
+/// The incident command's dispatch contract (the TS public-command.test.ts
+/// incident suite): parsed options and a once-resolved window reach
+/// `run_incident`; usage errors fail with exit code 1 and the help hint.
+#[cfg(test)]
+mod incident_dispatch_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn routes_the_incident_command_with_parsed_window_options() {
+        // The routed dispatch parses the options, resolves the window
+        // once, and runs the command (over whatever logs exist under the
+        // agent dir — the fixture-backed coverage lives in the incident
+        // module's own tests); a routed run never fails with a usage
+        // error.
+        let result = handle_public_command(&args(&[
+            "incident",
+            "--since",
+            "20:02",
+            "--until=21:00",
+            "--session",
+            "abc",
+        ]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, None);
+        assert!(result.args.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_incident_options_with_usage_guidance() {
+        let result = handle_public_command(&args(&["incident", "--json"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn rejects_an_unordered_incident_window_with_usage_guidance() {
+        let result = handle_public_command(&args(&[
+            "incident",
+            "--since",
+            "2026-09-10T20:30",
+            "--until",
+            "2026-09-10T20:00",
+        ]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn rejects_a_bad_incident_time_with_usage_guidance() {
+        let result = handle_public_command(&args(&["incident", "--since", "yesterday"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn shows_incident_in_the_top_level_command_list() {
+        assert!(format_top_level_help().contains("incident"));
+    }
+
+    #[test]
+    fn the_incident_help_matches_the_ts_spec() {
+        let help = format_command_help(&["incident"]).expect("the incident spec");
+        assert!(
+            help.contains("Reconstruct a daemon incident from its logs"),
+            "{help}"
+        );
+        assert!(
+            help.contains("--since <time>  Window start (ISO date/time, date, or HH:MM today; default: 24h ago)"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Times without a timezone are read as UTC"),
+            "{help}"
+        );
+    }
 }
 
 #[cfg(test)]
