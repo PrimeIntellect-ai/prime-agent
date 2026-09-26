@@ -889,9 +889,12 @@ fn has_prime_agent_runtime_memoized(
     if !has_prime_agent_runtime(python) {
         return false;
     }
-    lock_probe_memo()
-        .get_or_insert_with(HashMap::new)
-        .insert(key, ());
+    let mut memo = lock_probe_memo();
+    let entries = memo.get_or_insert_with(HashMap::new);
+    if entries.len() >= 16 {
+        entries.clear();
+    }
+    entries.insert(key, ());
     true
 }
 
@@ -1236,13 +1239,18 @@ mod tests {
         let fake = dir.path().join("venv");
         let site = fake.join("lib/python3.11/site-packages");
         let rlm = site.join("rlm");
-        std::fs::create_dir_all(&rlm).unwrap();
-        let mut files = Vec::new();
-        collect_python_files(&real_rlm, &mut files).unwrap();
-        for file in &files {
-            let target = rlm.join(file.strip_prefix(&real_rlm).unwrap());
-            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-            std::fs::copy(file, &target).unwrap();
+        let dill = site.join("dill");
+        let real_dill = installed_package_dir(&real_venv, "dill")
+            .expect("installed dill is required for the live runtime probe");
+        for (source, target_dir) in [(&real_rlm, &rlm), (&real_dill, &dill)] {
+            std::fs::create_dir_all(target_dir).unwrap();
+            let mut files = Vec::new();
+            collect_python_files(source, &mut files).unwrap();
+            for file in &files {
+                let target = target_dir.join(file.strip_prefix(source).unwrap());
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::copy(file, &target).unwrap();
+            }
         }
 
         let counter = dir.path().join("count");
@@ -1295,6 +1303,23 @@ mod tests {
             "an uninstalled rlm must be detected, not masked"
         );
         assert_eq!(probe_count(), 2, "the out-of-band uninstall re-probed");
+
+        let mut files = Vec::new();
+        collect_python_files(&real_rlm, &mut files).unwrap();
+        for file in &files {
+            let target = rlm.join(file.strip_prefix(&real_rlm).unwrap());
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(file, &target).unwrap();
+        }
+        assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
+        assert_eq!(probe_count(), 3, "the restored runtime re-probed");
+
+        std::fs::remove_dir_all(&dill).unwrap();
+        assert!(
+            !kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]),
+            "a removed dill import must not be hidden by the memo"
+        );
+        assert_eq!(probe_count(), 4, "the removed dependency re-probed");
     }
 
     #[test]
