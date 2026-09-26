@@ -628,7 +628,8 @@ class PackerGates(unittest.TestCase):
                 repo = SyntheticRepo(self.tmp / f"pkrepo-missing-{doc}")
                 (repo.root / "docs" / doc).unlink()
                 args = ["--root", str(repo.root), "--version", "9.9.9",
-                        "--binary", str(repo.binary), "--skip-build",
+                        "--binary", str(repo.binary), "--decoder", str(repo.decoder),
+                        "--skip-build",
                         "--catalog-assets", str(self.assets),
                         "--out-dir", str(self.tmp / f"pkout-{doc}")]
                 result = run_cli(PACKER, args)
@@ -642,7 +643,8 @@ class PackerGates(unittest.TestCase):
         self.assertEqual(assembled.returncode, 0, assembled.stderr)
         archive = self.tmp / "assembled-docs" / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz"
         packaged = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
-                                    "--binary", str(self.repo.binary), "--skip-build",
+                                    "--binary", str(self.repo.binary),
+                                    "--decoder", str(self.repo.decoder), "--skip-build",
                                     "--catalog-assets", str(self.assets),
                                     "--out-dir", str(self.tmp / "packaged-docs")])
         self.assertEqual(packaged.returncode, 0, packaged.stderr)
@@ -684,7 +686,8 @@ class PackerGates(unittest.TestCase):
         self.assertNotEqual(checked.returncode, 0)
         self.assertIn("development cache entry", checked.stderr)
         args = ["--root", str(self.repo.root), "--version", "9.9.9",
-                "--binary", str(self.repo.binary), "--skip-build",
+                "--binary", str(self.repo.binary),
+                "--decoder", str(self.repo.decoder), "--skip-build",
                 "--catalog-assets", str(self.assets),
                 "--out-dir", str(self.tmp / "package-caches")]
         packaged = run_cli(PACKER, args)

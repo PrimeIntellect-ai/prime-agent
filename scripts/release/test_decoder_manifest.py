@@ -34,6 +34,11 @@ class DecoderManifest(unittest.TestCase):
             repo.mkdir()
             for directory in ("prime-agent-runtime", "skills", "docs"):
                 (repo / directory).mkdir()
+            # The assembler's shipped-docs gate (install-tree payload
+            # curation) requires every user-facing doc.
+            for doc in ("RUST_QUICKSTART.md", "keybindings.md",
+                        "MODEL-SURFACE.md", "FEATURE_PARITY.md"):
+                (repo / "docs" / doc).write_text("# doc\n")
             (repo / "prime-agent-runtime/pyproject.toml").write_text("[project]\nname = 'fixture'\nversion = '0.1.0'\n")
             (repo / "LICENSE").write_text("fixture\n")
             (repo / "README.md").write_text("fixture\n")
