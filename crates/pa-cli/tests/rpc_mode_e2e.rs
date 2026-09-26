@@ -329,8 +329,11 @@ fn rpc_parse_and_unknown_command_errors() {
     client.drain_stderr();
 }
 
-/// Steer and follow-up queue behind a running turn; abort settles it;
-/// the queued steer runs as the next turn.
+/// Steer and follow-up queue behind a running turn; abort settles it
+/// and parks the rows; the next prompt's run folds the parked steer
+/// into its own turn and delivers the follow-up as its second turn
+/// (TS `runLoop`'s run-start steering poll and post-turn follow-up
+/// poll over the parked queues).
 #[test]
 fn rpc_steer_and_follow_up_queue_then_abort() {
     let script = json!({
@@ -338,7 +341,6 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
             { "text": "slow turn", "delayMs": 5000 },
             { "text": "continue reply" },
             { "text": "steer answer" },
-            { "text": "follow-up answer" },
         ],
     });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
@@ -415,37 +417,40 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         parked["data"]["sessionActions"]["queuedCount"], 2,
         "the abort parks the queued rows: {parked}"
     );
-    // The next prompt resumes the pump: the queued steer delivers as a
-    // turn on the second response step, the queued follow-up on the
-    // third, after the prompt's own turn. Collect the three terminal
-    // frames with the settle poll's diagnostic drain — a missing turn
-    // dumps the live state and every frame seen, so the stalled phase
-    // (the prompt's turn, the steer's, or the follow-up's) is readable
-    // from the round.
+    // The next prompt resumes delivery and its run FOLDS the parked
+    // rows (TS `runLoop`, agent-loop.ts): the run-start steering poll
+    // folds the parked steer into the prompt's own turn's input
+    // (`skip_initial=false` — the TS loop folds anything queued before
+    // the turn starts), and the run's post-turn follow-up poll
+    // delivers the parked follow-up as the run's second turn. One run,
+    // two turns: the prompt's turn answers on the second script step,
+    // the follow-up turn on the third, and the single `agent_end`
+    // carries the whole folded run.
     let second = client.request(&json!({ "type": "prompt", "message": "continue" }));
     assert_eq!(second["success"], true);
-    let mut pump_frames: Vec<Value> = Vec::new();
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        pump_frames.extend(client.drain_frames());
-        let ends = pump_frames
-            .iter()
-            .filter(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
-            .count();
-        if ends >= 3 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the pump turns never settled ({ends} of 3 agent_ends); state: {}; frames: {pump_frames:?}",
-            client.request(&json!({ "type": "get_state" }))
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let end = client.wait_event("agent_end", TIMEOUT);
+    let texts = end["messages"]
+        .as_array()
+        .expect("the run's messages on agent_end")
+        .iter()
+        .map(|message| {
+            message["content"]
+                .as_array()
+                .and_then(|content| content.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["continue", "steer this", "continue reply", "fu this", "steer answer"],
+        "the folded run carries the parked rows in TS order: {end}"
+    );
     let text = client.request(&json!({ "type": "get_last_assistant_text" }));
     assert_eq!(
-        text["data"]["text"], "follow-up answer",
-        "the queued follow-up ran last: {text}"
+        text["data"]["text"], "steer answer",
+        "the folded follow-up turn ran last: {text}"
     );
     client.drain_stderr();
 }
