@@ -1311,8 +1311,9 @@ mod tests {
             std::fs::create_dir_all(target.parent().unwrap()).unwrap();
             std::fs::copy(file, &target).unwrap();
         }
+        invalidate_runtime_probe_cache();
         assert!(kernel_ready(&python.to_string_lossy(), &fake, &identity, &[]));
-        assert_eq!(probe_count(), 3, "the restored runtime re-probed");
+        assert_eq!(probe_count(), 3, "the restored runtime re-probed after invalidation");
 
         std::fs::remove_dir_all(&dill).unwrap();
         assert!(
