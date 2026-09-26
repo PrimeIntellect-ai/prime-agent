@@ -379,6 +379,7 @@ mod tests {
         client.attach(&registry, "b");
         let outcome = registry.publish("a", frame("one"));
         assert_eq!(outcome.delivered, 1, "a duplicate attach must not double-deliver");
+        assert_eq!(drained(&mut rx).await.len(), 1);
         client.detach_all(&registry);
         assert_eq!(registry.publish("b", frame("late")).delivered, 0);
         assert!(drained(&mut rx).await.is_empty());
