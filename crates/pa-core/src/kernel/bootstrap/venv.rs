@@ -1244,7 +1244,7 @@ mod tests {
         std::fs::write(
             &python,
             format!(
-                "#!/bin/sh\necho x >> \"{}\"\nPYTHONPATH={:?} exec \"{}\" \"$@\"\n",
+                "#!/bin/sh\necho x >> \"{}\"\nPYTHONPATH={:?} exec \"{}\" -S \"$@\"\n",
                 counter.display(),
                 site,
                 real_python.display()
