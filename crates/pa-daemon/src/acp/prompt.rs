@@ -420,7 +420,7 @@ async fn run_session_command_segment(
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     turn_failure: &mut Option<String>,
 ) -> anyhow::Result<bool> {
-    let Some(model) = mode.model.clone() else {
+    let Some(model) = mode.current_model().await else {
         // Unreachable in practice (the engine assembly requires a model);
         // fail as a request error instead of a turn failure.
         anyhow::bail!("No model available to run the session command");
@@ -433,7 +433,7 @@ async fn run_session_command_segment(
         let mut autonomous = session.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
-            api_key: mode.api_key.clone(),
+            api_key: mode.current_api_key().await,
             global_harness_dir: mode.agent_dir.as_path().to_path_buf(),
             autonomous: &mut autonomous,
         };

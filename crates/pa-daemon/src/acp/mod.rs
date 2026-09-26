@@ -1,18 +1,22 @@
 //! ACP stdio mode: a thin JSON-RPC transport over the session engine.
 //!
 //! One connection hosts at most one session. `session/new` admits the
-//! session (reporting a cwd mismatch instead of adopting one), `session/
-//! prompt` drives one engine turn with follow-up queueing semantics, and
-//! `session/cancel` / `session/close` stop work. Every frame leaves through
-//! one ordered write queue, so responses and `session/update` notifications
-//! interleave exactly in publication order. The process exits when stdin
-//! closes.
+//! session (reporting a cwd mismatch instead of adopting one) and
+//! advertises the model and reasoning-effort pickers, `session/prompt`
+//! drives one engine turn with follow-up queueing semantics,
+//! `session/set_config_option` applies a picker selection, and
+//! `session/cancel` / `session/close` stop work. Every frame leaves
+//! through one ordered write queue, so responses and `session/update`
+//! notifications interleave exactly in publication order. The process
+//! exits when stdin closes.
 
 mod autorefine;
 mod compaction_arms;
+mod config_options;
 pub mod daemon;
 mod events;
 mod goal_continuation;
+mod in_process_config;
 mod jsonrpc;
 mod mcp;
 mod meta;
@@ -20,6 +24,7 @@ mod producer;
 mod prompt;
 mod session;
 mod types;
+mod wire_config;
 mod wire_events;
 
 use std::path::{Path, PathBuf};
@@ -41,6 +46,9 @@ use types::{
     initialize_result, session_id_params, AcpStopReason, AcpStopReasonResponse, NewSessionParams,
 };
 
+use config_options::ProviderTargetSlot;
+use in_process_config::{admit_session_config, InProcessConfig};
+
 /// Everything the mode needs from the composition root.
 pub struct AcpOptions {
     /// The running session engine (`create_session` output).
@@ -58,6 +66,11 @@ pub struct AcpOptions {
     pub agent_dir: PathBuf,
     /// The autonomous runtime configuration from the CLI flags.
     pub autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
+    /// The switchable provider target the session's stream reads per call
+    /// (the composition's create-time output): a picker model switch swaps
+    /// it so the next turn streams on the selected model (TS `setModel`'s
+    /// stream re-registration).
+    pub provider_target: ProviderTargetSlot,
 }
 
 /// The hosted-session slot plus the in-flight admission bookkeeping.
@@ -76,9 +89,22 @@ struct AcpModeState {
     engine: Arc<SessionEngine>,
     actual_cwd: Arc<PathBuf>,
     product_version: Arc<String>,
-    model: Option<pa_types::ai::Model>,
-    api_key: Option<String>,
+    /// The session's live model (TS `state.model`): the composition's
+    /// resolved model at admission, updated by a picker model switch so
+    /// the session-command executors (`/compact`, `/refine`) follow the
+    /// switched model, exactly like the TS session's own calls.
+    model: Arc<Mutex<Option<pa_types::ai::Model>>>,
+    /// The session's live request key: follows a picker model switch's
+    /// registry resolution, so the session-command executors authenticate
+    /// against the switched model's provider (TS re-resolves auth with
+    /// the model).
+    api_key: Arc<Mutex<Option<String>>>,
+    /// The serialized config queue (TS `configTask`): picker switches and
+    /// the trigger-consuming arms observe one another through it, so an
+    /// armed refinement never reads the pre-switch model mid-switch.
+    config_queue: Arc<tokio::sync::Mutex<()>>,
     agent_dir: Arc<PathBuf>,
+    provider_target: ProviderTargetSlot,
     autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
     /// Session-scoped MCP servers live on the connection, exactly like the
     /// TS process-lifetime manager: one owner id fences them and
@@ -88,10 +114,30 @@ struct AcpModeState {
     mcp_server_names: Arc<Mutex<Vec<String>>>,
 }
 
+impl AcpModeState {
+    /// The session's current model (the live slot the picker switch
+    /// updates).
+    async fn current_model(&self) -> Option<pa_types::ai::Model> {
+        self.model.lock().await.clone()
+    }
+
+    /// The session's current request key (the live slot the picker switch
+    /// updates).
+    pub(super) async fn current_api_key(&self) -> Option<String> {
+        self.api_key.lock().await.clone()
+    }
+}
+
 /// One hosted session and its in-flight prompt turn, if any.
 struct SessionEntry {
     session: Arc<AcpSession>,
     prompt_task: Option<tokio::task::JoinHandle<()>>,
+    /// The picker state (TS `AcpSessionEntry`'s configOptions/models).
+    config: Arc<InProcessConfig>,
+    /// The agent-end refresh subscription (unsubscribed at close so a
+    /// closed session stops refreshing — the listener would otherwise
+    /// outlive the session and pin its state).
+    config_refresh: Option<pa_agent::agent::Subscription>,
 }
 
 /// Run the ACP stdio mode until stdin closes. Returns the process exit code.
@@ -123,9 +169,11 @@ pub async fn run_acp_mode(options: AcpOptions) -> Result<i32> {
         engine: options.engine.clone(),
         actual_cwd: Arc::new(options.actual_cwd.clone()),
         product_version: Arc::new(options.product_version.clone()),
-        model: options.model.clone(),
-        api_key: options.api_key.clone(),
+        model: Arc::new(Mutex::new(options.model.clone())),
+        api_key: Arc::new(Mutex::new(options.api_key.clone())),
+        config_queue: Arc::new(tokio::sync::Mutex::new(())),
         agent_dir: Arc::new(options.agent_dir.clone()),
+        provider_target: options.provider_target.clone(),
         autonomous_config: options.autonomous_config.clone(),
         // One MCP store with the engine's prompt gating (the core engine
         // builds it at session assembly): admitted servers reach the model
@@ -181,6 +229,12 @@ async fn teardown(state: &Arc<Mutex<ConnectionState>>, mode: &AcpModeState) {
     if let Some(task) = entry.prompt_task.take() {
         let _ = task.await;
     }
+    // The refresh listener goes away with the session, then the
+    // serialized config work settles before the producer fences.
+    if let Some(subscription) = entry.config_refresh.take() {
+        subscription.unsubscribe().await;
+    }
+    let _ = mode.config_queue.lock().await;
     // The serialized dispose drain (TS `dispose`): a compaction can arm
     // the compact-trigger review with no further turn to service it —
     // close runs the round one last time, best-effort, before the
@@ -225,6 +279,9 @@ async fn handle_request(
         }
         "session/prompt" => {
             prompt::handle_session_prompt(id, params, state, mode, tx).await;
+        }
+        "session/set_config_option" => {
+            in_process_config::handle_set_config_option(id, params, state, mode, tx).await;
         }
         "session/close" => {
             handle_session_close(id, params, state, mode, tx).await;
@@ -372,6 +429,10 @@ async fn session_new(
         }
     }
 
+    // The session's picker state: discovery and the initial options must
+    // not block admission (TS `entry.models = []` on a discovery failure).
+    let config = admit_session_config(mode).await;
+
     let session_id = uuid::Uuid::new_v4().to_string();
     let producer = UpdateProducer::new(session_id.clone(), tx.clone());
     // Autonomous state is session-scoped, like the TS session it backs.
@@ -386,14 +447,24 @@ async fn session_new(
         AcpSession::new(
             session_id.clone(),
             mode.engine.clone(),
-            producer,
+            producer.clone(),
             autonomous,
             driver,
         )
         .await,
     );
+    // The engine subscription refreshes the pickers at the end of every
+    // agent run (the TS `agent_end` trigger), through the same serialized
+    // queue as the request handler. The subscription is retained on the
+    // entry so close removes it (a listener that outlives the session
+    // keeps refreshing it).
+    let config_refresh =
+        in_process_config::wire_config_refresh(&session, Arc::clone(&config), mode.clone()).await;
 
-    let mut result = json!({ "sessionId": session_id });
+    let mut result = json!({
+        "sessionId": session_id,
+        "configOptions": *config.published.lock().await,
+    });
     if let Some(cwd_mismatch) = cwd_mismatch {
         result["_meta"] = meta::prime_agent_meta(PrimeAgentSessionMeta {
             cwd: Some(cwd_mismatch),
@@ -407,6 +478,8 @@ async fn session_new(
     Ok(SessionEntry {
         session,
         prompt_task: None,
+        config,
+        config_refresh: Some(config_refresh),
     })
 }
 
@@ -456,6 +529,14 @@ async fn handle_session_close(
     if let Some(task) = entry.prompt_task.take() {
         let _ = task.await;
     }
+    // The refresh listener goes away with the session (no later agent
+    // run refreshes a closed session), then the serialized config work
+    // settles before the producer fences (TS `await configTask` in
+    // `session/close`).
+    if let Some(subscription) = entry.config_refresh.take() {
+        subscription.unsubscribe().await;
+    }
+    let _ = mode.config_queue.lock().await;
     // The serialized dispose drain (TS `dispose`): a compaction can arm
     // the compact-trigger review with no further turn to service it —
     // close runs the round one last time, best-effort, before the

@@ -1,9 +1,10 @@
-//! ACP wire types: the five-method surface, `session/update` payload shapes,
+//! ACP wire types: the method surface, `session/update` payload shapes,
 //! and prompt-block parsing.
 //!
 //! The served surface is exactly what the TS product serves: `initialize`,
 //! `session/new`, `session/prompt`, `session/close` (requests),
-//! `session/cancel` (notification), and the outgoing `session/update`
+//! `session/cancel` (notification), `session/set_config_option` (the
+//! model/effort pickers, TS #2455), and the outgoing `session/update`
 //! notification. ACP-spec methods the TS product does not serve
 //! (`session/load`, `session/read`, `session/clone`, cwd adoption) are not
 //! invented here.
@@ -180,6 +181,13 @@ pub enum AcpSessionUpdate {
         #[serde(rename = "_meta")]
         meta: Value,
     },
+    /// The session's configuration options changed (TS #2455): the full
+    /// set with current values, connection-scoped like the TS publish.
+    #[serde(rename = "config_option_update")]
+    ConfigOptionUpdate {
+        #[serde(rename = "configOptions")]
+        config_options: Vec<super::config_options::SessionConfigOption>,
+    },
 }
 
 impl AcpSessionUpdate {
@@ -338,6 +346,35 @@ impl PromptParams {
     }
 }
 
+/// The `session/set_config_option` request params.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetConfigOptionParams {
+    pub session_id: String,
+    pub config_id: String,
+    pub value: Value,
+}
+
+impl SetConfigOptionParams {
+    /// Parse `session/set_config_option` params. The value stays raw: the
+    /// handler treats a non-string value as an invalid option (the TS
+    /// handler's `typeof value === "string"` gate).
+    pub fn parse(params: &Value) -> SetConfigOptionParams {
+        SetConfigOptionParams {
+            session_id: params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            config_id: params
+                .get("configId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            value: params.get("value").cloned().unwrap_or(Value::Null),
+        }
+    }
+}
+
 /// A bare `{ "sessionId": ... }` params reader shared by close and cancel.
 pub fn session_id_params(params: &Value) -> String {
     params
@@ -430,6 +467,35 @@ mod tests {
         let prompt = json!([{ "type": "image", "data": "AAAA" }]);
         let error = parse_prompt_blocks(prompt.as_array().unwrap()).unwrap_err();
         assert_eq!(error, PromptBlockError::InvalidImage);
+    }
+
+    #[test]
+    fn config_option_update_carries_the_ts_tag_and_payload() {
+        let update = AcpSessionUpdate::ConfigOptionUpdate {
+            config_options: vec![super::super::config_options::SessionConfigOption {
+                id: "model".to_string(),
+                name: "Model".to_string(),
+                kind: "select",
+                category: "model".to_string(),
+                current_value: r#"["faux","faux-1"]"#.to_string(),
+                options: vec![super::super::config_options::SessionConfigSelectOption {
+                    value: r#"["faux","faux-1"]"#.to_string(),
+                    name: "Faux Model (faux)".to_string(),
+                }],
+            }],
+        };
+        let value = update.to_bare_value();
+        assert_eq!(value["sessionUpdate"], "config_option_update");
+        assert_eq!(value["configOptions"][0]["id"], "model");
+        assert_eq!(value["configOptions"][0]["type"], "select");
+        assert_eq!(
+            value["configOptions"][0]["currentValue"],
+            r#"["faux","faux-1"]"#
+        );
+        assert_eq!(
+            value["configOptions"][0]["options"][0]["value"],
+            r#"["faux","faux-1"]"#
+        );
     }
 
     #[test]
