@@ -685,14 +685,13 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
         if dock.focused && dock.selected == *group {
-            // The focused group reads as one unit (accent + selection
-            // background); unfocused, every cluster keeps its own status
-            // color.
-            let style = theme
-                .fg_style(ThemeColor::Accent)
-                .patch(theme.bg_style(ThemeBg::SelectedBg));
+            // The focused group reads as one unit behind a slight green
+            // band (the theme's success-panel background — the operator's
+            // 2026-09-26 selection directive); each span keeps its own
+            // status color, so the selection never repaints the text.
+            let band = theme.bg_style(ThemeBg::ToolSuccessBg);
             for span in spans {
-                line.push(Span::styled(span.content.clone(), style));
+                line.push(Span::styled(span.content.clone(), span.style.patch(band)));
             }
         } else {
             for span in spans {
@@ -933,6 +932,73 @@ mod tests {
         assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     }
 
+    /// The focused dock's selection reads as a slight green band behind
+    /// the selected group (the operator's 2026-09-26 directive), never as
+    /// an accent text repaint: the band is the theme's success-panel
+    /// background across exactly the group's spans, and each span keeps
+    /// its own status color.
+    #[test]
+    fn activity_dock_selection_is_a_slight_green_band_not_accent_text() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let dock = ActivityDock {
+            subagents_running_direct: 1,
+            subagents_running_nested: 1,
+            subagents_total: 2,
+            heartbeats: 3,
+            heartbeats_paused: 1,
+            bash_running: 1,
+            bash_total: 2,
+            goal_label: Some("Pursuing goal (0s)".to_string()),
+            selected: ActivityGroup::Heartbeats,
+            focused: true,
+        };
+        let frame = render_activity_dock(&dock, &theme, 120).unwrap();
+        let row = &frame[1];
+        // The band is the theme's slight green panel background (prime:
+        // #0e1510 — green-leaning), never the accent.
+        let band = Some(Color::Rgb(0x0e, 0x15, 0x10));
+        assert_eq!(theme.bg_style(ThemeBg::ToolSuccessBg).bg, band);
+        let span = |text: &str| {
+            row.iter()
+                .find(|span| span.content == text)
+                .unwrap_or_else(|| panic!("missing span {text:?}"))
+        };
+        // The whole selected group carries the band while keeping its
+        // own status colors: the running count stays success green, the
+        // paused cluster stays amber, the in-group separator stays dim.
+        let success = theme.fg_style(ThemeColor::Success).fg;
+        let warning = theme.fg_style(ThemeColor::Warning).fg;
+        let dim = theme.fg_style(ThemeColor::Dim).fg;
+        assert_eq!(span("\u{25f7} 3 heartbeats").style.bg, band);
+        assert_eq!(span("\u{25f7} 3 heartbeats").style.fg, success);
+        assert_eq!(span(" \u{b7} ").style.bg, band);
+        assert_eq!(span(" \u{b7} ").style.fg, dim);
+        assert_eq!(span("\u{25d0} 1 paused").style.bg, band);
+        assert_eq!(span("\u{25d0} 1 paused").style.fg, warning);
+        // The band rides exactly the selected group: the other groups
+        // and the separators between them carry no band.
+        let selected = ["\u{25f7} 3 heartbeats", " \u{b7} ", "\u{25d0} 1 paused"];
+        for span in row {
+            assert_eq!(
+                span.style.bg == band,
+                selected.contains(&span.content.as_str()),
+                "the band rides exactly the selected group: {:?}",
+                span.content
+            );
+        }
+        // No purple on selection: the accent color never rides the row.
+        let accent = theme.fg_style(ThemeColor::Accent).fg;
+        assert!(row.iter().all(|span| span.style.fg != accent));
+        // The band is a focus-owned signal: the same dock without focus
+        // renders no band at all.
+        let unfocused = ActivityDock {
+            focused: false,
+            ..dock
+        };
+        let frame = render_activity_dock(&unfocused, &theme, 120).unwrap();
+        assert!(frame[1].iter().all(|span| span.style.bg.is_none()));
+    }
+
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
     /// with the readout, truncated with no ellipsis when it overflows.
     #[test]
@@ -956,6 +1022,7 @@ mod tests {
 
     use super::*;
     use crate::theme::{ColorMode, Theme};
+    use ratatui::style::Color;
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)

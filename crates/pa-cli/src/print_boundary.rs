@@ -1114,6 +1114,7 @@ mod tests {
             cli_extension_sources: Vec::new(),
             extension_tool_allow_list: None,
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         })
