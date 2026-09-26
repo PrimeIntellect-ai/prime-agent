@@ -66,7 +66,9 @@ use crate::protocol::{
     response_success, DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError,
     TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
-use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
+use crate::registry::{
+    ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,
+};
 use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
@@ -761,7 +763,7 @@ impl Supervisor {
             {
                 let command = if kill_stop { "kill" } else { "shutdown" };
                 let _ = self
-                    .route_command(
+                    .route_command_typed(
                         resident,
                         command,
                         json!({}),
@@ -1202,7 +1204,7 @@ impl Supervisor {
         };
         let mut child = child;
         let response = match self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "create",
                 create_payload,
@@ -1396,7 +1398,7 @@ impl Supervisor {
         // reads nothing stalls only its own dispatch tasks once the queue
         // fills — memory stays bounded per connection — while every other
         // client and worker is unaffected.
-        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Outbound>, bool)>(
             crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
         );
         // One dispatch slot per concurrent command. The read arm is armed
@@ -1481,7 +1483,11 @@ impl Supervisor {
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        if let Err(error) = write_line(&mut writer, &outbound).await {
+                        let written = match outbound {
+                            Outbound::Line(value) => write_line(&mut writer, &value).await,
+                            Outbound::Raw(line) => write_raw_line(&mut writer, &line).await,
+                        };
+                        if let Err(error) = written {
                             // A failed response write must not strand the
                             // shutdown: the stop pass still has to run.
                             if stop {
@@ -1574,7 +1580,7 @@ impl Supervisor {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "detach",
                         payload,
@@ -1608,8 +1614,8 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
-    ) -> (Vec<Value>, bool) {
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
+    ) -> (Vec<Outbound>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -1629,12 +1635,12 @@ impl Supervisor {
                     "parse"
                 };
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         id.as_deref(),
                         type_name,
                         &error.to_string(),
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -1656,12 +1662,12 @@ impl Supervisor {
                 .register(&active_session_id, admission_id)
             {
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         Some(&command_id),
                         "parse",
                         &error,
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -1674,12 +1680,12 @@ impl Supervisor {
         // gate, so its own response path is unaffected.
         if self.shutting_down.load(Ordering::SeqCst) {
             return (
-                vec![response_line(&response_failure(
+                vec![Outbound::Line(response_line(&response_failure(
                     Some(&command_id),
                     &type_name,
                     "Supervisor is shutting down",
                     None,
-                ))],
+                )))],
                 false,
             );
         }
@@ -1701,12 +1707,12 @@ impl Supervisor {
             if let Some(state) = self.update_prepare.active_state() {
                 if update_gate_refuses(state, &type_name) {
                     return (
-                        vec![response_line(&response_failure(
+                        vec![Outbound::Line(response_line(&response_failure(
                             Some(&command_id),
                             &type_name,
                             UPDATE_PREPARING_MESSAGE,
                             None,
-                        ))],
+                        )))],
                         false,
                     );
                 }
@@ -1734,7 +1740,14 @@ impl Supervisor {
         if mutating {
             self.mutation_drain.end();
         }
-        outcome
+        (
+            outcome
+                .0
+                .into_iter()
+                .map(Outbound::Line)
+                .collect::<Vec<_>>(),
+            outcome.1,
+        )
     }
 
     /// The parsed-command match of [`Self::dispatch_client`], executed under
@@ -1750,7 +1763,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2052,6 +2065,7 @@ impl Supervisor {
                         attached,
                         command_id.clone(),
                         type_name.clone(),
+                        Some(stream),
                     )
                     .await;
                 // A selector that resolves to nothing detaches nothing and
@@ -2094,7 +2108,14 @@ impl Supervisor {
                 // generic one (streamed attach included).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let outcome = self
-                    .route_client_command(command, &client_id, attached, command_id, type_name)
+                    .route_client_command(
+                        command,
+                        &client_id,
+                        attached,
+                        command_id,
+                        type_name,
+                        Some(stream),
+                    )
                     .await;
                 let mut cleared = vec![active_session_id.clone(), target_active_session_id.clone()];
                 if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
@@ -2227,8 +2248,15 @@ impl Supervisor {
             }
             command => {
                 let client_id = effective_client_id.lock().unwrap().clone();
-                self.route_client_command(command, &client_id, attached, command_id, type_name)
-                    .await
+                self.route_client_command(
+                    command,
+                    &client_id,
+                    attached,
+                    command_id,
+                    type_name,
+                    Some(stream),
+                )
+                .await
             }
         }
     }
@@ -2382,7 +2410,7 @@ impl Supervisor {
             let resident = Arc::clone(resident);
             async move {
                 let response = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "update_snapshot",
                         json!({}),
@@ -2993,7 +3021,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3114,7 +3142,7 @@ impl Supervisor {
                 // response carries the authoritative rows regardless,
                 // and the fold still has to visit every file for the data
                 // itself.
-                let mut bundle = (vec![item, progress], false);
+                let mut bundle = (vec![Outbound::Line(item), Outbound::Line(progress)], false);
                 loop {
                     match stream_rows.try_send(bundle) {
                         Ok(()) => break true,
@@ -3209,7 +3237,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 item["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![item], false)).await;
+            let _ = stream.send((vec![Outbound::Line(item)], false)).await;
         }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
@@ -3251,7 +3279,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 completion["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![completion], false)).await;
+            let _ = stream.send((vec![Outbound::Line(completion)], false)).await;
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the
@@ -3476,7 +3504,7 @@ impl Supervisor {
     /// fallback for an unreachable worker.
     async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "get_state",
                 json!({}),
@@ -3575,7 +3603,7 @@ impl Supervisor {
         // authoritative create summary instead of failing the spawn (the
         // session is durable at this point; the child is healthy).
         let summary = match self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "get_state",
                 json!({}),
@@ -3736,7 +3764,7 @@ impl Supervisor {
         }
         for resident in self.registry.list().await {
             let response = self
-                .route_command(
+                .route_command_typed(
                     &resident,
                     "get_state",
                     json!({}),
@@ -3835,7 +3863,7 @@ impl Supervisor {
         // fail fast instead of parking on this worker.
         resident.note_retired();
         let _ = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "shutdown",
                 json!({}),
@@ -3946,7 +3974,7 @@ impl Supervisor {
                 continue;
             }
             let _ = self
-                .route_command(
+                .route_command_typed(
                     &resident,
                     "shutdown",
                     json!({}),
@@ -4105,10 +4133,27 @@ fn salvage_command_type(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// One outbound client-socket line: a JSON value the connection serializes,
+/// or the pre-serialized bytes of a relayed worker response (the zero-copy
+/// route hands the worker's own line through with the client's command id
+/// spliced in front).
+pub(crate) enum Outbound {
+    Line(Value),
+    Raw(Vec<u8>),
+}
+
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
     writer.write_all(line.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write one pre-serialized client line (the byte relay's raw form already
+/// carries its trailing newline).
+async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -> Result<()> {
+    writer.write_all(line).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -4124,13 +4169,32 @@ pub(crate) fn client_command_payload(
         object.insert("clientId".to_string(), json!(client_id));
         // The supervisor always attaches slim, like the TS supervisor's
         // `attachClient`: summary and messages travel inside the snapshot.
-        if matches!(
-            command,
-            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. }
-        ) {
+        // The client's OWN normalized capability set rides alongside as
+        // `clientCapabilities`: the worker echoes it into the attach
+        // result's `client.capabilities`, so the response the supervisor
+        // relays by bytes already carries the echo the supervisor used to
+        // patch into the parsed tree.
+        if let DaemonCommand::Attach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        }
+        | DaemonCommand::Reattach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        } = command
+        {
             object.insert(
                 "capabilities".to_string(),
                 json!(["attach_snapshot", "event_sequence", "slim_attach"]),
+            );
+            object.insert(
+                "clientCapabilities".to_string(),
+                json!(crate::snapshot_stream::attach_client_capabilities(
+                    capabilities.as_deref(),
+                    *supports_extension_ui
+                )),
             );
         }
         // Create carries its fields under `config`; the worker reads them flat.
@@ -4303,7 +4367,7 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
     ) -> Result<()> {
         resident.intentional_stop.store(true, Ordering::SeqCst);
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "shutdown",
                 json!({}),
@@ -4937,7 +5001,9 @@ mod tests {
                 .await
                 .remove(&request.request_id)
                 .expect("the routed shutdown holds a reply slot");
-            let _ = reply.send(crate::protocol::response_success(None, "shutdown", None));
+            let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+                None, "shutdown", None,
+            )));
         });
         supervisor.registry.insert(Arc::clone(&resident)).await;
         let mut events = supervisor.events.subscribe();

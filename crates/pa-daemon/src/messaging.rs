@@ -136,7 +136,7 @@ impl Supervisor {
             Err(error) => return fail(format!("invalid delivery command: {error}")),
         };
         let response = self
-            .route_command(
+            .route_command_typed(
                 &target,
                 "worker_deliver_message",
                 payload,
@@ -162,7 +162,7 @@ impl Supervisor {
     /// downgrades an unreachable worker to a recovering row instead).
     async fn source_worker_summary(&self, resident: &Arc<ResidentWorker>) -> Result<Value> {
         let state = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "get_state",
                 json!({}),

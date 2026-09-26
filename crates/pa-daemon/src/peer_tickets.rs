@@ -181,7 +181,7 @@ impl Supervisor {
         };
         let payload = serde_json::to_value(&registration)?;
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "worker_register_peer_transport",
                 payload,
