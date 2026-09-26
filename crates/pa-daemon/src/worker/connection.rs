@@ -649,11 +649,28 @@ impl Worker {
         sink.wait_flushed(self.events.current_seq()).await;
         let payload =
             serde_json::to_vec(&crate::protocol::response_line(response)).unwrap_or_default();
-        let header = json!({
+        let mut header = json!({
             "kind": "outbound",
             "requestId": request_id,
             "outboundType": "response",
         });
+        // The attach family's response header carries the scalars the
+        // supervisor's routed bookkeeping reads (success, the attach's
+        // active session), so the response PAYLOAD can relay to the client
+        // by bytes. The header is the worker socket's own routing frame;
+        // direct-attach clients read it as a JSON object and ignore fields
+        // they do not know.
+        if matches!(response.command.as_str(), "attach" | "reattach") {
+            header["ok"] = json!(response.success);
+            if let Some(active_session_id) = response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("activeSessionId"))
+                .and_then(Value::as_str)
+            {
+                header["activeSessionId"] = json!(active_session_id);
+            }
+        }
         if let Err(error) = self.write_frame(&sink.writer, &header, &payload).await {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
@@ -692,6 +709,21 @@ impl Worker {
                         .map(str::to_string)
                         .collect::<Vec<_>>(),
                 )
+            });
+        // The supervisor's routed attach carries the CLIENT's own normalized
+        // capability set here (the supervisor forces slim for the
+        // worker-facing behavior but the client result echoes the client's
+        // set); a direct-attach client sends none and keeps the normalized
+        // request set, exactly as before.
+        let echoed_client_capabilities = payload
+            .get("clientCapabilities")
+            .and_then(Value::as_array)
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
             });
         let resume_cursor = payload
             .get("resumeCursor")
@@ -757,7 +789,10 @@ impl Worker {
         result["replay"] = json!(replay);
         result["lastEventSequence"] = json!(last_event_sequence);
         result["lastEventCursor"] = cursor;
-        result["client"] = json!({ "id": client_id, "capabilities": capabilities });
+        result["client"] = json!({
+            "id": client_id,
+            "capabilities": echoed_client_capabilities.unwrap_or(capabilities),
+        });
 
         response_success(None, "attach", Some(result))
     }

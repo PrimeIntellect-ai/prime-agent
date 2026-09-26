@@ -1144,18 +1144,39 @@ impl AgentView {
             ChatEntry::Assistant(message) => {
                 // The per-entry block cache (TS's per-component
                 // `blockCache`): settled blocks of the streaming message
-                // replay instead of re-rendering on every frame.
-                let mut caches = self.md_caches.borrow_mut();
-                let cache = caches.entry(index).or_default();
-                render_assistant(
-                    message,
-                    detail,
-                    &self.theme,
-                    &self.code_block_indent,
-                    width,
-                    preceded_by_tool_activity,
-                    cache,
-                )
+                // replay instead of re-rendering on every frame — the
+                // cache exists for the streaming case. A settled
+                // message's blocks are final, so its rendered rows live
+                // once in the entry layout and the block-cache copy is
+                // dropped (a resumed large session's duplicate copy was
+                // the TUI's biggest single retained allocation in the
+                // tui-memory census); any later re-render rebuilds the
+                // same rows from the message's own text.
+                if message.streaming {
+                    let mut caches = self.md_caches.borrow_mut();
+                    let cache = caches.entry(index).or_default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        cache,
+                    )
+                } else {
+                    self.md_caches.borrow_mut().remove(&index);
+                    let mut settled = crate::markdown::MarkdownBlockCache::default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        &mut settled,
+                    )
+                }
             }
             ChatEntry::Tool(card) => {
                 // TS `ToolExecutionComponent`: the leading spacer rides on
@@ -2715,6 +2736,46 @@ mod tests {
         assert!(before.contains("part one"));
         assert!(!before.contains("part two"));
         assert!(after.contains("part one part two"));
+    }
+
+    /// A settled assistant message keeps no markdown block cache (its
+    /// rendered rows live once, in the entry layout; the cache exists for
+    /// the streaming message's per-frame replays), while a streaming
+    /// message keeps its settled blocks cached for the next frame's
+    /// replay. The cache-drop must never change the rendered rows.
+    #[test]
+    fn settled_messages_render_once_streaming_keeps_block_cache() {
+        let settled_rows = {
+            let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text("settled body".to_string())],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            }))]);
+            let text = transcript_text(&mut view, 80);
+            assert!(
+                view.md_caches.borrow().is_empty(),
+                "a settled message keeps no duplicate block-cache copy"
+            );
+            text
+        };
+        let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Text("streaming body".to_string())],
+            has_tool_calls: false,
+            streaming: true,
+            error: None,
+            aborted: false,
+        }))]);
+        let streaming_text = transcript_text(&mut view, 80);
+        assert!(
+            !view.md_caches.borrow().is_empty(),
+            "a streaming message keeps its block cache for per-frame replays"
+        );
+        assert!(
+            settled_rows.contains("settled body") && streaming_text.contains("streaming body"),
+            "both render their bodies identically through their own paths"
+        );
     }
 
     /// A running tool card animates: its rows must not be cached (the
