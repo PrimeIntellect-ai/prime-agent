@@ -463,9 +463,10 @@ impl Supervisor {
         let Ok(payload) = serde_json::to_value(&update) else {
             return;
         };
-        let _ = self
-            .events
-            .send((ClientRouting::RosterSubscribers, std::sync::Arc::new(payload)));
+        let _ = self.events.send((
+            ClientRouting::RosterSubscribers,
+            std::sync::Arc::new(payload),
+        ));
     }
 }
 
@@ -1213,9 +1214,7 @@ mod tests {
         let mut pushes = Vec::new();
         loop {
             match events.try_recv() {
-                Ok((ClientRouting::RosterSubscribers, payload)) => {
-                    pushes.push((*payload).clone())
-                }
+                Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push((*payload).clone()),
                 Ok(_) => {}
                 Err(
                     tokio::sync::broadcast::error::TryRecvError::Empty

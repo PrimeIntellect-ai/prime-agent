@@ -2610,7 +2610,9 @@ impl Supervisor {
                         "sessions": sessions,
                     }
                 });
-                let _ = self.events.send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
+                let _ = self
+                    .events
+                    .send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
                 // The response is written before the accept loop exits (the
                 // write path is the dispatch channel; the 100ms drain only
                 // orders the exit behind it - the coordinator's Booting
@@ -3999,9 +4001,10 @@ impl Supervisor {
         self.log_line(
             "received shutdown signal; entering graceful drain: new client commands refused, running turns settle through the workers' routed shutdown",
         );
-        let _ = self
-            .events
-            .send((ClientRouting::Broadcast, std::sync::Arc::new(daemon_closing_shutdown_event())));
+        let _ = self.events.send((
+            ClientRouting::Broadcast,
+            std::sync::Arc::new(daemon_closing_shutdown_event()),
+        ));
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             supervisor.ensure_shutdown_started().await;
