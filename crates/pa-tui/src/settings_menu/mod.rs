@@ -1076,15 +1076,16 @@ mod menu_tests {
             }
         );
         // Each tab keeps its own query: typing on General, switching to
-        // Models and back, the filter and the field still hold.
+        // Models and back, the filter and the field still hold. The
+        // arrows switch even under an active query (digits would type).
         for key in ["w", "a", "r", "n"] {
             menu.handle_key(key, &kb());
         }
-        menu.handle_key("2", &kb());
+        menu.handle_key("right", &kb());
         assert!(render_text(&menu)
             .iter()
             .any(|row| row.contains("Transport")));
-        menu.handle_key("1", &kb());
+        menu.handle_key("left", &kb());
         let text = render_text(&menu);
         assert!(text.iter().any(|row| row.contains("warn")));
         assert!(text.iter().any(|row| row.contains("Warnings")));
@@ -1127,7 +1128,11 @@ mod menu_tests {
         }));
         // The selected first row carries the menu marker and its value
         // rides the row's trailing cluster (the shared menu-row grammar).
-        assert!(text.iter().any(|row| row.contains("\u{203a} Auto-compact")));
-        assert!(text.iter().any(|row| row.contains("on ")));
+        let selected = text
+            .iter()
+            .find(|row| row.starts_with("\u{203a}"))
+            .expect("the selected row carries the marker");
+        assert!(selected.contains("Auto-compact"));
+        assert!(selected.contains("true"));
     }
 }
