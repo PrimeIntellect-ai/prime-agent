@@ -1454,8 +1454,16 @@ mod tests {
         )
         .unwrap();
         let skills = vec![
-            skill("edit", dir.path().join("skills/edit").to_str().unwrap(), "h1"),
-            skill("goal", dir.path().join("skills/goal").to_str().unwrap(), "h2"),
+            skill(
+                "edit",
+                dir.path().join("skills/edit").to_str().unwrap(),
+                "h1",
+            ),
+            skill(
+                "goal",
+                dir.path().join("skills/goal").to_str().unwrap(),
+                "h2",
+            ),
         ];
         sync_python_skills(
             uv.to_str().unwrap(),
@@ -1469,7 +1477,10 @@ mod tests {
         .unwrap();
         let calls = uv_invocations(dir.path());
         assert_eq!(calls.len(), 1, "one batched uv invocation: {calls:?}");
-        assert!(calls[0].contains("goal"), "the missing skill installs: {calls:?}");
+        assert!(
+            calls[0].contains("goal"),
+            "the missing skill installs: {calls:?}"
+        );
         assert!(
             !calls[0].contains("edit"),
             "the installed skill is not reinstalled: {calls:?}"
@@ -1503,10 +1514,11 @@ mod tests {
             skill("edit", "/skills/edit", "h1"),
             skill("broken", "/skills/broken", "h2"),
         ];
-        let mut warnings = Vec::new();
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut options = EnsureKernelPythonOptions::default();
-        options.on_progress = Some(std::sync::Arc::new(|message: &str| {
-            warnings.push(message.to_string())
+        let sink = warnings.clone();
+        options.on_progress = Some(std::sync::Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_string())
         }));
         sync_python_skills(
             uv.to_str().unwrap(),
@@ -1528,6 +1540,7 @@ mod tests {
             calls[0].contains("edit") && calls[0].contains("broken"),
             "the batch covers both skills: {calls:?}"
         );
+        let warnings = warnings.lock().unwrap();
         assert!(
             warnings.len() == 1 && warnings[0].contains("broken"),
             "one warning naming the broken skill: {warnings:?}"
