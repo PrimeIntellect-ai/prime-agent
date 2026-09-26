@@ -538,6 +538,17 @@ impl Supervisor {
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
 
+        // The OS-signal drain (SIGTERM/SIGINT; the loop lives in
+        // `crate::signal_drain`): installed once the socket owns its
+        // identity. From here on, the first signal drains (new work
+        // refused, running turns settled) and a later signal force-exits.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                crate::signal_drain::run_signal_drain(supervisor).await;
+            });
+        }
+
         // The boot reap (the operator's same-socket predecessor rule): this
         // daemon now owns the socket's lineage, so leftover worker processes
         // of a dead predecessor - alive, still holding their runtime session
@@ -1846,7 +1857,7 @@ impl Supervisor {
                 let response = response_success(Some(&command_id), &type_name, None);
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
-                let closing = json!({ "type": "daemon_closing", "reason": "shutdown" });
+                let closing = daemon_closing_shutdown_event();
                 let _ = self.events.send((
                     ClientRouting::BroadcastExcept {
                         connection_id: connection_id.to_string(),
@@ -4364,6 +4375,54 @@ impl Supervisor {
         self.accept_exit.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
     }
+
+    /// The OS-signal drain step (SIGTERM/SIGINT; the loop in
+    /// `crate::signal_drain` runs this once per received signal): the
+    /// first signal enters the graceful drain, and any later signal - or
+    /// one that finds a client-command shutdown or an update exit
+    /// already in flight - force-exits instead.
+    ///
+    /// The gate flips synchronously, so from this moment every later
+    /// client command is refused at the dispatch gate and every create
+    /// at the launch gate; the connected clients get the same
+    /// `daemon_closing` event the shutdown command broadcasts. The
+    /// terminal stop pass then runs in the background
+    /// ([`Self::ensure_shutdown_started`]): each resident worker gets its
+    /// routed `shutdown` - the worker's handler is the flush barrier, so
+    /// the in-flight turn aborts and settles before the worker exits -
+    /// and a worker that misses the route gets the identity-gated
+    /// SIGTERM → SIGKILL escalation instead of lingering in the
+    /// supervisor-lost window.
+    ///
+    /// Returns `true` when this call started the drain (the signal loop
+    /// keeps waiting for the force signal); `false` when a drain or exit
+    /// was already in flight (the caller is the forced exit). The update
+    /// restart's exit ordering is preserved: a signal that finds
+    /// `accept_exit` already published never flips the shutdown gate, so
+    /// it cannot convert the descriptor-preserving update exit into a
+    /// terminal stop pass.
+    pub(crate) fn begin_signal_drain(self: &Arc<Self>) -> bool {
+        if self.accept_exit.load(Ordering::SeqCst)
+            || self.shutting_down.swap(true, Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.log_line(
+            "received shutdown signal; entering graceful drain: new client commands refused, running turns settle through the workers' routed shutdown",
+        );
+        let _ = self
+            .events
+            .send((ClientRouting::Broadcast, daemon_closing_shutdown_event()));
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            supervisor.ensure_shutdown_started().await;
+        });
+        // Console note last: a dead stderr pipe must not unwind an armed drain.
+        eprintln!(
+            "pa-daemon: received shutdown signal; draining before exit (a second signal forces it)"
+        );
+        true
+    }
 }
 
 /// Attach outcome for a `chunked_snapshot` client: the response carries the
@@ -4579,6 +4638,14 @@ fn offline_summary(worker_id: &str) -> Value {
 pub async fn run_supervisor(options: SupervisorOptions) -> Result<()> {
     let supervisor = Arc::new(Supervisor::new(options)?);
     supervisor.run().await
+}
+
+/// The non-update `daemon_closing` frame (the shutdown command's and the
+/// OS-signal drain's shared spelling): every connected client learns the
+/// daemon is going down for a shutdown, the spelling the TUI reconnects
+/// attached windows on.
+fn daemon_closing_shutdown_event() -> Value {
+    json!({ "type": "daemon_closing", "reason": "shutdown" })
 }
 
 /// Saved-session row (port of `serializeSavedSessionInfo`).
@@ -5042,6 +5109,202 @@ mod tests {
         assert!(
             supervisor.accept_exit.load(Ordering::SeqCst),
             "the completed stop pass must exit the accept loop"
+        );
+    }
+
+    /// The first OS signal's drain: the gate rejects new work, every
+    /// client gets the `daemon_closing` event, and the running turn
+    /// settles inside its worker's routed `shutdown` before the stop
+    /// pass retires the worker (descriptor gone - no supervisor-lost
+    /// lingering) and lets the accept loop exit. The fake worker holds
+    /// its `shutdown` reply on a test-controlled settle, so a pass that
+    /// does not wait for the flush barrier fails the assertions below.
+    #[tokio::test]
+    async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "w-signal",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "test",
+            "rootActiveSessionId": "w-signal",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let descriptor_dir = dir.path().join("descriptors");
+        std::fs::create_dir_all(&descriptor_dir).unwrap();
+        let descriptor_path = descriptor_dir.join("w-signal.descriptor.json");
+        let resident = Arc::new(ResidentWorker::new(
+            "w-signal".to_string(),
+            descriptor,
+            descriptor_path.clone(),
+        ));
+        // The fake worker connection: the routed `shutdown` reply is the
+        // flush barrier, so it is held until the test releases the turn's
+        // settle.
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
+        let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
+        let (settle_release_tx, settle_release_rx) = oneshot::channel::<()>();
+        let pump_resident = Arc::clone(&resident);
+        let pump = tokio::spawn(async move {
+            let request = cmd_rx.recv().await.expect("the drain routes a command");
+            assert_eq!(request.command_type, "shutdown");
+            let _ = shutdown_routed_tx.send(());
+            settle_release_rx.await.expect("the turn settles first");
+            let _ = turn_settled_tx.send(());
+            let reply = pump_resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("the routed shutdown holds a reply slot");
+            let _ = reply.send(crate::protocol::response_success(None, "shutdown", None));
+        });
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let mut events = supervisor.events.subscribe();
+        let create = DaemonCommand::Create {
+            id: None,
+            session_path: None,
+            continue_recent: None,
+            no_session: None,
+            name: None,
+            config: None,
+            telemetry_disabled: None,
+            runtime_metadata: None,
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: Map::default(),
+        };
+        assert!(
+            supervisor.begin_signal_drain(),
+            "the first signal must start the drain"
+        );
+        let refused = supervisor
+            .launch_worker(&create, None)
+            .await
+            .err()
+            .expect("a create during the drain must be rejected");
+        assert_eq!(
+            refused.to_string(),
+            "Supervisor is shutting down",
+            "the refusal error: {refused:#}"
+        );
+        let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("the drain broadcasts daemon_closing")
+            .expect("the events channel stays open");
+        assert!(
+            matches!(routing, ClientRouting::Broadcast),
+            "every client learns the closing"
+        );
+        assert_eq!(
+            closing,
+            json!({ "type": "daemon_closing", "reason": "shutdown" })
+        );
+        tokio::time::timeout(Duration::from_secs(2), shutdown_routed_rx)
+            .await
+            .expect("the drain routes the worker's shutdown")
+            .expect("the routed channel stays open");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !supervisor.accept_exit.load(Ordering::SeqCst),
+            "the stop pass must wait for the settling turn"
+        );
+        let _ = settle_release_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), turn_settled_rx)
+            .await
+            .expect("the turn settles within the drain")
+            .expect("the settle channel stays open");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !supervisor.accept_exit.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the completed stop pass must exit the accept loop"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            supervisor.registry.list().await.is_empty(),
+            "the drained worker leaves the registry"
+        );
+        assert!(
+            !descriptor_path.exists(),
+            "the drained worker's descriptor is retired with it"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a second signal while shutting down forces"
+        );
+        pump.abort();
+    }
+
+    /// Every signal that finds a shutdown already in flight is the force
+    /// request: the drain's own second signal, a signal racing the
+    /// shutdown command's gate, and a signal racing an update exit - the
+    /// last without flipping the gate, so the update's
+    /// descriptor-preserving exit never becomes a terminal stop pass.
+    #[tokio::test]
+    async fn a_signal_during_an_in_flight_shutdown_forces() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        assert!(
+            supervisor.begin_signal_drain(),
+            "the first signal starts the drain"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "the second signal forces the exit"
+        );
+
+        // A client-command shutdown already flipped the gate: a signal
+        // racing it forces.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the shutdown command forces"
+        );
+
+        // An update exit published accept_exit before the gate: the
+        // signal forces without flipping the gate.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.accept_exit.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the update exit forces"
+        );
+        assert!(
+            !supervisor.shutting_down.load(Ordering::SeqCst),
+            "the update exit must not become a terminal stop pass"
         );
     }
 }
