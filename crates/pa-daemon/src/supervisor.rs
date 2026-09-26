@@ -5284,7 +5284,7 @@ mod tests {
                 "the lagged drain was never logged; log: {log}"
             );
             match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
-                Ok(Ok(_)) | Ok(Err(_)) => {}
+                Ok(Ok(_) | Err(_)) => {}
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
         };
