@@ -1439,7 +1439,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -1453,13 +1453,13 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some(id.to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -1499,7 +1499,7 @@ mod tests {
                         thinking: "2".repeat(400),
                         thinking_signature: None,
                         redacted: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -1513,13 +1513,13 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some("a2".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         let entries = vec![
@@ -1816,7 +1816,7 @@ mod tests {
     async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -1846,7 +1846,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn zero")).unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
                         name: "edit".to_string(),
                         arguments: edit_arguments,
                         thought_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1874,7 +1874,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         session.append_message(user("turn one")).unwrap();
@@ -1895,6 +1895,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1921,7 +1922,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "the newest kept reply".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1935,7 +1936,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         session.append_message(user("turn four")).unwrap();
@@ -1955,6 +1956,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await

@@ -62,9 +62,10 @@ pub fn build_summarization_request(
         );
     }
     if let Some(recent_state_anchor) = recent_state_anchor {
-        prompt_text.push_str(&format!(
+        let _ = write!(
+            prompt_text,
             "<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\n{recent_state_anchor}\n</recent-state-anchor>\n\n"
-        ));
+        );
     }
     prompt_text.push_str(&build_summarization_prompt(
         custom_instructions,
