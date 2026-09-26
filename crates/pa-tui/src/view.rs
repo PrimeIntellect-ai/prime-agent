@@ -2738,6 +2738,46 @@ mod tests {
         assert!(after.contains("part one part two"));
     }
 
+    /// A settled assistant message keeps no markdown block cache (its
+    /// rendered rows live once, in the entry layout; the cache exists for
+    /// the streaming message's per-frame replays), while a streaming
+    /// message keeps its settled blocks cached for the next frame's
+    /// replay. The cache-drop must never change the rendered rows.
+    #[test]
+    fn settled_messages_render_once_streaming_keeps_block_cache() {
+        let settled_rows = {
+            let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text("settled body".to_string())],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            }))]);
+            let text = transcript_text(&mut view, 80);
+            assert!(
+                view.md_caches.borrow().is_empty(),
+                "a settled message keeps no duplicate block-cache copy"
+            );
+            text
+        };
+        let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Text("streaming body".to_string())],
+            has_tool_calls: false,
+            streaming: true,
+            error: None,
+            aborted: false,
+        }))]);
+        let streaming_text = transcript_text(&mut view, 80);
+        assert!(
+            !view.md_caches.borrow().is_empty(),
+            "a streaming message keeps its block cache for per-frame replays"
+        );
+        assert!(
+            settled_rows.contains("settled body") && streaming_text.contains("streaming body"),
+            "both render their bodies identically through their own paths"
+        );
+    }
+
     /// A running tool card animates: its rows must not be cached (the
     /// spinner frame advances), while a settled card's rows ignore the
     /// pulse frame.
