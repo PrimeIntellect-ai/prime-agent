@@ -1,5 +1,5 @@
 //! Worker tests (moved with their concerns).
-    use crate::*;
+use super::*;
 
     fn worker_with_journal() -> Arc<Worker> {
         let dir = std::env::temp_dir().join(format!("pa-worker-verdict-{}", uuid::Uuid::new_v4()));

@@ -1,5 +1,5 @@
 //! Worker tests (moved with their concerns).
-    use crate::*;
+use super::*;
     use crate::engine::SessionEngine;
     use std::path::Path;
 

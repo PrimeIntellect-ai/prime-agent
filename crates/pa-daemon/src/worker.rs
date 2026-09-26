@@ -40,12 +40,11 @@ mod create;
 mod turn;
 
 use create::{active_session_id_of, worker_server_capabilities};
-use turn::TurnRunner;
 pub(crate) use summary::{
-    RosterPushContext, compact_action_label, emit_worker_event_with, push_roster_delta,
-    session_snapshot, session_summary,
+    compact_action_label, emit_worker_event_with, push_roster_delta, session_snapshot,
+    session_summary, RosterPushContext,
 };
-
+use turn::TurnRunner;
 
 mod commands;
 
@@ -765,7 +764,6 @@ impl Worker {
         let _ = self.handle_shutdown().await;
         self.exit_after_close();
     }
-
 }
 
 /// The turn runner: drains the queue one turn at a time, running the session
@@ -902,17 +900,11 @@ mod prompt_image_tests;
 
 #[cfg(test)]
 mod update_snapshot_tests;
-
 #[cfg(test)]
 mod tests;
-
-
 #[cfg(test)]
 mod turn_stream_tests;
-
 #[cfg(test)]
 mod replacement_gate_tests;
-
 #[cfg(test)]
 mod recovery_verdict_tests;
-

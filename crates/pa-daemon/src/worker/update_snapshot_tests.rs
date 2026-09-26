@@ -1,5 +1,5 @@
 //! Worker tests (moved with their concerns).
-    use crate::*;
+use super::*;
 
     async fn snapshot_after_create() -> (Arc<Worker>, DaemonResponse) {
         let dir = std::env::temp_dir().join(format!("pa-worker-us-{}", uuid::Uuid::new_v4()));

@@ -1,5 +1,5 @@
 //! Worker tests (moved with their concerns).
-    use crate::*;
+use super::*;
 
     fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
         QueuedItem {
