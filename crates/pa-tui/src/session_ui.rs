@@ -3848,7 +3848,7 @@ impl SessionUi {
         let team_picker = view
             .auth_panel
             .as_ref()
-            .is_some_and(|panel| panel.team_picker_mounted());
+            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
         if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
