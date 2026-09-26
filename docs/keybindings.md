@@ -141,6 +141,8 @@ Typing, Backspace, Delete, and paste replace an active selection; Escape drops t
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
 | `app.clipboard.copyLoginUrl` | `c`, `alt+c` | Copy the sign-in URL from a login dialog |
+| `app.shortcuts` | `?` | Show the quick-shortcut overlay (empty editor) |
+| `app.subagents.focus` | `alt+a` | Focus the activity dock (Enter opens the focused group's view) |
 
 ### Sessions
 
@@ -161,6 +163,11 @@ Typing, Backspace, Delete, and paste replace an active selection; Escape drops t
 ### Configuration Pickers
 
 Models, Providers, and MCP Connections open as separate pickers. Use `escape` to close a picker. Left and right edit a nonempty search field; with an empty model search, they adjust the highlighted model's effort.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.modal.back` | `left` | Go back / close the current dialog (the bash and heartbeats panes; the model and MCP pickers while the search field is empty) |
+| `app.heartbeats.openSelected` | `right` | Open the selected heartbeat's detail drill-in (`/heartbeats`) |
 
 ### Display and Message Queue
 
@@ -190,6 +197,18 @@ Ctrl+O changes presentation only: the default hides thinking and collapses tools
 | `app.tree.filter.all` | `ctrl+a` | Toggle tree filter that shows all entries |
 | `app.tree.filter.cycleForward` | `ctrl+o` | Cycle tree filter forward |
 | `app.tree.filter.cycleBackward` | `shift+ctrl+o` | Cycle tree filter backward |
+
+### Agents View
+
+The agents view (`alt+a` from the session, or the activity dock) lists every session and subagent. Its bottom hint line names the effective keys below.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.agents.back` | `left` | Return to the parent agent scope (scoped views) |
+| `app.agents.open` | `right` | Drill into the selected agent's session (Enter opens too) |
+| `app.agents.new` | `ctrl+n` | Start a new session from the agents view |
+| `app.agents.delete` | `ctrl+x` | Stop or delete the selected row (press twice to confirm) |
+| `app.agents.expand` | `alt+right` | Expand or collapse the selected agent's subagent list |
 
 ## Custom Configuration
 

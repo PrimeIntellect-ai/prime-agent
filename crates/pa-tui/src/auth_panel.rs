@@ -31,7 +31,8 @@ use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{
-    hint_row, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines, MenuSegment,
+    hint_row, key_hint, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines,
+    MenuSegment,
 };
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
@@ -541,12 +542,6 @@ impl AuthPanel {
         kb: &KeybindingsManager,
         sink: &mut crate::clipboard::OscSink,
     ) {
-        // Ctrl+C cancels the mounted input like Esc (the surfaces that
-        // consume the pair note it handled).
-        if key == "ctrl+c" {
-            self.cancel_input();
-            return;
-        }
         // TS `handleInput`'s copy arm: the copy binding copies the shown
         // URL, except a single-character key while the paste field is
         // visible — that one types into the field, so only the binding's
@@ -659,32 +654,10 @@ impl AuthPanel {
         }
     }
 
-    /// Esc/Ctrl+C on the mounted input: the paste prompt answers `None`
-    /// (the flow cancels), the picker answers `Cancelled` (the stored
-    /// selection stays, TS `onCancel`); no input means nothing to
-    /// cancel.
-    fn cancel_input(&mut self) {
-        match &mut self.input {
-            PanelInput::Working => {}
-            PanelInput::Paste { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(None);
-                }
-                self.input = PanelInput::Working;
-            }
-            PanelInput::Teams { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(PrimeTeamPick::Cancelled);
-                }
-                self.input = PanelInput::Working;
-            }
-        }
-        self.notice = None;
-    }
-
     /// The panel's rendered rows (the provider selector's panel chrome:
     /// the top rule, the title, the subtitle, the content, the hint, the
-    /// bottom rule).
+    /// bottom rule). The hint row renders the effective bindings, so a
+    /// user `keybindings.json` override moves the hint with the handler.
     pub(crate) fn render(
         &mut self,
         theme: &Theme,
@@ -772,9 +745,18 @@ impl AuthPanel {
                 // While the URL block shows, the actions row below the
                 // input carries the submit and cancel hints (TS
                 // `getAuthActionsText`); a paste-only panel (the MCP token
-                // surface) keeps its own hint row.
+                // surface) keeps its own hint row — rendered from the
+                // effective bindings.
                 if self.auth_url.is_none() {
-                    lines.push(hint_row(theme, width, "enter submit  escape cancel"));
+                    let hints = [
+                        key_hint(kb, &["tui.select.confirm"], "submit"),
+                        key_hint(kb, &["tui.select.cancel"], "cancel"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<String>>()
+                    .join("  ");
+                    lines.push(hint_row(theme, width, &hints));
                 }
             }
             PanelInput::Teams { picker, .. } => {
@@ -821,11 +803,16 @@ impl AuthPanel {
                 if count == 0 {
                     lines.push(no_match_row(theme, width, "No matching teams"));
                 }
-                lines.push(hint_row(
-                    theme,
-                    width,
-                    "\u{2191}\u{2193} navigate  enter select  escape cancel",
-                ));
+                let hints = [
+                    key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
+                    key_hint(kb, &["tui.select.confirm"], "select"),
+                    key_hint(kb, &["tui.select.cancel"], "cancel"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>()
+                .join("  ");
+                lines.push(hint_row(theme, width, &hints));
             }
         }
         // TS `getAuthActionsText`: the URL block's actions row rides last —
@@ -1150,7 +1137,7 @@ mod tests {
             .iter()
             .any(|row| row.contains("Paste a Prime API key below:")));
         assert!(rows.iter().any(|row| row.contains("Paste value")));
-        assert!(rows.iter().any(|row| row.contains("enter submit")));
+        assert!(rows.iter().any(|row| row.contains("Enter submit")));
         for character in "  sk-live  ".chars() {
             panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
@@ -1181,6 +1168,44 @@ mod tests {
         panel.handle_key("k", &kb(), &mut sink());
         panel.handle_key("enter", &kb(), &mut sink());
         assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
+    }
+
+    /// The cancel keys run through the effective binding (TS
+    /// `LoginDialogComponent.handleInput`): the stock bindings cancel on
+    /// ctrl+c (the binding's second default key), and an override that
+    /// empties the binding takes ctrl+c with it — the panel never
+    /// cancels on a key its binding does not name, so the derived hint
+    /// stays truthful.
+    #[test]
+    fn cancel_runs_through_the_effective_binding() {
+        // The stock bindings: ctrl+c is tui.select.cancel's second key.
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb(), &mut sink());
+        assert_eq!(
+            answer.try_recv(),
+            Ok(None),
+            "ctrl+c cancels through the stock binding"
+        );
+        // An emptied cancel binding drops ctrl+c with it: the input
+        // stays mounted, waiting.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb, &mut sink());
+        assert!(
+            answer.try_recv().is_err(),
+            "an emptied cancel binding takes ctrl+c with it"
+        );
+        // A rebound cancel binding moves the cancel key.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), vec!["ctrl+q".to_string()]);
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb, &mut sink());
+        assert!(answer.try_recv().is_err(), "the default key went inert");
+        panel.handle_key("ctrl+q", &kb, &mut sink());
+        assert_eq!(answer.try_recv(), Ok(None), "the rebound key cancels");
     }
 
     /// TS `OAuthPrompt.allowEmpty`: a prompt that allows the blank entry
