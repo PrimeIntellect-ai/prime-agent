@@ -109,9 +109,8 @@ fn xai_subscription_model(model: &Model) -> Model {
     let mut adapted = model.clone();
     adapted.api = "openai-responses".to_string();
     adapted.base_url = "https://api.x.ai/v1".to_string();
-    // TS `getXaiSubscriptionModel` fills only an absent map: a model that
-    // already declares its levels keeps them (a blanket replacement
-    // collapsed a thinking-capable route onto the all-null default arm).
+    // TS `getXaiSubscriptionModel` fills only an absent map: a model
+    // that already declares its levels keeps them.
     if adapted.thinking_level_map.is_none() {
         adapted.thinking_level_map = Some(xai_subscription_thinking_map(&model.id));
     }

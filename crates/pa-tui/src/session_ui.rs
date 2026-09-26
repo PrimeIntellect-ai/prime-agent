@@ -7360,13 +7360,12 @@ impl SessionUi {
         }
     }
 
-    /// The session's connection state (TS `AgentConnectionState`, the
-    /// TS client `getState()`'s `get_connection_state` response — the
-    /// worker's `get_state` serves the roster `SessionSummary` and never
-    /// carries the connection fields, so reading it here starved every
-    /// `availableThinkingLevels`/`steeringMode`-style consumer).
-    /// `None` surfaces the failure as a note; callers keep the
-    /// transcript unchanged then.
+    /// The session's connection state (TS `AgentConnectionState`): the
+    /// worker's `get_connection_state` response, which carries the
+    /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
+    /// `steeringMode`, `serviceTier`, ...) — `get_state` serves the
+    /// roster summary instead. `None` surfaces the failure as a note;
+    /// callers keep the transcript unchanged then.
     async fn connection_state(&mut self, view: &mut AgentView) -> Option<Value> {
         match self
             .bounded_request(
