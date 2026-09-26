@@ -179,7 +179,7 @@ impl AcpSession {
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> (CompactionCheckRun, Option<pa_types::session::CustomMessage>) {
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             // TS reads `this.model?.contextWindow ?? 0`: a session
             // without a resolvable model never crosses a threshold.
             return (CompactionCheckRun::Proceed, None);
@@ -231,14 +231,17 @@ impl AcpSession {
     /// so a failed run is not silently re-run on the next boundary. The
     /// outcomes publish like the `/refine` command events.
     pub(super) async fn consume_requested_refine(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        // The config queue serializes the round against picker switches
+        // (the review runs on the model the session reports).
+        let _guard = mode.config_queue.lock().await;
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let Some(refinement) = mode
             .engine
             .consume_pending_refinement(
                 &model,
-                mode.api_key.clone(),
+                mode.current_api_key().await,
                 mode.agent_dir.as_path().to_path_buf(),
             )
             .await
@@ -312,7 +315,7 @@ impl AcpSession {
             }
             _ => None,
         };
-        let outcome = run_compaction(self, engine, model, mode.api_key.clone(), None).await;
+        let outcome = run_compaction(self, engine, model, mode.current_api_key().await, None).await;
         let cancelled = outcome
             .as_ref()
             .err()
@@ -345,7 +348,7 @@ impl AcpSession {
             self,
             engine,
             model,
-            mode.api_key.clone(),
+            mode.current_api_key().await,
             instructions.as_deref(),
         )
         .await;
@@ -437,7 +440,7 @@ impl AcpSession {
         assistant: &AssistantMessage,
     ) -> OverflowAttempt {
         let engine = &mode.engine;
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             return OverflowAttempt::Continue;
         };
         // TS `sameModel`: a model switch must not compact for the old
@@ -515,7 +518,7 @@ impl AcpSession {
             self,
             engine,
             &model,
-            mode.api_key.clone(),
+            mode.current_api_key().await,
             instructions.as_deref(),
         )
         .await;
@@ -791,6 +794,11 @@ mod tests {
             session: Some(SessionEntry {
                 session,
                 prompt_task: None,
+                config: std::sync::Arc::new(super::super::InProcessConfig {
+                    published: tokio::sync::Mutex::new(Vec::new()),
+                    models: tokio::sync::Mutex::new(Vec::new()),
+                }),
+                config_refresh: None,
             }),
             session_new_in_flight: false,
             session_close_in_flight: false,
@@ -799,9 +807,11 @@ mod tests {
             engine: engine.clone(),
             actual_cwd: std::sync::Arc::new(dir.path().to_path_buf()),
             product_version: std::sync::Arc::new("test".to_string()),
-            model: Some(model),
-            api_key: None,
+            model: std::sync::Arc::new(Mutex::new(Some(model))),
+            api_key: std::sync::Arc::new(Mutex::new(None)),
+            config_queue: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             agent_dir: std::sync::Arc::new(agent_dir),
+            provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             autonomous_config: None,
             mcp: engine.mcp_manager.clone(),
             mcp_owner_id: std::sync::Arc::new("acp-test-owner".to_string()),
