@@ -7166,11 +7166,10 @@ mod agent_message_tests {
     }
 
     /// The attach response's wire shape is the TS `createAttachResult`
-    /// byte order, proven on the serialized payload: snapshot keys in TS
-    /// order, the non-slim top-level duplication between
-    /// `activeSessionId` and `snapshot`, the slim response carrying the
-    /// messages exactly once (inside the snapshot), and the duplicated
-    /// message trees byte-identical.
+    /// key order (serde_json keeps insertion order), for slim and plain
+    /// clients: the slim response carries the messages exactly once
+    /// (inside the snapshot) and the non-slim duplicate is byte-identical
+    /// to the snapshot's copy.
     #[tokio::test]
     async fn attach_response_wire_bytes_keep_the_ts_key_order() {
         let worker = created_worker().await;
@@ -7198,49 +7197,74 @@ mod agent_message_tests {
                 .await;
             assert!(response.success, "attach failed: {response:?}");
             let data = response.data.expect("attach carries data");
-            let payload = serde_json::to_string(&data).unwrap();
-            // serde_json preserves insertion order (preserve_order), so
-            // the first occurrence of a key name marks its byte position.
-            let after = |payload: &str, left: &str, right: &str| {
-                assert!(
-                    payload.find(&format!("\"{left}\"")) < payload.find(&format!("\"{right}\"")),
-                    "{left} must serialize before {right}"
-                );
+            let keys = data
+                .as_object()
+                .expect("attach data is an object")
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>();
+            let expected = if slim {
+                vec![
+                    "protocol".to_string(),
+                    "activeSessionId".to_string(),
+                    "snapshot".to_string(),
+                    "replay".to_string(),
+                    "lastEventSequence".to_string(),
+                    "lastEventCursor".to_string(),
+                    "client".to_string(),
+                ]
+            } else {
+                vec![
+                    "protocol".to_string(),
+                    "activeSessionId".to_string(),
+                    "state".to_string(),
+                    "messages".to_string(),
+                    "snapshot".to_string(),
+                    "replay".to_string(),
+                    "lastEventSequence".to_string(),
+                    "lastEventCursor".to_string(),
+                    "client".to_string(),
+                ]
             };
-            after(&payload, "protocol", "activeSessionId");
-            after(&payload, "activeSessionId", "snapshot");
-            after(&payload, "snapshot", "replay");
-            after(&payload, "replay", "lastEventSequence");
-            after(&payload, "lastEventSequence", "lastEventCursor");
-            after(&payload, "lastEventCursor", "client");
+            assert_eq!(
+                keys, expected,
+                "the attach top-level keys keep the TS createAttachResult order"
+            );
             let snapshot = data.get("snapshot").expect("the attach snapshot");
-            let snapshot_payload = serde_json::to_string(snapshot).unwrap();
-            let snapshot_after = |left: &str, right: &str| {
-                assert!(
-                    snapshot_payload.find(&format!("\"{left}\""))
-                        < snapshot_payload.find(&format!("\"{right}\"")),
-                    "the snapshot's {left} must serialize before {right}"
-                );
-            };
-            snapshot_after("activeSessionId", "summary");
-            snapshot_after("summary", "state");
-            snapshot_after("state", "messages");
-            snapshot_after("messages", "lastEventSequence");
-            snapshot_after("lastEventSequence", "lastEventCursor");
-            snapshot_after("lastEventCursor", "children");
+            let snapshot_keys = snapshot
+                .as_object()
+                .expect("the snapshot is an object")
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>();
+            assert_eq!(
+                snapshot_keys,
+                vec![
+                    "activeSessionId".to_string(),
+                    "summary".to_string(),
+                    "state".to_string(),
+                    "messages".to_string(),
+                    "lastEventSequence".to_string(),
+                    "lastEventCursor".to_string(),
+                    "children".to_string(),
+                ],
+                "the snapshot keys keep the TS order"
+            );
             let messages = snapshot.get("messages").expect("the snapshot messages");
-            let rows = messages.as_array().expect("messages are an array");
-            let content: Vec<&str> = rows
+            let content: Vec<String> = messages
+                .as_array()
+                .expect("messages are an array")
                 .iter()
                 .map(|row| {
                     row.get("content")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
+                        .to_string()
                 })
                 .collect();
             assert_eq!(
                 content,
-                vec!["wire bytes", "byte order"],
+                vec!["wire bytes".to_string(), "byte order".to_string()],
                 "the snapshot carries the store's transcript rows in order"
             );
             if slim {
@@ -7249,9 +7273,6 @@ mod agent_message_tests {
                     "the slim attach duplicates no message tree at the top level"
                 );
             } else {
-                after(&payload, "activeSessionId", "state");
-                after(&payload, "state", "messages");
-                after(&payload, "messages", "snapshot");
                 let top_messages = data.get("messages").expect("the top-level messages");
                 assert_eq!(
                     serde_json::to_string(top_messages).unwrap(),
