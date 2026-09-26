@@ -583,6 +583,7 @@ async fn drive_onboarding_pane(
     drive: &mut PaneDrive<'_>,
     mut screen: crate::onboarding::OnboardingScreen,
     mut flow: Option<OnboardingFlowTask>,
+    osc_sink: &mut crate::clipboard::OscSink,
 ) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
     // The armed render barrier holds the input batch behind it (the
     // loop's post-draw check pops it on satisfy or timeout).
@@ -670,7 +671,7 @@ async fn drive_onboarding_pane(
                     if key_id == "ctrl+c" {
                         drive.exit_guard.note_ctrl_c_handled();
                     }
-                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings) {
+                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
                         // A decision tears the pane down mid-drive: end
                         // a still-running login flow with it (TS the
                         // dialog's abort signal) — the cooperative
@@ -799,7 +800,8 @@ async fn run_onboarding_phase(
         // The model-ready branch (TS `runOnboardingFlow`'s ready case):
         // the immediate splash mounts the trace question alone.
         let screen = crate::onboarding::OnboardingScreen::new();
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -839,7 +841,8 @@ async fn run_onboarding_phase(
     // questions. A flow that aborts (a cancelled or failed sign-in,
     // the exit keys) leaves the marker unset — the next launch retries.
     let screen = crate::onboarding::OnboardingScreen::welcome();
-    let (mut screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+    let (mut screen, outcome) =
+        drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
     // The welcome binds one key: Enter starts the flow (TS: cancel is
     // deliberately unbound — signing in is the only way forward).
     match outcome {
@@ -894,7 +897,8 @@ async fn run_onboarding_phase(
         prime_cancel,
     );
     let (mut screen, outcome) =
-        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow)).await?;
+        drive_onboarding_pane(view, &mut *drive, screen, Some(prime_flow), &mut session.osc_sink)
+        .await?;
     // The dialog consumes every key itself; only the flow settling or
     // the exit keys can end the drive.
     let login = match outcome {
@@ -987,7 +991,7 @@ async fn run_onboarding_phase(
             crate::onboarding_flow::ProviderPicker::new(options),
         ));
         let (picked_screen, outcome) =
-            drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         screen = picked_screen;
         let pick = match outcome {
             PaneOutcome::InputClosed => return Ok(false),
@@ -1055,8 +1059,14 @@ async fn run_onboarding_phase(
                 },
                 prompt_cancel,
             );
-            let (prompted_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(prompt_flow)).await?;
+            let (prompted_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(prompt_flow),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = prompted_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1100,8 +1110,14 @@ async fn run_onboarding_phase(
                 async move { service_auth.0.login_on_panel(&row, panel).await },
                 service_cancel,
             );
-            let (login_screen, outcome) =
-                drive_onboarding_pane(view, &mut *drive, screen, Some(provider_login)).await?;
+            let (login_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(provider_login),
+                &mut session.osc_sink,
+            )
+            .await?;
             screen = login_screen;
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
@@ -1140,7 +1156,8 @@ async fn run_onboarding_phase(
                 crate::onboarding::trace_question_config(),
             ),
         ));
-        let (_screen, outcome) = drive_onboarding_pane(view, &mut *drive, screen, None).await?;
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
         match outcome {
             PaneOutcome::InputClosed => return Ok(false),
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
@@ -1216,6 +1233,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// Links opened by mouse clicks (headless runs have no terminal to
+    /// hand a browser to; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -1766,6 +1786,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -3055,6 +3076,7 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        opened_urls: std::mem::take(&mut session.opened_urls),
         agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now

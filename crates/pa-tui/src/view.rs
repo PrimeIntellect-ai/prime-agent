@@ -261,6 +261,10 @@ pub struct AgentView {
     /// Rows of the last composed frame (frame-selection geometry; TS
     /// `lastFrameVisibleHeight`).
     pub(crate) frame_rows: usize,
+    /// The last composed frame's clickable link ranges (TS the
+    /// viewport's `hyperlinkAt` over `lastFrame`): the click dispatch
+    /// resolves a screen cell to its URL through these.
+    pub(crate) frame_links: Vec<crate::hyperlinks::LinkRange>,
     /// In-app mouse text selection (TS `FullscreenViewport`'s selection
     /// state): anchor/head points, the mode, and the frame snapshot.
     pub(crate) selection: crate::selection::SelectionState,
@@ -380,6 +384,7 @@ impl AgentView {
             layout_options: None,
             flushed_frame: Vec::new(),
             frame_rows: 0,
+            frame_links: Vec::new(),
             selection: crate::selection::SelectionState::default(),
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
@@ -1501,17 +1506,28 @@ impl AgentView {
         // render): the frame repaints on every tick, and re-emitting an
         // image placement each paint would corrupt the display. Graphics
         // placements belong to the inline paint path only.
-        crate::image_component::with_fullscreen_image_fallback(|| {
+        let frame = crate::image_component::with_fullscreen_image_fallback(|| {
             self.render_frame_inner(width, height)
-        })
+        });
+        // The composed frame is the click surface (TS `hyperlinkAt` reads
+        // the last painted frame's OSC 8 sequences): one scan serves every
+        // pane — the transcript window, the dock, and the onboarding splash
+        // all carry their links in span content.
+        self.frame_links = crate::hyperlinks::frame_link_ranges(&frame);
+        frame
     }
 
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
-        // no top bar, transcript, or prompt dock behind it.
+        // no top bar, transcript, or prompt dock behind it. The pane is a
+        // frame surface like the TS overlay (its rows select; TS's
+        // `beginFrameSelection` falls through to the overlay's rows), so
+        // the frame-selection regions span the whole frame.
         if let Some(screen) = self.onboarding.as_mut() {
-            let frame = screen.render(&self.theme, width, height);
+            let kb = self.editor.keybindings();
+            let mut frame = screen.render(&self.theme, width, height, &kb);
             self.frame_rows = frame.len();
+            self.apply_frame_selection(&mut frame, 0, width);
             return frame;
         }
         // The `/model` and `/effort` pickers mount in the editor dock (TS
@@ -1578,7 +1594,8 @@ impl AgentView {
             } else if let Some(selector) = self.provider_auth.as_mut() {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(panel) = self.auth_panel.as_mut() {
-                dock.extend(panel.render(&self.theme, width));
+                let kb = self.editor.keybindings();
+                dock.extend(panel.render(&self.theme, width, &kb));
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
@@ -1660,7 +1677,11 @@ impl AgentView {
             }
         }
         self.frame_rows = frame.len();
-        self.apply_frame_selection(&mut frame, width);
+        self.apply_frame_selection(
+            &mut frame,
+            crate::selection::HEADER_ROWS + self.window_rows,
+            width,
+        );
         // The action toasts overlay the transcript window's top rows
         // (newest at the bottom of the stack), above the selection restyle
         // so the transient text stays legible. The overlay never runs
