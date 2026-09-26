@@ -1398,15 +1398,18 @@ mod tests {
             "process B re-probes after the rlm uninstall"
         );
 
-        // Repair republishes.
+        // A repair to the EXACT already-verified content: the restored
+        // state matches the verdict the cold call published, so a fresh
+        // process HITS the disk memo with zero probes — restoring to a
+        // known-good verified state is the memo working as designed.
         std::fs::create_dir_all(&rlm).unwrap();
         std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
         clear_in_process_probe_memo_for_tests();
         assert!(kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(
             probe_count(),
-            8,
-            "the repaired venv re-probes and republishes"
+            6,
+            "a repair to the already-published content hits the disk memo without re-probing"
         );
 
         // A rewritten version file (a newer concurrent daemon rebuilt the
@@ -1417,7 +1420,7 @@ mod tests {
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(
             probe_count(),
-            8,
+            6,
             "a version-file rewrite fails the cheap check before any probe"
         );
 
@@ -1427,7 +1430,7 @@ mod tests {
         assert!(!kernel_ready(&python_str, &venv, "sha256:runtime", &[]));
         assert_eq!(
             probe_count(),
-            8,
+            6,
             "a deleted interpreter misses without running"
         );
     }
