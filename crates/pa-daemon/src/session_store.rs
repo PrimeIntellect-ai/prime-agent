@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 #[path = "session_store_info_tests.rs"]
 mod info_tests;
 #[cfg(test)]
+#[path = "session_store_stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
@@ -297,12 +301,23 @@ impl SessionFile {
     /// header is missing or invalid; malformed entry lines are skipped,
     /// matching the TS loader.
     pub fn open(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
+        // Streamed line-by-line load: one line is resident at a time, so a
+        // grown session never holds the raw file bytes alongside the parsed
+        // entries (the whole-body String read was a transient copy the
+        // allocator kept resident long after `open` returned).
+        let file = fs::File::open(path)
             .with_context(|| format!("read session file {}", path.display()))?;
-        let mut lines = content.lines().filter(|l| !l.trim().is_empty());
-        let first = lines
-            .next()
-            .ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
+        let mut lines = std::io::BufReader::new(file).lines();
+        let read_context = || format!("read session file {}", path.display());
+        let mut first = None;
+        for line in lines.by_ref() {
+            let line = line.with_context(read_context)?;
+            if !line.trim().is_empty() {
+                first = Some(line);
+                break;
+            }
+        }
+        let first = first.ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
         let header_value: Value = serde_json::from_str(first.trim())
             .with_context(|| format!("invalid session header in {}", path.display()))?;
         if header_value.get("type").and_then(Value::as_str) != Some("session") {
@@ -320,6 +335,7 @@ impl SessionFile {
             lease: None,
         };
         for line in lines {
+            let line = line.with_context(read_context)?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -341,7 +357,7 @@ impl SessionFile {
     /// no session header; a malformed retained row falls back to the
     /// full [`SessionFile::open`] load, so its errors surface here too.
     pub fn open_windowed(path: &Path) -> Result<Self> {
-        let Some(window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
+        let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
             return Self::open(path);
         };
         let header = window
@@ -361,8 +377,16 @@ impl SessionFile {
             window: None,
             lease: None,
         };
-        for line in window.metadata_entries().iter().chain(window.raw_entries()) {
-            let Ok(entry) = serde_json::from_str(line) else {
+        // The raw rows are consumed in place: each line String drops as
+        // soon as its parsed entry joins the store, instead of keeping the
+        // raw copy resident for the whole build.
+        let raw_count = window.raw_entries().len();
+        for line in window
+            .take_metadata_entries()
+            .into_iter()
+            .chain(window.take_raw_entries())
+        {
+            let Ok(entry) = serde_json::from_str(&line) else {
                 return Self::open(path);
             };
             file.push_index(entry);
@@ -388,14 +412,13 @@ impl SessionFile {
             boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
-            retained_ids: window
-                .raw_entries()
+            // The retained rows joined the store verbatim above (any
+            // unparsable row fell back to the full reader), so their ids are
+            // exactly the trailing `raw_count` store ids — no third parse
+            // pass over the retained body.
+            retained_ids: file.entries[file.entries.len() - raw_count..]
                 .iter()
-                .filter_map(|raw| {
-                    serde_json::from_str::<SessionEntry>(raw)
-                        .ok()
-                        .map(|entry| entry.id)
-                })
+                .map(|entry| entry.id.clone())
                 .collect(),
             older_path_stats: window.older_path_stats().clone(),
         });
@@ -1293,8 +1316,11 @@ const SESSION_SCAN_MAX_CACHED_STATES: usize = 4096;
 #[derive(Default)]
 struct SessionInfoScanCache {
     states: HashMap<PathBuf, SessionScanState>,
-    /// Insertion order; a re-store moves a path to the back (LRU recency).
-    order: Vec<PathBuf>,
+    /// Oldest first. One ordinal per live state keeps the recency index
+    /// bounded even when the same roster is refreshed indefinitely.
+    order: std::collections::BTreeMap<u64, PathBuf>,
+    ordinal_by_path: HashMap<PathBuf, u64>,
+    next_ordinal: u64,
     retained_usage_entries: usize,
 }
 
@@ -1304,17 +1330,40 @@ impl SessionInfoScanCache {
         if let Some(state) = self.states.remove(path) {
             self.retained_usage_entries -= state.accounted_usage_entries;
         }
-        self.order.retain(|p| p != path);
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+    }
+
+    fn mark_recent(&mut self, path: &Path) {
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+        // Rollover is unreachable in practice, but rebuilding the tiny
+        // (at most 4096 entries) recency index preserves exact LRU order.
+        if self.next_ordinal == u64::MAX {
+            let ordered: Vec<PathBuf> = self.order.values().cloned().collect();
+            self.order.clear();
+            self.ordinal_by_path.clear();
+            for (ordinal, old_path) in ordered.into_iter().enumerate() {
+                let ordinal = ordinal as u64;
+                self.ordinal_by_path.insert(old_path.clone(), ordinal);
+                self.order.insert(ordinal, old_path);
+            }
+            self.next_ordinal = self.order.len() as u64;
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        self.ordinal_by_path.insert(path.to_path_buf(), ordinal);
+        self.order.insert(ordinal, path.to_path_buf());
     }
 
     /// The unchanged-file hit re-stores in TS (`storeSessionScanState
     /// (filePath, previous)`) — LRU recency without re-accounting.
     fn touch(&mut self, path: &Path) {
-        if !self.states.contains_key(path) {
-            return;
+        if self.states.contains_key(path) {
+            self.mark_recent(path);
         }
-        self.order.retain(|p| p.as_path() != path);
-        self.order.push(path.to_path_buf());
     }
 
     /// TS `storeSessionScanState`: (re-)store with fresh accounting, then
@@ -1324,14 +1373,15 @@ impl SessionInfoScanCache {
         let mut state = state;
         state.accounted_usage_entries = state.acc.usage_scan.retained_entries();
         self.retained_usage_entries += state.accounted_usage_entries;
-        self.order.push(path.to_path_buf());
         self.states.insert(path.to_path_buf(), state);
+        self.mark_recent(path);
         while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
             || self.states.len() > SESSION_SCAN_MAX_CACHED_STATES
         {
-            let Some(front) = self.order.first().cloned() else {
+            let Some((_, front)) = self.order.first_key_value() else {
                 break;
             };
+            let front = front.clone();
             self.drop_state(&front);
         }
     }

@@ -33,7 +33,7 @@ from pathlib import Path
 from bundle_catalog import validate_bundled_catalog_dir
 # The release platform alias the archive name carries (TS parity; the update
 # flow's channel manifest requires alias-named archives).
-from assemble_artifacts import TARGET_ALIASES
+from assemble_artifacts import TARGET_ALIASES, RUNTIME_EXCLUDED_NAMES, RUNTIME_EXCLUDED_SUFFIXES
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
 # Continuous builds additionally stage the package.json version manifest.
@@ -107,6 +107,11 @@ def main() -> int:
                 f"!= designed payload {sorted(expected_top_level)}"
             )
         for member in members:
+            if member.name.startswith(("skills/", "prime-agent-runtime/")) and any(
+                part in RUNTIME_EXCLUDED_NAMES or part.endswith(RUNTIME_EXCLUDED_SUFFIXES)
+                for part in Path(member.name).parts
+            ):
+                fail(f"tarball contains a development cache entry {member.name!r}")
             if member.issym() or member.islnk():
                 fail(f"tarball contains a link entry {member.name!r}")
             if member.uid != 0 or member.gid != 0 or member.mtime != 0:

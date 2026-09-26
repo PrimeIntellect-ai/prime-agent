@@ -53,6 +53,9 @@ impl Worker {
                     return response_failure(None, command_type, &error.to_string(), None);
                 }
             }
+            // The hydrated full file was a transient whole-file copy on
+            // top of the installed history: release its freed heap.
+            pa_types::memory_release::trim_freed_heap();
         }
         match command_type {
             "create" => self.handle_create(payload).await,
