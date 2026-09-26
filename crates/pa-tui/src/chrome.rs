@@ -6,6 +6,7 @@
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::Style;
+use serde_json::Value;
 
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 
@@ -64,7 +65,8 @@ pub struct ChromeState {
     /// subagent session renders `depth N` after the manage hint; a root
     /// session (depth 0 or unknown) renders none.
     pub tray_depth: Option<u32>,
-    /// Thinking effort suffix rendered as `model:effort` in the tray.
+    /// Thinking effort suffix rendered as `model:effort` in the tray (TS
+    /// `getModelContextLabel`); `None` keeps the bare model id.
     pub thinking_suffix: Option<String>,
     /// Startup warning (tmux keyboard setup), rendered as a status row.
     pub tmux_notice: Option<String>,
@@ -463,6 +465,30 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     line.push(Span::styled(" ".repeat(gap), Style::default()));
     line.extend(right);
     line
+}
+
+/// The tray model label's thinking-effort suffix (TS `getModelContextLabel`:
+/// `model.reasoning ? connectionState.thinkingLevel : undefined` — a model
+/// without reasoning renders the bare id, and so does a level outside the
+/// wire vocabulary, which TS would render raw). The state's level parses
+/// to its wire name, so the suffix is always one of the TS `ThinkingLevel`
+/// strings, including "off" when the session explicitly turned thinking
+/// off — the tray shows `model:off` like TS; only the agents-view Model
+/// column hides "off" (`formatSessionModel`).
+pub(crate) fn tray_thinking_suffix(state: &Value) -> Option<String> {
+    let reasoning = state
+        .get("model")
+        .and_then(|model| model.get("reasoning"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !reasoning {
+        return None;
+    }
+    state
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .and_then(pa_types::ai::thinking_level_from_str)
+        .map(|level| level.wire_name().to_string())
 }
 
 /// Truncate a styled span row to a visible width, replacing the tail with
@@ -1010,6 +1036,7 @@ mod tests {
     use super::*;
     use crate::theme::{ColorMode, Theme};
     use ratatui::style::Color;
+    use serde_json::json;
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)
@@ -1072,6 +1099,77 @@ mod tests {
         assert!(text.starts_with("\u{2190} manage"));
         assert!(text.contains("faux-1 \u{00b7} 6.1k (5%)"));
         assert_eq!(str_width(&text), 120);
+    }
+
+    /// TS `getModelContextLabel`: the effort suffix is the state's
+    /// `thinkingLevel` behind the model's `reasoning` gate — a level on a
+    /// reasoning model renders, everything else keeps the bare id.
+    #[test]
+    fn effort_suffix_gates_on_model_reasoning() {
+        let reasoning = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "high",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&reasoning),
+            Some("high".to_string()),
+            "a reasoning model's session level renders as the suffix"
+        );
+        let plain = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": false },
+            "thinkingLevel": "high",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&plain),
+            None,
+            "no reasoning, no suffix"
+        );
+        assert_eq!(
+            tray_thinking_suffix(&json!({ "thinkingLevel": "high" })),
+            None,
+            "no model block, no suffix"
+        );
+        let unknown = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "default",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&unknown),
+            None,
+            "a level outside the wire vocabulary keeps the bare id"
+        );
+        let off = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "off",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&off),
+            Some("off".to_string()),
+            "an explicit off renders `model:off` like the TS tray"
+        );
+    }
+
+    /// The tray renders `model:effort` with a suffix and the bare model id
+    /// without one (TS `getModelContextLabel`'s two arms).
+    #[test]
+    fn tray_renders_the_effort_suffix_and_the_bare_id_without_it() {
+        let mut state = ChromeState {
+            show_manage: true,
+            model_id: Some("faux-1".to_string()),
+            thinking_suffix: Some("high".to_string()),
+            ..Default::default()
+        };
+        let line = render_tray(&state, &theme(), 120);
+        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+        assert!(
+            text.contains("faux-1:high"),
+            "the effort suffix rides the id: {text}"
+        );
+        state.thinking_suffix = None;
+        let line = render_tray(&state, &theme(), 120);
+        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+        assert!(text.contains("faux-1"), "the bare id still renders: {text}");
+        assert!(!text.contains("faux-1:"), "no suffix, no colon: {text}");
     }
 
     /// The tray (the line below the prompt bar) never carries the goal
