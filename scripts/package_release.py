@@ -96,6 +96,7 @@ REQUIRED_FILES = (
     "docs/MODEL-SURFACE.md",
     "docs/RUST_QUICKSTART.md",
     "docs/keybindings.md",
+    "docs/FEATURE_PARITY.md",
 )
 REQUIRED_DIRS = ("prime-agent-runtime/src/rlm", "skills")
 

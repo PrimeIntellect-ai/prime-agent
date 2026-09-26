@@ -107,7 +107,7 @@ RUNTIME_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
 # developers (~570KB at assembly time) and stays out of the installed
 # footprint; the docs payload entry itself always ships (the update
 # flow's RELEASE_ASSETS and the TS binaryAssets list require it).
-SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md")
+SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md", "FEATURE_PARITY.md")
 
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
 TARGET_ALIASES = {
