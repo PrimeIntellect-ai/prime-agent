@@ -1428,7 +1428,9 @@ mod tests {
     fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
         let dir = temp_dir("legacy-corrupt-tail");
         let parent = dir.join("p.jsonl");
-        let mut bytes = json!({"type": "session", "id": "p1"}).to_string().into_bytes();
+        let mut bytes = json!({"type": "session", "id": "p1"})
+            .to_string()
+            .into_bytes();
         bytes.push(b'\n');
         bytes.extend_from_slice(&[0xff_u8; 4096]);
         fs::write(&parent, bytes).unwrap();
