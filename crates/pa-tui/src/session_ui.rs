@@ -4535,6 +4535,7 @@ impl SessionUi {
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
+        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
