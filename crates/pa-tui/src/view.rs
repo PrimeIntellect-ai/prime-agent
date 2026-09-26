@@ -1526,6 +1526,10 @@ impl AgentView {
         // tree and fork selectors: the prompt context (the detail hint)
         // stays above the pane and the transcript stays mounted above it.
         let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
+        // The read-only info panel's CURRENT row budget (a terminal resize
+        // re-budgets an open panel every frame, never a stale open-time
+        // value): read before the panel borrow below.
+        let info_viewport_rows = crate::session_ui::picker_viewport_rows(self.terminal_rows());
         let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
@@ -1562,7 +1566,7 @@ impl AgentView {
                 width,
                 self.editor.keybindings(),
                 &self.code_block_indent,
-                crate::session_ui::picker_viewport_rows(self.terminal_rows()),
+                info_viewport_rows,
             ));
             Some(dock)
         } else {
