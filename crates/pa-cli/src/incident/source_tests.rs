@@ -199,7 +199,7 @@ fn does_not_fall_back_when_agent_jsonl_parses_but_has_no_in_window_events() {
 
 #[test]
 fn reports_missing_logs_clearly() {
-    with_agent_dir(|agent_dir| {
+    with_agent_dir(|_agent_dir| {
         // No logs at all: the command prints the missing-logs message
         // instead of an empty timeline (TS runIncident's early return).
         let options = IncidentCommandOptions {

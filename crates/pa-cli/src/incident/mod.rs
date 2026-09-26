@@ -77,17 +77,16 @@ pub(crate) fn parse_incident_options(
                 "Unknown option for incident: {arg}"
             )));
         }
-        let value = match value {
-            Some(value) => value,
-            None => {
-                let Some(next) = args.get(index + 1) else {
-                    return Err(IncidentUsageError(format!(
-                        "Option {name} requires a value."
-                    )));
-                };
-                index += 1;
-                next.clone()
-            }
+        let value = if let Some(value) = value {
+            value
+        } else {
+            let Some(next) = args.get(index + 1) else {
+                return Err(IncidentUsageError(format!(
+                    "Option {name} requires a value."
+                )));
+            };
+            index += 1;
+            next.clone()
         };
         if value.trim().is_empty() {
             return Err(IncidentUsageError(format!(
@@ -178,10 +177,10 @@ pub(crate) fn read_incident_log_entries() -> IncidentLogSource {
         return structured;
     };
     let fallback = scan_incident_log_files(&[(fallback_path, IncidentLogFileKind::Daemon)]);
-    if !fallback.entries.is_empty() {
-        fallback
-    } else {
+    if fallback.entries.is_empty() {
         structured
+    } else {
+        fallback
     }
 }
 
@@ -251,7 +250,7 @@ fn newest_daemon_log_path(logs_dir: &Path) -> Option<PathBuf> {
         };
         candidates.push((path, mtime));
     }
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.1));
     candidates.first().map(|(path, _)| path.clone())
 }
 
@@ -346,7 +345,7 @@ mod tests {
     fn parses_separated_and_equals_attached_values() {
         let args: Vec<String> = ["--since", "20:02", "--until=21:00", "--session", "abc"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(
             parse_incident_options(&args).expect("options"),
@@ -365,7 +364,7 @@ mod tests {
     #[test]
     fn rejects_unknown_missing_and_empty_values() {
         fn options(args: &[&str]) -> Result<IncidentCommandOptions, IncidentUsageError> {
-            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
             parse_incident_options(&args)
         }
         assert!(options(&["--json"]).is_err());

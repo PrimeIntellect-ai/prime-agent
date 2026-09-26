@@ -166,7 +166,7 @@ fn digits(text: &str) -> Option<u32> {
 /// Take exactly `len` ASCII digits off the front of `rest`.
 fn take_digits(rest: &mut &str, len: usize) -> Option<u32> {
     let bytes = rest.as_bytes();
-    if bytes.len() < len || !bytes[..len].iter().all(|b| b.is_ascii_digit()) {
+    if bytes.len() < len || !bytes[..len].iter().all(u8::is_ascii_digit) {
         return None;
     }
     let value = rest[..len].parse().ok()?;

@@ -76,9 +76,7 @@ struct AggregatedEvent {
 /// the way the TS `Map` insertion order does).
 fn aggregate_incident_events(events: &[IncidentEvent]) -> Vec<AggregatedEvent> {
     let mut groups: HashMap<String, AggregatedEvent> = HashMap::new();
-    let mut arrival = 0usize;
-    for incident in events {
-        arrival += 1;
+    for (arrival, incident) in events.iter().enumerate() {
         let key = format!(
             "{}|{}|{}",
             incident.category.as_str(),
@@ -102,7 +100,7 @@ fn aggregate_incident_events(events: &[IncidentEvent]) -> Vec<AggregatedEvent> {
                         first: incident.clone(),
                         last: incident.clone(),
                         count: 1,
-                        arrival,
+                        arrival: arrival + 1,
                     },
                 );
             }
