@@ -666,7 +666,7 @@ impl Supervisor {
                                 active_session_id,
                             },
                         );
-                        let _ = events.send((routing, payload));
+                        let _ = events.send((routing, std::sync::Arc::new(payload)));
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
@@ -678,7 +678,7 @@ impl Supervisor {
                                 active_session_id,
                             },
                         );
-                        let _ = events.send((routing, payload));
+                        let _ = events.send((routing, std::sync::Arc::new(payload)));
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
                         // snapshot can no longer be trusted as fresh (TS
@@ -692,7 +692,7 @@ impl Supervisor {
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ = events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
                         // A worker's background catalog refresh changed
                         // the served snapshot: every client re-fetches
@@ -702,7 +702,7 @@ impl Supervisor {
                         // refresh returns the validated snapshot instantly
                         // and lands the fresh catalog through this
                         // broadcast.
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ = events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);
