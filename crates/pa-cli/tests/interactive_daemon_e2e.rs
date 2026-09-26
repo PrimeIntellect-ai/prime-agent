@@ -262,9 +262,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         .env("PI_OFFLINE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(std::process::Stdio::from(
-            std::fs::File::create(dir.join("daemon.err")).expect("daemon err log"),
-        ))
+        .stderr(std::process::Stdio::inherit())
         .env("PA_DAEMON_DEBUG", "1");
     // The launcher strips inherited worker role env vars before spawning the
     // supervisor; a CLI running inside a daemon worker must not leak them.
