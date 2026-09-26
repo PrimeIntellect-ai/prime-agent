@@ -191,9 +191,16 @@ fn scan_incident_log_files(files: &[(PathBuf, IncidentLogFileKind)]) -> Incident
     let mut scanned_count = 0;
     let mut skipped_count = 0;
     for (path, kind) in files {
-        let Ok(contents) = std::fs::read_to_string(path) else {
+        // A torn multi-byte write at the live log's tail must not cost
+        // the whole scan (TS readFile + toString keeps it as replacement
+        // characters — the agents-view reader's own lossy rule): decode
+        // lossily, keep every structured line around the tear, and let
+        // the torn line itself fail the parse like any non-line. Only a
+        // read error (missing, unreadable) skips the file whole.
+        let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
+        let contents = String::from_utf8_lossy(&bytes);
         for line in contents.split('\n') {
             if line.trim().is_empty() {
                 continue;

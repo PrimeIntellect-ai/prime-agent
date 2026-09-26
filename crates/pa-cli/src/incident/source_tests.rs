@@ -65,6 +65,45 @@ fn tolerates_malformed_lines_and_reports_them_as_skipped() {
     });
 }
 
+/// A torn multi-byte write at the live log's tail must not cost the whole
+/// scan (Cursor Bugbot: the CLI's `read_to_string` dropped the file on
+/// invalid UTF-8; TS readFile + toString keeps the tear as replacement
+/// characters — the agents-view reader's own lossy rule). The complete
+/// lines around the tear still classify; the torn line itself fails the
+/// parse like any non-line.
+#[test]
+fn keeps_structured_lines_around_a_torn_multibyte_tail() {
+    with_agent_dir(|agent_dir| {
+        let listening = supervisor_line(
+            "2026-09-10T20:02:39.764Z",
+            "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
+        );
+        let crash = supervisor_line(
+            "2026-09-10T20:05:00.000Z",
+            "Session worker 5b1d3aeb91 stderr: uncaught exception: Error: write EPIPE",
+        );
+        // A third line cut two bytes into its three-byte U+26A0: the
+        // file is invalid UTF-8 from the write tear onward.
+        let torn_line: &[u8] = br#"{"ts":"2026-09-10T20:06:00.000Z","msg":"daemon restarting "#;
+        let contents: Vec<u8> = [
+            format!("{listening}\n{crash}\n").as_bytes(),
+            torn_line,
+            &[0xE2, 0x9A],
+        ]
+        .concat();
+        std::fs::write(agent_dir.join("logs/agent.jsonl"), contents).expect("write log");
+        let text = report_text("2026-09-10T20:00", "2026-09-10T20:30");
+        assert!(
+            text.contains("worker 5b1d3aeb91 crashed: uncaught exception: Error: write EPIPE"),
+            "{text}"
+        );
+        assert!(
+            text.contains("3 lines scanned, 2 events in window, 1 unreadable skipped"),
+            "{text}"
+        );
+    });
+}
+
 /// Unix-only: the decoy is a directory carrying a future mtime via
 /// `File::set_times` on a directory handle, which Windows cannot open.
 #[cfg(unix)]
