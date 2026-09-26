@@ -325,7 +325,7 @@ fn rpc_parse_and_unknown_command_errors() {
 fn rpc_steer_and_follow_up_queue_then_abort() {
     let script = json!({
         "responses": [
-            { "text": "slow turn", "delayMs": 2000 },
+            { "text": "slow turn", "delayMs": 5000 },
             { "text": "continue reply" },
             { "text": "steer answer" },
             { "text": "follow-up answer" },
@@ -342,10 +342,11 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     assert_eq!(response["success"], true);
     // Pace into the turn's LLM call: the run's initial steering poll
     // (the TS prompt loop folds anything queued before the turn starts)
-    // happens within milliseconds of admission, and the faux delayMs
-    // then holds the stream closed for 2000ms — 100ms in, the queues
-    // are past the fold window and nothing polls until the turn ends.
-    std::thread::sleep(Duration::from_millis(100));
+    // races the loop task's scheduling on a loaded runner, and the faux
+    // delayMs then holds the stream closed for 5000ms — 1000ms in, the
+    // queues are well past the fold window and nothing polls until the
+    // turn ends.
+    std::thread::sleep(Duration::from_millis(1000));
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
     assert_eq!(steer["success"], true, "steer queues: {steer}");
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));
@@ -355,7 +356,10 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     // agent's isStreaming only flips once content starts streaming) —
     // the queue projections are the observable fact here: both rows
     // queued while the turn runs its request.
-    assert_eq!(state["data"]["sessionActions"]["queuedCount"], 2);
+    assert_eq!(
+        state["data"]["sessionActions"]["queuedCount"], 2,
+        "both rows queued while the turn runs its request: {state}"
+    );
     assert_eq!(
         state["data"]["sessionActions"]["steering"],
         json!(["steer this"]),
