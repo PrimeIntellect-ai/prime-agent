@@ -44,7 +44,7 @@ use pa_agent::stream::{
     AssistantMessageEvent, ModelStream, OnPayloadHook, OnResponseHook, StreamFn,
     StreamRequestOptions,
 };
-use pa_agent::types::{AgentMessage, StopReason, Usage};
+use pa_agent::types::{StopReason, Usage};
 use serde_json::{json, Map, Value};
 
 use crate::session::manager::format_iso;
@@ -915,7 +915,9 @@ fn round_ms(delta_ms: f64) -> f64 {
 mod tests {
     use super::*;
     use pa_agent::stream::{event_stream, LlmContext};
-    use pa_agent::types::{AssistantContent, Message, TextContent, UserContent, UserMessage};
+    use pa_agent::types::{
+        AgentMessage, AssistantContent, Message, TextContent, UserContent, UserMessage,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     /// Tests that touch the `PI_REQUEST_TIMING` env serialize on this lock:
@@ -1025,12 +1027,33 @@ mod tests {
         done_gate: tokio::sync::oneshot::Receiver<()>,
         with_response_hook: bool,
     ) -> StreamFn {
+        // An `Fn` stream seam cannot move its captures per call, so the
+        // one-shot receivers ride an interior-mutable slot the task takes
+        // them from.
+        let response_gate = Arc::new(Mutex::new(Some(response_gate)));
+        let first_token_gate = Arc::new(Mutex::new(Some(first_token_gate)));
+        let done_gate = Arc::new(Mutex::new(Some(done_gate)));
         Arc::new(move |_model, _context, options| {
             let model = model.clone();
-            let mut response_gate = response_gate;
-            let mut first_token_gate = first_token_gate;
-            let mut done_gate = done_gate;
+            let response_gate = Arc::clone(&response_gate);
+            let first_token_gate = Arc::clone(&first_token_gate);
+            let done_gate = Arc::clone(&done_gate);
             Box::pin(async move {
+                let mut response_gate = response_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("one scripted request per provider");
+                let mut first_token_gate = first_token_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("one scripted request per provider");
+                let mut done_gate = done_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("one scripted request per provider");
                 let (handle, consumer) = event_stream();
                 let hook_model = model.clone();
                 let final_msg = final_message(&model);
@@ -1334,13 +1357,18 @@ mod tests {
         let failing: StreamFn = Arc::new(|_model, _context, _options| {
             Box::pin(async move { Err(anyhow::anyhow!("socket hang up")) })
         });
-        let error = instrument_stream_fn(wiring, failing)(
+        // `Box<dyn ModelStream>` is not `Debug`, so the error side is
+        // matched out instead of `unwrap_err`.
+        let error = match instrument_stream_fn(wiring, failing)(
             test_model(),
             LlmContext::default(),
             StreamRequestOptions::default(),
         )
         .await
-        .unwrap_err();
+        {
+            Ok(_) => panic!("the failing stream fn must propagate its error"),
+            Err(error) => error,
+        };
         assert_eq!(error.to_string(), "socket hang up", "the error propagates");
         let entries = timing_entries(&log_path);
         let summary = entries.last().expect("failed summary");
