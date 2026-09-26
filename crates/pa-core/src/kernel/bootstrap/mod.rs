@@ -7,6 +7,7 @@
 //! Ported from `core/kernel/bootstrap.ts`.
 
 pub(crate) mod dir_lock;
+mod disk_memo;
 mod runtime_code;
 pub(crate) mod venv;
 
