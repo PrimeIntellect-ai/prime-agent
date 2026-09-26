@@ -250,10 +250,10 @@ impl InfoPanel {
 /// hint never advertises a key the surface does not handle.
 fn hint_text(kb: &KeybindingsManager) -> String {
     let scroll = crate::menu_panel::key_hint(kb, &["tui.select.up", "tui.select.down"], "scroll");
-    let close = kb
-        .first_key("tui.select.cancel")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_else(|| "Esc".to_string());
+    let close = kb.first_key("tui.select.cancel").map_or_else(
+        || "Esc".to_string(),
+        |key| crate::keybindings::format_key_text(&key),
+    );
     match scroll {
         Some(scroll) => format!("{scroll} \u{b7} {close} close"),
         None => format!("{close} close"),
