@@ -1894,7 +1894,10 @@ stdlib = {
     "collections", "contextlib", "copy", "datetime", "itertools", "json",
     "os", "pathlib", "re", "shutil", "subprocess", "sys", "time", "uuid",
     "hashlib", "base64", "signal", "threading", "abc", "io", "textwrap",
-    "warnings", "asyncio",
+    "warnings", "asyncio", "types", "stat", "unicodedata", "atexit",
+    "secrets", "selectors", "socket", "struct", "fcntl", "termios", "ast",
+    "codecs", "contextvars", "ctypes", "linecache", "platform",
+    "tempfile", "traceback",
 }
 
 def collect(nodes, found):
