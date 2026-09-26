@@ -4001,7 +4001,7 @@ impl Supervisor {
         );
         let _ = self
             .events
-            .send((ClientRouting::Broadcast, daemon_closing_shutdown_event()));
+            .send((ClientRouting::Broadcast, std::sync::Arc::new(daemon_closing_shutdown_event())));
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             supervisor.ensure_shutdown_started().await;
@@ -4975,7 +4975,7 @@ mod tests {
             "every client learns the closing"
         );
         assert_eq!(
-            closing,
+            *closing,
             json!({ "type": "daemon_closing", "reason": "shutdown" })
         );
         tokio::time::timeout(Duration::from_secs(2), shutdown_routed_rx)
@@ -5168,7 +5168,9 @@ mod tests {
         for index in 0..flood {
             let _ = supervisor.events.send((
                 ClientRouting::Broadcast,
-                json!({ "type": "session_event", "index": index, "padding": padding }),
+                std::sync::Arc::new(json!({
+                    "type": "session_event", "index": index, "padding": padding
+                })),
             ));
         }
         // Drain the parked connection while watching for the log line: the

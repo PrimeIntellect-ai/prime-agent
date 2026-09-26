@@ -465,7 +465,7 @@ impl Supervisor {
         };
         let _ = self
             .events
-            .send((ClientRouting::RosterSubscribers, payload));
+            .send((ClientRouting::RosterSubscribers, std::sync::Arc::new(payload)));
     }
 }
 
@@ -1208,12 +1208,14 @@ mod tests {
     /// Drain the pushed roster frames (the events a subscribed client
     /// pump forwards); anything else on the channel is not a roster push.
     fn drain_roster_pushes(
-        events: &mut tokio::sync::broadcast::Receiver<(ClientRouting, Value)>,
+        events: &mut tokio::sync::broadcast::Receiver<(ClientRouting, std::sync::Arc<Value>)>,
     ) -> Vec<Value> {
         let mut pushes = Vec::new();
         loop {
             match events.try_recv() {
-                Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
+                Ok((ClientRouting::RosterSubscribers, payload)) => {
+                    pushes.push((*payload).clone())
+                }
                 Ok(_) => {}
                 Err(
                     tokio::sync::broadcast::error::TryRecvError::Empty
