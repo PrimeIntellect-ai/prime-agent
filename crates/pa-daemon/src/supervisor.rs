@@ -4249,7 +4249,7 @@ impl Supervisor {
     async fn finish_plain_kill_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
-        rest: &Value,
+        rest: &Map<String, Value>,
     ) {
         if let Err(error) = self.stop_worker(resident).await {
             self.log_line(&format!(
