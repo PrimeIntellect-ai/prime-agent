@@ -26,9 +26,12 @@ fn command_streaming_behavior(payload: &Value) -> Option<StreamingBehavior> {
 }
 
 /// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
-/// source: "rpc"})`): admission-level success — the turn's events follow
-/// on the ordered stream. Session commands execute like the ACP prompt
-/// path (the pa-core executor persists the durable rows).
+/// source: "rpc"})`): admission-level success — the response fires once
+/// the admitted turn's run registers (TS `preflightResult` over
+/// `returnAfterAccepted: true`; the turn's events follow on the ordered
+/// stream, buffered behind the response). Session commands execute
+/// like the ACP prompt path (the pa-core executor persists the durable
+/// rows) and their result still rides the response.
 ///
 /// # Errors
 ///
@@ -50,6 +53,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
             images,
             PromptOptions {
                 streaming_behavior: behavior,
+                return_after_accepted: true,
                 ..PromptOptions::default()
             },
         )

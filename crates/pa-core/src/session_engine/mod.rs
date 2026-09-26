@@ -87,6 +87,13 @@ pub struct PromptOptions {
     /// steering batch). Each row rides the turn after the primary, with
     /// its own text and images, like the primary.
     pub batch: Vec<PromptBatchRow>,
+    /// TS `returnAfterAccepted: true`: the admitted model turn runs
+    /// detached and the admission returns once its run registers (the TS
+    /// in-process connection's prompt shape: `preflightResult` fires at
+    /// the delivered ticket, the run settles on its own and its events
+    /// follow on the session stream) instead of awaiting the run's
+    /// completion.
+    pub return_after_accepted: bool,
 }
 
 /// One co-delivered user row of a batched prompt admission.
@@ -793,7 +800,9 @@ impl AgentSession {
     /// # Errors
     ///
     /// Returns an error when the prompt fails validation, the session is
-    /// busy under its admission rule, or the agent rejects the turn.
+    /// busy under its admission rule, or the agent rejects the turn (with
+    /// [`PromptOptions::return_after_accepted`], a rejection after the run
+    /// registers rides the events instead of this result).
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -887,9 +896,19 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+            if options.return_after_accepted {
+                // TS `returnAfterAccepted: true` — the connection's prompt
+                // returns once the admitted turn delivers.
+                self.agent
+                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
+                        prompt_messages,
+                    ))
+                    .await?;
+            } else {
+                self.agent
+                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                    .await?;
+            }
         }
         Ok(PromptOutcome::Prompt)
     }

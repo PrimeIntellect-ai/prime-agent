@@ -340,11 +340,12 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     assert_eq!(mode["success"], true, "the mode is set: {mode}");
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
-    // Pace into the turn's LLM call: the run's initial steering poll
-    // (the TS prompt loop folds anything queued before the turn starts)
-    // races the loop task's scheduling on a loaded runner, and the faux
-    // delayMs then holds the stream closed for 5000ms — 1000ms in, the
-    // queues are well past the fold window and nothing polls until the
+    // The response fires once the turn's run registers (TS
+    // `preflightResult` — the admission-time contract), so from here
+    // the turn is mid-LLM-call: the faux delayMs holds the stream
+    // closed for 5000ms, and the run-start steering poll (the fold
+    // window) already closed before the response. 1000ms in, both
+    // queued rows sit in the queues — nothing polls them until the
     // turn ends.
     std::thread::sleep(Duration::from_millis(1000));
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
@@ -352,10 +353,13 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));
     assert_eq!(follow_up["success"], true);
     let state = client.request(&json!({ "type": "get_state" }));
-    // The turn is mid-LLM-call (the faux delay holds it open; the
-    // agent's isStreaming only flips once content starts streaming) —
-    // the queue projections are the observable fact here: both rows
-    // queued while the turn runs its request.
+    // The turn runs past its response (the admission returned at run
+    // start; the faux delay still holds the stream closed) and both
+    // rows queue behind it.
+    assert_eq!(
+        state["data"]["isStreaming"], true,
+        "the turn is still running past the prompt response: {state}"
+    );
     assert_eq!(
         state["data"]["sessionActions"]["queuedCount"], 2,
         "both rows queued while the turn runs its request: {state}"
