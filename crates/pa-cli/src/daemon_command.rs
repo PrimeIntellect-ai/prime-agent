@@ -1,7 +1,8 @@
 //! The daemon-backed command runner behind the public commands `list`,
-//! `stop`, `rename`, `send`, and `schedule`: argument parsing, request
-//! shaping, and output rendering. Ported from `cli/daemon-command.ts`
-//! (the `handleDaemonCommand` surface reachable from public routing).
+//! `sessions`, `stop`, `rename`, `send`, and `schedule`: argument parsing,
+//! request shaping, and output rendering. Ported from
+//! `cli/daemon-command.ts` (the `handleDaemonCommand` surface reachable
+//! from public routing).
 //!
 //! `schedule` maps to the internal `cron` command and `stop` to `kill`, exactly
 //! like `runInternalAgentCommand`/`runNestedAgentCommand` in public-command.ts.
@@ -40,6 +41,7 @@ pub(crate) fn run_daemon_command(command: &str, args: &[String]) -> Result<()> {
     let mut client = DaemonClient::connect(&parsed.socket_path)?;
     match command {
         "list" => run_list(&mut client, &parsed.positionals, parsed.json),
+        "sessions" => run_sessions(&mut client, &parsed.positionals, parsed.json),
         "kill" => run_kill(&mut client, &parsed.positionals, parsed.json),
         "rename" => run_rename(&mut client, &parsed.positionals, parsed.json),
         "send" => run_send(&mut client, &parsed.positionals, parsed.json),
@@ -190,6 +192,52 @@ fn list_command(all: bool) -> DaemonCommand {
         include_client_owned: None,
         rest: serde_json::Map::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// sessions
+// ---------------------------------------------------------------------------
+
+/// The same list RPC as `prime-agent list`, rendered as the
+/// one-line-per-agent operator table (TS `runSessions`).
+fn run_sessions(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
+    let mut all = false;
+    for arg in args {
+        if arg == "-a" || arg == "--all" {
+            all = true;
+            continue;
+        }
+        bail!("Unknown sessions option: {arg}");
+    }
+    let response = client.request(list_command(all))?;
+    let data = require_success(response)?.unwrap_or(Value::Null);
+    if json {
+        print_json(&data);
+        return Ok(());
+    }
+    let Some(sessions) = crate::daemon_session_list::validated_session_values(&data) else {
+        print_json(&data);
+        return Ok(());
+    };
+    if sessions.is_empty() {
+        println!(
+            "{}",
+            if all {
+                "No agents."
+            } else {
+                "No active agents."
+            }
+        );
+        return Ok(());
+    }
+    println!(
+        "{}",
+        crate::sessions_table_format::format_sessions_table(
+            &sessions,
+            crate::daemon_session_list::now_ms()
+        )
+    );
+    Ok(())
 }
 
 /// `resolveLiveSessionSelector`: match a name/id/session-id selector against
