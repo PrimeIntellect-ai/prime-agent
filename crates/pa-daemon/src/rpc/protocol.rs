@@ -91,15 +91,12 @@ pub fn parse_line(line: &str) -> ParsedLine {
             ));
         }
     };
-    let object = match parsed {
-        Value::Object(object) => object,
-        _ => {
-            return ParsedLine::ParseError(error(
-                None,
-                "parse",
-                "Invalid command: expected an object with a string type",
-            ));
-        }
+    let Value::Object(object) = parsed else {
+        return ParsedLine::ParseError(error(
+            None,
+            "parse",
+            "Invalid command: expected an object with a string type",
+        ));
     };
     let command = match object.get("type") {
         Some(Value::String(command)) => command.clone(),

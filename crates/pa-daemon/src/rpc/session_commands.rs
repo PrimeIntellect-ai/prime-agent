@@ -637,8 +637,7 @@ fn assistant_text(message: &pa_types::session::AgentMessage) -> Option<String> {
                     pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join(""),
+                .collect::<String>(),
         ),
         _ => None,
     }
