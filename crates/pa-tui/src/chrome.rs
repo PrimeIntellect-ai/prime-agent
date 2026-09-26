@@ -6,6 +6,7 @@
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::Style;
+use serde_json::Value;
 
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 
@@ -68,7 +69,8 @@ pub struct ChromeState {
     /// subagent session renders `depth N` after the manage hint; a root
     /// session (depth 0 or unknown) renders none.
     pub tray_depth: Option<u32>,
-    /// Thinking effort suffix rendered as `model:effort` in the tray.
+    /// Thinking effort suffix rendered as `model:effort` in the tray (TS
+    /// `getModelContextLabel`); `None` keeps the bare model id.
     pub thinking_suffix: Option<String>,
     /// Startup warning (tmux keyboard setup), rendered as a status row.
     pub tmux_notice: Option<String>,
@@ -88,16 +90,29 @@ pub struct ChromeState {
     pub splash_hide_cwd: bool,
 }
 
-/// Which actionable group owns the activity-dock selection.
+/// Which actionable group owns the activity-dock selection. Every
+/// group is arrow-traversable whether or not it has rows (the
+/// operator's 2026-09-26 muscle-memory directive): emptiness never
+/// removes a group from the cycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ActivityGroup {
     #[default]
     Subagents,
     Heartbeats,
     Bash,
-    /// The active goal: selectable while a goal is being pursued, opens
-    /// the read-only goal panel (the objective and its facts).
+    /// The active goal: its group is mounted while a goal is being
+    /// pursued and opens the read-only goal panel (the objective and
+    /// its facts); a goal that ended unmounts the row with it.
     Goal,
+}
+
+/// Which way an arrow key steps along the dock's rendered groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDirection {
+    /// The left arrow: the previous group, wrapping past the first.
+    Prev,
+    /// The right arrow: the next group, wrapping past the last.
+    Next,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,8 +127,9 @@ pub struct ActivityDock {
     /// agents view.
     pub subagents_running_nested: usize,
     /// Every descendant, finished ones included: this keeps the dock
-    /// mounted and its Subagents group selectable while any subagent
-    /// history remains browsable (the rendered count stays live-only).
+    /// mounted while any subagent history remains browsable (the
+    /// rendered count stays live-only; the group stays traversable at
+    /// zero).
     pub subagents_total: usize,
     /// The CURRENT session's heartbeats (nested sessions' jobs do not
     /// surface here, operator scoping).
@@ -144,6 +160,43 @@ impl ActivityDock {
             || self.heartbeats > 0
             || self.bash_total > 0
             || self.goal_label.is_some()
+    }
+
+    /// The groups this dock renders, left to right — the arrow
+    /// traversal order. The subagents, heartbeats, and shells groups
+    /// always render (an empty one reads its zero count and stays
+    /// traversable); the goal group renders exactly while a live goal
+    /// keeps its row mounted.
+    pub fn groups(&self) -> Vec<ActivityGroup> {
+        let mut groups = vec![
+            ActivityGroup::Subagents,
+            ActivityGroup::Heartbeats,
+            ActivityGroup::Bash,
+        ];
+        if self.goal_label.is_some() {
+            groups.push(ActivityGroup::Goal);
+        }
+        groups
+    }
+
+    /// One arrow step along the rendered groups: the neighbor in
+    /// `direction`, wrapping at the row's ends. A group's emptiness
+    /// never skips it, so the cycle is deterministic — N rendered
+    /// groups take N presses to return to the start. A `current` that
+    /// no longer renders (a goal group whose row unmounted) steps
+    /// from the row's start.
+    pub fn step(&self, current: ActivityGroup, direction: ActivityDirection) -> ActivityGroup {
+        let groups = self.groups();
+        let len = groups.len();
+        let position = groups
+            .iter()
+            .position(|group| *group == current)
+            .unwrap_or(0);
+        let neighbor = match direction {
+            ActivityDirection::Prev => position + len - 1,
+            ActivityDirection::Next => position + 1,
+        };
+        groups[neighbor % len]
     }
 }
 
@@ -481,6 +534,30 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     line
 }
 
+/// The tray model label's thinking-effort suffix (TS `getModelContextLabel`:
+/// `model.reasoning ? connectionState.thinkingLevel : undefined` — a model
+/// without reasoning renders the bare id, and so does a level outside the
+/// wire vocabulary, which TS would render raw). The state's level parses
+/// to its wire name, so the suffix is always one of the TS `ThinkingLevel`
+/// strings, including "off" when the session explicitly turned thinking
+/// off — the tray shows `model:off` like TS; only the agents-view Model
+/// column hides "off" (`formatSessionModel`).
+pub(crate) fn tray_thinking_suffix(state: &Value) -> Option<String> {
+    let reasoning = state
+        .get("model")
+        .and_then(|model| model.get("reasoning"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !reasoning {
+        return None;
+    }
+    state
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .and_then(pa_types::ai::thinking_level_from_str)
+        .map(|level| level.wire_name().to_string())
+}
+
 /// Truncate a styled span row to a visible width, replacing the tail with
 /// the ellipsis when it does not fit (TS `truncateToWidth` on the composed
 /// row).
@@ -622,41 +699,50 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         }
     };
     let running = dock.subagents_running_direct + dock.subagents_running_nested;
-    let subagents = vec![theme.fg_span(
-        running_color(running),
-        if running > 0 {
-            format!(
-                "◆ {}, {} subagents",
-                dock.subagents_running_direct, dock.subagents_running_nested
-            )
-        } else {
-            "◆ 0 subagents".to_string()
-        },
-    )];
-    let mut heartbeats = vec![theme.fg_span(
-        running_color(dock.heartbeats),
-        format!(
-            "◷ {} heartbeat{}",
-            dock.heartbeats,
-            if dock.heartbeats == 1 { "" } else { "s" }
-        ),
-    )];
-    if dock.heartbeats_paused > 0 {
-        heartbeats.extend(cluster(
-            &format!("◐ {} paused", dock.heartbeats_paused),
-            ThemeColor::Warning,
-        ));
-    }
-    let mut groups = vec![
-        (ActivityGroup::Subagents, subagents),
-        (ActivityGroup::Heartbeats, heartbeats),
-        // Only live bash runs count in the dock's indicator (operator
-        // scoping); the bash view keeps the finished rows. The label is
-        // "shell(s)" (operator directive via #2677): the tool name stays
-        // bash() everywhere else.
-        (
-            ActivityGroup::Bash,
-            vec![theme.fg_span(
+    // The row and the arrows share one group order (`groups()`): a
+    // group renders exactly when it stays traversable, so the focused
+    // selection never binds to a hidden segment and no group can be
+    // skipped by its emptiness.
+    let groups = dock.groups();
+    let mut line = vec![Span::raw(" ")];
+    for (index, group) in groups.iter().copied().enumerate() {
+        if index > 0 {
+            line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
+        }
+        let spans = match group {
+            ActivityGroup::Subagents => vec![theme.fg_span(
+                running_color(running),
+                if running > 0 {
+                    format!(
+                        "◆ {}, {} subagents",
+                        dock.subagents_running_direct, dock.subagents_running_nested
+                    )
+                } else {
+                    "◆ 0 subagents".to_string()
+                },
+            )],
+            ActivityGroup::Heartbeats => {
+                let mut heartbeats = vec![theme.fg_span(
+                    running_color(dock.heartbeats),
+                    format!(
+                        "◷ {} heartbeat{}",
+                        dock.heartbeats,
+                        if dock.heartbeats == 1 { "" } else { "s" }
+                    ),
+                )];
+                if dock.heartbeats_paused > 0 {
+                    heartbeats.extend(cluster(
+                        &format!("◐ {} paused", dock.heartbeats_paused),
+                        ThemeColor::Warning,
+                    ));
+                }
+                heartbeats
+            }
+            // Only live bash runs count in the dock's indicator (operator
+            // scoping); the bash view keeps the finished rows. The label is
+            // "shell(s)" (operator directive via #2677): the tool name stays
+            // bash() everywhere else.
+            ActivityGroup::Bash => vec![theme.fg_span(
                 running_color(dock.bash_running),
                 format!(
                     "▸ {} shell{}",
@@ -664,30 +750,22 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
                     if dock.bash_running == 1 { "" } else { "s" }
                 ),
             )],
-        ),
-    ];
-    if let Some(goal) = &dock.goal_label {
-        // The goal row carries the dock's activity convention: an
-        // actively pursued goal reads green, and the paused and
-        // budget-limited states read amber (the paused heartbeat
-        // cluster's own warning color) — the dock is the goal's one
-        // chrome surface, so every live state stays visible.
-        let goal_color = if goal.starts_with("Pursuing goal") {
-            ThemeColor::Success
-        } else {
-            ThemeColor::Warning
+            // The goal row carries the dock's activity convention: an
+            // actively pursued goal reads green, and the paused and
+            // budget-limited states read amber (the paused heartbeat
+            // cluster's own warning color) — the dock is the goal's one
+            // chrome surface, so every live state stays visible.
+            ActivityGroup::Goal => {
+                let goal = dock.goal_label.as_deref().unwrap_or_default();
+                let goal_color = if goal.starts_with("Pursuing goal") {
+                    ThemeColor::Success
+                } else {
+                    ThemeColor::Warning
+                };
+                vec![theme.fg_span(goal_color, goal.to_string())]
+            }
         };
-        groups.push((
-            ActivityGroup::Goal,
-            vec![theme.fg_span(goal_color, goal.clone())],
-        ));
-    }
-    let mut line = vec![Span::raw(" ")];
-    for (index, (group, spans)) in groups.iter().enumerate() {
-        if index > 0 {
-            line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
-        }
-        if dock.focused && dock.selected == *group {
+        if dock.focused && dock.selected == group {
             // The focused group reads as one unit behind a slight green
             // band (the theme's success-panel background — the operator's
             // 2026-09-26 selection directive); each span keeps its own
@@ -698,7 +776,7 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             }
         } else {
             for span in spans {
-                line.push(span.clone());
+                line.push(span);
             }
         }
     }
@@ -1002,6 +1080,181 @@ mod tests {
         assert!(frame[1].iter().all(|span| span.style.bg.is_none()));
     }
 
+    /// The arrows never skip an empty group (the operator's 2026-09-26
+    /// muscle-memory directive): one press steps to the neighboring
+    /// rendered group and wraps, so every group is visited in order
+    /// in both directions and N groups take exactly N presses to cycle.
+    #[test]
+    fn dock_arrows_visit_every_group_even_when_empty() {
+        // A dock mounted by subagent history alone: the heartbeats and
+        // shells groups are empty and stay in the cycle.
+        let dock = ActivityDock {
+            subagents_total: 1,
+            ..ActivityDock::default()
+        };
+        assert_eq!(
+            dock.groups(),
+            vec![
+                ActivityGroup::Subagents,
+                ActivityGroup::Heartbeats,
+                ActivityGroup::Bash,
+            ]
+        );
+        // Right: the neighbors in order, the empty groups included,
+        // wrapping back to the first.
+        assert_eq!(
+            dock.step(ActivityGroup::Subagents, ActivityDirection::Next),
+            ActivityGroup::Heartbeats
+        );
+        assert_eq!(
+            dock.step(ActivityGroup::Heartbeats, ActivityDirection::Next),
+            ActivityGroup::Bash
+        );
+        assert_eq!(
+            dock.step(ActivityGroup::Bash, ActivityDirection::Next),
+            ActivityGroup::Subagents,
+            "the cycle wraps past the last group"
+        );
+        // Left: the same groups in reverse, wrapping past the first.
+        assert_eq!(
+            dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
+            ActivityGroup::Bash,
+            "the cycle wraps past the first group"
+        );
+        assert_eq!(
+            dock.step(ActivityGroup::Bash, ActivityDirection::Prev),
+            ActivityGroup::Heartbeats
+        );
+        assert_eq!(
+            dock.step(ActivityGroup::Heartbeats, ActivityDirection::Prev),
+            ActivityGroup::Subagents
+        );
+        // The press count is stable in both directions: N groups take
+        // exactly N presses to return to the start, and no shorter run
+        // does — the emptiness of a group never moves another.
+        for direction in [ActivityDirection::Next, ActivityDirection::Prev] {
+            let mut walked = ActivityGroup::Subagents;
+            let rendered = dock.groups().len();
+            for presses in 1..=rendered {
+                walked = dock.step(walked, direction);
+                assert_eq!(
+                    walked == ActivityGroup::Subagents,
+                    presses == rendered,
+                    "the cycle length is exactly the rendered group count"
+                );
+            }
+        }
+    }
+
+    /// The same traversal with rows in every group: filling groups
+    /// changes only the rendered counts, never the group order, the
+    /// neighbors, or the press count.
+    #[test]
+    fn dock_arrows_visit_the_same_groups_with_items() {
+        let dock = ActivityDock {
+            subagents_running_direct: 1,
+            subagents_running_nested: 2,
+            subagents_total: 3,
+            heartbeats: 2,
+            heartbeats_paused: 1,
+            bash_running: 1,
+            bash_total: 2,
+            goal_label: Some("Pursuing goal (0s)".to_string()),
+            ..ActivityDock::default()
+        };
+        assert_eq!(
+            dock.groups(),
+            vec![
+                ActivityGroup::Subagents,
+                ActivityGroup::Heartbeats,
+                ActivityGroup::Bash,
+                ActivityGroup::Goal,
+            ]
+        );
+        // The full cycle right: every group in order, the goal group
+        // included, back to the start in four presses.
+        let mut walked = ActivityGroup::Subagents;
+        for expected in [
+            ActivityGroup::Heartbeats,
+            ActivityGroup::Bash,
+            ActivityGroup::Goal,
+            ActivityGroup::Subagents,
+        ] {
+            walked = dock.step(walked, ActivityDirection::Next);
+            assert_eq!(walked, expected);
+        }
+        // The full cycle left mirrors it exactly.
+        let mut walked = ActivityGroup::Subagents;
+        for expected in [
+            ActivityGroup::Goal,
+            ActivityGroup::Bash,
+            ActivityGroup::Heartbeats,
+            ActivityGroup::Subagents,
+        ] {
+            walked = dock.step(walked, ActivityDirection::Prev);
+            assert_eq!(walked, expected);
+        }
+    }
+
+    /// The goal group unmounts with its row (its goal ended): the cycle
+    /// drops it, and a stale selection on it steps to a group the dock
+    /// still renders — never to a hidden segment.
+    #[test]
+    fn dock_goal_group_unmounts_with_its_row() {
+        let with_goal = ActivityDock {
+            goal_label: Some("Goal paused (0s)".to_string()),
+            ..ActivityDock::default()
+        };
+        assert!(with_goal.groups().contains(&ActivityGroup::Goal));
+        let ended = ActivityDock::default();
+        assert!(
+            !ended.groups().contains(&ActivityGroup::Goal),
+            "the goal group leaves the cycle when its row unmounts"
+        );
+        assert_eq!(
+            ended.step(ActivityGroup::Goal, ActivityDirection::Prev),
+            ActivityGroup::Bash,
+            "a stale goal selection lands on the row's last group"
+        );
+        assert_eq!(
+            ended.step(ActivityGroup::Goal, ActivityDirection::Next),
+            ActivityGroup::Heartbeats,
+            "a stale goal selection steps from the row's first group"
+        );
+    }
+
+    /// Entering an empty group still renders it: the focused selection's
+    /// slight green band rides the group's zero-count segment on the row
+    /// — the dock-level empty state is the zero readout itself (the view
+    /// the group opens carries the pane's own empty-state row).
+    #[test]
+    fn dock_renders_the_focused_empty_group() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let dock = ActivityDock {
+            subagents_total: 2,
+            selected: ActivityGroup::Heartbeats,
+            focused: true,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        // The selection's slight green band rides exactly the entered
+        // empty group's zero readout, which keeps its own muted color
+        // (the selection never repaints the text).
+        let band = theme.bg_style(ThemeBg::ToolSuccessBg).bg;
+        let muted = theme.fg_style(ThemeColor::Muted).fg;
+        let heartbeat = frame[1]
+            .iter()
+            .find(|span| span.content == "◷ 0 heartbeats")
+            .unwrap_or_else(|| panic!("the empty heartbeats readout renders: {text}"));
+        assert_eq!(heartbeat.style.bg, band);
+        assert_eq!(heartbeat.style.fg, muted);
+    }
+
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
     /// with the readout, truncated with no ellipsis when it overflows.
     #[test]
@@ -1026,6 +1279,7 @@ mod tests {
     use super::*;
     use crate::theme::{ColorMode, Theme};
     use ratatui::style::Color;
+    use serde_json::json;
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)
@@ -1126,6 +1380,77 @@ mod tests {
         assert!(text.starts_with("\u{2190} manage"));
         assert!(text.contains("faux-1 \u{00b7} 6.1k (5%)"));
         assert_eq!(str_width(&text), 120);
+    }
+
+    /// TS `getModelContextLabel`: the effort suffix is the state's
+    /// `thinkingLevel` behind the model's `reasoning` gate — a level on a
+    /// reasoning model renders, everything else keeps the bare id.
+    #[test]
+    fn effort_suffix_gates_on_model_reasoning() {
+        let reasoning = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "high",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&reasoning),
+            Some("high".to_string()),
+            "a reasoning model's session level renders as the suffix"
+        );
+        let plain = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": false },
+            "thinkingLevel": "high",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&plain),
+            None,
+            "no reasoning, no suffix"
+        );
+        assert_eq!(
+            tray_thinking_suffix(&json!({ "thinkingLevel": "high" })),
+            None,
+            "no model block, no suffix"
+        );
+        let unknown = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "default",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&unknown),
+            None,
+            "a level outside the wire vocabulary keeps the bare id"
+        );
+        let off = json!({
+            "model": { "id": "faux-1", "provider": "faux", "reasoning": true },
+            "thinkingLevel": "off",
+        });
+        assert_eq!(
+            tray_thinking_suffix(&off),
+            Some("off".to_string()),
+            "an explicit off renders `model:off` like the TS tray"
+        );
+    }
+
+    /// The tray renders `model:effort` with a suffix and the bare model id
+    /// without one (TS `getModelContextLabel`'s two arms).
+    #[test]
+    fn tray_renders_the_effort_suffix_and_the_bare_id_without_it() {
+        let mut state = ChromeState {
+            show_manage: true,
+            model_id: Some("faux-1".to_string()),
+            thinking_suffix: Some("high".to_string()),
+            ..Default::default()
+        };
+        let line = render_tray(&state, &theme(), 120);
+        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+        assert!(
+            text.contains("faux-1:high"),
+            "the effort suffix rides the id: {text}"
+        );
+        state.thinking_suffix = None;
+        let line = render_tray(&state, &theme(), 120);
+        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
+        assert!(text.contains("faux-1"), "the bare id still renders: {text}");
+        assert!(!text.contains("faux-1:"), "no suffix, no colon: {text}");
     }
 
     /// The tray (the line below the prompt bar) never carries the goal
