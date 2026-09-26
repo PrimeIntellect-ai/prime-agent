@@ -2726,9 +2726,18 @@ mod tests {
             roster_entry("i1", "idle", idle_child),
         ];
         let rows = rows_for_lists(&roster, None, &["file:/x/p.jsonl"], &[]);
+        // A subagent row's identity is its first alias (the parent-qualified
+        // `agent:` id), so the line is looked up off the rendered child row —
+        // the same dynamic lookup the drill-in tests use.
+        let child_identity = rows
+            .iter()
+            .find(|row| row.title == "runner")
+            .expect("the child row renders under the expanded running line")
+            .identity
+            .clone();
         let nested = rows
             .iter()
-            .find(|row| row.identity == "subagents:file:/x/r1.jsonl")
+            .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
             .expect("the child's own running line");
         assert_eq!(nested.title, "1, 0 running");
         assert_eq!(nested.cost, 0.25, "only the grandchild's spend");
