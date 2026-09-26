@@ -5010,27 +5010,46 @@ class Battery:
                     )
             else:
                 guide = B.tmux_wait_text(tui, "Hotkeys", timeout=30)
-                # The override's row sits deep in the document: End jumps
-                # the scrollable window to the guide's bottom rows.
-                self.tui_send(tui, "End", enter=False)
-                guide = self.settle_frame(tui, quiet_s=1.5, timeout=20)
+                # The override's row sits mid-document: page down until
+                # the Other section (the expand-tools row, X vs the
+                # removed default Ctrl+O) rides the window — bounded by
+                # the guide's finite length, so the X-vs-Ctrl+O check
+                # reads the actual row, not an off-screen region.
+                for _ in range(12):
+                    self.tui_send(tui, "PageDown", enter=False)
+                    if B.tmux_wait_text(tui, "Cycle overview", timeout=4):
+                        break
+                guide = self.settle_frame(tui, quiet_s=1.0, timeout=20)
                 side.evidence(flow, "04-hotkeys-guide.txt", guide)
                 frames[side.name]["hotkeys-guide"] = guide
-                if "mouse click on link" in guide and "Ctrl+O" not in guide:
+                if "Cycle overview" in guide and "Ctrl+O" not in guide:
                     self.record(
                         flow, "visual",
-                        f"{side.name}: the /hotkeys info panel scrolled to the guide's bottom (End)",
+                        f"{side.name}: the /hotkeys info panel scrolled to the override's row (X, not Ctrl+O)",
                         gap=False,
                     )
                 else:
                     self.record(
                         flow, "visual",
-                        f"{side.name}: the /hotkeys info panel did not scroll to the bottom",
+                        f"{side.name}: the /hotkeys info panel did not show the effective override",
                         evidence=side.root / flow / "04-hotkeys-guide.txt",
                         lane=FLOW_LANES[flow],
                     )
-                self.tui_send(tui, "Escape", enter=False)
-                time.sleep(0.5)
+                # Esc closes the panel deterministically: poll until the
+                # panel's key-hint row is gone from the pane (the next
+                # step's ? must reach the EDITOR, not an open panel).
+                deadline = time.time() + 20
+                closed = B.tmux_capture(tui)
+                while "Esc close" in closed and time.time() < deadline:
+                    time.sleep(0.5)
+                    closed = B.tmux_capture(tui)
+                if "Esc close" in closed:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel did not close on Esc",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
             # 5) The `?` key. TS (`app.shortcuts`, empty editor) mounts
             #    the quick-shortcut guide and the next submission clears
             #    it (`clearShortcutGuide`); Rust REMOVED the guide (the
@@ -5076,9 +5095,15 @@ class Battery:
                         evidence=side.root / flow / "05-shortcut-guide.txt",
                         lane=FLOW_LANES[flow],
                     )
-                # Esc clears the typed `?` back to the empty editor.
-                self.tui_send(tui, "Escape", enter=False)
-                time.sleep(0.5)
+                # Esc clears the typed `?` back to the empty editor:
+                # poll until the `?` is gone from the pane (the typed
+                # char is the only `?` on this surface), so the closing
+                # submission starts from a clean editor.
+                deadline = time.time() + 20
+                cleared_editor = B.tmux_capture(tui)
+                while "?" in cleared_editor and time.time() < deadline:
+                    time.sleep(0.5)
+                    cleared_editor = B.tmux_capture(tui)
             # 6) The closing submission. TS clears the quick guide at its
             #    top; Rust's editor is already clean (the panel closed on
             #    Esc in step 4). Both sides run the turn and return to the
