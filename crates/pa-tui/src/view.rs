@@ -1607,7 +1607,7 @@ impl AgentView {
             // part, so the hint stays above the pane.
             let mut dock = render_prompt_context(&self.detail_label(), &self.theme, width);
             if let Some(selector) = self.tree_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.fork_selector.as_ref() {
                 dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(loader) = self.share_loader.as_ref() {
@@ -1615,8 +1615,7 @@ impl AgentView {
             } else if let Some(confirm) = self.confirm.as_ref() {
                 dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.provider_auth.as_mut() {
-                selector.set_keybindings(self.editor.keybindings().clone());
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(panel) = self.auth_panel.as_mut() {
                 let kb = self.editor.keybindings();
                 dock.extend(panel.render(&self.theme, width, kb));

@@ -32,8 +32,9 @@ use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{
-    hint_row, login_field_row, menu_row, no_match_row, scroll_row, scrub_controls,
+    hint_row, key_hint, login_field_row, menu_row, no_match_row, scroll_row, scrub_controls,
     search_field_lines, search_field_plain_row, MenuSegment,
+}
 };
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
@@ -1050,7 +1051,15 @@ impl AuthPanel {
                 if self.auth_url.is_some() {
                     lines.push(Vec::new());
                 } else {
-                    lines.push(hint_row(theme, width, "enter submit  escape cancel"));
+                    let hints = [
+                        key_hint(kb, &["tui.select.confirm"], "submit"),
+                        key_hint(kb, &["tui.select.cancel"], "cancel"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<String>>()
+                    .join("  ");
+                    lines.push(hint_row(theme, width, &hints));
                 }
             }
             PanelInput::Teams { .. } => unreachable!("the team picker returned above"),
@@ -1460,13 +1469,13 @@ mod tests {
             rows[0].chars().all(|c| c == '\u{2500}'),
             "the rule opens the panel"
         );
-        // The paste-only panel keeps its own hint row (the MCP token
-        // surface's grammar); the auth-actions row rides only under a
-        // shown URL block (TS `getAuthActionsText` — pinned by the URL
-        // block's tests below).
+        // The paste-only panel keeps its own hint row, rendered from the
+        // effective bindings (the MCP token surface's grammar); the
+        // auth-actions row rides only under a shown URL block (TS
+        // `getAuthActionsText` — pinned by the URL block's tests below).
         assert!(rows
             .iter()
-            .any(|row| row.contains("enter submit  escape cancel")));
+            .any(|row| row.contains("Enter submit  Esc/Ctrl+C cancel")));
         for character in "  sk-live  ".chars() {
             panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
         }
@@ -1520,6 +1529,44 @@ mod tests {
             "the login dialog waits silently: {rows:?}"
         );
         assert!(answer.try_recv().is_err(), "nothing answered");
+    }
+
+    /// The cancel keys run through the effective binding (TS
+    /// `LoginDialogComponent.handleInput`): the stock bindings cancel on
+    /// ctrl+c (the binding's second default key), and an override that
+    /// empties the binding takes ctrl+c with it — the panel never
+    /// cancels on a key its binding does not name, so the derived hint
+    /// stays truthful.
+    #[test]
+    fn cancel_runs_through_the_effective_binding() {
+        // The stock bindings: ctrl+c is tui.select.cancel's second key.
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb(), &mut sink());
+        assert_eq!(
+            answer.try_recv(),
+            Ok(None),
+            "ctrl+c cancels through the stock binding"
+        );
+        // An emptied cancel binding drops ctrl+c with it: the input
+        // stays mounted, waiting.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb, &mut sink());
+        assert!(
+            answer.try_recv().is_err(),
+            "an emptied cancel binding takes ctrl+c with it"
+        );
+        // A rebound cancel binding moves the cancel key.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), vec!["ctrl+q".to_string()]);
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb, &mut sink());
+        assert!(answer.try_recv().is_err(), "the default key went inert");
+        panel.handle_key("ctrl+q", &kb, &mut sink());
+        assert_eq!(answer.try_recv(), Ok(None), "the rebound key cancels");
     }
 
     /// TS `OAuthPrompt.allowEmpty`: a prompt that allows the blank entry
