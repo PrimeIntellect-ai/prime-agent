@@ -794,11 +794,11 @@ fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
                 .modified()
                 .map(|time| format!("{time:?}"))
                 .unwrap_or_else(|_| "no-mtime".to_string());
-            hasher.update(
-                format!("py:{}:{}:{modified}", python.display(), meta.len()).as_bytes(),
-            );
+            hasher.update(format!("py:{}:{}:{modified}", python.display(), meta.len()).as_bytes());
         }
-        Err(error) => hasher.update(format!("py-error:{python}:{error}").as_bytes()),
+        Err(error) => {
+            hasher.update(format!("py-error:{}:{error}", python.display()).as_bytes())
+        }
     }
     match installed_rlm_dir(venv) {
         Some(rlm) => match hash_python_tree(&rlm) {
