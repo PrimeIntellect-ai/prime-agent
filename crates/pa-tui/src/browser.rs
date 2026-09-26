@@ -26,7 +26,11 @@ use std::process::{Command, Stdio};
 /// The xdg-utils locations a desktop Linux carries `xdg-open` in (the
 /// fixed tool slots — searched in order, the first that exists wins).
 #[cfg(all(unix, not(target_os = "macos")))]
-const XDG_OPEN_SLOTS: [&str; 3] = ["/usr/bin/xdg-open", "/usr/local/bin/xdg-open", "/bin/xdg-open"];
+const XDG_OPEN_SLOTS: [&str; 3] = [
+    "/usr/bin/xdg-open",
+    "/usr/local/bin/xdg-open",
+    "/bin/xdg-open",
+];
 
 /// The absolute opener path and its argument list for one URL, or `None`
 /// when the platform's tool is not installed (the one arm per compiled
@@ -54,10 +58,7 @@ fn opener(url: &str) -> Option<(PathBuf, Vec<String>)> {
             .join("rundll32.exe");
         Some((
             rundll32,
-            vec![
-                "url.dll,FileProtocolHandler".to_string(),
-                url.to_string(),
-            ],
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
         ))
     }
 }

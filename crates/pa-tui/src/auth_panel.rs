@@ -886,7 +886,10 @@ impl AuthPanel {
                 theme.fg_span(ThemeColor::Muted, format!(" {action}")),
             ]);
         }
-        if matches!(self.input, PanelInput::Paste { .. } | PanelInput::Teams { .. }) {
+        if matches!(
+            self.input,
+            PanelInput::Paste { .. } | PanelInput::Teams { .. }
+        ) {
             parts.extend(
                 kb.first_key("tui.select.cancel")
                     .map(|key| hint_part(theme, &key, "cancel")),
