@@ -164,7 +164,7 @@ fn create_session(client: &mut Client, request_id: &str, config: &Value) -> Stri
 
 fn write_script(dir: &Path, responses: &[&str]) -> PathBuf {
     let script_path = dir.join("engine-script.json");
-    let scripted = responses
+    let scripted: Vec<Value> = responses
         .iter()
         .map(|text| json!({ "text": text }))
         .collect();

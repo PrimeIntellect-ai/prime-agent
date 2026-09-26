@@ -327,7 +327,7 @@ mod tests {
             .collect();
         assert_eq!(worker_logs.len(), RETAINED_FILES);
         assert!(
-            worker_logs.contains(&"worker-000.stderr.log".to_string()),
+            remaining.contains(&"worker-000.stderr.log".to_string()),
             "the just-opened log survives even when it sorts into the deletion window"
         );
         assert!(
