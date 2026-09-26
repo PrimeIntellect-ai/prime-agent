@@ -1872,58 +1872,161 @@ impl AgentView {
         rows
     }
 
-    /// Rows of the inline layout that changed since the last main-screen
-    /// flush, as a write plan for the flush primitive (TS
-    /// `exitFullscreen`'s inline repaint):
+    /// Stream the changed rows of the inline layout to `out` as the
+    /// main-screen flush (TS `exitFullscreen`'s inline repaint): the flush
+    /// is the one output path that writes into the user's native
+    /// scrollback, so its byte stream is parity-frozen — and on a long
+    /// transcript the materialized flush (`render_inline_frame` plus the
+    /// row texts plus the write buffer) held the whole transcript in
+    /// memory at once, a +O(rows) RSS spike right at exit. The streaming
+    /// flush renders the frame one section at a time (splash, chat
+    /// entries, tail, dock) and hands the encoded rows to `out` in
+    /// bounded chunks, so the peak extra memory is one section plus one
+    /// chunk.
     ///
-    /// - [`FlushPlan::Append`] when the flushed frame is a prefix of the
-    ///   new one (or nothing was flushed yet): the new tail appends below
-    ///   the cursor and flows into native scrollback — this is the exit
-    ///   path that keeps the exit frame and resume hint visible.
-    /// - [`FlushPlan::Repaint`] when rows above the flushed tail changed
-    ///   (a transcript that grew past a suspend-time flush, a snapshot
-    ///   rebuild): the visible screen is erased and the last screenful
-    ///   repainted, mirroring the TS full redraw. Scrollback above the
-    ///   screen is never rewritten — terminal scrollback is immutable,
-    ///   the same trade-off the TS renderer makes.
-    pub fn take_flush_plan(&mut self, width: usize, screen_height: usize) -> FlushPlan {
-        let rows = self.render_inline_frame(width);
-        let texts: Vec<String> = rows.iter().map(row_text_of).collect();
-        let first_changed = (0..self.flushed_frame.len().max(texts.len())).find(|&index| {
-            let old = self.flushed_frame.get(index).map(String::as_str);
-            let new = texts.get(index).map(String::as_str);
-            old != new
-        });
-        let plan = match first_changed {
-            // Identical frame: nothing to write.
-            None => FlushPlan::Append(Vec::new()),
-            // The flushed frame is a prefix: append the new tail.
-            Some(index) if index >= self.flushed_frame.len() => {
-                FlushPlan::Append(rows[index.min(rows.len())..].to_vec())
-            }
-            // Rows above the flushed tail changed: repaint the visible
-            // window (the frame tail), leaving scrollback untouched.
-            Some(_) => {
-                let start = rows.len().saturating_sub(screen_height);
-                FlushPlan::Repaint(rows[start..].to_vec())
-            }
+    /// The write plan keeps the materialized flush's decision tree:
+    ///
+    /// - rows extending the flushed frame append below the cursor and
+    ///   flow into native scrollback — the exit path that keeps the exit
+    ///   frame and resume hint visible;
+    /// - a change above the flushed tail (a transcript that grew past a
+    ///   suspend-time flush, a snapshot rebuild) erases the visible
+    ///   screen and repaints the last screenful, mirroring the TS full
+    ///   redraw — scrollback above the screen is never rewritten,
+    ///   because terminal scrollback is immutable;
+    /// - an identical frame writes nothing.
+    ///
+    /// `self.flushed_frame` (the row texts of the last flush) is the diff
+    /// base for the next flush, exactly as before.
+    pub fn stream_flush_to(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        width: usize,
+        screen_height: usize,
+    ) -> std::io::Result<()> {
+        let layout = self.layout_pass(width);
+        let mut sink = FlushSink {
+            flushed: std::mem::take(&mut self.flushed_frame),
+            texts: Vec::new(),
+            ring: std::collections::VecDeque::new(),
+            chunk: String::new(),
+            screen_height,
+            appending: false,
+            repaint: false,
         };
-        self.flushed_frame = texts;
-        plan
+        sink.feed(out, &layout.splash)?;
+        let mut preceded_by_tool_activity = false;
+        for (index, entry) in self.chat.iter().enumerate() {
+            let rows = self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
+            sink.feed(out, &rows)?;
+            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+        }
+        sink.feed(out, &layout.tail)?;
+        let dock = self.render_dock(width);
+        sink.feed(out, &dock)?;
+        sink.finish(out)?;
+        self.flushed_frame = std::mem::take(&mut sink.texts);
+        Ok(())
     }
 }
 
-/// The main-screen write plan produced by [`AgentView::take_flush_plan`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum FlushPlan {
-    /// Write the rows below the cursor (joined with newlines), scrolling
-    /// excess rows into native scrollback.
-    Append(Vec<Line>),
-    /// Erase the visible screen (scrollback above it stays) and paint the
-    /// rows from the top — the TS full-redraw path for changes above the
-    /// flushed tail.
-    Repaint(Vec<Line>),
+/// The encoded flush rows leave the process in slices of at most this
+/// many bytes: big enough that each PTY write stays one syscall, small
+/// enough that the flush buffer never holds the transcript.
+const CHUNK_BYTES: usize = 256 * 1024;
+
+/// The streaming main-screen flush state: feeds the inline frame's rows
+/// section by section, routes them between the append stream and the
+/// repaint ring, and writes the encoded bytes in bounded chunks.
+struct FlushSink {
+    /// The last flush's row texts — the diff base (owned: the new frame's
+    /// texts replace it at the end of the flush).
+    flushed: Vec<String>,
+    /// The new frame's row texts, accumulated as the rows stream (the
+    /// diff base the NEXT flush compares against).
+    texts: Vec<String>,
+    /// The most recent `screen_height` rows seen, for the repaint write:
+    /// a change above the flushed tail repaints the frame tail only.
+    ring: std::collections::VecDeque<crate::Line>,
+    /// The encoded append rows not yet handed to `out`.
+    chunk: String,
+    screen_height: usize,
+    /// Set once a row extends the flushed frame: every later row appends.
+    appending: bool,
+    /// Set when a row inside the flushed frame changed: every row keeps
+    /// landing in the repaint ring instead.
+    repaint: bool,
 }
+
+impl FlushSink {
+    /// Feed one section of the inline frame.
+    fn feed(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        rows: &[crate::Line],
+    ) -> std::io::Result<()> {
+        for row in rows {
+            let index = self.texts.len();
+            let text = row_text_of(row);
+            if self.appending {
+                crate::interactive::write_flush_rows(&mut self.chunk, std::slice::from_ref(row));
+                self.texts.push(text);
+                if self.chunk.len() >= CHUNK_BYTES {
+                    out.write_all(self.chunk.as_bytes())?;
+                    self.chunk.clear();
+                }
+            } else if self.repaint || index >= self.flushed.len() {
+                // Rows inside the flushed frame landed in the ring while
+                // the mode was undecided; a changed row turns the write
+                // into a repaint, and a row past the flushed frame turns
+                // it into an append.
+                if self.repaint {
+                    self.ring_push(row);
+                } else {
+                    self.appending = true;
+                    crate::interactive::write_flush_rows(&mut self.chunk, std::slice::from_ref(row));
+                }
+                self.texts.push(text);
+            } else {
+                if self.flushed[index].as_str() != text.as_str() {
+                    self.repaint = true;
+                }
+                self.ring_push(row);
+                self.texts.push(text);
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the repaint ring at one screenful.
+    fn ring_push(&mut self, row: &crate::Line) {
+        self.ring.push_back(row.clone());
+        while self.ring.len() > self.screen_height {
+            self.ring.pop_front();
+        }
+    }
+
+    /// Write what the decided mode owes: the append tail, the repaint
+    /// erase plus the ring, or nothing for an identical frame.
+    fn finish(&mut self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        if self.appending {
+            if !self.chunk.is_empty() {
+                out.write_all(self.chunk.as_bytes())?;
+                self.chunk.clear();
+            }
+        } else if self.repaint || self.texts.len() < self.flushed.len() {
+            // A frame that shrank never rewinds into a rewrite of
+            // scrollback: the changed region repaints the visible window.
+            let mut buffer = String::from("\x1b[2J\x1b[H");
+            let ring: Vec<crate::Line> = std::mem::take(&mut self.ring).into_iter().collect();
+            crate::interactive::write_flush_rows(&mut buffer, &ring);
+            out.write_all(buffer.as_bytes())?;
+            self.chunk.clear();
+        }
+        Ok(())
+    }
+}
+
 
 /// Concatenated span contents of a row (includes zero-width OSC zone
 /// markers, which must persist into scrollback).
@@ -2543,8 +2646,17 @@ mod tests {
         assert_eq!(crate::osc133::row_markers(&out), RowMarkers::default());
     }
 
+    /// Flush the inline frame into a byte sink, returning the exact bytes
+    /// the terminal would receive.
+    fn flush_bytes(v: &mut AgentView, width: usize, screen_height: usize) -> Vec<u8> {
+        let mut sink: Vec<u8> = Vec::new();
+        v.stream_flush_to(&mut sink, width, screen_height)
+            .expect("the flush streams");
+        sink
+    }
+
     #[test]
-    fn flush_plan_appends_then_repaints_the_changed_tail() {
+    fn flush_streams_append_then_repaints_the_changed_tail() {
         let mut v = view();
         v.chrome.version = "0.0.0".to_string();
         v.chrome.cwd = "/w".to_string();
@@ -2556,17 +2668,19 @@ mod tests {
         // transcript, dock) and keeps the zero-width zone markers embedded
         // in the rows — they must survive into scrollback for
         // shell-integration jumps.
-        let first = v.take_flush_plan(80, 24);
-        let FlushPlan::Append(rows) = &first else {
-            panic!("first flush must append");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("prime agent v0.0.0"));
+        let first = flush_bytes(&mut v, 80, 24);
+        let joined = String::from_utf8_lossy(&first);
+        // The encoded bytes carry SGR styling between spans: assert on
+        // single-span fragments, not strings spanning a style boundary.
+        assert!(joined.contains("0.0.0"));
         assert!(joined.contains("first turn"));
-        assert!(rows.iter().any(|l| crate::osc133::row_markers(l).start));
+        assert!(first.windows(crate::osc133::ZONE_START.len())
+            .any(|w| w == crate::osc133::ZONE_START.as_bytes()));
+        // Every appended row starts at column 0 and ends CRLF.
+        assert!(first.starts_with(b"\r") && first.ends_with(b"\r\n"));
 
         // An unchanged frame flushes nothing.
-        assert_eq!(v.take_flush_plan(80, 24), FlushPlan::Append(Vec::new()));
+        assert!(flush_bytes(&mut v, 80, 24).is_empty());
 
         // New transcript rows land ABOVE the flushed dock, so the flush
         // repaints the visible window: the changed region is rewritten, not
@@ -2574,36 +2688,33 @@ mod tests {
         v.push(TranscriptItem::UserMessage {
             text: "second turn".to_string(),
         });
-        let FlushPlan::Repaint(rows) = v.take_flush_plan(80, 24) else {
-            panic!("growth past the flushed dock must repaint");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut v, 80, 24);
+        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"), "a repaint erases first");
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("second turn"));
         assert!(joined.contains("first turn"));
         // The repaint covers at most one screenful: a long transcript
         // repaints only the tail.
         let mut long = filled(view(), 30);
-        let FlushPlan::Append(_) = long.take_flush_plan(80, 10) else {
-            panic!("first flush of a long transcript must append");
-        };
+        let appended = flush_bytes(&mut long, 80, 10);
+        assert!(!appended.is_empty() && !appended.starts_with(b"\x1b[2J"), "first flush appends");
         long.push(TranscriptItem::UserMessage {
             text: "late turn".to_string(),
         });
-        let FlushPlan::Repaint(rows) = long.take_flush_plan(80, 10) else {
-            panic!("growth past the flushed dock must repaint");
-        };
-        assert!(rows.len() <= 10);
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut long, 80, 10);
+        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
+        // One screenful of rows: at most `screen_height` CRLFs.
+        assert!(repaint.iter().filter(|b| **b == b'\n').count() <= 10);
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("late turn"));
         assert!(!joined.contains("reply 0"));
 
         // A shrinking rebuild never rewinds into a rewrite of scrollback:
         // the changed region repaints the visible window only.
         v.clear_chat();
-        let FlushPlan::Repaint(rows) = v.take_flush_plan(80, 24) else {
-            panic!("a rebuild past the flushed frame must repaint");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut v, 80, 24);
+        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(!joined.contains("second turn"));
     }
 
