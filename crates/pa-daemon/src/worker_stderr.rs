@@ -9,9 +9,10 @@
 //! it holds exactly the current launch's stderr (never the previous
 //! attempt's), and the spawn-time prune keeps only the newest
 //! [`RETAINED_FILES`] worker logs by modified time, deleting the older
-//! ones (the just-opened log is spared if timestamp ties sort it into the
-//! deletion window). The tail a not-ready error carries is the last
-//! [`TAIL_BYTES`] of the file.
+//! ones — but never a log younger than [`PRUNE_PROTECTION_SECS`] and
+//! never the just-opened log itself (coarse-mtime ties could sort either
+//! into the deletion window). The tail a not-ready error carries is the
+//! last [`TAIL_BYTES`] of the file.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -26,6 +27,13 @@ const TAIL_BYTES: u64 = 4096;
 /// How many worker stderr logs the daemon retains (the spawn-time prune
 /// cap; see the module docs for the full retention rule).
 const RETAINED_FILES: usize = 64;
+
+/// Logs younger than this are never prune targets: a launch's log must
+/// survive from its spawn until the launch settles (the probe and auth
+/// fit inside the platform launch budgets — the 30s Unix default, the
+/// 90s Windows default, and the e2e override), so one concurrent spawn's
+/// prune cannot unlink another's fresh log.
+const PRUNE_PROTECTION_SECS: u64 = 120;
 
 /// The worker's stderr log: `worker-<id>.stderr.log` under the daemon's
 /// logs dir, the existing state-dir convention the supervisor's own log
@@ -65,9 +73,12 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
 /// the prune every session a daemon ever hosted would leave a log behind.
 /// The just-opened log (`keep`) is spared if coarse-mtime ties sort it
 /// into the deletion window: the child holds its descriptor, but a later
-/// tail read opens by pathname. Deletion of the rest is best-effort (a
-/// live worker's file may be open; an unlinked file keeps receiving the
-/// child's writes until it exits).
+/// tail read opens by pathname. Logs younger than
+/// [`PRUNE_PROTECTION_SECS`] are never prune targets either: concurrent
+/// launches each know only their own `keep`, so only their age protects
+/// one spawn's fresh log from another spawn's prune. Deletion of the rest
+/// is best-effort (a live worker's file may be open; an unlinked file
+/// keeps receiving the child's writes until it exits).
 fn prune_retained(logs_dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         return;
@@ -82,6 +93,15 @@ fn prune_retained(logs_dir: &Path, keep: &Path) {
         })
         .filter_map(|path| {
             let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+            // A future mtime (clock skew) reads as not-yet-elapsed, i.e.
+            // protected: a skewed clock must not turn a fresh launch's
+            // log into a prune target.
+            let fresh = modified.elapsed().map_or(true, |age| {
+                age < std::time::Duration::from_secs(PRUNE_PROTECTION_SECS)
+            });
+            if fresh {
+                return None;
+            }
             Some((modified, path))
         })
         .collect();
@@ -349,5 +369,32 @@ mod tests {
             "supervisor line\n",
             "foreign logs are only listed, never rewritten"
         );
+    }
+
+    #[test]
+    fn prune_spares_a_fresh_burst_of_launches() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let logs_dir = dir.path().join("logs");
+        // A same-tick launch burst: every log carries the current
+        // modified time, so every one is inside the prune-protection
+        // window and no spawn's prune may touch another's fresh log.
+        for index in 0..(RETAINED_FILES + 6) {
+            write_log(
+                &logs_dir,
+                &format!("worker-{index:03}.stderr.log"),
+                "worker died\n",
+            );
+        }
+        prune_retained(&logs_dir, &Path::new("absent-keep"));
+        let fresh = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
+        assert_eq!(fresh, RETAINED_FILES + 6, "a fresh burst is not pruned");
+        // The burst ages past the window: the same prune collapses it to
+        // the retention cap.
+        for index in 0..(RETAINED_FILES + 6) {
+            backdate(&logs_dir.join(format!("worker-{index:03}.stderr.log")), 0);
+        }
+        prune_retained(&logs_dir, &Path::new("absent-keep"));
+        let aged = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
+        assert_eq!(aged, RETAINED_FILES, "an aged burst collapses to the cap");
     }
 }

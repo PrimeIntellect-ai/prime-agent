@@ -225,10 +225,12 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
         "the worker's stderr output is in its per-worker log: {contents}"
     );
 
-    // The spawn-time prune kept the newest logs only: this run's log plus
-    // the newest leftovers up to the retention cap, the oldest deleted.
+    // The spawn-time prune kept the newest logs only: the aged leftovers
+    // collapse to the retention cap, and this run's fresh log rides above
+    // it inside the prune-protection window (never a prune target while
+    // its launch could still be settling).
     let remaining = worker_stderr_logs(&agent_dir);
-    assert!(remaining.len() <= 64, "retention is bounded: {remaining:?}");
+    assert!(remaining.len() <= 65, "retention is bounded: {remaining:?}");
     assert!(remaining.contains(&format!("worker-{session_id}.stderr.log")));
     assert!(
         remaining.iter().any(|name| name.starts_with("worker-old")),
