@@ -3,6 +3,7 @@
 //! call and file-op details land with the provider integration slice.
 
 use pa_types::session::{AgentMessage, FileEntry};
+use std::fmt::Write as _;
 
 /// Default compaction settings (TS `DEFAULT_COMPACTION_SETTINGS`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
@@ -480,9 +481,9 @@ pub fn build_summarization_prompt(
     }
     .to_string();
     if let Some(custom_instructions) = custom_instructions {
-        base.push_str(&format!(
+        let _ = write!(base,
             "\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n{custom_instructions}\n</user-instructions>"
-        ));
+        );
     }
     format!("{base}\n\n{KERNEL_PERSIST_SUMMARY_NOTE}")
 }
@@ -499,7 +500,7 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: Some(parent.to_string()),
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -511,7 +512,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
         )
     }
@@ -525,7 +526,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "ok".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -540,13 +541,13 @@ mod tests {
                     cache_read: 0,
                     cache_write: 0,
                     total_tokens: 150,
-                    cost: Default::default(),
+                    cost: pa_types::ai::UsageCost::default(),
                 },
                 stop_reason: pa_types::ai::StopReason::Stop,
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
         )
     }
@@ -555,7 +556,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -565,7 +566,7 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: "ok".to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             )],
             api: "openai-completions".to_string(),
@@ -580,13 +581,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: usage_total,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -766,7 +767,7 @@ mod tests {
         let user = AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("12345678".to_string()), // 8 chars -> 2 tokens
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         assert_eq!(estimate_tokens(&user), 2);
         // Usage math: totalTokens wins.
@@ -776,7 +777,7 @@ mod tests {
             cache_read: 1,
             cache_write: 1,
             total_tokens: 100,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         assert_eq!(calculate_context_tokens(&usage), 100);
     }
@@ -810,13 +811,13 @@ mod tests {
                         pa_types::ai::TextContent {
                             text: "result".to_string(),
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: serde_json::Map::default(),
                         },
                     )],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ),
         ];
@@ -889,13 +890,13 @@ mod tests {
                         cache_read: 0,
                         cache_write: 0,
                         total_tokens: 2,
-                        cost: Default::default(),
+                        cost: pa_types::ai::UsageCost::default(),
                     },
                     stop_reason: pa_types::ai::StopReason::Aborted,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ),
         ];

@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -467,8 +467,8 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
                 let session = line["session"].clone();
                 assert!(session["path"]
                     .as_str()
-                    .unwrap_or_default()
-                    .ends_with(".jsonl"));
+                    .and_then(|path| Path::new(path).extension())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")));
                 assert!(session["firstMessage"].is_string());
                 assert!(session["state"]["status"].is_string());
                 rows.push(session);
@@ -651,7 +651,8 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     assert_eq!(data["sessionId"], session_uuid.as_str());
     assert!(data["sessionFile"]
         .as_str()
-        .is_some_and(|path| path.ends_with(".jsonl")));
+        .and_then(|path| Path::new(path).extension())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")));
     assert_eq!(data["userMessages"], 1);
     assert_eq!(data["assistantMessages"], 1);
     assert_eq!(data["toolCalls"], 0);

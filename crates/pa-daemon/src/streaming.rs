@@ -30,7 +30,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::protocol::{create_daemon_event_meta, DaemonOutbound};
 use crate::worker::OutboundFrame;
@@ -187,7 +187,7 @@ impl TurnStreamCoalescer {
             active_session_id: self.session.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound).unwrap_or_default();
         events.send(OutboundFrame::session_event(payload));

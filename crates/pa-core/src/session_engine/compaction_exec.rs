@@ -9,6 +9,7 @@ use super::compaction_utils::{
 use super::messages::convert_to_llm;
 use pa_types::ai::{AssistantMessage, TextContent, UserContent, UserContentBlock, UserMessage};
 use pa_types::session::{AgentMessage, CompactionEntry, FileEntry};
+use std::fmt::Write as _;
 
 /// Details stored on the compaction entry for file tracking.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -48,9 +49,10 @@ pub fn build_summarization_request(
     let conversation_text = super::compaction_utils::serialize_conversation(&llm_messages);
     let mut prompt_text = format!("<conversation>\n{conversation_text}\n</conversation>\n\n");
     if let Some(previous_summary) = previous_summary {
-        prompt_text.push_str(&format!(
+        let _ = write!(
+            prompt_text,
             "<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
-        ));
+        );
     }
     prompt_text.push_str(&build_summarization_prompt(
         custom_instructions,
@@ -60,10 +62,10 @@ pub fn build_summarization_request(
         content: UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
             text: prompt_text,
             text_signature: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]),
         timestamp: 0,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })]
 }
 
@@ -101,10 +103,10 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
         content: UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
             text: prompt_text,
             text_signature: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]),
         timestamp: 0,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })]
 }
 
@@ -409,7 +411,7 @@ mod tests {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -418,7 +420,7 @@ mod tests {
             content: vec![pa_types::ai::AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -426,12 +428,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -466,7 +468,7 @@ mod tests {
             cache_read: 80,
             cache_write: 0,
             total_tokens: 110,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         let result = CompactionResult {
             summary: "the overflow summary".to_string(),
@@ -524,7 +526,7 @@ mod tests {
                     id: Some(format!("e{index}")),
                     parent_id: None,
                     timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             })
             .collect();

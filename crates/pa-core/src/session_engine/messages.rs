@@ -7,6 +7,7 @@ use pa_types::ai::{
     AssistantMessage, TextContent, ToolResultMessage, UserContent, UserContentBlock, UserMessage,
 };
 use pa_types::session::AgentMessage;
+use std::fmt::Write as _;
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe conversation history before this point was compacted into the following summary:\n\n<summary>\n";
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
@@ -134,7 +135,7 @@ pub fn create_provider_retry_outcome_message(
             "finalError": error,
         })),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -157,7 +158,7 @@ pub fn create_compaction_outcome_message(
             "outcome": outcome.wire(),
         })),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -204,7 +205,7 @@ pub fn create_heartbeat_prompt_message(
         display: true,
         details: Some(serde_json::Value::Object(details)),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -236,7 +237,7 @@ pub fn create_async_bash_completion_message(
             "exitCode": exit_code,
         })),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -274,12 +275,14 @@ fn bash_output_to_text(
         text.push_str("\n\n(command cancelled)");
     } else if let Some(code) = exit_code {
         if code != 0 {
-            text.push_str(&format!("\n\nCommand exited with code {code}"));
+            let _ = write!(text, "\n\nCommand exited with code {code}");
         }
     }
     if truncated {
         match full_output_path {
-            Some(path) => text.push_str(&format!("\n\n[Output truncated. Full output: {path}]")),
+            Some(path) => {
+                let _ = write!(text, "\n\n[Output truncated. Full output: {path}]");
+            }
             None => text.push_str("\n\n[Output truncated.]"),
         }
     }
@@ -305,7 +308,7 @@ fn text_block(text: String) -> UserContentBlock {
     UserContentBlock::Text(TextContent {
         text,
         text_signature: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
@@ -322,7 +325,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 AgentMessage::User(UserMessage {
                     content: UserContent::Blocks(vec![text_block(bash_execution_to_text(bash))]),
                     timestamp: bash.timestamp,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })
             }
             AgentMessage::Custom(custom) => {
@@ -341,12 +344,12 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 // shape is the array either way).
                 let content = match custom.content.clone() {
                     UserContent::Text(text) => UserContent::Blocks(vec![text_block(text)]),
-                    blocks => blocks,
+                    blocks @ UserContent::Blocks(_) => blocks,
                 };
                 AgentMessage::User(UserMessage {
                     content,
                     timestamp: custom.timestamp,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })
             }
             AgentMessage::BranchSummary(summary) => AgentMessage::User(UserMessage {
@@ -355,7 +358,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     summary.summary
                 ))]),
                 timestamp: summary.timestamp,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             AgentMessage::CompactionSummary(summary) => {
                 let digest_block = summary
@@ -371,7 +374,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         summary.summary
                     ))]),
                     timestamp: summary.timestamp,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 })
             }
             AgentMessage::User(_) | AgentMessage::Assistant(_) | AgentMessage::ToolResult(_) => {
@@ -856,7 +859,7 @@ mod tests {
             AgentMessage::User(UserMessage {
                 content: UserContent::Text("keep me".to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             AgentMessage::Custom(pa_types::session::CustomMessage {
                 custom_type: SESSION_SLASH_COMMAND_CUSTOM_TYPE.to_string(),
@@ -864,7 +867,7 @@ mod tests {
                 display: true,
                 details: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             AgentMessage::Custom(pa_types::session::CustomMessage {
                 custom_type: "extension_note".to_string(),
@@ -872,7 +875,7 @@ mod tests {
                 display: true,
                 details: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             AgentMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
                 summary: "the branch".to_string(),

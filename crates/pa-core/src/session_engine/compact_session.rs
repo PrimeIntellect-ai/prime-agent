@@ -105,7 +105,7 @@ pub fn estimate_summary_request_tokens(
     // The history slice runs for every compaction except a split turn
     // whose kept cut leaves no history ("No prior history." is a literal
     // stand-in, no wire call).
-    let issues_history_call = !history.is_empty() || !(is_split_turn && !turn_prefix.is_empty());
+    let issues_history_call = !history.is_empty() || !is_split_turn || turn_prefix.is_empty();
     if issues_history_call {
         let request = super::compaction_exec::build_summarization_request(
             history,
@@ -189,7 +189,7 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 display: payload.display,
                 details: payload.details.clone(),
                 timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
@@ -721,6 +721,7 @@ mod tests {
     use super::super::compaction::estimate_context_tokens;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
+    use serde_json::Map;
 
     fn session_with_turns(cwd: &std::path::Path, turns: usize) -> SessionManager {
         let mut session = SessionManager::in_memory(cwd);
@@ -729,7 +730,7 @@ mod tests {
                 .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                     content: UserContent::Text(format!("turn {i} message with some words")),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }))
                 .unwrap();
             session
@@ -738,7 +739,7 @@ mod tests {
                         pa_types::ai::TextContent {
                             text: format!("reply {i}"),
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: serde_json::Map::default(),
                         },
                     )],
                     api: "openai-completions".to_string(),
@@ -753,13 +754,13 @@ mod tests {
                         cache_read: 0,
                         cache_write: 0,
                         total_tokens: 120,
-                        cost: Default::default(),
+                        cost: pa_types::ai::UsageCost::default(),
                     },
                     stop_reason: pa_types::ai::StopReason::Stop,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }))
                 .unwrap();
         }
@@ -793,7 +794,7 @@ mod tests {
                 id: Some("c".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         let _ = &mut compaction;
@@ -806,13 +807,13 @@ mod tests {
                 details: None,
                 is_error: false,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some("t".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         assert!(message_from_entry(&tool_result).is_none());
@@ -858,7 +859,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -867,7 +868,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -881,7 +882,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn one")).unwrap();
@@ -908,7 +909,8 @@ mod tests {
         // Scripted summaries: each factory call records its request and
         // answers with its scripted response, so both wire calls are
         // captured regardless of issue order.
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -998,7 +1000,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: input + output,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             }
         };
         let mut expected = usage_of(history_request, history_response);
@@ -1043,7 +1045,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1052,7 +1054,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1066,7 +1068,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let goal_row = |session: &mut SessionManager| {
@@ -1077,7 +1079,7 @@ mod tests {
                 Some(serde_json::json!({ "kind": "continuation" })),
             )
         };
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let record_summary = |recorder: std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
                 move |context: &pa_types::ai::Context,
@@ -1211,7 +1213,7 @@ mod tests {
     async fn split_turn_without_history_makes_only_the_prefix_call() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -1237,7 +1239,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1246,7 +1248,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1260,7 +1262,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         // One big turn only: the cut splits it, and nothing precedes the
@@ -1330,7 +1332,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: input + output,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             })
         );
         registration.unregister();
@@ -1347,7 +1349,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session
@@ -1359,7 +1361,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: format!("reply {}", "y".repeat(4_000)),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1373,7 +1375,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         session.append_message(user("small")).unwrap();
@@ -1399,13 +1401,13 @@ mod tests {
             message: AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some(id.to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -1422,7 +1424,7 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -1504,7 +1506,7 @@ mod tests {
     async fn second_compaction_updates_the_prior_summary_over_new_history() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -1534,7 +1536,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn zero")).unwrap();
@@ -1639,7 +1641,7 @@ mod tests {
     async fn second_compaction_split_turn_history_updates_prefix_does_not() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -1670,7 +1672,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1679,7 +1681,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1693,7 +1695,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn zero")).unwrap();
@@ -1869,7 +1871,7 @@ mod tests {
             .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text("threshold crossing turn".to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }))
             .unwrap();
         session
@@ -1940,7 +1942,7 @@ mod tests {
                 display: true,
                 details: None,
                 timestamp: summary_timestamp + 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         }
         assert!(!super::super::compaction::threshold_compaction_due(
@@ -1966,7 +1968,7 @@ mod tests {
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let mut session = session_with_turns(tmp.path(), 3);
-        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let sink_deltas = std::sync::Arc::clone(&deltas);
         let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
             sink_deltas.lock().unwrap().push(delta.to_string());
@@ -2022,7 +2024,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -2031,7 +2033,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -2045,7 +2047,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })
         };
         session.append_message(user("turn one")).unwrap();
@@ -2075,7 +2077,7 @@ mod tests {
                 pa_ai::faux::FauxAssistantMessageOptions::default(),
             )),
         ]);
-        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let sink_deltas = std::sync::Arc::clone(&deltas);
         let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
             sink_deltas.lock().unwrap().push(delta.to_string());
@@ -2194,9 +2196,9 @@ mod tests {
                     content: "Written before compaction.".to_string(),
                     path: "general".to_string(),
                     scope: Some(crate::refinement::HarnessScope::Local),
-                    reference: Default::default(),
-                    arguments: Default::default(),
-                    metadata: Default::default(),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
                     source: "refine".to_string(),
                     created_at: "2026-09-07T00:00:00.000Z".to_string(),
                     updated_at: "2026-09-07T00:00:00.000Z".to_string(),
@@ -2493,7 +2495,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "seed reply".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )]
             };
@@ -2514,7 +2516,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2525,13 +2527,13 @@ mod tests {
             cache_read: 80,
             cache_write: 0,
             total_tokens: 110,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         let probe = |text: &str| {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(probe("seed turn")).unwrap();
@@ -2542,7 +2544,7 @@ mod tests {
         // The overflow error turn: stopReason "error" with zeroed usage
         // (what the provider returns for a failed request).
         session
-            .append_message(reply(Default::default(), true))
+            .append_message(reply(pa_types::ai::Usage::default(), true))
             .unwrap();
         // TS: 110 (last valid usage) + ceil(415/4) (the probe turn) = 214.
         assert_eq!(
@@ -2628,7 +2630,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("faux/compact-m"));
         let mut session = session_with_turns(tmp.path(), 3);
-        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -2676,7 +2678,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("testaux/missing-model"));
         let mut session = session_with_turns(tmp.path(), 3);
-        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -2860,7 +2862,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 }
