@@ -1293,8 +1293,11 @@ const SESSION_SCAN_MAX_CACHED_STATES: usize = 4096;
 #[derive(Default)]
 struct SessionInfoScanCache {
     states: HashMap<PathBuf, SessionScanState>,
-    /// Insertion order; a re-store moves a path to the back (LRU recency).
-    order: Vec<PathBuf>,
+    /// Oldest first. One ordinal per live state keeps the recency index
+    /// bounded even when the same roster is refreshed indefinitely.
+    order: std::collections::BTreeMap<u64, PathBuf>,
+    ordinal_by_path: HashMap<PathBuf, u64>,
+    next_ordinal: u64,
     retained_usage_entries: usize,
 }
 
@@ -1304,17 +1307,40 @@ impl SessionInfoScanCache {
         if let Some(state) = self.states.remove(path) {
             self.retained_usage_entries -= state.accounted_usage_entries;
         }
-        self.order.retain(|p| p != path);
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+    }
+
+    fn mark_recent(&mut self, path: &Path) {
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+        // Rollover is unreachable in practice, but rebuilding the tiny
+        // (at most 4096 entries) recency index preserves exact LRU order.
+        if self.next_ordinal == u64::MAX {
+            let ordered: Vec<PathBuf> = self.order.values().cloned().collect();
+            self.order.clear();
+            self.ordinal_by_path.clear();
+            for (ordinal, old_path) in ordered.into_iter().enumerate() {
+                let ordinal = ordinal as u64;
+                self.ordinal_by_path.insert(old_path.clone(), ordinal);
+                self.order.insert(ordinal, old_path);
+            }
+            self.next_ordinal = self.order.len() as u64;
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        self.ordinal_by_path.insert(path.to_path_buf(), ordinal);
+        self.order.insert(ordinal, path.to_path_buf());
     }
 
     /// The unchanged-file hit re-stores in TS (`storeSessionScanState
     /// (filePath, previous)`) — LRU recency without re-accounting.
     fn touch(&mut self, path: &Path) {
-        if !self.states.contains_key(path) {
-            return;
+        if self.states.contains_key(path) {
+            self.mark_recent(path);
         }
-        self.order.retain(|p| p.as_path() != path);
-        self.order.push(path.to_path_buf());
     }
 
     /// TS `storeSessionScanState`: (re-)store with fresh accounting, then
@@ -1324,14 +1350,15 @@ impl SessionInfoScanCache {
         let mut state = state;
         state.accounted_usage_entries = state.acc.usage_scan.retained_entries();
         self.retained_usage_entries += state.accounted_usage_entries;
-        self.order.push(path.to_path_buf());
         self.states.insert(path.to_path_buf(), state);
+        self.mark_recent(path);
         while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
             || self.states.len() > SESSION_SCAN_MAX_CACHED_STATES
         {
-            let Some(front) = self.order.first().cloned() else {
+            let Some((_, front)) = self.order.first_key_value() else {
                 break;
             };
+            let front = front.clone();
             self.drop_state(&front);
         }
     }

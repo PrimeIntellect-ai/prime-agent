@@ -519,12 +519,57 @@ fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
         cache.states.len()
     );
     assert_eq!(cache.order.len(), cache.states.len());
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
     assert!(!cache.states.contains_key(&dir.join("zero-0.jsonl")));
     assert!(!cache.states.contains_key(&dir.join("zero-7.jsonl")));
     assert!(cache.states.contains_key(&dir.join(format!(
         "zero-{}.jsonl",
         super::SESSION_SCAN_MAX_CACHED_STATES + 7
     ))));
+}
+
+#[test]
+fn scan_cache_recency_tracks_updates_and_removals_without_growth() {
+    let dir = test_dir();
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|index| dir.join(format!("lru-{index}.jsonl")))
+        .collect();
+    let generation = SessionInfoGeneration::from_metadata(&fs::metadata(&dir).unwrap());
+    let mut cache = SessionInfoScanCache::default();
+    for path in &paths {
+        cache.store_state(path, SessionScanState::fresh(generation));
+    }
+    cache.touch(&paths[0]);
+    cache.touch(&paths[2]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[1], &paths[0], &paths[2]]
+    );
+    for _ in 0..1000 {
+        cache.touch(&paths[0]);
+    }
+    assert_eq!(cache.order.len(), 3);
+    assert_eq!(cache.ordinal_by_path.len(), 3);
+    assert_eq!(cache.order.first_key_value().unwrap().1, &paths[1]);
+    cache.store_state(&paths[1], SessionScanState::fresh(generation));
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[2], &paths[0], &paths[1]]
+    );
+    cache.drop_state(&paths[0]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[2], &paths[1]]
+    );
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
+    cache.next_ordinal = u64::MAX;
+    cache.touch(&paths[2]);
+    assert_eq!(
+        cache.order.values().collect::<Vec<_>>(),
+        vec![&paths[1], &paths[2]]
+    );
+    assert_eq!(cache.ordinal_by_path.len(), cache.states.len());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 /// The old-record regression (the Mac bug's shape): a session created
