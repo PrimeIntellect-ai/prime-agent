@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::frontmatter::parse_frontmatter;
-use super::{create_synthetic_source_info, SourceInfo, SourceScope};
+use super::{create_synthetic_source_info, skill_markdown_name, SourceInfo, SourceScope};
 pub use pa_types::slash_commands::parse_slash_command;
 
 /// A prompt template loaded from a markdown file.
@@ -194,7 +194,7 @@ fn load_templates_from_dir(
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".md") {
+        if !skill_markdown_name(&name) {
             continue;
         }
         if !std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {

@@ -10,6 +10,7 @@
 //! written runtime is unobservable (temp dir + rename), and a concurrent
 //! materializer that loses the rename finds the winner in place.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -79,8 +80,10 @@ fn runtime_digest() -> String {
     hasher
         .finalize()
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::new(), |mut output, b| {
+            let _ = write!(output, "{b:02x}");
+            output
+        })
 }
 
 /// Write the bundled runtime under `<agent_dir>/extension-host/` and return

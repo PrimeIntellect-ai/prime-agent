@@ -7,6 +7,7 @@
 //! manifest), the `prime-agent-runtime/` sidecar, `skills/`, and `docs/`
 //! beside it, all resolved at runtime from the executable's directory.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,7 +78,11 @@ fn copy_dir(source: &Path, target: &Path) {
             copy_dir(&path, &destination);
         } else {
             std::fs::copy(&path, &destination).unwrap_or_else(|error| {
-                panic!("copy asset file {path:?} -> {destination:?}: {error}")
+                panic!(
+                    "copy asset file {} -> {}: {error}",
+                    path.display(),
+                    destination.display()
+                )
             });
         }
     }
@@ -106,7 +111,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -117,7 +123,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -677,7 +686,10 @@ fn sha256_file(path: &Path) -> String {
     // A tiny pure-std sha256 (the test dependency set stays minimal).
     let bytes = std::fs::read(path).expect("hash input");
     let digest = sha256(&bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    digest.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 /// SHA-256 (FIPS 180-4), pure std so the e2e needs no extra dev-dependency.

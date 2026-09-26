@@ -340,7 +340,7 @@ impl McpManager {
             probe_override: options.probe_override,
             usage_report: None,
             integrations: HashMap::new(),
-            service_catalog: Default::default(),
+            service_catalog: crate::mcp::service_catalog::McpCatalogResolution::default(),
             catalog_available: false,
             connection_store,
             acp_servers: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -514,7 +514,7 @@ impl McpManager {
         let all = handle.get_all();
         match serde_json::to_value(&all) {
             Ok(Value::Object(map)) => map,
-            _ => Default::default(),
+            _ => serde_json::Map::default(),
         }
     }
 
@@ -854,7 +854,7 @@ mod tests {
 
     fn test_auth_storage() -> AuthStorage {
         AuthStorage::in_memory(
-            Default::default(),
+            crate::auth::types::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::manager::NoOAuth),
         )
     }

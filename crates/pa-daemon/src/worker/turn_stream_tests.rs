@@ -537,7 +537,7 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
         core.steering
             .push_back(queued_prompt("armed two", TurnPolicy::Queued));
         core.forced_all_steering = true;
-        for item in core.steering.iter_mut() {
+        for item in &mut core.steering {
             item.forced_batch = true;
         }
         // An un-armed steer queued behind the armed prefix (a steer

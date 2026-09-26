@@ -69,7 +69,7 @@ impl GoalDriver {
         Self {
             state: empty_goal_state(),
             accounting_started_at: None,
-            accounted_messages: Default::default(),
+            accounted_messages: std::collections::HashSet::default(),
             owed_continuation_for_rlm_work: false,
         }
     }
@@ -554,6 +554,7 @@ mod tests {
     use crate::goals::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
     use crate::session::manager::SessionManager;
     use pa_types::ai::UserContent;
+    use std::fmt::Write as _;
 
     fn persisted_session() -> SessionManager {
         let dir = tempfile::TempDir::new().unwrap();
@@ -592,7 +593,10 @@ mod tests {
             serde_json::json!({"type":"compaction","id":"compact","parentId":"kept","summary":"summary","firstKeptEntryId":"kept","tokensBefore":1000}),
             serde_json::json!({"type":"custom","id":"invalid","parentId":"compact","customType":GOAL_STATE_CUSTOM_TYPE,"data":{"active":true}}),
         ];
-        let original: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let original: String = rows.iter().fold(String::new(), |mut output, row| {
+            let _ = writeln!(output, "{row}");
+            output
+        });
         std::fs::write(&path, &original).unwrap();
         let mut session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
@@ -943,7 +947,7 @@ mod tests {
                 pa_types::ai::UserMessage {
                     content: UserContent::Text("hi".to_string()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .unwrap();
@@ -1137,7 +1141,7 @@ mod tests {
                 pa_types::ai::UserMessage {
                     content: UserContent::Text("no goal here".to_string()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .unwrap();

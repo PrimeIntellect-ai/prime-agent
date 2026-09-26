@@ -6,6 +6,7 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -178,8 +179,8 @@ fn worker_pid(agent_dir: &Path, socket_path: &Path, worker_id: &str) -> Option<u
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(socket_path.to_string_lossy().as_bytes());
     let mut hex = String::new();
-    for byte in digest.iter() {
-        hex.push_str(&format!("{byte:02x}"));
+    for byte in &digest {
+        write!(hex, "{byte:02x}").expect("write to String");
     }
     let descriptor_dir = agent_dir.join("daemon-workers").join(&hex[..12]);
     let descriptor: serde_json::Value = serde_json::from_str(
@@ -235,7 +236,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
     // registries, journal files); the steady-state baseline is what the
     // cycle set must hold.
     let mut counts: Vec<usize> = Vec::new();
-    for cycle in 0..(CYCLES + 1) {
+    for cycle in 0..=CYCLES {
         let create_id = format!("c{cycle}");
         client.send_command(
             &create_id,

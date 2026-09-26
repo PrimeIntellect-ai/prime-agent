@@ -10,6 +10,7 @@
 //! fix this measurement grounds.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -198,7 +199,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         })
         .to_string(),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        let _ = write!(payload, "data: {data}\n\n");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -338,7 +339,7 @@ fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
 // Measurement harness, not a correctness test: seeds a ~50MB session
 // and prints the phase table; run explicitly with --ignored.
 #[test]
-#[ignore] // measurement harness: seeds ~50MB and prints the phase table
+#[ignore = "measurement harness: seeds ~50MB and prints the phase table"]
 fn mega_session_threshold_compaction_phase_measurement() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");

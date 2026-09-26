@@ -796,7 +796,7 @@ impl TurnRunner {
                         active_session_id: core.active_session_id.clone(),
                         event: event_json,
                         meta: Some(meta),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     };
                     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
                     direct_payloads.push(payload);
@@ -1004,7 +1004,7 @@ impl TurnRunner {
             active_session_id: core.active_session_id.clone(),
             event: json!({ "type": "session_action_update", "actions": snapshot }),
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);
@@ -1030,7 +1030,7 @@ impl TurnRunner {
             active_session_id: self.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound).unwrap_or_default();
         drop(core);
