@@ -194,13 +194,14 @@ mod tests {
 
     #[test]
     fn tail_reads_the_last_4k_from_a_line_boundary() {
+        use std::fmt::Write as _;
         let dir = tempfile::tempdir().expect("temp dir");
         // 8 KiB of numbered lines: the tail must be exactly the last
         // TAIL_BYTES worth, minus the leading partial line.
         let mut contents = String::new();
         let mut line_index = 0;
         while contents.len() < 8192 {
-            contents.push_str(&format!("panic trace line {line_index}\n"));
+            write!(contents, "panic trace line {line_index}\n").expect("write to String");
             line_index += 1;
         }
         let path = write_log(dir.path(), "worker-a.stderr.log", &contents);
