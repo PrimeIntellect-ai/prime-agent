@@ -1140,12 +1140,14 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   providers selector directly — the full `ConfigurationMenuComponent`
   (the tabbed settings menu around it) is not ported, so post-login model
   selection refresh happens on the next `/model` open; (2) the provider
-  subscription OAuth flows (Anthropic/Copilot/Codex/xAI) and the Prime
-  browser logins are not ported — their rows render (TS names, TS order,
-  prime-inference first) and their flows report the unavailability; the
+  subscription OAuth flows (Anthropic/Copilot/Codex/xAI) are not ported —
+  their rows render (TS names, TS order, prime-inference first) and their
+  flows report the unavailability; the Prime browser login races its
+  challenge URL against the paste prompt (the core login over the shared
+  `auth_challenge` protocol, the fallback on a failed browser); the
   MCP device flow runs like `/mcp login` (through the inline auth panel;
-  the Prime Inference login renders its paste prompt, progress lines, and
-  the team picker there — TS `LoginDialogComponent` +
+  the Prime Inference login renders its auth URL, paste prompt, progress
+  lines, and the team picker there — TS `LoginDialogComponent` +
   `PrimeTeamSelectorComponent`, no terminal takeover); (3) the
   post-logout `/reload` for removed `mcp:` credentials stays unported
   (the TS rule), reported with the removal status instead.
