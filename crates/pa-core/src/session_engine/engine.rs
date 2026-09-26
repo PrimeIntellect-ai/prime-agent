@@ -415,16 +415,16 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let has_snapshot = session_artifact_dir
         .as_ref()
         .is_some_and(|dir| crate::kernel::state_snapshot::snapshot_path_in(dir).exists());
-    // The restore-notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
-    // `onRestore` fires from a background task that can settle before
-    // the AgentSession exists (the resume prewarm starts at build), so
-    // the row parks in a mailbox the session adopts once constructed and
-    // shares afterwards.
-    let restore_rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+    // The boot-notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
+    // `onRestore`/`onUnavailableSkills` fires from a background task that
+    // can settle before the AgentSession exists (the resume prewarm starts
+    // at build), so the rows park in a mailbox the session adopts once
+    // constructed and shares afterwards.
+    let boot_notice_rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
         pa_types::session::CustomMessage,
     >::new()));
     let on_restore = {
-        let restore_rows = std::sync::Arc::clone(&restore_rows);
+        let boot_notice_rows = std::sync::Arc::clone(&boot_notice_rows);
         Some(std::sync::Arc::new(
             move |result: &crate::kernel::state_snapshot::RestoreResult| {
                 // TS `_onIpythonStateRestored`: the notice only fires
@@ -432,12 +432,28 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 // callback when no snapshot existed), and it rides the
                 // next admitted turn ahead of its prompt.
                 let row = super::state_restore_notice::notice_message(result);
-                restore_rows
+                boot_notice_rows
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(row);
             },
         ) as crate::kernel::provisioner::RestoreCallback)
+    };
+    let on_unavailable_skills = {
+        let boot_notice_rows = std::sync::Arc::clone(&boot_notice_rows);
+        Some(std::sync::Arc::new(
+            move |errors: &crate::kernel::bootstrap::UnavailablePythonSkills| {
+                // TS `_onPythonSkillsUnavailable` (PR #2381): the broken
+                // skills and their import errors ride the next admitted
+                // turn, so the model learns before its first call
+                // instead of from the placeholder's error.
+                let row = super::skills_unavailable_notice::notice_message(errors);
+                boot_notice_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(row);
+            },
+        ) as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
@@ -447,6 +463,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         session_artifact_dir,
         on_restore,
+        on_unavailable_skills,
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
@@ -711,11 +728,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // reads the resource loader at expansion time; the session snapshots
     // the engine's loaded list).
     session.set_skills(resources.skills.clone());
-    // The restore-notice mailbox becomes the session's next-turn queue:
+    // The boot-notice mailbox becomes the session's next-turn queue:
     // rows parked by a boot that settled mid-build merge in, and later
-    // restores (a lazy first-call boot) push straight into the live
+    // boots (a lazy first-call start) push straight into the live
     // session's queue.
-    session.adopt_next_turn_rows(restore_rows);
+    session.adopt_next_turn_rows(boot_notice_rows);
 
     // Bind the turn-boundary runtime the `compact.*`/`refine.*` handlers
     // probe (turn-active state, usage estimate, compaction preparation).

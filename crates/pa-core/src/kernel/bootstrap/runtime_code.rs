@@ -4,6 +4,37 @@
 
 use super::KernelPythonSkill;
 
+/// Line the runtime bootstrap prints (once, after the skill import loop) when
+/// one or more pre-imported Python skills failed to import. The host scans
+/// the bootstrap cell's stdout for this marker so unavailable skills reach
+/// the model instead of failing only on first call.
+pub const PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER: &str =
+    "__PRIME_AGENT_PYTHON_SKILL_IMPORT_ERRORS__";
+
+/// Failed skill imports reported by a bootstrap cell: `(import name, import
+/// error)` pairs in import order (TS `UnavailablePythonSkills =
+/// Record<string, string>`; the marker's JSON preserves insertion order,
+/// which the notice keeps).
+pub type UnavailablePythonSkills = Vec<(String, String)>;
+
+/// Extract the unavailable-skill report a bootstrap cell printed, or
+/// `None` when it printed none: the marker must be followed by a JSON
+/// object of `{import name: error}` with at least one non-empty string
+/// value (TS `parseUnavailablePythonSkills`).
+pub fn parse_unavailable_python_skills(stdout: &str) -> Option<UnavailablePythonSkills> {
+    let at = stdout.find(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER)?;
+    let raw = stdout[at + PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER.len()..].trim();
+    let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw).ok()?;
+    let errors = parsed
+        .into_iter()
+        .filter_map(|(name, error)| {
+            let error = error.as_str()?;
+            (!error.is_empty()).then(|| (name, error.to_string()))
+        })
+        .collect::<UnavailablePythonSkills>();
+    (!errors.is_empty()).then_some(errors)
+}
+
 const RLM_BOOTSTRAP_HEADER_CODE: &str =
     "import asyncio\nimport os as _prime_agent_os\n\n_prime_agent_os.environ[\"NO_COLOR\"] = \"1\"";
 
@@ -48,8 +79,10 @@ except Exception as _prime_agent_rlm_error:
 
 /// The code the session injects right after kernel start/restore: binds the
 /// `rlm`, `bash`, and MCP surfaces, imports every Python skill (wrapping
-/// callable ones, replacing broken imports with a stub that raises), matching
-/// the TS `buildRlmBootstrapCode`.
+/// callable ones, replacing broken imports with a stub that raises), and —
+/// when any import failed — ends by printing
+/// [`PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER`] plus the errors as JSON so
+/// the host can tell the model, matching the TS `buildRlmBootstrapCode`.
 pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
     let mut import_names: Vec<&str> = python_skills
@@ -122,11 +155,23 @@ for _prime_agent_skill_name in {imports_json}:
             _prime_agent_importlib.import_module(_prime_agent_skill_name)
         )
     except Exception as _prime_agent_skill_error:
-        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = str(_prime_agent_skill_error)
+        # An empty exception message would otherwise be dropped by the
+        # host-side parser; fall back to the exception type name.
+        _prime_agent_skill_error_text = (
+            str(_prime_agent_skill_error) or type(_prime_agent_skill_error).__name__
+        )
+        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = _prime_agent_skill_error_text
         globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
             _prime_agent_skill_name,
-            str(_prime_agent_skill_error),
+            _prime_agent_skill_error_text,
         )
+
+if _PRIME_AGENT_SKILL_IMPORT_ERRORS:
+    import json as _prime_agent_json
+    print(
+        "{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}"
+        + _prime_agent_json.dumps(_PRIME_AGENT_SKILL_IMPORT_ERRORS)
+    )
 "#
     )
     .trim()
@@ -156,5 +201,54 @@ mod tests {
         let code = build_rlm_bootstrap_code(&skills);
         assert!(code.contains(r#"for _prime_agent_skill_name in ["edit"]"#));
         assert!(code.contains("_PrimeAgentUnavailableSkill"));
+    }
+
+    /// The TS #2381 parser table: marker+JSON, noise-prefixed marker,
+    /// no marker, non-JSON payload, and the empty dict all land where the
+    /// host-side report decides notice vs silence.
+    #[test]
+    fn parse_unavailable_python_skills_table() {
+        let cases: Vec<(String, UnavailablePythonSkills)> = vec![
+            (
+                format!(
+                    "{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"websearch\":\"No module named 'websearch'\"}}\n"
+                ),
+                vec![("websearch".into(), "No module named 'websearch'".into())],
+            ),
+            (
+                format!("noise\n{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"edit\":\"boom\"}}"),
+                vec![("edit".into(), "boom".into())],
+            ),
+            ("some unrelated kernel output".to_string(), Vec::new()),
+            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}not json"), Vec::new()),
+            (format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{}}"), Vec::new()),
+        ];
+        for (stdout, expected) in cases {
+            let parsed = parse_unavailable_python_skills(&stdout);
+            if expected.is_empty() {
+                assert!(parsed.is_none(), "{stdout:?} must not report");
+            } else {
+                assert_eq!(parsed, Some(expected), "{stdout:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_unavailable_python_skills_drops_non_string_and_empty_values() {
+        // Non-string values and empty messages drop (TS keeps only
+        // non-empty string entries); ordering follows the marker's JSON.
+        let stdout = format!(
+            "{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"edit\":\"boom\",\"null_skill\":null,\"list_skill\":[1],\"empty_skill\":\"\",\"websearch\":\"No module named 'websearch'\"}}"
+        );
+        assert_eq!(
+            parse_unavailable_python_skills(&stdout),
+            Some(vec![
+                ("edit".into(), "boom".into()),
+                ("websearch".into(), "No module named 'websearch'".into()),
+            ])
+        );
+        // A report whose every value drops stays silent.
+        let stdout = format!("{PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{{\"empty_skill\":\"\"}}");
+        assert_eq!(parse_unavailable_python_skills(&stdout), None);
     }
 }
