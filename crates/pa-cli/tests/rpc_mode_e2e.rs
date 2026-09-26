@@ -369,11 +369,20 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         json!(["steer this"]),
         "the queue projection carries the queued previews"
     );
-    let aborted = client.request(&json!({ "type": "abort" }));
+    let abort_id = client.command(&json!({ "type": "abort" }));
+    let (aborted, before_abort) = client.wait_response(&abort_id, TIMEOUT);
     assert_eq!(aborted["success"], true);
-    // The abort settles the delayed turn and suspends queued delivery
-    // (TS `requestAbort`): the queued rows stay queued.
-    client.wait_event("agent_end", TIMEOUT);
+    // The abort settles the running turn on its own task: the settle's
+    // `agent_end` can land on the wire before or after the abort
+    // response (the TS single-threaded reference always orders the
+    // response first; the async port does not guarantee it) — accept
+    // either ordering; an `agent_end` the response read consumed counts.
+    if !before_abort
+        .iter()
+        .any(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
+    {
+        client.wait_event("agent_end", TIMEOUT);
+    }
     let parked = client.request(&json!({ "type": "get_state" }));
     assert_eq!(
         parked["data"]["sessionActions"]["queuedCount"], 2,

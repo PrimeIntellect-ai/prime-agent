@@ -1154,7 +1154,9 @@ impl Agent {
         if started_rx.await.is_ok() {
             return Ok(());
         }
-        Err(failed_rx.await.expect("a dropped start signal answers with the refusal"))
+        Err(failed_rx
+            .await
+            .expect("a dropped start signal answers with the refusal"))
     }
 
     /// Continue from the current context (TS `continue`).

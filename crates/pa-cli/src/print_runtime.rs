@@ -233,11 +233,11 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
         options.session.continue_recent = false;
         options.session.fork = None;
         Box::pin(async move {
-            // The runtime lease an `Open` acquired for the target file: it
-            // rides the handle (dropping with the engine on the next
-            // replacement, exactly when the old session stops writing).
-            let mut opened_lease = None;
-            let manager = match &request {
+            // The runtime lease the replacement acquired for its target
+            // file: it rides the handle (dropping with the engine on the
+            // next replacement, exactly when the old session stops
+            // writing).
+            let (manager, opened_lease) = match &request {
                 pa_daemon::rpc::session::RpcEngineRequest::New { parent_session } => {
                     let session_dir = replacement_session_dir(&options);
                     let manager = match parent_session {
@@ -265,12 +265,13 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     // lease slot releases exactly when the engine that
                     // owned it goes away.
                     let lease = pa_daemon::lease::acquire_runtime_session_lease(
-                        manager.get_session_file().expect("a fresh session knows its file"),
+                        manager
+                            .get_session_file()
+                            .expect("a fresh session knows its file"),
                         &options.config.agent_dir,
                     )
                     .map_err(|error| format!("{error:#}"))?;
-                    opened_lease = Some(lease);
-                    manager
+                    (manager, Some(lease))
                 }
                 pa_daemon::rpc::session::RpcEngineRequest::Open { session_path } => {
                     let session_dir = replacement_session_dir(&options);
@@ -290,8 +291,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     // directory): tools, settings, and file work run
                     // against the session's repository.
                     options.config.cwd = manager.get_cwd().to_path_buf();
-                    opened_lease = Some(lease);
-                    manager
+                    (manager, Some(lease))
                 }
             };
             let engine = if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
