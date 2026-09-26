@@ -3,11 +3,13 @@
 //! `handleContextCommand` over `formatContextTree`,
 //! `handleSystemPromptCommand`, `handleLogsCommand`, and
 //! `handleChangelogCommand` over `parseChangelog`). Row data and render are
-//! pure; the session UI owns the daemon fetches that feed the builders, the
-//! view owns the paint. Every builder returns the structured form of the TS
-//! `theme.fg(...)`-embedded info strings: one [`ClientLine`] per source
-//! line, spans carrying their theme color so the view resolves them at
-//! render time.
+//! pure; the session UI owns the daemon fetches that feed the builders, and
+//! the read-only info panel (`info_panel`) owns the paint (the operator's
+//! 2026-09-26 directive: these displays render as the docked popup panel,
+//! not as transcript rows). Every builder returns the structured form of
+//! the TS `theme.fg(...)`-embedded info strings: one [`ClientLine`] per
+//! source line, spans carrying their theme color so the view resolves them
+//! at render time.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -879,38 +881,6 @@ fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
         .collect()
 }
 
-/// Count client text using the same styled input runs as rendering.
-pub(crate) fn client_text_row_count(rows: &[ClientLine], theme: &Theme, width: usize) -> usize {
-    1 + rows
-        .iter()
-        .map(|row| {
-            crate::width::wrapped_line_count(
-                &styled_spans(row, theme),
-                width.saturating_sub(2).max(1),
-            )
-        })
-        .sum::<usize>()
-}
-
-fn changelog_style(theme: &Theme, code_block_indent: &str) -> crate::markdown::MarkdownStyle {
-    let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-    md.code_block_indent = code_block_indent.to_string();
-    md
-}
-
-pub(crate) fn changelog_panel_row_count(
-    markdown: &str,
-    theme: &Theme,
-    code_block_indent: &str,
-    width: usize,
-) -> usize {
-    7 + crate::markdown::markdown_row_count(
-        markdown.trim(),
-        width.saturating_sub(2).max(1),
-        &changelog_style(theme, code_block_indent),
-    )
-}
-
 /// TS `Spacer(1)` + `Text(info, 1, 0)`: one blank row, then each source
 /// line wrapped at `width - 2` with a one-column margin on each side and
 /// rows padded to the full width (continuation rows pad inside the open
@@ -937,38 +907,6 @@ pub fn render_client_text(rows: &[ClientLine], theme: &Theme, width: usize) -> V
     out
 }
 
-/// TS `handleChangelogCommand`: `Spacer(1)`, `DynamicBorder`, the accent
-/// `What's New` title (`Text(title, 1, 0)`), `Spacer(1)` + `Markdown(md, 1,
-/// 1)`, and the closing `DynamicBorder`.
-pub fn render_changelog_panel(
-    markdown: &str,
-    theme: &Theme,
-    code_block_indent: &str,
-    width: usize,
-) -> Vec<Line> {
-    let mut rows: Vec<Line> = Vec::new();
-    rows.push(Vec::new());
-    rows.push(vec![
-        theme.fg(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-    ]);
-    let title: Line = vec![Span::raw(" "), theme.fg(ThemeColor::Accent, "What's New")];
-    rows.push(crate::chat::pad_to(title, width, Style::default()));
-    rows.push(Vec::new());
-    rows.push(Vec::new());
-    let md = changelog_style(theme, code_block_indent);
-    rows.extend(crate::chat::render_markdown_block(
-        markdown,
-        &md,
-        width,
-        &mut crate::markdown::MarkdownBlockCache::default(),
-    ));
-    rows.push(Vec::new());
-    rows.push(vec![
-        theme.fg(ThemeColor::Border, "\u{2500}".repeat(width.max(1)))
-    ]);
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,32 +921,40 @@ mod tests {
         serde_json::from_str(text).expect("fixture json")
     }
 
+    /// The info rows the panel windows over: every rendered row pads to
+    /// exactly the render width (wide glyphs never overflow a row) and
+    /// wraps tighter at a narrow terminal instead of truncating content.
     #[test]
-    fn geometry_matches_client_and_changelog_rows() {
+    fn client_text_rows_wrap_and_pad_to_the_width() {
         let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
         let rows = vec![
             vec![],
             vec![raw_span("  ")],
             vec![dim("prefix "), raw_span("wide 界 words words")],
         ];
-        for width in [0, 1, 2, 7, 23, 80] {
-            assert_eq!(
-                client_text_row_count(&rows, &theme, width),
-                render_client_text(&rows, &theme, width).len()
-            );
-            for markdown in [
-                "",
-                "  ",
-                "# Heading\n\nwrapped words 界 words",
-                "| a | b |\n|---|---|\n| x | y |",
-                "```python\nprint(1)\n```",
-            ] {
+        // Sane terminal widths (at a degenerate width-1 terminal a wide
+        // glyph cannot fit a row, so exact-width padding is a width-2+
+        // property).
+        for width in [7, 23, 80] {
+            let rendered = render_client_text(&rows, &theme, width);
+            assert!(!rendered.is_empty(), "the leading spacer always renders");
+            for row in &rendered {
                 assert_eq!(
-                    changelog_panel_row_count(markdown, &theme, "    ", width),
-                    render_changelog_panel(markdown, &theme, "    ", width).len()
+                    crate::width::spans_width(row),
+                    width,
+                    "rows pad to the width: {row:?}"
                 );
             }
         }
+        let rendered = render_client_text(&rows, &theme, 7);
+        let text: Vec<String> = rendered
+            .iter()
+            .map(|row| row.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("界")),
+            "the wide glyph survives the wrap"
+        );
     }
 
     #[test]
@@ -1379,29 +1325,6 @@ mod tests {
         // Content width 6: the wrapped rows keep the one-column margins
         // and pad to the full width.
         assert_eq!(text, vec!["", " aaaa   ", " bb cc  "]);
-    }
-
-    #[test]
-    fn changelog_panel_renders_the_ts_borders_and_title() {
-        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-        let rows = render_changelog_panel("Entry one.", &theme, "  ", 20);
-        let text: Vec<String> = rows
-            .iter()
-            .map(|row| row.iter().map(|span| span.content.as_str()).collect())
-            .collect();
-        assert_eq!(
-            text,
-            vec![
-                String::new(),
-                "\u{2500}".repeat(20),
-                format!(" What's New{}", " ".repeat(9)),
-                String::new(),
-                String::new(),
-                format!(" Entry one.{}", " ".repeat(9)),
-                String::new(),
-                "\u{2500}".repeat(20),
-            ]
-        );
     }
 
     #[test]
