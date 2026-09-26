@@ -11,6 +11,7 @@
 //! "aborted" or "error", exactly like the TS implementation.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use futures::StreamExt;
 use serde::Deserialize;
@@ -343,7 +344,7 @@ async fn run_aborting<T>(
 ) -> Result<T, ()> {
     tokio::select! {
         value = future => Ok(value),
-        _ = signal.aborted() => Err(()),
+        () = signal.aborted() => Err(()),
     }
 }
 
@@ -582,7 +583,7 @@ pub fn repair_json(json: &str) -> String {
                         .iter()
                         .collect();
                     if digits.len() == 4 && digits.chars().all(|c| c.is_ascii_hexdigit()) {
-                        repaired.push_str(&format!("\\u{digits}"));
+                        let _ = write!(repaired, "\\u{digits}");
                         index += 6;
                     } else {
                         repaired.push_str("\\\\");
@@ -612,7 +613,7 @@ pub fn repair_json(json: &str) -> String {
 }
 
 fn parse_json_with_repair(json: &str) -> Result<serde_json::Value, ()> {
-    serde_json::from_str(json).map_err(|_| ()).or_else(|_| {
+    serde_json::from_str(json).map_err(|_| ()).or_else(|()| {
         let repaired = repair_json(json);
         if repaired == json {
             Err(())

@@ -396,7 +396,7 @@ pub(crate) fn build_request_headers(
                     json!(["claude-code-20250219", "oauth-2025-04-20"]
                         .iter()
                         .chain(beta_features.iter())
-                        .cloned()
+                        .copied()
                         .collect::<Vec<_>>()
                         .join(",")),
                 );
@@ -454,7 +454,7 @@ pub fn stream_simple_anthropic(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -504,7 +504,7 @@ pub fn stream_simple_anthropic(
                 stop_reason_raw: None,
                 error_message: Some(message),
                 timestamp: now_ms(),
-                rest: Default::default(),
+                rest: Map::default(),
             };
             writer.push(AssistantMessageEvent::Error {
                 reason: crate::types::ErrorStopReason::Error,

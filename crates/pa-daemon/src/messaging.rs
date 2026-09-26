@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use pa_types::daemon::{DaemonCommand, DaemonWorkerCommand};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
@@ -128,7 +128,7 @@ impl Supervisor {
             message: message.clone(),
             sender,
             delivery_mode: delivery_mode.clone(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = match serde_json::to_value(&delivery) {
             Ok(payload) => payload,
@@ -267,7 +267,7 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {
@@ -342,7 +342,7 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {
@@ -489,14 +489,14 @@ mod tests {
                 create_command: DurableDaemonCreateCommand {
                     session_path: None,
                     no_session: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 consecutive_failures: 0,
                 stop_requested_at: None,
                 archive_on_stop: None,
                 last_failure_at: None,
                 last_error: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             std::path::PathBuf::from("/d.json"),
         )
@@ -521,7 +521,7 @@ mod tests {
             from_active_session_id: from.map(str::to_string),
             agent_origin: None,
             delivery_mode: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

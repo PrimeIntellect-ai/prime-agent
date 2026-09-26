@@ -89,10 +89,11 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 /// sha256 hex, first `chars` characters.
 pub fn hash_key(input: &str, chars: usize) -> String {
     let digest = Sha256::digest(input.as_bytes());
-    digest
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()[..chars]
+    digest.iter().fold(String::new(), |mut key, b| {
+        use std::fmt::Write;
+        write!(key, "{b:02x}").expect("write to String");
+        key
+    })[..chars]
         .to_string()
 }
 
