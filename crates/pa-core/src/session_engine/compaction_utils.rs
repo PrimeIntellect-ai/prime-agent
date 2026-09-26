@@ -139,7 +139,8 @@ pub fn format_file_operations(read_files: &[String], modified_files: &[String]) 
 /// single source of truth. Blocks mid-summary (hook- or handwritten
 /// summaries) strip too; the newlines introducing a block strip with it,
 /// and an open tag without its close never matched the TS regex, so it
-/// stays.
+/// stays — and the scan resumes after it so later complete blocks still
+/// strip, exactly like the regex's global scan.
 pub fn strip_file_list_blocks(summary: &str) -> String {
     let mut result = String::with_capacity(summary.len());
     let mut rest = summary;
@@ -156,8 +157,12 @@ pub fn strip_file_list_blocks(summary: &str) -> String {
         let close = format!("</{tag}>");
         let after_open = pos + tag.len() + 2;
         let Some(close_offset) = rest[after_open..].find(&close) else {
-            result.push_str(rest);
-            break;
+            // An open tag without its close never matched the TS regex, so
+            // it stays; the scan resumes after it and still strips later
+            // complete blocks instead of bailing out with the whole rest.
+            result.push_str(&rest[..after_open]);
+            rest = &rest[after_open..];
+            continue;
         };
         let end = after_open + close_offset + close.len();
         // The block's introducing newlines strip with it (the regex's
@@ -611,6 +616,24 @@ mod tests {
         assert_eq!(
             strip_file_list_blocks("a <read-files> b"),
             "a <read-files> b"
+        );
+        // An unclosed tag never matched the TS regex, but the scan
+        // resumes after it: a later complete block still strips (the
+        // regex's global pass), so the stale block cannot ride back into
+        // the update prompt behind a malformed tag.
+        assert_eq!(
+            strip_file_list_blocks(
+                "alpha\n\n<read-files> unclosed\n\n<modified-files>\na.txt\n</modified-files>\nend"
+            ),
+            "alpha\n\n<read-files> unclosed\nend"
+        );
+        // The outer close makes one block either way: the regex's lazy
+        // span swallows the inner complete block with the outer tag.
+        assert_eq!(
+            strip_file_list_blocks(
+                "<read-files> x <modified-files>a</modified-files> y </read-files> tail"
+            ),
+            " tail"
         );
     }
 
