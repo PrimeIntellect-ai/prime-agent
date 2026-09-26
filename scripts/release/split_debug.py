@@ -10,9 +10,10 @@ shipped binary exactly:
     (~3x on DWARF), named ``prime-agent-<version>-<platform>.debug.gz`` —
     a SEPARATE release asset for offline symbolication, NEVER install
     payload (assemble_artifacts.py hard-fails if one enters a tarball).
-  - shipped: ``objcopy --strip-debug`` of the same image, in place — DWARF
-    gone, the static symbol table (function names in panic backtraces) and
-    .dynsym (dynamic linking, the GLIBC baseline gate) stay.
+  - shipped: ``objcopy --strip-debug`` into the separate ``--shipped`` path.
+    The Cargo output stays unstripped so a no-op cached build can split again.
+    The shipped image keeps the static symbol table (panic backtraces) and
+    .dynsym (dynamic linking, the GLIBC baseline gate).
 
 Symbolication round-trip: ``gunzip`` the decoder, then
 ``llvm-symbolizer --obj <decoder-file> <addr...>`` with addresses from the
@@ -21,13 +22,13 @@ shipped binary's backtraces or ``nm``/``objdump -t``.
 Usage:
     python3 scripts/release/split_debug.py \
         --binary target/x86_64-unknown-linux-gnu/release/prime-agent \
+        --shipped target/x86_64-unknown-linux-gnu/dist/prime-agent \
         --out target/x86_64-unknown-linux-gnu/dist \
         --version 0.1.0 --target x86_64-unknown-linux-gnu
 
-The stripped image replaces the --binary path in place (the assembled
-tarball and every downstream reference pick it up); the decoder lands in
---out. Both sha256s and sizes print for the release log and manifest
-provenance.
+The unstripped Cargo binary is never modified. The decoder and shipped ELF
+land in --out. The assembler records their SHA-256s and shared GNU build ID
+in a per-target manifest for promotion integrity checking.
 """
 
 from __future__ import annotations
@@ -81,6 +82,8 @@ def debug_sections(binary: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--shipped", required=True, type=Path,
+                        help="separate stripped ELF; never overwrite Cargo output")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--version", required=True,
                         help="bare release version, e.g. 0.1.0")
@@ -101,6 +104,10 @@ def main() -> int:
              "has no DWARF to keep)")
 
     args.out.mkdir(parents=True, exist_ok=True)
+    shipped = args.shipped
+    if shipped.resolve() == binary.resolve():
+        fail("--shipped must not overwrite the Cargo --binary input")
+    shipped.parent.mkdir(parents=True, exist_ok=True)
     decoder = args.out / decoder_name
     with tempfile.TemporaryDirectory(prefix="split-debug-") as tmp:
         keep = Path(tmp) / "keep-debug"
@@ -116,7 +123,7 @@ def main() -> int:
                                                   mtime=0) as gz:
             shutil.copyfileobj(src, gz)
 
-    stripped_tmp = binary.with_suffix(binary.suffix + ".stripped")
+    stripped_tmp = shipped.with_suffix(shipped.suffix + ".stripped")
     # --strip-debug drops the .debug_* DWARF sections but leaves the
     # binutils-emitted .debug_gdb_scripts auto-load marker (34 bytes); it
     # is removed explicitly so the shipped image carries NO .debug_*
@@ -127,10 +134,11 @@ def main() -> int:
     if after:
         fail(f"--strip-debug left .debug_* sections behind: {after}")
     shipped_sha = sha256_file(stripped_tmp)
-    os.replace(stripped_tmp, binary)
+    os.replace(stripped_tmp, shipped)
+    shipped.chmod(binary.stat().st_mode)
 
     print("split_debug:")
-    print(f"  shipped:  {binary} {binary.stat().st_size} bytes sha256 {shipped_sha}")
+    print(f"  shipped:  {shipped} {shipped.stat().st_size} bytes sha256 {shipped_sha}")
     print(f"  decoder:  {decoder} {decoder.stat().st_size} bytes sha256 {sha256_file(decoder)}")
     return 0
 

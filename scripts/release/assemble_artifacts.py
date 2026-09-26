@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -155,6 +156,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--binary", type=Path, default=None)
+    parser.add_argument("--decoder", type=Path, default=None,
+                        help="separate Linux .debug.gz sidecar from split_debug.py")
     parser.add_argument("--runtime-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--sha", default=None,
@@ -326,6 +329,40 @@ def pack_tarball(staging: Path, out_path: Path, entries: list[str]) -> None:
         fail(str(error))
 
 
+def gnu_build_id(path: Path) -> str:
+    result = subprocess.run(["readelf", "-n", str(path)],
+                            capture_output=True, text=True)
+    match = re.search(r"Build ID: ([0-9a-f]+)", result.stdout) if result.returncode == 0 else None
+    if match is None:
+        fail(f"no GNU build ID in {path}: {result.stderr.strip()}")
+    return match.group(1)
+
+
+def decoder_facts(args: argparse.Namespace) -> dict | None:
+    if args.target.endswith("-unknown-linux-gnu") and args.decoder is not None:
+        expected = f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
+        decoder = args.decoder
+        if decoder.name != expected or not decoder.is_file():
+            fail(f"missing required Linux decoder {expected}")
+        binary = resolve_binary(args)
+        with tempfile.TemporaryDirectory(prefix="prime-agent-decoder-") as tmp:
+            uncompressed = Path(tmp) / "prime-agent.debug"
+            try:
+                with gzip.open(decoder, "rb") as src, uncompressed.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except (OSError, EOFError) as error:
+                fail(f"cannot decompress decoder {decoder}: {error}")
+            build_id = gnu_build_id(binary)
+            if gnu_build_id(uncompressed) != build_id:
+                fail(f"decoder build ID does not match shipped ELF {binary}")
+        return {"target": args.target, "file": expected,
+                "sha256": sha256_file(decoder), "buildId": build_id,
+                "executableSha256": sha256_file(binary)}
+    if args.decoder is not None:
+        fail("decoder is only supported for Linux targets")
+    return None
+
+
 def main() -> int:
     args = parse_args()
     validate_version(args.version)
@@ -336,6 +373,7 @@ def main() -> int:
     if args.target not in TARGET_ALIASES:
         fail(f"unknown release target {args.target!r} (known: {', '.join(TARGET_ALIASES)})")
 
+    decoder = decoder_facts(args)
     out_dir = (args.out_dir or args.repo_root / "target" / "release" / "dist").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix="prime-agent-archive-"))
@@ -370,6 +408,8 @@ def main() -> int:
     # combined: the promotion job collects every per-target entry instead.
     manifest_path = out_dir / "manifest.json"
     manifest = {"version": f"v{args.version}", "binaries": []}
+    if decoder is not None:
+        manifest["decoders"] = [decoder]
     if args.sha is not None:
         manifest["commit"] = args.sha
     if manifest_path.exists():
@@ -387,9 +427,12 @@ def main() -> int:
     lines = []
     for line in sums_path.read_text().splitlines() if sums_path.exists() else []:
         parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1].strip() != archive_name:
+        if len(parts) == 2 and parts[1].strip() not in (
+                archive_name, decoder["file"] if decoder else ""):
             lines.append(line)
     lines.append(f"{archive_sha256}  {archive_name}")
+    if decoder is not None:
+        lines.append(f"{decoder['sha256']}  {decoder['file']}")
     lines.sort(key=lambda line: line.split(None, 1)[1])
     sums_path.write_text("\n".join(lines) + "\n")
 
