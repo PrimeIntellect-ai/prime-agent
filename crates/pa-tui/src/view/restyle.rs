@@ -3,9 +3,10 @@
 //! inside the selection range's diff — the rows the previous frame
 //! already styled (and the untouched rows around them) reuse the cached
 //! styled copies verbatim, so extending a drag by one row styles one row,
-//! not the window. Frames without a selection skip the pass entirely, so
-//! a drag's first styled frame is a cold rebuild and the diff below owns
-//! every frame after it. Rebuilt rows re-style from the cached window rows
+//! not the window. Frames with no selection armed skip the pass entirely,
+//! so a drag's first styled frame is a cold rebuild and the diff below owns
+//! every frame after it; an armed selection — degenerate or not — keeps the
+//! pass and its warm cache. Rebuilt rows re-style from the cached window rows
 //! (the per-entry line cache), never from the raw entries.
 
 use super::AgentView;
@@ -48,11 +49,13 @@ impl AgentView {
             RESTYLE_ROWS.with(|count| count.set(0));
             RESTYLE_REBUILDS.with(|count| count.set(0));
         }
-        // No selection spans any rows, so every span below is `None`: the
-        // styled window is the base rows themselves. A scroll frame
+        // No selection anchor is armed, so every span below is `None`
+        // and no drag can extend into one without a fresh begin: the
+        // styled window is the base rows themselves, and a scroll frame
         // (whose window always changed) skips the whole-window clone and
-        // the cache churn it feeds.
-        if !self.has_selection() {
+        // the cache churn it feeds. An armed selection — degenerate or
+        // not — keeps the pass and its warm cache.
+        if !self.has_selection() && !self.selection.is_dragging() {
             return base;
         }
         let spans: Vec<Option<(usize, usize)>> = (0..base.len())
