@@ -4001,6 +4001,10 @@ fn compact_action_label(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "worker_attach_wire_tests.rs"]
+mod worker_attach_wire_tests;
+
+#[cfg(test)]
 #[path = "worker_resume_settings_tests.rs"]
 mod worker_resume_settings_tests;
 
