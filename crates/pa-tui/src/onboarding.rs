@@ -228,6 +228,7 @@ impl OnboardingScreen {
     }
 
     /// The full pane frame (TS `PrimeOnboardingSplashComponent.render`).
+    /// The keybindings manager feeds the mounted panel's hint row.
     pub(crate) fn render(
         &mut self,
         theme: &Theme,
