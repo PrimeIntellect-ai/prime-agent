@@ -773,7 +773,10 @@ fn build_session_manager_with_lease(
 fn fresh_session_with_lease(
     cwd: &std::path::Path,
     session_dir: &std::path::Path,
-) -> (pa_core::session::manager::SessionManager, Option<pa_daemon::lease::SessionLease>) {
+) -> (
+    pa_core::session::manager::SessionManager,
+    Option<pa_daemon::lease::SessionLease>,
+) {
     let manager = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
     lease_fresh_manager(manager)
 }
