@@ -1071,6 +1071,23 @@ mod tests {
             pyproject_hash: hash.to_string(),
         }
     }
+    /// Collect every `.runtime-probe-memo.json` under `root` (the override
+    /// boundary pin: the override path must create none).
+    fn collect_memo_files(root: &Path, found: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_memo_files(&path, found);
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
+                {
+                    found.push(path);
+                }
+            }
+        }
+    }
 
     #[test]
     fn version_file_round_trips() {
@@ -1549,21 +1566,6 @@ mod tests {
     #[tokio::test]
     async fn custom_override_never_touches_the_disk_memo() {
         let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
-        fn walk(root: &Path, found: &mut Vec<std::path::PathBuf>) {
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        walk(&path, found);
-                    } else if path
-                        .file_name()
-                        .is_some_and(|n| n == super::super::disk_memo::DISK_MEMO_FILE)
-                    {
-                        found.push(path);
-                    }
-                }
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -1579,10 +1581,9 @@ mod tests {
         std::env::set_var("HOME", &home);
         std::env::set_var("PRIME_AGENT_KERNEL_PYTHON", &python);
         std::env::remove_var("PRIME_AGENT_KERNEL_VENV");
-        let resolved = super::super::ensure_kernel_python(
-            super::super::EnsureKernelPythonOptions::default(),
-        )
-        .await;
+        let resolved =
+            super::super::ensure_kernel_python(super::super::EnsureKernelPythonOptions::default())
+                .await;
         match previous_venv {
             Some(value) => std::env::set_var("PRIME_AGENT_KERNEL_VENV", value),
             None => std::env::remove_var("PRIME_AGENT_KERNEL_VENV"),
@@ -1602,7 +1603,7 @@ mod tests {
             "the override python is returned as-is"
         );
         let mut found: Vec<std::path::PathBuf> = Vec::new();
-        walk(dir.path(), &mut found);
+        collect_memo_files(dir.path(), &mut found);
         assert!(
             found.is_empty(),
             "the override path created no memo file: {found:?}"
