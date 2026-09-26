@@ -46,12 +46,17 @@ fn release(col: usize, row: usize) -> String {
 
 struct MockSupervisor {
     listener: UnixListener,
+    /// The catalog the picker's background `get_model_catalog` refresh
+    /// answers with: the mock must serve the same models the run opened
+    /// with, or the refresh would empty the picker's list.
+    catalog: Vec<Model>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind(socket: &std::path::Path, catalog: Vec<Model>) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            catalog,
         }
     }
 
@@ -120,6 +125,21 @@ impl MockSupervisor {
                             "data": {
                                 "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                                 "cost": 0.01,
+                            },
+                        }),
+                    );
+                }
+                "get_model_catalog" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_model_catalog",
+                            "success": true,
+                            "data": {
+                                "models": self.catalog,
+                                "configuredProviders": [],
                             },
                         }),
                     );
@@ -362,7 +382,7 @@ fn run_plan(steps: Vec<HeadlessStep>, catalog: Vec<Model>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
+    let supervisor = MockSupervisor::bind(&socket, catalog);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -539,6 +559,12 @@ fn a_click_selects_a_model_picker_row() {
             },
             click,
             release,
+            // The selection band's move is the click's visible reaction:
+            // hold until the frame shows the marker on the clicked row.
+            HeadlessStep::WaitRender {
+                needle: "\u{203a} Mock Two".to_string(),
+                timeout_ms: 5_000,
+            },
         ],
         catalog,
     );
