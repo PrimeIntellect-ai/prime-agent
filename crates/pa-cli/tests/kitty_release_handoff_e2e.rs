@@ -165,10 +165,13 @@ fn releases_around_the_handoff_never_become_visible() {
     );
 
     // A real press still works: the search editor repaints on input,
-    // proving the surface is interactive after the release burst.
+    // proving the surface is interactive after the release burst. The
+    // frame paints typed cells one styled positioned cell at a time (an
+    // escape byte rides between the characters), so the needle is the
+    // painted `z` cell, not the two adjacent bytes.
     let mark_query = harness.mark();
     harness.write(b"zz");
-    harness.wait_from(mark_query, b"zz", "the search editor repaints");
+    harness.wait_from(mark_query, b"z", "the search editor repaints");
     harness.write(b"\x7f\x7f");
     harness.drain_until_quiet(20);
 
