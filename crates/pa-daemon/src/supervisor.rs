@@ -210,7 +210,7 @@ impl Supervisor {
                 ),
             },
         )?;
-        let (events, _) = broadcast::channel(4096);
+        let (events, _) = broadcast::channel(crate::backpressure::EVENT_RING_CAPACITY);
         let log = paths::RotatingLog::new(paths::daemon_log_path(
             &options.socket_path,
             &options.agent_dir,
@@ -1746,11 +1746,12 @@ impl Supervisor {
                             }
                         }
                         // A lagged receiver means the shared event ring
-                        // (capacity 4096) dropped this many events for
-                        // THIS connection: the loss itself is the
-                        // broadcast's defined backpressure, but it must
-                        // never stay invisible (finding 4a) — the daemon
-                        // log records which client lost how much.
+                        // ([`crate::backpressure::EVENT_RING_CAPACITY`])
+                        // dropped this many events for THIS connection:
+                        // the loss itself is the broadcast's defined
+                        // backpressure, but it must never stay invisible
+                        // (finding 4a) — the daemon log records which
+                        // client lost how much.
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             self.log_line(&format!(
                                 "client {connection_id} lagged on the event ring: {skipped} events dropped"
@@ -5256,7 +5257,7 @@ mod tests {
         // event write, its receiver falls out of the ring's live window,
         // and the parked write only completes once the drain frees the
         // buffer again.
-        let capacity = supervisor.events.capacity();
+        let capacity = crate::backpressure::EVENT_RING_CAPACITY;
         let padding = "x".repeat(2048);
         let flood = capacity + 2048;
         for index in 0..flood {

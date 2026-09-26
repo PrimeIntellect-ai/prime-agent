@@ -38,6 +38,12 @@ use crate::protocol::{response_failure, DaemonResponse};
 /// for the one session one of our workers serves.
 pub(crate) const WORKER_INFLIGHT_CAPACITY: usize = 128;
 
+/// Capacity of the supervisor's shared client event broadcast ring. The
+/// ring's per-receiver drop on lag is the defined backpressure for a slow
+/// reader (the supervisor must never block on one client); the connection
+/// loop's lag arm makes every drop observable in the daemon log.
+pub(crate) const EVENT_RING_CAPACITY: usize = 4096;
+
 /// Outbound response bundles one client connection may hold before its
 /// senders stall. A wedged client (reading nothing) stalls only its own
 /// dispatch tasks at this bound — worker slots free as replies arrive, so
@@ -53,6 +59,7 @@ const _: () = assert!(CLIENT_OUTBOUND_CAPACITY > WORKER_INFLIGHT_CAPACITY);
 /// What a route does when its worker is at the in-flight bound. Codex's
 /// split: a request answers the explicit overload error immediately
 /// (`mod.rs:228-259`), a notification awaits capacity (`mod.rs:265`).
+#[derive(Clone, Copy)]
 pub(crate) enum RouteAdmission {
     /// A client's request-shaped command: the route answers the typed
     /// `worker_overloaded` refusal the moment the worker saturates. The
