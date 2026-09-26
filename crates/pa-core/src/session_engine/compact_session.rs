@@ -89,11 +89,17 @@ pub(crate) fn summarizer_request_tokens(request: &[AgentMessage]) -> u64 {
 /// completion budget — the largest slice wins, because routing must fit
 /// every request the compaction will issue. `history` and `turn_prefix`
 /// are the messages the run will summarize (see [`execute_compaction`]).
+/// `recent_state_anchor` mirrors the anchor block the history wire request
+/// always carries when the kept tail has assistant text (TS follow-up
+/// 771611b14): an estimate without it would accept an auxiliary model
+/// whose window fits the underestimate while the real request goes
+/// over-limit.
 pub fn estimate_summary_request_tokens(
     history: &[AgentMessage],
     turn_prefix: &[AgentMessage],
     is_split_turn: bool,
     previous_summary: Option<&str>,
+    recent_state_anchor: Option<&str>,
     custom_instructions: Option<&str>,
     reserve_tokens: u64,
 ) -> u64 {
@@ -111,6 +117,7 @@ pub fn estimate_summary_request_tokens(
             history,
             custom_instructions,
             previous_summary,
+            recent_state_anchor,
             reserve_tokens,
         );
         required = required.max(
@@ -243,8 +250,15 @@ pub struct CompactionPreparation {
     pub boundary_start: usize,
     /// TS `previousSummary`: the prior compaction's summary, wired into the
     /// history summarizer request so it updates the existing summary instead
-    /// of re-summarizing from scratch.
+    /// of re-summarizing from scratch. File-list blocks never ride it (TS
+    /// #2385 `stripFileListBlocks`): they strip before the update prompt,
+    /// and a summary that contained only file blocks leaves no
+    /// `previous_summary` at all (the initial-prompt path).
     pub previous_summary: Option<String>,
+    /// TS #2385 `recentStateAnchor`: the newest kept-tail assistant text
+    /// (tail-truncated), wired into the history summarizer request so the
+    /// update summary cannot lag behind the retained tail it merges into.
+    pub recent_state_anchor: Option<String>,
 }
 
 /// Resolve the compaction cut and the skip guards without a model call
@@ -287,7 +301,14 @@ pub fn prepare_compaction(
             // TS boundaryStart: the retained entry when it still exists,
             // else the entry after the compaction (session migration).
             let boundary_start = first_kept_index.unwrap_or(index + 1);
-            (boundary_start, Some(payload.summary.clone()))
+            // File-list blocks never reach the update prompt (TS #2385):
+            // they are re-appended mechanically below and compound when
+            // the model re-summarizes them. A previous summary that
+            // contained only file blocks falls back to the initial-prompt
+            // path.
+            let stripped = super::compaction_utils::strip_file_list_blocks(&payload.summary);
+            let previous_summary = (!stripped.is_empty()).then_some(stripped);
+            (boundary_start, previous_summary)
         }
         None => (start, None),
     };
@@ -307,6 +328,13 @@ pub fn prepare_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    // The recency anchor (TS #2385): the summarizer sees only messages
+    // before the cut, so its summary would describe pre-tail state. The
+    // newest retained assistant text is the state the next turn actually
+    // sees; it anchors the history summary to the kept tail.
+    let recent_state_anchor =
+        extract_recent_state_anchor(entries, cut.first_kept_entry_index, entries.len());
+
     // Avoid a compaction that would summarize no history (TS prepareCompaction
     // — a prior summary alone is enough to run: the update merges it).
     if messages.is_empty() && turn_prefix_messages.is_empty() && previous_summary.is_none() {
@@ -316,7 +344,56 @@ pub fn prepare_compaction(
         cut,
         boundary_start,
         previous_summary,
+        recent_state_anchor,
     })
+}
+
+/// Maximum characters kept from the retained tail for the recency anchor
+/// (TS #2385 `RECENT_STATE_ANCHOR_MAX_CHARS`). The end of a message holds
+/// the newest state, so long text keeps its tail.
+const RECENT_STATE_ANCHOR_MAX_CHARS: usize = 2_000;
+
+/// Extract the newest retained assistant text — the recency anchor (TS
+/// #2385 `extractRecentStateAnchor`) — from the kept tail
+/// `[kept_start, kept_end)`: scanning newest-first, the first assistant
+/// message whose text blocks join to non-empty trimmed text wins; a longer
+/// text keeps its tail. Compaction entries and harness digests are never
+/// anchor candidates ([`message_from_entry`] drops them, mirroring TS
+/// `getMessageFromEntryForCompaction`); assistants without text (tool-call
+/// or thinking-only) skip until a text-bearing one is found.
+fn extract_recent_state_anchor(
+    entries: &[FileEntry],
+    kept_start: usize,
+    kept_end: usize,
+) -> Option<String> {
+    for entry in entries[kept_start..kept_end].iter().rev() {
+        let Some(AgentMessage::Assistant(assistant)) = message_from_entry(entry) else {
+            continue;
+        };
+        let text = assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let chars = text.chars().count();
+        return Some(if chars > RECENT_STATE_ANCHOR_MAX_CHARS {
+            text.chars()
+                .skip(chars - RECENT_STATE_ANCHOR_MAX_CHARS)
+                .collect()
+        } else {
+            text
+        });
+    }
+    None
 }
 
 /// Run compaction over the session: summarize the pre-cut prefix, persist the
@@ -338,6 +415,7 @@ pub async fn execute_compaction(
     };
     let cut = preparation.cut;
     let previous_summary = preparation.previous_summary;
+    let recent_state_anchor = preparation.recent_state_anchor;
     let first_kept_entry = entries
         .get(cut.first_kept_entry_index)
         .and_then(|entry| entry.id())
@@ -417,6 +495,7 @@ pub async fn execute_compaction(
                 &turn_prefix_messages,
                 cut.is_split_turn,
                 previous_summary.as_deref(),
+                recent_state_anchor.as_deref(),
                 options.custom_instructions,
                 options.settings.reserve_tokens,
             );
@@ -483,6 +562,7 @@ pub async fn execute_compaction(
             &history,
             options.custom_instructions,
             previous_summary.as_deref(),
+            recent_state_anchor.as_deref(),
             options.settings.reserve_tokens,
         );
         complete_summary_call(
@@ -1352,6 +1432,175 @@ mod tests {
         }
     }
 
+    fn raw_assistant_text_entry(id: &str, text: &str) -> FileEntry {
+        FileEntry::Message {
+            message: AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: text.to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "p".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }),
+            base: EntryBase {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                rest: Default::default(),
+            },
+        }
+    }
+
+    /// The recency anchor pins to the newest kept-tail assistant text (TS
+    /// #2385 `extractRecentStateAnchor`): the newest-first scan means a
+    /// direction flip fails this test (an older assistant sits in the
+    /// same kept tail), thinking-only assistants skip (text blocks only),
+    /// long text keeps its tail within the anchor budget, and a tail
+    /// without assistant text carries no anchor — compaction entries are
+    /// never candidates.
+    #[test]
+    fn prepare_compaction_anchors_on_the_newest_kept_tail_assistant_text() {
+        // 400-char texts (100 tokens at the chars/4 heuristic) keep the
+        // cuts deterministic: a 250-token keep budget cuts at the second
+        // entry, so the kept tail holds BOTH assistants.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_assistant_text_entry("a1", &"older tail text ".repeat(25)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_assistant_text_entry("a2", &"newest tail text ".repeat(25)),
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        assert_eq!(preparation.cut.first_kept_entry_index, 1);
+        // The anchor text trims like the TS scan (`.join("\n").trim()`).
+        assert_eq!(
+            preparation.recent_state_anchor.as_deref(),
+            Some("newest tail text ".repeat(25).trim())
+        );
+
+        // A newest assistant with thinking but no text skips; the older
+        // text-bearing assistant wins.
+        let thinking_only = FileEntry::Message {
+            message: AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Thinking(
+                    pa_types::ai::ThinkingContent {
+                        thinking: "2".repeat(400),
+                        thinking_signature: None,
+                        redacted: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "p".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }),
+            base: EntryBase {
+                id: Some("a2".to_string()),
+                parent_id: None,
+                timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                rest: Default::default(),
+            },
+        };
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_assistant_text_entry("a1", &"older tail text ".repeat(25)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            thinking_only,
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        assert_eq!(
+            preparation.recent_state_anchor.as_deref(),
+            Some("older tail text ".repeat(25).trim())
+        );
+
+        // A 3000-char text tail-truncates to the anchor budget: the END
+        // of the message holds the newest state.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_assistant_text_entry("a2", &"z".repeat(3_000)),
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        let anchor = preparation
+            .recent_state_anchor
+            .expect("tail-truncated anchor");
+        assert_eq!(anchor.chars().count(), 2_000);
+        assert_eq!(anchor, "z".repeat(2_000));
+
+        // A tail with no assistant text carries no anchor; the prior
+        // summary alone keeps the compaction runnable.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_compaction_entry("c1", "m0", "the prior summary"),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_user_entry("m2", "small"),
+        ];
+        let preparation =
+            prepare_compaction(&entries, 250).expect("prior-summary compaction prepares");
+        assert_eq!(preparation.recent_state_anchor, None);
+        assert_eq!(
+            preparation.previous_summary.as_deref(),
+            Some("the prior summary")
+        );
+    }
+
+    /// File-list blocks never reach the update prompt (TS #2385
+    /// `stripFileListBlocks`): the stored summary's blocks strip before it
+    /// becomes `previousSummary`, and a summary that contained only file
+    /// blocks leaves no update anchor at all — the initial-prompt path.
+    #[test]
+    fn prepare_compaction_strips_file_blocks_from_the_previous_summary() {
+        let entries = vec![
+            raw_user_entry("m0", "turn zero"),
+            raw_compaction_entry(
+                "c1",
+                "m0",
+                "the prior summary\n\n<read-files>\na.rs\nb.rs\n</read-files>\n\n<modified-files>\nc.rs\n</modified-files>",
+            ),
+            raw_user_entry("m1", "turn one"),
+            raw_user_entry("m2", "turn two"),
+        ];
+        let preparation = prepare_compaction(&entries, 2).expect("update compaction prepares");
+        assert_eq!(
+            preparation.previous_summary,
+            Some("the prior summary".to_string())
+        );
+        // Only-file-block summaries drop entirely.
+        let entries = vec![
+            raw_user_entry("m0", "turn zero"),
+            raw_compaction_entry(
+                "c1",
+                "m0",
+                "<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\n</modified-files>",
+            ),
+            raw_user_entry("m1", "turn one"),
+            raw_user_entry("m2", "turn two"),
+        ];
+        let preparation = prepare_compaction(&entries, 2).expect("update compaction prepares");
+        assert_eq!(preparation.previous_summary, None);
+    }
+
     /// The iterative update mode activates from a prior compaction (TS
     /// `prepareCompaction`): the prior summary becomes `previousSummary`
     /// and the prior compaction's first kept entry becomes the
@@ -1552,6 +1801,189 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(compactions, vec!["the first summary", "the second summary"]);
+        registration.unregister();
+    }
+
+    /// The second compaction anchors on the kept tail and never
+    /// re-summarizes the file lists (TS #2385's end-to-end wiring): the
+    /// stored first summary ends with its mechanically appended file
+    /// block, but the update request carries a STRIPPED
+    /// `<previous-summary>` plus the newest retained assistant text in a
+    /// `<recent-state-anchor>` block, and the fresh file block still
+    /// appends to the new stored summary — the entry details plus the
+    /// mechanical append stay the single source of truth.
+    #[tokio::test]
+    async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let make_step = |response: &'static str| {
+            let seen = seen.clone();
+            pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
+                move |context: &pa_types::ai::Context,
+                      _options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      _model: &pa_types::ai::Model| {
+                    let text = match &context.messages[0] {
+                        pa_types::ai::Message::User(user) => user.content.text(),
+                        _ => panic!("expected a user request"),
+                    };
+                    seen.lock().unwrap().push(text);
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        response,
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ))
+        };
+        registration.set_responses(vec![
+            make_step("the first summary"),
+            make_step("the second summary"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(tmp.path());
+        let user = |text: &str| {
+            AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text(text.to_string()),
+                timestamp: 0,
+                rest: Default::default(),
+            })
+        };
+        session.append_message(user("turn zero")).unwrap();
+        let mut edit_arguments = serde_json::Map::new();
+        edit_arguments.insert("path".to_string(), serde_json::json!("a.rs"));
+        session
+            .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::ToolCall(
+                    pa_types::ai::ToolCall {
+                        id: "tc1".to_string(),
+                        name: "edit".to_string(),
+                        arguments: edit_arguments,
+                        thought_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::ToolUse,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(user("turn two")).unwrap();
+        // First compaction (keep 2: the cut keeps turn two): the edit rides
+        // the summarized history, so the stored summary ends with the
+        // mechanically appended file block.
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model: model.clone(),
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 2,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(first) = outcome else {
+            panic!("expected the first compaction to run")
+        };
+        assert_eq!(
+            first.result.summary,
+            "the first summary\n\n<modified-files>\na.rs\n</modified-files>"
+        );
+        // The initial-prompt path: no previous summary, no anchor.
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].contains("<previous-summary>"));
+        assert!(!requests[0].contains("<recent-state-anchor>"));
+
+        // New history after the first compaction, ending with an
+        // assistant reply in the kept tail.
+        session.append_message(user("turn three")).unwrap();
+        session
+            .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "the newest kept reply".to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        session.append_message(user("turn four")).unwrap();
+        // Second compaction (keep 10: the cut keeps turn three, the reply,
+        // and turn four, so the reply is the newest retained assistant
+        // text).
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 10,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(second) = outcome else {
+            panic!("expected the second compaction to run")
+        };
+        assert_eq!(registration.call_count(), 2);
+        let request = seen.lock().unwrap().clone()[1].clone();
+        // The previous summary strips its file blocks before the update
+        // prompt: the lists stop compounding across compactions.
+        assert!(request.contains("<previous-summary>\nthe first summary\n</previous-summary>"));
+        assert!(!request.contains("<modified-files>"));
+        assert!(!request.contains("<read-files>"));
+        // The newest retained assistant text anchors the update after the
+        // previous summary (the turn-prefix arm never carries one).
+        let previous_end = request
+            .find("</previous-summary>")
+            .expect("previous summary block");
+        let anchor_start = request.find("<recent-state-anchor>").expect("anchor block");
+        assert!(anchor_start > previous_end);
+        assert!(request.contains("\n\nthe newest kept reply\n</recent-state-anchor>\n\n"));
+        // The fresh file block still rides the NEW stored summary: the
+        // entry details plus the mechanical append are the single source
+        // of truth for file lists.
+        assert_eq!(
+            second.result.summary,
+            "the second summary\n\n<modified-files>\na.rs\n</modified-files>"
+        );
         registration.unregister();
     }
 
@@ -2654,31 +3086,46 @@ mod tests {
         let history = vec![user_message("some history to summarize")];
         let turn_prefix = vec![user_message(&"a very long turn prefix ".repeat(2_000))];
         let full =
-            estimate_summary_request_tokens(&history, &turn_prefix, true, None, None, 10_000);
+            estimate_summary_request_tokens(&history, &turn_prefix, true, None, None, None, 10_000);
         let history_only =
-            estimate_summary_request_tokens(&history, &[], false, None, None, 10_000);
+            estimate_summary_request_tokens(&history, &[], false, None, None, None, 10_000);
         let prefix_only =
-            estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, 10_000);
+            estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, None, 10_000);
         // A split turn must fit every request it will issue: the estimate
         // is the larger of the two arms' estimates (each with the shared
         // system prompt and its own completion budget).
         assert_eq!(full, history_only.max(prefix_only));
         assert!(full > history_only);
-        // The previous summary and the custom instructions grow the
-        // history request, so they grow the estimate.
+        // The previous summary, the recency anchor, and the custom
+        // instructions grow the history request, so they grow the
+        // estimate.
         let with_anchors = estimate_summary_request_tokens(
             &history,
             &[],
             false,
             Some("the previous summary text"),
+            Some("the newest kept-tail assistant text"),
             Some("focus on the goal"),
             10_000,
         );
         assert!(with_anchors > history_only);
+        // The recency anchor alone grows the estimate (TS follow-up
+        // 771611b14: the estimator mirrors the anchor block the wire
+        // request carries).
+        let with_anchor = estimate_summary_request_tokens(
+            &history,
+            &[],
+            false,
+            None,
+            Some("the newest kept-tail assistant text"),
+            None,
+            10_000,
+        );
+        assert!(with_anchor > history_only);
         // The completion budgets draw on the reserve: a larger reserve
         // grows the estimate.
         let bigger_reserve =
-            estimate_summary_request_tokens(&history, &[], false, None, None, 100_000);
+            estimate_summary_request_tokens(&history, &[], false, None, None, None, 100_000);
         assert!(bigger_reserve > history_only);
     }
 

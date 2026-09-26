@@ -39,10 +39,17 @@ pub type SummarizerFn = Box<
 >;
 
 /// Assemble the summarization messages for the conversation slice.
+/// `recent_state_anchor` (TS #2385) is the newest retained assistant text:
+/// it rides the request as a `<recent-state-anchor>` block after the
+/// previous summary, marking the retained tail — not the summarized
+/// conversation above — as the current state, so the update summary cannot
+/// lag behind the kept tail. The turn-prefix request never carries one
+/// (its slice is summarized away).
 pub fn build_summarization_request(
     messages: &[AgentMessage],
     custom_instructions: Option<&str>,
     previous_summary: Option<&str>,
+    recent_state_anchor: Option<&str>,
     #[allow(unused_variables)] reserve_tokens: u64,
 ) -> Vec<AgentMessage> {
     let llm_messages = convert_to_llm(messages);
@@ -53,6 +60,11 @@ pub fn build_summarization_request(
             prompt_text,
             "<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
         );
+    }
+    if let Some(recent_state_anchor) = recent_state_anchor {
+        prompt_text.push_str(&format!(
+            "<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\n{recent_state_anchor}\n</recent-state-anchor>\n\n"
+        ));
     }
     prompt_text.push_str(&build_summarization_prompt(
         custom_instructions,
@@ -302,6 +314,9 @@ pub struct CompactRequest<'a> {
     pub custom_instructions: Option<&'a str>,
     /// Previous summary for update-mode summarization.
     pub previous_summary: Option<&'a str>,
+    /// Newest retained assistant text anchoring the summary to the
+    /// kept-tail state (TS #2385 `recentStateAnchor`).
+    pub recent_state_anchor: Option<&'a str>,
     /// Budget for the summary output.
     pub reserve_tokens: u64,
     /// Model for the summarizer call.
@@ -325,6 +340,7 @@ pub async fn compact_with(
         tokens_before,
         custom_instructions,
         previous_summary,
+        recent_state_anchor,
         reserve_tokens,
         model,
     } = request;
@@ -334,6 +350,7 @@ pub async fn compact_with(
         summarized,
         custom_instructions,
         previous_summary,
+        recent_state_anchor,
         reserve_tokens,
     );
     let assistant = summarize(model, request_messages).await?;
@@ -496,6 +513,44 @@ mod tests {
         );
     }
 
+    /// The history request carries the recency anchor after the previous
+    /// summary (TS #2385), marking the retained tail — not the summarized
+    /// conversation above — as the current state; a missing anchor adds no
+    /// block, and the turn-prefix request has no anchor parameter at all.
+    #[test]
+    fn summarization_request_carries_the_recent_state_anchor() {
+        let request = build_summarization_request(
+            std::slice::from_ref(&user("the conversation")),
+            None,
+            Some("the previous summary"),
+            Some("the newest kept-tail text"),
+            1_000,
+        );
+        let AgentMessage::User(prompt) = &request[0] else {
+            panic!("the summarization request is a single user message");
+        };
+        let text = prompt.content.text();
+        let previous_end = text.find("</previous-summary>").expect("previous summary");
+        let anchor_start = text.find("<recent-state-anchor>").expect("anchor block");
+        let anchor_end = text.find("</recent-state-anchor>").expect("anchor close");
+        assert!(previous_end < anchor_start && anchor_start < anchor_end);
+        assert!(text.contains(
+            "<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\nthe newest kept-tail text\n</recent-state-anchor>\n\n"
+        ));
+        // Without an anchor the request carries no anchor block.
+        let request = build_summarization_request(
+            std::slice::from_ref(&user("the conversation")),
+            None,
+            Some("the previous summary"),
+            None,
+            1_000,
+        );
+        let AgentMessage::User(prompt) = &request[0] else {
+            panic!("the summarization request is a single user message");
+        };
+        assert!(!prompt.content.text().contains("<recent-state-anchor>"));
+    }
+
     /// The serialized `details` block byte-matches the TS literal order:
     /// `{"readFiles":[...],"modifiedFiles":[...]}` (TS `summaryDetails` in
     /// `agent-session.ts` builds `readFiles` first). The JSON map preserves
@@ -563,6 +618,7 @@ mod tests {
                 tokens_before: 1_000,
                 custom_instructions: Some("focus"),
                 previous_summary: None,
+                recent_state_anchor: None,
                 reserve_tokens: 1_000,
                 model,
             },
@@ -659,7 +715,13 @@ mod tests {
     #[test]
     fn summarization_request_shape() {
         let messages = vec![user("hello"), user("world")];
-        let request = build_summarization_request(&messages, Some("be brief"), None, 1_000);
+        let request = build_summarization_request(
+            &messages,
+            Some("be brief"),
+            None,
+            /*recent_state_anchor*/ None,
+            1_000,
+        );
         match &request[0] {
             AgentMessage::User(user) => {
                 let text = user.content.text();
