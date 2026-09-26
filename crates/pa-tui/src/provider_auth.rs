@@ -284,8 +284,8 @@ impl ProviderAuthSelector {
     fn title(&self) -> String {
         match &self.mode {
             Mode::Prompt { provider, .. } => format!("Login to {}", provider.name),
-            _ if self.is_logout() => "Saved Credentials".to_string(),
-            _ => "Providers".to_string(),
+            Mode::List if self.is_logout() => "Saved Credentials".to_string(),
+            Mode::List => "Providers".to_string(),
         }
     }
 

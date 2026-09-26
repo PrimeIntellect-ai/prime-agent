@@ -396,8 +396,9 @@ impl OnboardingPanel {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.render(theme, width),
             OnboardingPanel::Providers(picker) => picker.render(theme, width),
-            OnboardingPanel::Question(choice) => choice.render(theme, width),
-            OnboardingPanel::TeamQuestion { choice, .. } => choice.render(theme, width),
+            OnboardingPanel::Question(choice) | OnboardingPanel::TeamQuestion { choice, .. } => {
+                choice.render(theme, width)
+            }
         }
     }
 
