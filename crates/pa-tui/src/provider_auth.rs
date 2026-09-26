@@ -162,6 +162,21 @@ pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 /// session engine).
 pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
 
+/// The other subscription providers' ids (the same wire identifiers,
+/// carried the same way).
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
+pub const XAI_PROVIDER_ID: &str = "xai";
+
+/// The subscription rows whose logins run on the panel (TS
+/// `loginProvider`'s oauth dispatch): every flow checks the
+/// cooperative cancel flag (#2770).
+pub const SUBSCRIPTION_PROVIDER_IDS: [&str; 4] = [
+    ANTHROPIC_PROVIDER_ID,
+    GITHUB_COPILOT_PROVIDER_ID,
+    OPENAI_CODEX_PROVIDER_ID,
+    XAI_PROVIDER_ID,
+];
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
