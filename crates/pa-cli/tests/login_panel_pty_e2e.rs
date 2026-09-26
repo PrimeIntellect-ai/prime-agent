@@ -108,6 +108,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::TerminalFlow,
+            configured: true,
             available: true,
         };
         Box::pin(async move { vec![row] })
@@ -180,7 +181,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -202,7 +203,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     }
@@ -282,9 +283,10 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
-            // The lane's menu-rule field: a working API-key login row is
-            // available (Enter routes the picked model's sign-in through
-            // it; an unavailable row renders dimmed and inert).
+            configured: false,
+            // The menu rule: a working API-key login row is available
+            // (Enter routes the picked model's sign-in through it; an
+            // unavailable row renders dimmed and inert).
             available: true,
         };
         Box::pin(async move { vec![row] })
@@ -394,21 +396,21 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
     // window (the whole flow stayed on the TUI's alternate screen).
     let window = harness.window_since(mark);
     assert!(
-        !find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_some(),
+        find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_none(),
         "the login never leaves the alternate screen"
     );
     assert!(
-        !find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_some(),
+        find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_none(),
         "the login never clears the screen"
     );
     assert!(
-        !find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_some(),
+        find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_none(),
         "the login never releases the mouse tracking (the old suspend bracket)"
     );
     // The numbered stdin prompt is gone too: the flow renders through
     // the panel, not the plain terminal.
     assert!(
-        !find_subsequence(window, "Enter a team number".as_bytes()).is_some(),
+        find_subsequence(window, "Enter a team number".as_bytes()).is_none(),
         "the numbered stdin prompt never prints"
     );
 
@@ -452,15 +454,15 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
         "the inline login panel mounted (its title word)"
     );
     assert!(
-        !find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_some(),
+        find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_none(),
         "the /mcp login never leaves the alternate screen"
     );
     assert!(
-        !find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_some(),
+        find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_none(),
         "the /mcp login never clears the screen"
     );
     assert!(
-        !find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_some(),
+        find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_none(),
         "the /mcp login never releases the mouse tracking (the old suspend bracket)"
     );
 
@@ -520,7 +522,7 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     // operator reported is gone from the whole flow.
     let window = harness.window_since(mark);
     assert!(
-        !find_subsequence(window, "Model not found".as_bytes()).is_some(),
+        find_subsequence(window, "Model not found".as_bytes()).is_none(),
         "the sign-in route never surfaces the dead-end refusal"
     );
 
@@ -696,9 +698,8 @@ impl MockSupervisor {
     }
 
     fn serve(self) {
-        let (stream, _) = match self.listener.accept() {
-            Ok(accept) => accept,
-            Err(_) => return,
+        let Ok((stream, _)) = self.listener.accept() else {
+            return;
         };
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;

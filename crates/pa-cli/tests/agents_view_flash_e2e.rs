@@ -9,6 +9,7 @@
 //! under the parent's collapsed tree.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -121,22 +122,22 @@ fn write_fixture(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\""
     );
     if let Some(parent) = parent {
-        content.push_str(&format!(",\"parentSession\":\"{}\"", parent.display()));
+        let _ = write!(content, ",\"parentSession\":\"{}\"", parent.display());
     }
-    content.push_str(&format!(",\"rlmDepth\":{rlm_depth}}}"));
+    let _ = write!(content, ",\"rlmDepth\":{rlm_depth}}}");
     content.push('\n');
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -242,7 +243,7 @@ impl Client {
         while Instant::now() < deadline {
             if self.try_read_line().is_some() {
                 last_line = Instant::now();
-            } else if Instant::now() - last_line >= quiet {
+            } else if last_line.elapsed() >= quiet {
                 return;
             }
         }
@@ -529,12 +530,12 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     );
     let settled = frame_of(&view.frames, "flash parent");
     assert!(
-        settled.contains("300 subagents"),
+        settled.contains("300 inactive subagents"),
         "the settled frame carries the dead family behind the parent's collapsed tree:\n{settled}"
     );
     let expanded = frame_of(&view.frames, "flash worker 007");
     assert!(
-        !expanded.contains("▸ 300 subagents"),
+        !expanded.contains("▸ 300 inactive subagents"),
         "the expansion opens the parent's list:\n{expanded}"
     );
 }

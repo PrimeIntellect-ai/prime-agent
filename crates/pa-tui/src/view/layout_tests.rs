@@ -649,7 +649,7 @@ fn a_glue_push_after_a_user_row_folds_at_its_own_slot() {
     view.render_frame(80, 12);
     view.scroll_by(-6);
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("original"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -764,7 +764,7 @@ fn a_short_sequence_push_folds_at_the_pushed_slot() {
         view.push_entry(card(&format!("a{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("out a0"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -828,7 +828,7 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
         view.push_entry(card(&format!("b{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("out b1"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -907,7 +907,7 @@ fn a_short_sequence_pop_folds_at_the_popped_slot() {
     let frame = view.render_frame(80, 30);
     // The selection sits on a card ABOVE the popped one (the popped
     // card's own content vanishes with it).
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("out b0"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -1057,7 +1057,7 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
         view.push_entry(queued_card(&format!("b{index}")));
     }
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("out b1"))
         .unwrap();
     assert!(view.begin_selection(row, 0));
@@ -1186,7 +1186,7 @@ fn an_assistant_growth_folds_at_its_own_slot() {
     view.render_frame(80, 12);
     view.scroll_by(-6);
     let frame = view.render_frame(80, 12);
-    let row = (1..1 + view.window_rows)
+    let row = (1..=view.window_rows)
         .find(|row| row_text(&frame, *row).contains("original"))
         .unwrap();
     assert!(view.begin_selection(row, 0));

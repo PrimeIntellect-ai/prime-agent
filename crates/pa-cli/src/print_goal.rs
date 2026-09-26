@@ -794,7 +794,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -978,7 +978,7 @@ mod tests {
                 .unwrap();
             self.engine
                 .session
-                .prompt(text, Default::default())
+                .prompt(text, pa_core::session_engine::PromptOptions::default())
                 .await
                 .unwrap();
             self.engine.session.agent().wait_for_idle().await;
@@ -1051,7 +1051,7 @@ mod tests {
         // it lands ahead of the user row in the transcript.
         let entries = bed.engine.session.entries().await;
         let mut kinds: Vec<String> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 pa_types::session::FileEntry::CustomMessage { payload, .. }
                     if payload.custom_type == pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE =>
@@ -1294,7 +1294,7 @@ mod tests {
         // the compaction as the post-compaction turn's leading row.
         let entries = bed.engine.session.entries().await;
         let mut marks: Vec<(String, u64)> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 // The goal-state rows are `Custom` entries (their `data` is
                 // the serialized state); the context rows are
@@ -1332,15 +1332,18 @@ mod tests {
             (pa_core::goals::GOAL_STATE_CUSTOM_TYPE.to_string(), 1),
             "the mint's slot bump immediately precedes the compaction"
         );
+        // The live CompactionSummary prevents a second threshold check from
+        // writing a spurious skipped `compaction_outcome` before this turn.
         assert_eq!(
-            marks[compaction + 1].0,
-            "compaction_outcome",
-            "the compaction's durable outcome row follows the entry"
-        );
-        assert_eq!(
-            marks[compaction + 2],
+            marks[compaction + 1],
             (pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE.to_string(), 1),
             "the held context row follows the compaction as the next turn"
+        );
+        assert!(
+            marks[compaction + 1..]
+                .iter()
+                .all(|(kind, _)| kind != "compaction_outcome"),
+            "no repeat compaction outcome follows the live summary boundary"
         );
         // The stream: the crossing turn's usage bump, the mint's bump, the
         // held follow-up queue frame, the drain's phase frames (the held
@@ -1409,7 +1412,7 @@ mod tests {
                         String::from("a resumed history turn ") + &"x".repeat(60000),
                     ),
                     timestamp: 1,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .expect("the resumed user turn appends");

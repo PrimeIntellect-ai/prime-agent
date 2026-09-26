@@ -10,6 +10,7 @@
 //! never sets it.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -345,7 +346,7 @@ async fn create_session_via_daemon(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -385,9 +386,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -410,7 +411,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -479,7 +480,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: second.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text");
@@ -491,7 +492,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("list");
@@ -602,6 +603,9 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Enter answers the mounted question on its pre-selected `Share` row;
     // the submission that follows must reach the editor, not the dialog.
@@ -680,6 +684,9 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // No key step answers anything: the flow must complete before the
     // plan's submission reaches the editor.
@@ -721,6 +728,321 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
     drop(supervisor);
 }
 
+/// The scripted provider-auth surface the full-flow verifier drives: the
+/// Prime Inference row and its panel-driven login (a progress line, the
+/// paste prompt, the store), one api-key provider row (the picker's
+/// connect step), and one `mcp:` service row (the picker's exclusion).
+/// Credentials persist through the real auth store so the model-readiness
+/// probe and the connected marks read them like the product does.
+struct FullFlowProviderAuth {
+    agent_dir: PathBuf,
+}
+
+impl FullFlowProviderAuth {
+    fn stored(&self, provider: &str) -> bool {
+        pa_core::auth::AuthStorage::create(&self.agent_dir)
+            .get_all()
+            .credential(provider)
+            .is_some()
+    }
+}
+
+impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
+    fn login_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        let rows = vec![
+            pa_tui::provider_auth::ProviderRow {
+                id: pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID.to_string(),
+                name: "Prime Inference".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: Some(pa_tui::provider_auth::AuthStatusIndicator {
+                    style: pa_tui::provider_auth::AuthStatusStyle::Success,
+                    label: "configured".to_string(),
+                }),
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: self.stored(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "faux-key".to_string(),
+                name: "Faux Key".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::ApiKeyPrompt,
+                configured: self.stored("faux-key"),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "mcp:faux".to_string(),
+                name: "Faux MCP".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::Oauth,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: false,
+                available: true,
+            },
+        ];
+        Box::pin(async move { rows })
+    }
+
+    fn logout_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn login(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        api_key: Option<&str>,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        let key = api_key.map(str::to_string);
+        Box::pin(async move {
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: key.unwrap_or_default(),
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to save API key for {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}"
+            ))
+        })
+    }
+
+    fn login_on_panel(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        Box::pin(async move {
+            // Only the Prime row runs here (the flow's sign-in step);
+            // anything else cancels.
+            if provider_id != pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            }
+            panel.progress("Checking Prime Inference access...");
+            let Some(api_key) = panel
+                .paste_prompt(
+                    "Paste a Prime API key below:",
+                    pa_tui::auth_panel::PasteStyle::Visible,
+                )
+                .await
+            else {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            };
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: api_key,
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}. Credentials saved to {}.",
+                agent_dir.join("auth.json").display()
+            ))
+        })
+    }
+
+    fn logout(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+}
+
+/// The full first-run flow on a fresh home with no usable model (TS
+/// #2340's `runOnboardingFlow` not-ready branch): the welcome screen's
+/// login action starts the flow, the Prime Inference sign-in runs through
+/// the inline auth panel (a progress line, the paste prompt), the default
+/// GLM 5.3 model applies behind the pane, the connect-more-providers
+/// picker connects one more provider through its key prompt and
+/// re-mounts with the connected mark, and the trace question ends the
+/// flow — every answer, both credentials, and the completion flag
+/// persist together, and the released pane runs the submitted turn.
+#[tokio::test]
+async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello full flow", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    // The readiness probe mirrors the flow's contract: the home is not
+    // ready until the sign-in stores its credential (the model-ready
+    // gate at flow end).
+    let probe_agent_dir = agent_dir.clone();
+    let model_ready = std::sync::Arc::new(move || {
+        pa_core::auth::AuthStorage::create(&probe_agent_dir)
+            .get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some()
+    });
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+        model_ready,
+        current_model: None,
+        provider_auth: Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+            std::sync::Arc::new(FullFlowProviderAuth {
+                agent_dir: agent_dir.clone(),
+            }),
+        )),
+    });
+    let enter = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    let down = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    // The plan waits on observable readiness, not fixed sleeps: each
+    // barrier holds the queued batch until a frame rendered after arming
+    // contains the condition, so a loaded runner cannot fire keys at a
+    // pane whose field or picker has not mounted yet (the pane drive
+    // implements the same WaitRender contract the run loop's session
+    // steps use).
+    let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 5_000,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The welcome screen's login action starts the flow.
+            enter(),
+            // The Prime sign-in: the paste prompt mounts with the flow.
+            wait_render("Paste a Prime API key below:"),
+            pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
+            enter(),
+            // The model applies behind the pane, then the picker mounts.
+            wait_render("Connect other providers, or continue."),
+            // Down to the provider row: Enter runs its key prompt.
+            down(),
+            enter(),
+            wait_render("Enter API key"),
+            pa_tui::interactive::HeadlessStep::Type("faux-key".to_string()),
+            enter(),
+            // The picker re-mounts with the connected mark; Enter on the
+            // pinned Continue row ends the step.
+            wait_render("\u{2713}"),
+            enter(),
+            // The trace question: Enter on the pre-selected Share row.
+            wait_render("Share agent traces"),
+            enter(),
+            // The released pane runs the submitted turn.
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Log in with Prime Intellect"),
+        "the welcome screen's action rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Login with Prime Intellect"),
+        "the login dialog's heading replaced the brand line:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Paste a Prime API key below:"),
+        "the paste prompt mounted inside the pane:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Connect other providers, or continue."),
+        "the providers picker rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Share agent traces"),
+        "the trace question ended the flow:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("hello full flow"),
+        "the completed flow released the pane and the first turn ran:\n{rendered}"
+    );
+    // The default-model apply's round trip: the scripted engine refuses
+    // live model switches by design (Engine::switch_model returns false
+    // for the harness), so the daemon's refusal row is the proof the
+    // apply REQUEST reached it and its failure surfaced like TS's
+    // applySelectedModel error path — the flow still completes and the
+    // marker still writes (the readiness probe reads the registry, not
+    // the session).
+    assert!(
+        rendered.contains("This session does not support model switching"),
+        "the apply round-tripped and the scripted engine's refusal surfaced:\n{rendered}"
+    );
+    // The connected provider's status row shows the store outcome.
+    assert!(
+        rendered.contains("Saved API key for Faux Key"),
+        "the provider login's status row applied:\n{rendered}"
+    );
+
+    // Everything persisted together: the flag, the answer, both
+    // credentials.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        settings.get_onboarding_shown(),
+        "the completed flow marked onboarding shown"
+    );
+    assert!(
+        settings.get_agent_traces_enabled(),
+        "the Share answer persisted"
+    );
+    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    assert!(
+        auth.get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some(),
+        "the Prime sign-in stored its credential"
+    );
+    assert!(
+        auth.get_all().credential("faux-key").is_some(),
+        "the provider login stored its key"
+    );
+    drop(supervisor);
+}
+
 /// A failed completion write surfaces a warning row and never kills the
 /// run: a provisioned home whose settings write fails still completes the
 /// flow for this run (the session stays usable), the warning names the
@@ -754,6 +1076,9 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -825,6 +1150,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Down + Enter answers `Not now` (the answer that used to re-show the
     // question on every later session open), then the turn runs.
@@ -930,9 +1258,9 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -955,7 +1283,7 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1022,9 +1350,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1047,7 +1375,7 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1207,7 +1535,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
     // intent. `spawn_supervisor` strips the same variables from the daemon
     // side.
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        Default::default(),
+        pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -1224,9 +1552,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: catalog,
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1249,7 +1577,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1327,9 +1655,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1352,7 +1680,7 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1468,9 +1796,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1493,7 +1821,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1665,9 +1993,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1692,7 +2020,7 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1840,7 +2168,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     // the applied content progressed instead of jumping once at turn end.
     let mut filler = String::new();
     for segment in 0..24 {
-        filler.push_str(&format!("MARK-{segment:02} "));
+        let _ = write!(filler, "MARK-{segment:02} ");
         filler.push_str(&"history ".repeat(250));
     }
     // Paced at 3000 tokens/second so the ~12k-token turn streams for
@@ -1865,9 +2193,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1890,7 +2218,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -1998,7 +2326,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
         model_configured_providers: std::collections::HashSet::new(),
         model_recent_models: Vec::new(),
@@ -2024,7 +2352,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         // default set.
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -2165,9 +2493,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2189,7 +2517,7 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     };
@@ -2300,7 +2628,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
             ..Default::default()
         },
         model_catalog: vec![glm],
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2323,7 +2651,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -2415,7 +2743,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     // daemon's (hermetic auth; the models.json key is the only configured
     // credential).
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        Default::default(),
+        pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -2431,7 +2759,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: None,
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: catalog,
         model_configured_providers: ["test-provider".to_string()].into_iter().collect(),
         model_recent_models: Vec::new(),
@@ -2456,7 +2784,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -2507,9 +2835,9 @@ fn base_options(
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
         script_path: Some(dir.join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2528,7 +2856,7 @@ fn base_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
         provider_auth: None,
@@ -2621,7 +2949,7 @@ async fn tui_renames_session_through_slash_command() {
         .request_ok(DaemonCommand::GetState {
             id: None,
             active_session_id: outcome.active_session_id.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_state");
@@ -2971,9 +3299,9 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2992,7 +3320,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         client_settings: None,
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
     };
@@ -3037,7 +3365,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: first.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text on the first session");
@@ -3049,7 +3377,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: second.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text on the second session");
@@ -3106,7 +3434,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     std::fs::write(&png_path, MINIMAL_PNG).expect("write fixture image");
     std::env::set_var("PRIME_AGENT_TEST_CLIPBOARD_IMAGE", &png_path);
     let prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>> =
-        Default::default();
+        std::sync::Arc::default();
     let make_options = || pa_tui::interactive::InteractiveOptions {
         provider_auth: None,
         traces: None,
@@ -3115,9 +3443,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -3229,7 +3557,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: first.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text");
@@ -3295,9 +3623,9 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -3316,7 +3644,7 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         client_settings: None,
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
     };
@@ -3429,7 +3757,7 @@ async fn create_idle_session_with_settled_turn(
             active_session_id: session.clone(),
             message: prompt_text.to_string(),
             input: empty_prompt_input(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("prompt_and_wait");
@@ -3548,7 +3876,7 @@ async fn tui_idle_session_event_repaints_without_input() {
             id: None,
             active_session_id: session.clone(),
             name: "renamed-while-attached".to_string(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("rename");

@@ -318,7 +318,7 @@ pub fn summary_for_record(record: &UnifiedRecord) -> Value {
             // TS synthesizes the runtime kind from the saved depth (a saved
             // child with a parent path but no depth is depth 1).
             "runtimeKind": if saved.get("rlmDepth").and_then(Value::as_u64)
-                .unwrap_or(if saved.get("parentSessionPath").is_some() { 1 } else { 0 })
+                .unwrap_or(u64::from(saved.get("parentSessionPath").is_some()))
                 > 0 { "subagent" } else { "top-level" },
             "cwd": saved.get("cwd").cloned().unwrap_or(Value::Null),
             "sessionFile": saved.get("path").cloned().unwrap_or(Value::Null),
@@ -843,8 +843,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         assert_eq!(rows[0].section, Section::Running);
@@ -1040,8 +1041,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         let layout = build_layout(&rows, 120);
@@ -1089,8 +1091,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         let age = rows

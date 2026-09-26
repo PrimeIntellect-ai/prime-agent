@@ -12,6 +12,7 @@
 //! exited surface never receives a completed login (a task abort cannot
 //! reach a started blocking body).
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -282,10 +283,11 @@ fn generate_pkce() -> (String, String) {
 /// A random, hex CSRF `state` (TS `createState`: 16 random bytes as
 /// hex).
 fn create_state() -> String {
-    random_bytes(16)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let mut state = String::with_capacity(32);
+    for byte in random_bytes(16) {
+        let _ = write!(state, "{byte:02x}");
+    }
+    state
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {
@@ -497,6 +499,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
+    /// The app registration's redirect port is one fixed socket and every
+    /// `login_openai_codex` flow binds it, while the default harness runs
+    /// this module's tests on parallel threads: each flow stages the
+    /// port under this lock, so a sibling's bind can never land in the
+    /// browser race's probe-to-bind window and leave its flow's listener
+    /// dead. The lock is the async-aware one — the guard is held across
+    /// the flow's awaits by design (and never poisons).
+    static REDIRECT_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
     /// unexpected fetches).
@@ -702,6 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
@@ -742,6 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_exchange_surfaces_the_ts_message() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
@@ -755,6 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
@@ -794,6 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_without_the_account_id_fails_the_login() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(None));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
@@ -807,6 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http(&account_jwt(Some("acct-1")));
@@ -822,6 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_paste_ends_the_login() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::ready()),
@@ -835,6 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(&format!(
@@ -850,6 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         // The redirect carries no code: the prompt fallback answers it.
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
@@ -868,6 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_prompt_ends_the_login() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(REDIRECT_URI)),
@@ -881,6 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_prompt_answer_reports_the_missing_code() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(REDIRECT_URI)),
@@ -894,6 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_callback_falls_to_the_prompt_without_a_paste_surface() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         // The app registration's redirect port is the flow's wire
         // contract (a bind-anywhere test would not exercise it): it is
         // held here deliberately — a busy port leaves the flow's server
@@ -923,6 +945,7 @@ mod tests {
     /// must end the flow with the cancel, never hang the wait.
     #[tokio::test]
     async fn a_pending_paste_never_holds_a_cancelled_flow() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         let held = std::net::TcpListener::bind(("127.0.0.1", 1455));
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
@@ -943,6 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
+        let _registered_port = REDIRECT_PORT.lock().await;
         // The app registration's redirect port is the flow's wire
         // contract (a bind-anywhere test would not exercise the real
         // listener): the flow binds its callback server and the browser
@@ -971,9 +995,24 @@ mod tests {
             .find(|(key, _)| key == "state")
             .map(|(_, value)| value.to_string())
             .expect("the authorization url carries the state");
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", 1455))
-            .await
-            .expect("the flow's callback server accepts the redirect");
+        // The captured url implies the flow's bind already resolved (the
+        // server starts before the url is presented), so a refused
+        // connect here is a port stolen after the probe: wait for the
+        // listener itself — observable readiness, bounded by a deadline
+        // that fails the test (never a green-on-timeout retry loop).
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut stream = loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", 1455)).await {
+                Ok(stream) => break stream,
+                Err(error) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the flow's callback server never listened: {error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
         stream
             .write_all(
                 format!("GET /auth/callback?code=live-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n")

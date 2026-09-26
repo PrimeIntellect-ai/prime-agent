@@ -191,7 +191,7 @@ mod tests {
         );
         *client.cache.lock().unwrap() = Some(entry(
             flags(&[("new_engine", Value::Bool(true))]),
-            Instant::now() - FLAG_CACHE_TTL,
+            Instant::now().checked_sub(FLAG_CACHE_TTL).unwrap(),
         ));
         assert!(client.cached_flag("new_engine").is_none());
     }

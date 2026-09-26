@@ -123,6 +123,58 @@ pub enum AuthPanelRequest {
     TracesSettled { outcome: TraceLoginOutcome },
 }
 
+/// A login flow's cooperative cancel signal: the flag the blocking body
+/// polls before its auth-store writes, and the watch that wakes every
+/// pending panel prompt (a prompt's answer can only come from the pane
+/// that is exiting, so a pending prompt waits on the watch instead of
+/// hanging the exit — the watch keeps the marked value, so a mark that
+/// races a wait is never lost).
+#[derive(Clone)]
+pub struct FlowCancel {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl FlowCancel {
+    /// The signal starts live (nothing cancelled it yet).
+    fn new() -> Self {
+        FlowCancel {
+            flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wake: std::sync::Arc::new(tokio::sync::watch::channel(false).0),
+        }
+    }
+
+    /// `true` once the driving pane exited.
+    pub fn cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The bare flag's storage (the #2790 panel consumers load it
+    /// directly; every `mark` is visible through it).
+    pub(crate) fn flag_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.flag)
+    }
+
+    /// The pane exits: mark the flow cancelled and wake every prompt
+    /// that is waiting for an answer the exited pane can no longer give.
+    pub(crate) fn mark(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.wake.send(true);
+    }
+
+    /// Wait until the flow's cancel signal fires.
+    async fn wait(&self) {
+        let mut marked = self.wake.subscribe();
+        // A mark that landed before the subscribe is already visible in
+        // `cancelled`; a mark after it fires `changed`.
+        while !self.cancelled() {
+            if marked.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// The flow-side handle to the inline auth panel: one login run's
 /// request channel. The composition root drives its flow against this
 /// handle; the TUI run loop owns the receiving side and services every
@@ -132,10 +184,10 @@ pub enum AuthPanelRequest {
 pub struct AuthPanelHandle {
     tx: mpsc::UnboundedSender<AuthPanelRequest>,
     /// The flow's cooperative cancel signal: the driving surface marks
-    /// it when the panel exits, and a blocking login body checks it
-    /// before its auth-store writes — a `JoinHandle::abort` cannot
-    /// reach a started `spawn_blocking` closure (#2770).
-    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// it when the panel or pane exits, and a blocking login body
+    /// checks it before its auth-store writes — a `JoinHandle::abort`
+    /// cannot reach a started `spawn_blocking` closure (#2770).
+    cancel: FlowCancel,
 }
 
 impl AuthPanelHandle {
@@ -144,19 +196,25 @@ impl AuthPanelHandle {
     pub fn new(tx: mpsc::UnboundedSender<AuthPanelRequest>) -> Self {
         AuthPanelHandle {
             tx,
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel: FlowCancel::new(),
         }
     }
 
     /// The flow's cancel state: `true` once the driving surface exited.
     pub fn cancelled(&self) -> bool {
-        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+        self.cancel.cancelled()
     }
 
     /// The flow's cancel signal for the driving side (the pane marks it
     /// on exit; every handle clone shares it).
+    pub fn cancel_signal(&self) -> FlowCancel {
+        self.cancel.clone()
+    }
+
+    /// The bare cancel flag (the #2790 codex login's shape): the
+    /// same storage the [`FlowCancel`] arms — loads observe every mark.
     pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        std::sync::Arc::clone(&self.cancel)
+        self.cancel.flag_arc()
     }
 
     /// Submit one request directly (the helpers below and the session's
@@ -184,13 +242,22 @@ impl AuthPanelHandle {
     /// paste field; the submitted value resolves the future, a cancel
     /// answers `None`.
     pub async fn paste_prompt(&self, prompt: &str, style: PasteStyle) -> Option<String> {
+        // An exited pane can never answer the prompt: a cancelled flow
+        // returns without sending (the blocking body's next
+        // `cancelled` check reports the cancellation).
+        if self.cancelled() {
+            return None;
+        }
         let (reply, answer) = oneshot::channel();
         self.send(AuthPanelRequest::PastePrompt {
             prompt: prompt.to_string(),
             style,
             reply,
         });
-        answer.await.unwrap_or(None)
+        tokio::select! {
+            answered = answer => answered.unwrap_or(None),
+            () = self.cancelled_wait() => None,
+        }
     }
 
     /// TS `PrimeTeamSelectorComponent`: the team picker; a cancel
@@ -201,13 +268,26 @@ impl AuthPanelHandle {
         teams: Vec<PrimeTeamOption>,
         current: Option<&str>,
     ) -> PrimeTeamPick {
+        // An exited pane can never answer the picker: a cancelled flow
+        // returns the cancelled pick (the stored selection stays).
+        if self.cancelled() {
+            return PrimeTeamPick::Cancelled;
+        }
         let (reply, answer) = oneshot::channel();
         self.send(AuthPanelRequest::SelectTeam {
             teams,
             current: current.map(str::to_string),
             reply,
         });
-        answer.await.unwrap_or(PrimeTeamPick::Cancelled)
+        tokio::select! {
+            picked = answer => picked.unwrap_or(PrimeTeamPick::Cancelled),
+            () = self.cancelled_wait() => PrimeTeamPick::Cancelled,
+        }
+    }
+
+    /// Wait until the flow's cancel signal fires (the pane exited).
+    async fn cancelled_wait(&self) {
+        self.cancel.wait().await;
     }
 }
 
@@ -247,6 +327,7 @@ const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser
 
 /// The mounted panel: the flow's progress lines, the browser URL block,
 /// and the one active input (a paste prompt or the team picker).
+#[derive(Debug)]
 pub struct AuthPanel {
     /// TS the dialog's panel title: `Login to {provider}` / `Connect
     /// {service}`.
@@ -267,6 +348,7 @@ pub struct AuthPanel {
 }
 
 /// The panel's active input.
+#[derive(Debug)]
 enum PanelInput {
     /// No input mounted: the flow works between requests (its progress
     /// lines stay; Esc has nothing to cancel — the flow settles within
@@ -288,6 +370,7 @@ enum PanelInput {
 
 /// The mounted team picker (TS `PrimeTeamSelectorComponent`): the search
 /// field over the personal-first rows.
+#[derive(Debug)]
 struct PrimeTeamPicker {
     /// The team rows; the personal account rides first as its own row.
     teams: Vec<PrimeTeamOption>,
@@ -1126,8 +1209,8 @@ mod tests {
         );
         let rows = frame_text(&mut panel);
         let joined = rows.join("\n");
-        assert!(!joined.contains("\u{1b}"), "no escapes render: {joined:?}");
-        assert!(joined.contains("A"), "the scrubbed name still renders");
+        assert!(!joined.contains('\u{1b}'), "no escapes render: {joined:?}");
+        assert!(joined.contains('A'), "the scrubbed name still renders");
     }
 
     /// The OSC 8 link carries the URL as its own display text (an empty

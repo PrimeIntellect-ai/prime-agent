@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use pa_core::cron::store::{AgentCronJobStore, HeartbeatManagementAction};
 use pa_core::cron::{is_heartbeat_cron_job, AgentCronJob, JobStatus};
@@ -555,7 +555,7 @@ impl Supervisor {
             id: None,
             active_session_id: None,
             include_inactive: Some(true),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         for resident in self.live_workers_in_creation_order().await {
             let listing = self

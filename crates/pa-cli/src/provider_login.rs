@@ -324,6 +324,7 @@ impl ProviderAuth {
                     auth_type: AuthType::Oauth,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
                     flow: AuthFlow::TerminalFlow,
+                    configured: status.configured,
                     available: id == pa_core::auth::OPENAI_CODEX_PROVIDER_ID,
                 });
             }
@@ -364,6 +365,7 @@ impl ProviderAuth {
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
                     flow,
+                    configured: status.configured,
                     available: true,
                 });
             }
@@ -430,9 +432,12 @@ impl ProviderAuth {
                     label: "configured".to_string(),
                 }),
                 flow: AuthFlow::TerminalFlow,
-                // Credential removal always runs (an unavailable row's
+                // The stored-credential rows exist because the credential
+                // is there (TS `getProviderAuthStatus(id).configured`);
+                // credential removal always runs (an unavailable row's
                 // login never existed; its logout still removes the
                 // stored credential).
+                configured: true,
                 available: true,
             });
         }
@@ -517,8 +522,8 @@ fn login_blocking_on_panel(
         };
     }
     // TS `loginProvider`'s prime-inference dispatch: the API-key flow
-    // (the paste prompt, the whoami check, the team selection; the
-    // browser challenge stays unported) rendered through the panel.
+    // (the browser challenge raced against the paste prompt, the whoami
+    // check, the team selection) rendered through the panel.
     if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -541,6 +546,7 @@ fn login_blocking_on_panel(
                                 crate::prime_inference_login::prime_cli_config_path(&agent_dir)
                                     .as_deref(),
                             prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                            poll_interval_ms: None,
                         },
                         &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
                     ))
@@ -778,6 +784,7 @@ mod tests {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            configured: false,
             available: true,
         };
         match auth.login(&row, Some("sk-test")).await {

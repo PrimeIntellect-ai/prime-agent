@@ -249,7 +249,7 @@ pub async fn run_side_question(
         &update_rx,
     )
     .await;
-    let _ = subscription.unsubscribe().await;
+    let () = subscription.unsubscribe().await;
     result
 }
 

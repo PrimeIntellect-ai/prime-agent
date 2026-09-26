@@ -8,6 +8,7 @@
 //! runtime row keeping its persisted depth) and Enter re-opens it.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -121,22 +122,22 @@ fn write_fixture(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\""
     );
     if let Some(parent) = parent {
-        content.push_str(&format!(",\"parentSession\":\"{}\"", parent.display()));
+        let _ = write!(content, ",\"parentSession\":\"{}\"", parent.display());
     }
-    content.push_str(&format!(",\"rlmDepth\":{rlm_depth}}}"));
+    let _ = write!(content, ",\"rlmDepth\":{rlm_depth}}}");
     content.push('\n');
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -254,13 +255,13 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
             .expect("agents view run")
             .outcome;
 
-    // Collapsed: the parent row and its `2 subagents` summary row — the
-    // label aggregates the whole descendant tree (the child and the
-    // grandchild under it), with both reachable only through the summary
-    // row.
+    // Collapsed: the parent row and its `2 inactive subagents` line —
+    // the label aggregates the whole not-running descendant tree (the
+    // child and the grandchild under it), with both reachable only
+    // through the line.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
-        collapsed.contains("\u{25b8} 2 subagents"),
+        collapsed.contains("\u{25b8} 2 inactive subagents"),
         "the collapsed parent shows its tree-aggregated summary row:\n{collapsed}"
     );
     assert!(
@@ -273,7 +274,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // row keeps the grandchild hidden until the child expands too.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents"),
+        expanded.contains("\u{25be} 2 inactive subagents"),
         "the expanded summary row keeps the tree aggregate and flips its marker:\n{expanded}"
     );
     assert!(
@@ -306,12 +307,12 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         session_dir: Some(session_dir.clone()),
         script_path: None,
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         no_session: false,
         session: SessionSelection::Resume(child_path.clone()),
         initial_message: None,
@@ -331,7 +332,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: view.opened_rlm_depth,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: view.opened_has_children,
         client_settings: None,
     };
@@ -403,7 +404,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // mount frame predates the saved rows and their summary markers).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
-        returned.contains("\u{25b8} 2 subagents"),
+        returned.contains("\u{25b8} 2 inactive subagents"),
         "the opened child rides the parent's aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
     );
     assert!(
@@ -412,7 +413,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     );
     let expanded = frame_of(&back.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents"),
+        expanded.contains("\u{25be} 2 inactive subagents"),
         "the expanded parent tree carries the live child:\n{expanded}"
     );
     assert!(
@@ -420,7 +421,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the resumed child expands:\n{expanded}"
     );
     assert!(
-        expanded.contains("\u{25b8} 1 subagent"),
+        expanded.contains("\u{25b8} 1 inactive subagent"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
     );
     assert!(

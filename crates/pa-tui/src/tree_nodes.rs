@@ -133,6 +133,7 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn node(id: &str, parent: Option<&str>, timestamp: &str) -> TreeNodeData {
         TreeNodeData {
@@ -140,13 +141,13 @@ mod tests {
                 payload: pa_types::session::CustomEntry {
                     custom_type: "x".to_string(),
                     data: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 base: pa_types::session::EntryBase {
                     id: Some(id.to_string()),
                     parent_id: parent.map(str::to_string),
                     timestamp: Some(timestamp.to_string()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             },
             label: None,

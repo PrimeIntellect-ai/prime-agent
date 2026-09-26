@@ -9,6 +9,7 @@
 //! line, spans carrying their theme color so the view resolves them at
 //! render time.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
@@ -728,14 +729,14 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
     }
     let mut header = format!("  {}", pad_end("agent", label_width),);
     if show_models {
-        header.push_str(&format!("  {}", pad_end("model", model_width)));
+        let _ = write!(header, "  {}", pad_end("model", model_width));
     }
-    header.push_str(&format!(
-        "  {}  {}  {}",
+    let _ = write!(
+        header,
+        "  {}  {}  context",
         pad_start("tokens", token_width),
-        pad_start("cost", cost_width),
-        "context"
-    ));
+        pad_start("cost", cost_width)
+    );
     lines.push(vec![dim(header)]);
     for (index, row) in rows.iter().enumerate() {
         let label_space = label_width
@@ -1062,14 +1063,14 @@ mod tests {
             rows,
             vec![
                 "Logs".to_string(),
-                "".to_string(),
+                String::new(),
                 format!("Directory: {}", logs.display()),
-                "".to_string(),
+                String::new(),
                 // 2048/1024 = 2.0 KB; the 1-byte file rounds to 0.0 KB;
                 // rows sort by name; dot-entries stay hidden.
                 "• a-second.log (0.0 KB)".to_string(),
                 "• client-errors.log (2.0 KB)".to_string(),
-                "".to_string(),
+                String::new(),
                 "Daemon crashes log to <socket>.log; agent-open failures log to client-errors.log."
                     .to_string(),
             ]
@@ -1391,13 +1392,13 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "".to_string(),
+                String::new(),
                 "\u{2500}".repeat(20),
                 format!(" What's New{}", " ".repeat(9)),
-                "".to_string(),
-                "".to_string(),
+                String::new(),
+                String::new(),
                 format!(" Entry one.{}", " ".repeat(9)),
-                "".to_string(),
+                String::new(),
                 "\u{2500}".repeat(20),
             ]
         );

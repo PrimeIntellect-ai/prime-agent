@@ -331,10 +331,10 @@ mod tests {
             schema: serde_json::Value,
         }
         impl AgentTool for EchoTool {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "echo"
             }
-            fn description(&self) -> &str {
+            fn description(&self) -> &'static str {
                 "Echoes input."
             }
             fn parameters(&self) -> &serde_json::Value {

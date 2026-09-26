@@ -14,6 +14,7 @@ use pa_types::daemon::update_flow::{
     UpdateStatus, UpdateSupervisorIdentity, UpdateTimeoutBudget, UPDATE_ROSTER_FORMAT_VERSION,
     UPDATE_STATUS_FORMAT_VERSION,
 };
+use pa_types::JsonMap;
 
 /// Lossless round-trip contract (crate-wide): parse, serialize, re-parse, and
 /// require equality with the original JSON value.
@@ -190,7 +191,7 @@ fn prepared_expiry_window_and_marker_verdict_agree() {
             process_start_id: Some(String::from("1/2")),
             generation: String::from("g"),
         },
-        rest: Default::default(),
+        rest: JsonMap::default(),
     };
     assert_eq!(
         prepared_marker_expiry(&marker.expires_at, "2026-10-01T12:00:44.999Z"),
@@ -229,7 +230,7 @@ fn status_schema_is_ts_shaped() {
             process_start_id: Some(String::from("1/9")),
             supervisor_generation: None,
             supervisor_owner_token: None,
-            rest: Default::default(),
+            rest: JsonMap::default(),
         })
     );
     assert_eq!(status.socket_path, "/s");

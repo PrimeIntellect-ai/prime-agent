@@ -582,9 +582,9 @@ mod tests {
     #[test]
     fn file_entries_round_trip() {
         let (_dir, mut store) = temp_store();
-        let _a = message_entry(&mut store, "user", "first");
+        let a = message_entry(&mut store, "user", "first");
         let entries = file_entries(&store);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id().unwrap(), _a);
+        assert_eq!(entries[0].id().unwrap(), a);
     }
 }

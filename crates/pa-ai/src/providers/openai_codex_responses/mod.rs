@@ -131,7 +131,7 @@ pub fn stream_openai_codex_responses(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -471,7 +471,7 @@ async fn run_websocket_attempt(
                 .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
             {
                 keep_connection = false;
-            } else if use_cached_context && connection.cached && !output.response_id.is_none() {
+            } else if use_cached_context && connection.cached && output.response_id.is_some() {
                 let response_items = convert_responses_messages(
                     model,
                     &Context {
@@ -536,9 +536,8 @@ async fn run_sse_stream(
     let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
     let mut decoder = SseDecoder::new();
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
     }
@@ -712,9 +711,7 @@ pub fn stream_simple_openai_codex_responses(
         .and_then(|options| options.base.api_key.clone())
         .filter(|key| !key.is_empty())
         .or_else(|| get_env_api_key(&model.provider));
-    let api_key = if let Some(api_key) = api_key {
-        api_key
-    } else {
+    let Some(api_key) = api_key else {
         let (writer, reader) = create_assistant_message_event_stream();
         let message = AssistantMessage {
             content: Vec::new(),
@@ -729,7 +726,7 @@ pub fn stream_simple_openai_codex_responses(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -784,6 +781,7 @@ impl Provider for OpenAICodexResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// The user-facing text for a failed codex stream is the verbatim error
     /// message; the raw-`fetch` SSE connection failure surfaces the
@@ -796,7 +794,7 @@ mod tests {
                 message: "You have hit your ChatGPT usage limit (pro plan).".to_string(),
                 status: Some(429),
                 body: None,
-                headers: Default::default(),
+                headers: HashMap::default(),
                 request_id: None,
                 sdk_name: Some("CodexApiError".to_string()),
                 retry_after_ms: Some(60_000),
@@ -946,7 +944,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let (writer, _stream) = AssistantMessageEventStream::new();
         let mut processor = ResponsesStreamProcessor::new(
@@ -974,7 +972,7 @@ mod tests {
                 Message::User(UserMessage {
                     content: UserMessageContent::Text("run ls".into()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 Message::Assistant(output),
                 Message::ToolResult(ToolResultMessage {
@@ -983,12 +981,12 @@ mod tests {
                     content: vec![UserOrToolContent::Text(TextContent {
                         text: "ok".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             ],
             tools: None,

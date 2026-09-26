@@ -194,8 +194,8 @@ impl ScriptedTraces {
             credential: Mutex::new(credential),
             enabled: Mutex::new(vec![false]),
             set_calls: Mutex::new(Vec::new()),
-            logins: Mutex::new(Default::default()),
-            uploads: Mutex::new(Default::default()),
+            logins: Mutex::new(std::collections::VecDeque::default()),
+            uploads: Mutex::new(std::collections::VecDeque::default()),
         }
     }
 
@@ -309,12 +309,13 @@ impl TracesCommands for ScriptedTraces {
         // The scripted login flow: the queued outcomes answer in order,
         // defaulting to the credential's resolution.
         let outcome = self.logins.lock().unwrap().pop_front().unwrap_or_else(|| {
-            match self.credential.lock().unwrap().is_some() {
-                true => TraceLoginOutcome::Status(
+            if self.credential.lock().unwrap().is_some() {
+                TraceLoginOutcome::Status(
                     "Saved API key for Prime Agent Traces. Credentials saved to /agent/auth.json."
                         .to_string(),
-                ),
-                false => TraceLoginOutcome::Cancelled,
+                )
+            } else {
+                TraceLoginOutcome::Cancelled
             }
         });
         Box::pin(async move { outcome })
@@ -334,7 +335,7 @@ struct ScriptedProviderAuth {
 impl ScriptedProviderAuth {
     fn new() -> Self {
         ScriptedProviderAuth {
-            stored_keys: Mutex::new(Default::default()),
+            stored_keys: Mutex::new(std::collections::HashMap::default()),
             calls: Mutex::new(Vec::new()),
             prime_row: false,
         }
@@ -362,6 +363,7 @@ impl ScriptedProviderAuth {
                 label: "unconfigured".to_string(),
             }),
             flow: AuthFlow::ApiKeyPrompt,
+            configured,
             available: true,
         }
     }
@@ -378,6 +380,7 @@ impl ScriptedProviderAuth {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::TerminalFlow,
+            configured: true,
             available: true,
         }
     }
@@ -409,6 +412,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                     }),
                     id,
                     flow: AuthFlow::ApiKeyPrompt,
+                    configured: true,
                     available: true,
                 })
                 .collect()
@@ -527,9 +531,9 @@ fn command_options(
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
         script_path: Some(script_path.to_path_buf()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -552,7 +556,7 @@ fn command_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
     }
 }
@@ -587,7 +591,7 @@ async fn create_session_via_daemon(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -1207,7 +1211,7 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: fresh_id.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get last assistant text");

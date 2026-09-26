@@ -286,7 +286,8 @@ pub fn apply_refinement_proposal(
     options: ApplyOptions,
 ) -> super::RefinementResult {
     let mut applied_edits: Vec<AppliedRefinementEdit> = Vec::new();
-    let mut proposal_modified_keys: std::collections::HashSet<String> = Default::default();
+    let mut proposal_modified_keys: std::collections::HashSet<String> =
+        std::collections::HashSet::default();
     for edit in &proposal.edits {
         let computed_id = edit.id.clone().or_else(|| {
             (edit.action == Some(RefinementAction::Create)).then(|| {
@@ -652,7 +653,7 @@ mod tests {
         assert!(validate_edit(&skill_edit, None)
             .unwrap()
             .contains("skill requires arguments"));
-        skill_edit.arguments = Some(Default::default());
+        skill_edit.arguments = Some(serde_json::Map::default());
         assert!(validate_edit(&skill_edit, None)
             .unwrap()
             .contains("skill requires python reference"));
