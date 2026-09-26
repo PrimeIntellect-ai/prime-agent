@@ -73,7 +73,7 @@ impl StatusWriter {
                 started_at: now.clone(),
                 updated_at: now.clone(),
                 heartbeat_at: Some(now),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -228,7 +228,7 @@ pub fn coordinator_identity() -> UpdateProcessIdentity {
         process_start_id: pa_daemon::lease::get_process_start_id(pid),
         supervisor_generation: None,
         supervisor_owner_token: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 

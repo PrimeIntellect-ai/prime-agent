@@ -593,7 +593,7 @@ mod tests {
         // Sorted by server id, unique ids.
         let ids: Vec<&str> = catalog.entries.iter().map(|e| e.server.as_str()).collect();
         let mut sorted = ids.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(ids, sorted);
         // The two legacy built-ins ship metadata-reviewed.
         for server in ["linear", "notion"] {

@@ -3,8 +3,10 @@
 //! prompt-cache simulation, token-paced streaming with aborts, and queued
 //! response factories.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+use serde_json::Map;
 
 use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEventStream, AssistantMessageEventWriter,
@@ -14,7 +16,7 @@ use crate::types::{
     done_reason, error_reason, zero_model_cost, AssistantContent, AssistantMessage,
     AssistantMessageEvent, Context, ErrorStopReason, ImageContent, Message, MessageExt, Model,
     ModelCost, ModelInput, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, ToolCall, ToolResultMessage, Usage, UserMessageContent,
+    ThinkingContent, ToolCall, ToolResultMessage, Usage, UsageCost, UserMessageContent,
 };
 use crate::utils_inner::diagnostics::now_ms;
 use rand::Rng;
@@ -47,7 +49,7 @@ pub fn faux_text(text: &str) -> AssistantContent {
     AssistantContent::Text(TextContent {
         text: text.to_string(),
         text_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -56,7 +58,7 @@ pub fn faux_thinking(thinking: &str) -> AssistantContent {
         thinking: thinking.to_string(),
         thinking_signature: None,
         redacted: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -70,7 +72,7 @@ pub fn faux_tool_call(
         name: name.to_string(),
         arguments: arguments.as_object().cloned().unwrap_or_default(),
         thought_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -105,7 +107,7 @@ pub fn faux_assistant_message(
         stop_reason_raw: None,
         error_message: options.error_message,
         timestamp: options.timestamp.unwrap_or_else(now_ms),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -365,7 +367,7 @@ fn with_usage_estimate(
         cache_read,
         cache_write,
         total_tokens: input + output_tokens + cache_read + cache_write,
-        cost: Default::default(),
+        cost: UsageCost::default(),
     };
     message
 }
@@ -430,7 +432,7 @@ fn create_error_message(
         stop_reason_raw: None,
         error_message: Some(message.to_string()),
         timestamp: now_ms(),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -497,7 +499,7 @@ async fn stream_with_deltas(
                         thinking: String::new(),
                         thinking_signature: None,
                         redacted: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                 writer.push(AssistantMessageEvent::ThinkingStart {
                     content_index: index as u64,
@@ -539,7 +541,7 @@ async fn stream_with_deltas(
                 partial.content.push(AssistantContent::Text(TextContent {
                     text: String::new(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
                 writer.push(AssistantMessageEvent::TextStart {
                     content_index: index as u64,
@@ -577,9 +579,9 @@ async fn stream_with_deltas(
                 partial.content.push(AssistantContent::ToolCall(ToolCall {
                     id: tool_call_block.id.clone(),
                     name: tool_call_block.name.clone(),
-                    arguments: Default::default(),
+                    arguments: Map::default(),
                     thought_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
                 writer.push(AssistantMessageEvent::ToolcallStart {
                     content_index: index as u64,
@@ -691,7 +693,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                         on_response(
                             crate::types::ProviderResponse {
                                 status: 200,
-                                headers: Default::default(),
+                                headers: BTreeMap::default(),
                             },
                             &model,
                         );
@@ -734,8 +736,8 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                                 options.as_ref().and_then(|options| options.signal.clone())
                             {
                                 tokio::select! {
-                                    _ = hold => false,
-                                    _ = signal.cancelled() => true,
+                                    () = hold => false,
+                                    () = signal.cancelled() => true,
                                 }
                             } else {
                                 hold.await;
@@ -899,7 +901,7 @@ pub fn faux_image(data: &str, mime_type: &str) -> ImageContent {
     ImageContent {
         data: data.to_string(),
         mime_type: mime_type.to_string(),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 

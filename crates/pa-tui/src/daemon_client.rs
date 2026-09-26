@@ -18,7 +18,7 @@ use pa_types::daemon::{
     DaemonErrorInfo, DaemonProtocolInfo, DaemonResponse, DAEMON_PROTOCOL_NAME,
     DAEMON_PROTOCOL_VERSION,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -822,19 +822,18 @@ impl DaemonClient {
             return Ok(true);
         }
         self.drop_direct();
-        let ticket_response = match self
+        let Ok(ticket_response) = self
             .request_with_timeout(
                 DaemonCommand::GetDirectWorkerTransport {
                     id: None,
                     active_session_id: active_session_id.to_string(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 TICKET_TIMEOUT_MS,
             )
             .await
-        {
-            Ok(response) => response,
-            Err(_) => return Ok(false),
+        else {
+            return Ok(false);
         };
         if !ticket_response.success {
             return Ok(false);
@@ -842,9 +841,8 @@ impl DaemonClient {
         let Some(data) = ticket_response.data else {
             return Ok(false);
         };
-        let ticket = match read_session_transport_ticket(&data, active_session_id) {
-            Ok(ticket) => ticket,
-            Err(_) => return Ok(false),
+        let Ok(ticket) = read_session_transport_ticket(&data, active_session_id) else {
+            return Ok(false);
         };
         let Some(event_tx) = self.direct.event_sender() else {
             return Ok(false);
@@ -1083,7 +1081,7 @@ mod tests {
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await
             .unwrap();
@@ -1096,7 +1094,7 @@ mod tests {
                 active_session_id: "s1".to_string(),
                 message: "hi".to_string(),
                 input: empty_prompt_input(),
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await
             .unwrap();
@@ -1143,7 +1141,7 @@ mod tests {
                     cwd: None,
                     session_dir: None,
                     include_client_owned: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 100,
             )
@@ -1408,7 +1406,7 @@ mod tests {
                 recovery_config: None,
                 env: None,
                 launch_env: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await
             .unwrap();
@@ -1419,7 +1417,7 @@ mod tests {
             .request_ok(DaemonCommand::GetState {
                 id: None,
                 active_session_id: "s1".to_string(),
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await
             .unwrap();
@@ -1476,7 +1474,7 @@ mod tests {
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await
             .unwrap_err();

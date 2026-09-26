@@ -438,7 +438,7 @@ async fn run_child_process(
                 output_truncated: stdout_truncated || stderr_truncated,
             })
         }
-        _ = tokio::time::sleep(timeout) => {
+        () = tokio::time::sleep(timeout) => {
             let _ = child.kill().await;
             let (stdout, stdout_truncated) = stdout.await;
             let (stderr, stderr_truncated) = stderr.await;

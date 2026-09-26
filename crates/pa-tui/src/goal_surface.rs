@@ -257,7 +257,7 @@ pub fn render_goal_panel(
         shown -= 1;
         clipped = true;
     }
-    for line in wrapped[..shown].iter() {
+    for line in &wrapped[..shown] {
         let mut row: Line = vec![Span::raw("  ")];
         row.extend(line.iter().cloned());
         lines.push(crate::width::truncate_line(&row, width, ""));

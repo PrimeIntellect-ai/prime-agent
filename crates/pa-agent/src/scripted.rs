@@ -369,7 +369,7 @@ pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
                 AssistantMessageEvent::TextEnd { partial, .. } => Some(partial.clone()),
                 _ => None,
             },
-            _ => None,
+            ScriptStep::SleepMs(_) => None,
         })
         .unwrap_or_else(|| {
             let mut partial = base.clone();

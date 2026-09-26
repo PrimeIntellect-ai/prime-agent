@@ -309,6 +309,7 @@ use std::io::Write as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     #[test]
     fn write_file_atomic_replaces_an_existing_destination() {
@@ -367,14 +368,14 @@ mod tests {
             create_command: DurableDaemonCreateCommand {
                 session_path: Some("/a.jsonl".to_string()),
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let json = serde_json::to_value(&descriptor).unwrap();
         assert_eq!(json["lifecycle"], "ready");

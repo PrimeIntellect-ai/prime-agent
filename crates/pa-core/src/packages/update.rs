@@ -260,7 +260,7 @@ impl PackageManager {
                         );
                     }
                 }
-                _ => {}
+                ParsedSource::Local(_) => {}
             }
         }
         format!("No matching package found for {source}")

@@ -300,7 +300,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -646,14 +646,20 @@ mod tests {
         let long_seed = "seed turn one ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed, Default::default())
+            .prompt(
+                &long_seed,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;
         let long_seed_two = "seed turn two ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed_two, Default::default())
+            .prompt(
+                &long_seed_two,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;

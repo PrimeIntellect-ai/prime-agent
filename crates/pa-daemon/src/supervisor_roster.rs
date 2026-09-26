@@ -4,6 +4,7 @@
 //! `daemon-supervisor.ts`; the store itself lives in `agent_roster.rs`,
 //! and the seeding/hydration arms live in `supervisor_roster_seed.rs`).
 
+use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -330,9 +331,9 @@ impl Supervisor {
                 // The snapshot predates the ledger/roots awaits: a
                 // resumed worker can replace a row meanwhile, and only
                 // rows this worker still owns settle here.
-                if !roster
+                if roster
                     .get(&entry.agent_id)
-                    .is_some_and(|current| current.worker_id.as_deref() == Some(worker_id))
+                    .is_none_or(|current| current.worker_id.as_deref() != Some(worker_id))
                 {
                     continue;
                 }
@@ -399,9 +400,9 @@ impl Supervisor {
             // leaves the display rows untouched.
             if ledger_view.is_ok() {
                 for entry in &unowned_at_start {
-                    if !roster
+                    if roster
                         .get(&entry.agent_id)
-                        .is_some_and(|current| current.worker_id.is_none())
+                        .is_none_or(|current| current.worker_id.is_some())
                     {
                         continue;
                     }
@@ -450,7 +451,7 @@ impl Supervisor {
             changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
             removed: (!removed.is_empty()).then_some(removed),
             resync: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let Ok(payload) = serde_json::to_value(&update) else {
             return;
@@ -1147,14 +1148,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -1352,7 +1353,10 @@ mod tests {
         let pull = supervisor
             .write_roster_summary_for_resident(&resident, &pulled)
             .await;
-        assert!(pull.expect("pull entry").summary["thinkingLevel"] == serde_json::json!("off"));
+        assert_eq!(
+            pull.expect("pull entry").summary["thinkingLevel"],
+            serde_json::json!("off")
+        );
         assert_eq!(entry_level(), serde_json::json!("off"));
         let stale = delta(&supervisor, "seq-token", "high", Some(4), "i1").await;
         assert!(
@@ -1583,7 +1587,7 @@ mod tests {
     /// the serialization count is double the push count. Run with
     /// `cargo test -p pa-daemon roster_delta_push_benchmark -- --ignored
     /// --nocapture`.
-    #[ignore]
+    #[ignore = "manual roster delta push benchmark"]
     #[tokio::test]
     async fn roster_delta_push_benchmark() {
         const FLIPS: usize = 2000;
