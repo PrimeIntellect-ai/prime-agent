@@ -490,7 +490,7 @@ impl Supervisor {
                         request.command_type,
                         written
                             .as_ref()
-                            .map(|_| "ok")
+                            .map(|()| "ok")
                             .map_err(std::string::ToString::to_string)
                     );
                 }

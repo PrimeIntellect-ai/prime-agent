@@ -39,7 +39,7 @@ use pa_types::daemon::{
     UpdatePreparedMarker, UpdateTimeoutBudget,
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -623,7 +623,7 @@ impl Supervisor {
                     }
                 },
                 // begin_shutdown fired: loop back and fall out of the loop.
-                _ = self.shutdown_notify.notified() => continue,
+                () = self.shutdown_notify.notified() => continue,
             };
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
@@ -1302,7 +1302,7 @@ impl Supervisor {
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
@@ -1499,7 +1499,7 @@ impl Supervisor {
             update_resume: Some(self.restore.hello_resume()),
             client_id: client_id.clone(),
             server_capabilities: default_server_capabilities(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
 
@@ -1664,7 +1664,7 @@ impl Supervisor {
         // Detach from every attached session on disconnect (a TUI exit does
         // not stop the session; the worker keeps running).
         let attached_sessions = attached.lock().unwrap().clone();
-        for active_session_id in attached_sessions.iter() {
+        for active_session_id in &attached_sessions {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
@@ -2522,7 +2522,7 @@ impl Supervisor {
             update_id: update_id.clone(),
             expires_at: marker_expires_at_iso(now, &self.update_budget),
             supervisor: identity,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_prepared_artifacts(&self.update_prepared_dir(update_id), &roster, &marker)?;
         match self
@@ -3279,7 +3279,7 @@ impl Supervisor {
         // degrades to bare rows, exactly like the passive merge above.
         match ledger.deleted_descendant_usage_by_parent() {
             Ok(bucket) => {
-                for info in infos.iter_mut() {
+                for info in &mut infos {
                     let path = crate::lease::canonical_session_path(&info.path)
                         .to_string_lossy()
                         .to_string();
@@ -3360,7 +3360,7 @@ impl Supervisor {
             }
             let residents = self.registry.list().await;
             let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-            for resident in residents.iter() {
+            for resident in &residents {
                 let descriptor = resident.descriptor.lock().await;
                 if let Some(session_file) = &descriptor.session_file {
                     resident_by_file.push(ResidentRoot {
@@ -3554,7 +3554,7 @@ impl Supervisor {
         // create at a time per session file. A concurrent open waits
         // behind this one and then reuses the worker it launched — both
         // reaching the launch would race the runtime session lease.
-        let _opening_guard = self.opening_guard(command).await?;
+        let opening_guard = self.opening_guard(command).await?;
         // TS `createOrReuseWorker`'s reuse seam: an open of a session file
         // a live worker already serves answers the LIVE binding (the
         // client attaches next) instead of launching a second worker over
@@ -3622,7 +3622,7 @@ impl Supervisor {
         }
         // The admission settled: the single-flight may release (a
         // concurrent open's classification now finds a durable resident).
-        drop(_opening_guard);
+        drop(opening_guard);
         // The response still matches attach/list rows exactly: prefer a
         // fresh get_state, but a degraded one falls back to the
         // authoritative create summary instead of failing the spawn (the
@@ -4943,14 +4943,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -5008,7 +5008,7 @@ mod tests {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let refused = supervisor
             .launch_worker(&create, None)

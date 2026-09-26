@@ -10,6 +10,8 @@
 //! [`ansi_lines_to_html`] before returning it (the TS renderer converts at
 //! the same step, `ansi-to-html.ts` inside the export-html module).
 
+use std::fmt::Write as _;
+
 /// The 16-color palette (indices 0-15): standard 30-37/40-47 plus the
 /// bright 90-97/100-107 variants.
 const ANSI_COLORS: [&str; 16] = [
@@ -178,7 +180,7 @@ pub fn ansi_to_html(text: &str) -> String {
         let after = &rest[start + 1..];
         let Some(params) = after.strip_prefix('[') else {
             // No `[` follows the control byte: not an SGR escape.
-            result.push_str(&escape_html(&rest[..start + 1]));
+            result.push_str(&escape_html(&rest[..=start]));
             rest = &rest[start + 1..];
             continue;
         };
@@ -194,7 +196,7 @@ pub fn ansi_to_html(text: &str) -> String {
             None => (params, false),
         };
         if !terminated {
-            result.push_str(&escape_html(&rest[..start + 1]));
+            result.push_str(&escape_html(&rest[..=start]));
             rest = &rest[start + 1..];
             continue;
         }
@@ -205,7 +207,7 @@ pub fn ansi_to_html(text: &str) -> String {
         }
         apply_sgr(&sgr_params(params_str), &mut style);
         if !style.is_plain() {
-            result.push_str(&format!("<span style=\"{}\">", style.to_inline_css()));
+            let _ = write!(result, "<span style=\"{}\">", style.to_inline_css());
             in_span = true;
         }
         rest = &rest[start + 2 + params_str.len() + 1..];

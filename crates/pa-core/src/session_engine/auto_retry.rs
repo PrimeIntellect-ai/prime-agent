@@ -352,7 +352,7 @@ mod tests {
             .iter()
             .filter_map(|event| match event {
                 AutoRetryEvent::Start { delay_ms, .. } => Some(*delay_ms),
-                _ => None,
+                AutoRetryEvent::End { .. } => None,
             })
             .collect();
         assert_eq!(delays.len(), 2, "two retry starts: {events:?}");

@@ -1973,6 +1973,7 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
 mod tests {
     use super::*;
     use crate::chat::{AssistantMessage, MessageBlock};
+    use crate::osc133::RowMarkers;
     use crate::theme::{ColorMode, Theme};
     use crate::tool_card::{ToolCallCard, ToolResultView};
 
@@ -2103,7 +2104,7 @@ mod tests {
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("prime agent v0.0.0"));
         assert!(joined.contains("Details mode (Ctrl+O to expand)"));
-        assert!(joined.contains(">"));
+        assert!(joined.contains('>'));
     }
 
     #[test]
@@ -2352,7 +2353,7 @@ mod tests {
         // An unmarked row stays unmarked.
         let plain = vec![crate::Span::raw(" ".repeat(80))];
         let out = composite_follow_hint(&plain, " ctrl+shift+down to follow ", 80);
-        assert_eq!(crate::osc133::row_markers(&out), Default::default());
+        assert_eq!(crate::osc133::row_markers(&out), RowMarkers::default());
     }
 
     #[test]

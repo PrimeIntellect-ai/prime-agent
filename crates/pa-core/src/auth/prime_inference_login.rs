@@ -340,9 +340,9 @@ mod tests {
 
     /// The fast options: the pending status poll's interval stays real but
     /// short, so the tests yield without the product's 5s window.
-    fn fast_options<'a>(
-        prime_cli_config_path: Option<&'a std::path::Path>,
-    ) -> PrimeInferenceLoginOptions<'a> {
+    fn fast_options(
+        prime_cli_config_path: Option<&std::path::Path>,
+    ) -> PrimeInferenceLoginOptions<'_> {
         let mut options = PrimeInferenceLoginOptions::new(prime_cli_config_path);
         options.poll_interval_ms = Some(10);
         options

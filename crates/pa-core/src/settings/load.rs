@@ -67,9 +67,8 @@ pub fn from_value_lenient(value: &Value) -> Settings {
     if let Ok(settings) = serde_json::from_value::<Settings>(value.clone()) {
         return settings;
     }
-    let obj = match value.as_object() {
-        Some(obj) => obj,
-        None => return Settings::default(),
+    let Some(obj) = value.as_object() else {
+        return Settings::default();
     };
     let mut map = serde_json::Map::new();
     for (key, field) in obj {

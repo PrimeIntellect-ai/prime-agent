@@ -65,9 +65,8 @@ async fn run_command(program: &str, args: &[&str], timeout: Duration) -> Option<
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) | Err(_) => return None,
+    let Ok(Ok(output)) = tokio::time::timeout(timeout, child.wait_with_output()).await else {
+        return None;
     };
     if !output.status.success() {
         return None;
@@ -238,7 +237,7 @@ async fn read_via_osascript() -> Option<ClipboardImage> {
     let temp_path = temp_dir.join(format!("prime-agent-clip-{}.png", unique_suffix()));
     let path_str = temp_path.to_str()?.to_string();
     let script = format!(
-        r#"ObjC.import('Cocoa');
+        r"ObjC.import('Cocoa');
 const pb = $.NSPasteboard.generalPasteboard;
 const types = pb.types.allObjects;
 if (!types.containsObject($.NSPasteboardTypePNG)) {{
@@ -248,7 +247,7 @@ if (!types.containsObject($.NSPasteboardTypePNG)) {{
     const text = $.NSString.alloc.initWithDataEncoding(data, $.NSISOLatin1StringEncoding);
     text.writeToFileAtomicallyEncodingError('{path_str}', false, $.NSISOLatin1StringEncoding, null);
     'ok'
-}}"#
+}}"
     );
     let output = run_command(
         "osascript",

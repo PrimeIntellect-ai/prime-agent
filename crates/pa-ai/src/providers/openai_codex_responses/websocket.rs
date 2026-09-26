@@ -227,7 +227,7 @@ async fn spawn_connection_worker(
     let (stream, _response) = match signal.as_ref() {
         Some(signal) => {
             tokio::select! {
-                _ = signal.cancelled() => return Err(CodexStreamError::Aborted),
+                () = signal.cancelled() => return Err(CodexStreamError::Aborted),
                 result = connect => result,
             }
         }
@@ -308,7 +308,7 @@ async fn read_request_events(
         let message = match signal.as_ref() {
             Some(signal) => {
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(CodexStreamError::Aborted),
+                    () = signal.cancelled() => return Err(CodexStreamError::Aborted),
                     message = next => message,
                 }
             }

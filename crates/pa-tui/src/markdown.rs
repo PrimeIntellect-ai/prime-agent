@@ -497,7 +497,7 @@ fn render_block(
             // and `### H3` all render bare mdHeading).
             let text = block.lines.first().cloned().unwrap_or_default();
             let mut spans = render_inline(&text, style);
-            for s in spans.iter_mut() {
+            for s in &mut spans {
                 s.style = style.heading;
             }
             out.push(spans);
@@ -683,7 +683,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     // reaches the wire. `m` carries the emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
                     let mut label_spans = render_inline_ctx(&label, style, true);
-                    for s in label_spans.iter_mut() {
+                    for s in &mut label_spans {
                         s.style = s.style.add_modifier(m);
                     }
                     if crate::hyperlinks::hyperlinks_enabled() {
@@ -744,7 +744,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 if doubled {
                     bold = !bold;
                     let mut inner_spans = render_inline_ctx(&inner, style, in_link);
-                    for s in inner_spans.iter_mut() {
+                    for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.bold);
                     }
                     spans.extend(inner_spans);
@@ -752,7 +752,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 } else {
                     italic = !italic;
                     let mut inner_spans = render_inline_ctx(&inner, style, in_link);
-                    for s in inner_spans.iter_mut() {
+                    for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.italic);
                     }
                     spans.extend(inner_spans);
@@ -768,7 +768,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 if !inner.trim().is_empty() {
                     flush!();
                     let mut inner_spans = render_inline_ctx(&inner, style, in_link);
-                    for s in inner_spans.iter_mut() {
+                    for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.strikethrough);
                     }
                     spans.extend(inner_spans);
