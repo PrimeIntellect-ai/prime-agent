@@ -12,7 +12,7 @@
 //! "No background commands" for shells). The TS dock has no section
 //! traversal at all (`subagent-summary-line.ts` handles confirm/cancel
 //! only and renders nothing when its counts are zero), so this surface
-//! is the documented Rust divergence (docs/FEATURE_PARITY.md).
+//! is the documented Rust divergence (`docs/FEATURE_PARITY.md`).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
