@@ -201,7 +201,7 @@ mod tests {
         let mut contents = String::new();
         let mut line_index = 0;
         while contents.len() < 8192 {
-            write!(contents, "panic trace line {line_index}\n").expect("write to String");
+            writeln!(contents, "panic trace line {line_index}").expect("write to String");
             line_index += 1;
         }
         let path = write_log(dir.path(), "worker-a.stderr.log", &contents);
