@@ -1050,8 +1050,10 @@ mod tests {
     /// The pre-fix overlong-word break loop, verbatim from origin/rust
     /// (the O(token_len x rows) re-measure version): the output oracle for
     /// [`wrap_spans_into`]'s arithmetic-tracked rewrite. Every corpus below
-    /// must wrap to byte-identical rows on both algorithms — the rewrite is
-    /// a complexity fix, never a layout change.
+    /// must wrap to byte- and style-identical `Line`s on both algorithms —
+    /// the rewrite is a complexity fix, never a layout change. The oracle
+    /// stays O(token_len^2), so differential corpora are bounded (~4KiB
+    /// tokens); the linear rewrite gets its own unbounded stress test.
     fn legacy_wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<'_>) {
             if width == 0 {
                 for span in spans {
@@ -1154,89 +1156,124 @@ mod tests {
         legacy_wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
     }
 
+    /// Full-structure parity: every span's content AND style, and the row
+    /// count the layout caches must equal the rendered rows on both the
+    /// legacy oracle and the rewrite.
     fn assert_wrap_parity(spans: &[Span], widths: &[usize]) {
         for &width in widths {
             let mut legacy: Vec<Line> = Vec::new();
             legacy_wrap_spans(spans, width, &mut legacy);
             let mut current: Vec<Line> = Vec::new();
             wrap_spans(spans, width, Style::default(), &mut current);
-            let legacy_rows: Vec<String> = legacy
-                .iter()
-                .map(|line| {
-                    line.iter()
-                        .map(|span| span.content.as_str())
-                        .collect::<String>()
-                })
-                .collect();
-            let current_rows: Vec<String> = current
-                .iter()
-                .map(|line| {
-                    line.iter()
-                        .map(|span| span.content.as_str())
-                        .collect::<String>()
-                })
-                .collect();
             assert_eq!(
-                legacy_rows, current_rows,
-                "wrap parity broke at width {width}: spans={spans:?}"
+                legacy, current,
+                "wrap parity (styled spans) broke at width {width}: spans={spans:?}"
             );
-            // the row COUNT the layout caches must agree with the render
             let mut counter = geometry::WrapOutput::count();
             wrap_spans_into(spans, width, &mut counter);
-            assert_eq!(counter.rows, current.len(), "row count vs render at width {width}");
+            assert_eq!(
+                counter.rows, current.len(),
+                "row count vs render broke at width {width}: spans={spans:?}"
+            );
         }
     }
 
     #[test]
-    fn wrap_parity_ascii_monowords() {
-        // the catastrophic class: one unbroken token far wider than any wrap
-        for len in [80usize, 81, 160, 4096, 1 << 20] {
-            let spans = vec![Span::styled("x".repeat(len), Default::default())];
+    fn wrap_parity_ascii_monowords_bounded() {
+        // the catastrophic class, bounded for the O(n^2) oracle
+        for len in [81usize, 160, 1024, 4096] {
+            let spans = vec![Span::styled("x".repeat(len), Style::default())];
             assert_wrap_parity(&spans, &[1, 2, 3, 7, 79, 80, 81, 200]);
         }
         // a monoword behind an ordinary word (a mid-row break: col > 0)
-        let spans = vec![Span::styled(
-            format!("lead {}", "b".repeat(5000)),
-            Default::default(),
-        )];
+        let spans = vec![Span::styled(format!("lead {}", "b".repeat(4000)), Style::default())];
         assert_wrap_parity(&spans, &[3, 7, 20, 80, 81]);
     }
 
     #[test]
-    fn wrap_parity_clusters_tabs_escapes() {
-        // multi-char grapheme clusters (ZWJ emoji, combining marks), CJK,
-        // tabs (char_width expands to 3 like str_width), and OSC 8 escapes
-        let corpora = [
-            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} ".repeat(200),
-            "e\u{0301}".repeat(200),
-            "\u{4F60}\u{597D} ".repeat(100),
-            "a\tb c\t\td ".repeat(100),
-            format!("\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ {}", "z".repeat(300)),
-        ];
-        for corpus in corpora {
-            let spans = vec![Span::styled(corpus, Default::default())];
-            assert_wrap_parity(&spans, &[1, 2, 4, 9, 40, 80]);
+    fn wrap_parity_zwj_family_and_affixes() {
+        // the reviewer's cluster-split repro class (retracted underflow
+        // concern; the tentative-exit true measure resyncs the arithmetic):
+        // the exact token plus prefixes/suffixes across widths
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        for token in [
+            format!("aa{family}aaa"),
+            format!("{family}"),
+            format!("a{family}"),
+            format!("{family}a"),
+            format!("aa{family}aa"),
+            format!("\u{200D}{family}"),
+            format!("{family}\u{200D}"),
+            format!("aaa {family} aaa"),
+        ] {
+            let spans = vec![Span::styled(token, Style::default())];
+            assert_wrap_parity(&spans, &[1, 2, 3, 4, 5, 6, 7, 8, 12, 40]);
         }
     }
 
     #[test]
-    fn wrap_parity_mixed_multispan() {
-        // multiple spans, styles at span boundaries, whitespace runs
-        let mut spans = Vec::new();
-        for i in 0..40 {
-            spans.push(Span::styled(format!("word{i} "), Default::default()));
-            spans.push(Span::styled(format!("{} ", "q".repeat(137)), Default::default()));
+    fn wrap_parity_mixed_unicode_escapes_tabs() {
+        // ZWJ + skin tone, regional flags, combining and prepending
+        // marks, tabs (char_width expands to 3 like str_width), malformed
+        // ANSI (a lone ESC, an unterminated CSI), a well-formed OSC 8
+        // hyperlink, and multispan styling at span boundaries.
+        let bodies = [
+            format!("{}  ", "\u{1F468}\u{1F3FD}\u{200D}\u{1F33E}".repeat(64)),
+            format!("{} ", "\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}".repeat(64)),
+            format!("{} ", "e\u{0301}".repeat(300)),
+            format!("{} a", "\u{0605}".repeat(120)),
+            "a\tb c\t\td ".repeat(64),
+            format!("\u{1b} lone {}", "y".repeat(300)),
+            format!("\u{1b}[31 unterminated {}", "m".repeat(300)),
+            format!("\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ {}", "z".repeat(300)),
+        ];
+        for body in bodies {
+            let spans = vec![Span::styled(body, Style::default())];
+            assert_wrap_parity(&spans, &[1, 2, 3, 4, 5, 7, 9, 12, 40, 80]);
         }
-        assert_wrap_parity(&spans, &[1, 5, 17, 60, 80]);
+        // multispan: distinct styles and a monoword at a span boundary
+        let spans = vec![
+            Span::styled("intro ".to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("q".repeat(2000), Style::default().add_modifier(Modifier::ITALIC)),
+            Span::styled(" tail words here".to_string(), Style::default()),
+        ];
+        assert_wrap_parity(&spans, &[1, 2, 4, 9, 17, 60, 80]);
     }
 
     #[test]
     fn wrap_parity_fits_exactly_and_edges() {
         // rows that fit whole, exactly-width tokens, and width 0 (no wrap)
-        let spans = vec![Span::styled("abcdefgh".to_string(), Default::default())];
+        let spans = vec![Span::styled("abcdefgh".to_string(), Style::default())];
         assert_wrap_parity(&spans, &[0, 1, 7, 8, 9, 100]);
-        let spans = vec![Span::styled("".to_string(), Default::default())];
+        let spans = vec![Span::styled("".to_string(), Style::default())];
         assert_wrap_parity(&spans, &[0, 1, 80]);
+    }
+
+    #[test]
+    fn wrap_stress_megabyte_monoword_candidate_only() {
+        // The rewrite must wrap a 1MiB unbroken token in one linear pass:
+        // content round-trips exactly (hard breaks never trim), the ASCII
+        // row count is exact, and the whole wrap stays far under the
+        // tripwire bound — the legacy loop needed ~30s at width 80 for
+        // this input (the first-frame transcript blow-up), the rewrite
+        // is sub-second even in debug.
+        let token = "x".repeat(1 << 20);
+        let spans = vec![Span::styled(token.clone(), Style::default())];
+        let width = 80usize;
+        let started = std::time::Instant::now();
+        let mut current: Vec<Line> = Vec::new();
+        wrap_spans(&spans, width, Style::default(), &mut current);
+        let elapsed = started.elapsed();
+        assert_eq!(current.len(), (1 << 20) / width, "exact ASCII row count");
+        let joined: String = current
+            .iter()
+            .flat_map(|line| line.iter().map(|span| span.content.as_str()))
+            .collect();
+        assert_eq!(joined, token, "hard-broken rows round-trip");
+        assert!(
+            elapsed.as_secs() < 2,
+            "1MiB monoword wrap took {elapsed:?} — the quadratic path is back"
+        );
     }
 
     #[test]
