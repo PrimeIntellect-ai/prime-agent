@@ -331,7 +331,7 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -353,7 +353,7 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: Arc::default(),
         session_has_children: false,
         client_settings: None,
     }
