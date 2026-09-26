@@ -732,13 +732,11 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
     );
 }
 
-/// The supervisor config is persisted at boot: after the bind (the accept
-/// contract) but before the accept loop starts, so a client that has seen
-/// the `daemon_hello` line has waited out the write. The descriptor dir
-/// must then hold a valid `supervisor-config` for this supervisor's
-/// socket (version 1, this socket path, the resolved default session
-/// dir) — the write is diagnostic state with no serving-path reader, and
-/// this pins that it still happens exactly once per boot.
+/// The supervisor config is persisted before bind (the accept contract),
+/// so a client that has seen the `daemon_hello` line must find the settled
+/// file. The descriptor dir must then hold a valid `supervisor-config`
+/// for this supervisor's socket (version 1, this socket path, the resolved
+/// default session dir), with no lingering temp file.
 #[test]
 fn booted_supervisor_persists_its_config() {
     let dir = tempfile::TempDir::new().expect("temp dir");
