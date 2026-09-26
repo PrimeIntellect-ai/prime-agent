@@ -2028,6 +2028,40 @@ impl AgentsViewMode {
             let indent = "  ".repeat(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
             let text = format!("{indent}{marker} {}", row.title);
+            // The running line bills the descendant tree in the Cost
+            // column (the operator's 2026-09-26 ask; TS renders no cost
+            // on the summary row): the title spans the Session + Model
+            // zone — every row yields its leading cells to the cost
+            // column — and the aggregate rides the same right-aligned
+            // `${:.2}` cell the agent rows print, leaving the Age
+            // column blank behind it. The inactive line keeps its
+            // full-width title, unbilled.
+            if row
+                .identity
+                .starts_with(crate::agents_view_forest::SUMMARY_ROW_PREFIX)
+            {
+                let zone = layout.name_width + 2 + layout.model_width;
+                let title = crate::agents_view_state::truncate_text(&text, zone);
+                let pad = zone.saturating_sub(str_width(&title));
+                let mut line: Line = vec![
+                    crate::Span::raw(title),
+                    crate::Span::raw(" ".repeat(pad)),
+                    crate::Span::styled("  ".to_string(), ratatui::style::Style::default()),
+                    theme.fg(
+                        ThemeColor::Dim,
+                        layout
+                            .details
+                            .get(&row.identity)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
+                ];
+                line = pad_line(line, width);
+                if selected {
+                    return theme.bg_paint(ThemeBg::SelectedBg, line);
+                }
+                return line;
+            }
             let mut line: Line = vec![crate::Span::raw(crate::agents_view_state::truncate_text(
                 &text, width,
             ))];
@@ -5241,6 +5275,85 @@ the holder exits.";
         assert!(
             mode.saved_catalog_loaded,
             "the terminal load flags the carry for the flow's next run"
+        );
+    }
+
+    /// The operator's 2026-09-26 ask: the collapsed running line renders
+    /// the descendant-tree aggregate in the SAME Cost column the agent
+    /// rows bill — the right-aligned `${:.2}` cell, the Age column blank
+    /// behind it — while the inactive line keeps its unbilled full-width
+    /// title. TS renders no cost on the summary row
+    /// (`createSubagentSummaryRow` pins `recursiveCost: 0`): the
+    /// aggregate is a deliberate Rust divergence.
+    #[test]
+    fn running_line_renders_the_aggregate_in_the_cost_column() {
+        let mut parent = parent_summary("p");
+        parent["usage"] = serde_json::json!({ "cost": 0.25 });
+        let mut runner = child_summary("r1", "p", "runner");
+        runner["usage"] = serde_json::json!({ "cost": 1.25 });
+        let mut grandchild = child_summary("gc", "r1", "grandkid");
+        grandchild["rlmChildId"] = serde_json::json!("child-gc");
+        grandchild["usage"] = serde_json::json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = serde_json::json!({ "cost": 2.5 });
+        let mut inactive_child = child_summary("x1", "p", "old worker");
+        inactive_child["usage"] = serde_json::json!({ "cost": 0.75 });
+        let mut mode = mode_with_parent_and_child();
+        mode.roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("r1", "running", runner),
+            roster_entry("gc", "running", grandchild),
+            roster_entry("i1", "idle", idle_child),
+            roster_entry("x1", "inactive", inactive_child),
+        ];
+        mode.rebuild_rows();
+        assert_eq!(mode.rows[1].title, "1, 1 running");
+        let (lines, _) = mode.render_frame(120, 36);
+        let flat_lines: Vec<String> = lines.iter().map(flat).collect();
+        let running = flat_lines
+            .iter()
+            .find(|line| line.contains("1, 1 running"))
+            .expect("running line renders");
+        let parent_line = flat_lines
+            .iter()
+            .find(|line| line.contains("p name"))
+            .expect("parent row renders");
+        let cost_at = running.find("$4.75").expect("the aggregate prints");
+        let parent_cost_at = parent_line.find("$5.00").expect("the parent total prints");
+        assert_eq!(
+            cost_at, parent_cost_at,
+            "the aggregate shares the agent rows' Cost column"
+        );
+        assert!(
+            running.trim_end().ends_with("$4.75"),
+            "the Age column stays blank behind the aggregate: {running:?}"
+        );
+        let inactive = flat_lines
+            .iter()
+            .find(|line| line.contains("inactive subagents"))
+            .expect("inactive line renders");
+        assert!(
+            !inactive.contains('$'),
+            "the inactive line keeps its unbilled full-width title: {inactive:?}"
+        );
+    }
+
+    /// A tree that spends nothing still prints its `$0.00` aggregate —
+    /// the cost cell rides the row, it is never a value-dependent
+    /// extra.
+    #[test]
+    fn running_line_renders_zero_when_nothing_bills() {
+        let mut mode = mode_with_parent_and_child();
+        assert_eq!(mode.rows[1].title, "1, 0 running");
+        let (lines, _) = mode.render_frame(120, 36);
+        let running = lines
+            .iter()
+            .map(flat)
+            .find(|line| line.contains("1, 0 running"))
+            .expect("running line renders");
+        assert!(
+            running.contains("$0.00"),
+            "the zero aggregate prints in the Cost column: {running:?}"
         );
     }
 }

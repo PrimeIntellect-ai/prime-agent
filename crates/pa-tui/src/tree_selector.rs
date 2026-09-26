@@ -429,7 +429,8 @@ fn printable(id: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::ColorMode;
+    use crate::theme::{ColorMode, Theme};
+    use serde_json::{json, Value};
 
     fn selector_data() -> serde_json::Value {
         serde_json::json!({
@@ -526,5 +527,178 @@ mod tests {
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Enter select\n"), "{text}");
         assert!(!text.contains("Esc back"), "{text}");
+    }
+
+    /// The `get_session_tree` wire payload of a linear chain of user
+    /// messages `n0..n{depth-1}`, leaf at the far end.
+    fn wire_chain(depth: usize) -> Value {
+        let mut flat_nodes = Vec::with_capacity(depth);
+        let mut parent: Option<String> = None;
+        for step in 0..depth {
+            let id = format!("n{step}");
+            flat_nodes.push(json!({
+                "entry": {
+                    "type": "message",
+                    "id": id,
+                    "parentId": parent,
+                    "timestamp": "2024-01-01T00:00:00.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": format!("m{step}"),
+                        "timestamp": 0,
+                    },
+                },
+            }));
+            parent = Some(id);
+        }
+        json!({
+            "flatNodes": flat_nodes,
+            "leafId": format!("n{}", depth - 1),
+        })
+    }
+
+    /// One cycle-only or cycle-plus-clean-roots payload, with `leaf` as
+    /// the reported leaf.
+    fn wire_parents(leaf: &str) -> Value {
+        json!({
+            "flatNodes": [
+                {
+                    "entry": {
+                        "type": "message", "id": "a", "parentId": "b",
+                        "timestamp": "2024-01-01T00:00:00.000Z",
+                        "message": { "role": "user", "content": "a", "timestamp": 0 },
+                    },
+                },
+                {
+                    "entry": {
+                        "type": "message", "id": "b", "parentId": "a",
+                        "timestamp": "2024-01-01T00:00:01.000Z",
+                        "message": { "role": "user", "content": "b", "timestamp": 0 },
+                    },
+                },
+                {
+                    "entry": {
+                        "type": "message", "id": "r", "parentId": null,
+                        "timestamp": "2024-01-01T00:00:02.000Z",
+                        "message": { "role": "user", "content": "r", "timestamp": 0 },
+                    },
+                },
+                {
+                    "entry": {
+                        "type": "message", "id": "c", "parentId": "r",
+                        "timestamp": "2024-01-01T00:00:03.000Z",
+                        "message": { "role": "user", "content": "c", "timestamp": 0 },
+                    },
+                },
+            ],
+            "leafId": leaf,
+        })
+    }
+
+    fn rows_text(selector: &TreeSelector, theme: &Theme, width: usize) -> Vec<String> {
+        selector
+            .render(theme, width, &KeybindingsManager::new())
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn empty_wire_tree_returns_none() {
+        // Empty data never opens the pane: the caller shows its
+        // "No entries in session" note instead.
+        let empty = json!({ "flatNodes": [], "leafId": null });
+        assert!(
+            TreeSelector::new(&empty, 40, false, FilterMode::Default).is_none(),
+            "empty flatNodes must not open"
+        );
+        let missing = json!({ "leafId": null });
+        assert!(
+            TreeSelector::new(&missing, 40, false, FilterMode::Default).is_none(),
+            "missing flatNodes must not open"
+        );
+    }
+
+    #[test]
+    fn deep_wire_chain_opens_and_renders() {
+        // The operator's crash input: a linear session tens of thousands
+        // of entries deep. Build, walk, and render all stay off the call
+        // stack, and the leaf stays selected through the whole depth.
+        let data = wire_chain(30_000);
+        let selector =
+            TreeSelector::new(&data, 24, false, FilterMode::Default).expect("deep chain opens");
+        assert_eq!(selector.current_leaf_id(), Some("n29999"));
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let text = rows_text(&selector, &theme, 80);
+        assert!(
+            text.iter().any(|row| row.contains("(30000/30000)")),
+            "counter: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("m29999")),
+            "leaf row rendered: {text:?}"
+        );
+    }
+
+    #[test]
+    fn single_wire_node_renders() {
+        let data = wire_chain(1);
+        let selector =
+            TreeSelector::new(&data, 24, false, FilterMode::Default).expect("single node opens");
+        assert_eq!(selector.current_leaf_id(), Some("n0"));
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let text = rows_text(&selector, &theme, 40);
+        assert!(text.iter().any(|row| row.contains("user: m0")), "{text:?}");
+        assert!(text.iter().any(|row| row.contains("(1/1)")), "{text:?}");
+    }
+
+    #[test]
+    fn zero_terminal_rows_and_zero_width_render() {
+        // A zero-size terminal geometry must render, not panic: the pane
+        // clamps its border and truncates every row to the budget.
+        let data = wire_chain(2);
+        let selector = TreeSelector::new(&data, 0, false, FilterMode::Default)
+            .expect("selector opens at zero terminal rows");
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let rows = selector.render(&theme, 0, &KeybindingsManager::new());
+        assert!(!rows.is_empty());
+        let rows = selector.render(&theme, 1, &KeybindingsManager::new());
+        assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn parent_cycles_terminate() {
+        // A cycle with no root yields an empty tree (the caller's empty
+        // note); with a clean root present the pane opens, and a leaf
+        // inside the cycle ends the parent-chain walks instead of
+        // spinning.
+        let cycle_only = json!({
+            "flatNodes": [
+                {
+                    "entry": {
+                        "type": "message", "id": "a", "parentId": "b",
+                        "timestamp": "2024-01-01T00:00:00.000Z",
+                        "message": { "role": "user", "content": "a", "timestamp": 0 },
+                    },
+                },
+                {
+                    "entry": {
+                        "type": "message", "id": "b", "parentId": "a",
+                        "timestamp": "2024-01-01T00:00:01.000Z",
+                        "message": { "role": "user", "content": "b", "timestamp": 0 },
+                    },
+                },
+            ],
+            "leafId": "a",
+        });
+        assert!(TreeSelector::new(&cycle_only, 24, false, FilterMode::Default).is_none());
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        for leaf in ["c", "a"] {
+            let selector = TreeSelector::new(&wire_parents(leaf), 24, false, FilterMode::Default)
+                .expect("clean root survives a sibling cycle");
+            assert_eq!(selector.current_leaf_id(), Some(leaf));
+            let rows = selector.render(&theme, 60, &KeybindingsManager::new());
+            assert!(!rows.is_empty());
+        }
     }
 }

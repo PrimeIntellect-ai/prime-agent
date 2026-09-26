@@ -265,7 +265,9 @@ Remaining:
 ## 15. CLI command surface - partial
 
 Wired through the daemon client (#67, `pa-cli/src/daemon_command.rs`):
-`list [--all]`, `attach`, `stop` (kill), `rename`, `send`, `schedule`/cron.
+`list [--all]`, `sessions [--all] [--json]` (TS #2422, the one-line-per-agent
+operator table in `pa-cli/src/sessions_table_format.rs`), `attach`, `stop`
+(kill), `rename`, `send`, `schedule`/cron.
 `package` (#66) and `mcp` (family 12) run to completion; flag/error parity
 rows are differential-tested (`pa-cli/tests/differential_cli.rs`).
 

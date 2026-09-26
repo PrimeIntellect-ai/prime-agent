@@ -34,11 +34,27 @@ pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
         .expect("thinking level is always in EXTENDED_THINKING_LEVELS")
 }
 
-/// Thinking levels the model supports: "off" always when non-reasoning;
-/// otherwise every level that is not explicitly mapped to null. `xhigh`/`max`
-/// additionally require an explicit mapping.
+/// Whether the model has a thinking surface at all (the TS session's
+/// `supportsThinking`): the coarse `reasoning` flag, or a thinking-level
+/// map that maps at least one level to a wire value. A route that
+/// declares addressable thinking levels is thinking-capable even when the
+/// flag is false (the live catalog ships `gpt-5.3-chat-latest` as
+/// `reasoning: false` with an addressable `xhigh`); an all-null map is the
+/// "keep reasoning output, send no unverified controls" encoding, not a
+/// capability claim of its own.
+pub fn supports_thinking(model: &Model) -> bool {
+    model.reasoning
+        || model
+            .thinking_level_map
+            .as_ref()
+            .is_some_and(|map| map.values().any(Option::is_some))
+}
+
+/// Thinking levels the model supports: "off" only for a model without a
+/// thinking surface; otherwise every level that is not explicitly mapped to
+/// null. `xhigh`/`max` additionally require an explicit mapping.
 pub fn get_supported_thinking_levels(model: &Model) -> Vec<ModelThinkingLevel> {
-    if !model.reasoning {
+    if !supports_thinking(model) {
         return vec![ModelThinkingLevel::Off];
     }
     EXTENDED_THINKING_LEVELS
@@ -181,6 +197,67 @@ mod tests {
             clamp_thinking_level(&m, ModelThinkingLevel::High),
             ModelThinkingLevel::Off
         );
+    }
+
+    #[test]
+    fn an_addressable_map_enables_thinking_without_the_reasoning_flag() {
+        // The live catalog's `gpt-5.3-chat-latest` shape: `reasoning: false`
+        // with `off` nulled and `xhigh` addressable — the map is the
+        // stronger capability signal, so the levels answer from it.
+        let map = thinking_level_map(&[
+            (ModelThinkingLevel::Off, None),
+            (ModelThinkingLevel::Xhigh, Some("xhigh")),
+        ]);
+        let m = model(false, Some(map));
+        assert_eq!(
+            get_supported_thinking_levels(&m),
+            vec![
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+                ModelThinkingLevel::Xhigh,
+            ]
+        );
+        assert_eq!(
+            clamp_thinking_level(&m, ModelThinkingLevel::Max),
+            ModelThinkingLevel::Xhigh
+        );
+    }
+
+    #[test]
+    fn an_all_null_map_keeps_the_non_thinking_collapse() {
+        // The xAI subscription's unverified-control encoding: an all-null
+        // map claims no addressable level, so a non-reasoning model stays
+        // "off"-only (and a reasoning model's map filter is unchanged —
+        // it never claimed an addressable level either).
+        let all_null = thinking_level_map(&[
+            (ModelThinkingLevel::Off, None),
+            (ModelThinkingLevel::Minimal, None),
+            (ModelThinkingLevel::Low, None),
+            (ModelThinkingLevel::Medium, None),
+            (ModelThinkingLevel::High, None),
+            (ModelThinkingLevel::Xhigh, None),
+            (ModelThinkingLevel::Max, None),
+        ]);
+        let non_thinking = model(false, Some(all_null.clone()));
+        assert_eq!(
+            get_supported_thinking_levels(&non_thinking),
+            vec![ModelThinkingLevel::Off]
+        );
+        assert!(!supports_thinking(&non_thinking));
+        let reasoning = model(true, Some(all_null));
+        assert!(get_supported_thinking_levels(&reasoning).is_empty());
+    }
+
+    #[test]
+    fn supports_thinking_reads_the_flag_and_the_map() {
+        assert!(supports_thinking(&model(true, None)));
+        assert!(!supports_thinking(&model(false, None)));
+        // A map that only disables (`off` → "none") still addresses a
+        // thinking level: the surface exists.
+        let toggle = thinking_level_map(&[(ModelThinkingLevel::Off, Some("none"))]);
+        assert!(supports_thinking(&model(false, Some(toggle))));
     }
 
     #[test]
