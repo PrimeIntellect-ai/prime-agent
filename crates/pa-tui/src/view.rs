@@ -3069,8 +3069,9 @@ mod tests {
         // over a covered row that has content to keep.
         let mut view = view_with(
             (0..40)
-                .map(|index| ChatEntry::User {
+                .map(|index| ChatEntry::Status {
                     text: format!("covered line {index}"),
+                    kind: crate::chat::StatusKind::Info,
                 })
                 .collect(),
         );

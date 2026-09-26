@@ -1033,8 +1033,11 @@ mod tests {
         // property).
         for width in [7, 23, 80] {
             let rendered = render_client_text(&rows, &theme, width);
+            // The TS `Spacer(1)` leading blank rides first, unpadded;
+            // every CONTENT row below it pads to exactly the width.
             assert!(!rendered.is_empty(), "the leading spacer always renders");
-            for row in &rendered {
+            assert!(rendered[0].is_empty(), "the leading spacer is the TS blank");
+            for row in &rendered[1..] {
                 assert_eq!(
                     crate::width::spans_width(row),
                     width,

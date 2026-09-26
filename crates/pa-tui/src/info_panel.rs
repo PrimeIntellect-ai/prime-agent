@@ -274,9 +274,18 @@ mod tests {
         KeybindingsManager::new()
     }
 
+    /// The frame text with trailing padding trimmed: the content rows
+    /// pad to the full frame width (the panel surface), so the
+    /// assertions read the content.
     fn plain(rows: &[Line]) -> Vec<String> {
         rows.iter()
-            .map(|row| row.iter().map(|span| span.content.as_str()).collect())
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -403,8 +412,10 @@ mod tests {
         assert_eq!(panel.scroll, 0);
         assert_eq!(panel.handle_key("end", &kb), InfoPanelAction::None);
         assert_eq!(panel.scroll, max_scroll);
-        // Read-only: inert keys are consumed, never leaked to the editor.
-        assert_eq!(panel.handle_key("left", &kb), InfoPanelAction::None);
+        // The modal-back key closes like Esc (the pickers' back key);
+        // read-only inert keys are consumed, never leaked to the editor.
+        assert_eq!(panel.handle_key("left", &kb), InfoPanelAction::Close);
+        assert_eq!(panel.handle_key("a", &kb), InfoPanelAction::None);
         assert_eq!(panel.handle_key("enter", &kb), InfoPanelAction::None);
     }
 
