@@ -899,12 +899,12 @@ mod agent_message_tests;
 mod prompt_image_tests;
 
 #[cfg(test)]
-mod update_snapshot_tests;
+mod recovery_verdict_tests;
+#[cfg(test)]
+mod replacement_gate_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod turn_stream_tests;
 #[cfg(test)]
-mod replacement_gate_tests;
-#[cfg(test)]
-mod recovery_verdict_tests;
+mod update_snapshot_tests;

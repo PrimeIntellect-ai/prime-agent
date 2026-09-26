@@ -4,236 +4,238 @@ use super::*;
 
 use crate::types::SessionSummary;
 
-    pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {
-        // The one summary composer (TS `summaryForActiveSession`): the
-        // roster feed, `get_state`, and list rows all serve it, so the
-        // live flags (`isRunningTools` from the core's in-flight tool
-        // calls, `isBashRunning` from the user bash) never drift between
-        // surfaces.
-        let mut summary = session_summary(
-            core,
-            &self
-                .engine
-                .effective_thinking_level()
-                .unwrap_or_else(|| "default".to_string()),
-            self.engine.model_metadata(),
-            self.engine.model_fallback_message(),
-            self.user_bash.is_running(),
-        );
-        // The worker's roster-delta counter at snapshot time, and the
-        // process instance that read it — the pair is one snapshot:
-        // the supervisor's pull gate orders the summary against the
-        // watermark of the generation that took it, so a delta still
-        // in flight when the pull answered (a sequence at or below
-        // the counter) is dropped instead of overwriting the pull's
-        // fresher state. Both reads run under the caller's core
-        // lock, and every push stamps its snapshot after the state
-        // change it describes and before its counter increment, so
-        // a counter this summary embeds already includes every
-        // change the snapshot reflects. The PRE-first-push stamp of
-        // zero is a sequenced counter (the supervisor gates it like
-        // any other — a delayed pre-push pull never overwrites a
-        // newer delta's state); only a summary that carries no
-        // counter at all is the unsequenced legacy write.
-        summary.roster_delta_sequence = Some(
-            self.roster_delta_sequence
-                .load(std::sync::atomic::Ordering::SeqCst),
-        );
-        summary.worker_instance_id = (!self.config.worker_instance_id.is_empty())
-            .then(|| self.config.worker_instance_id.clone());
-        summary
-    }
+impl Worker {
+pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {
+    // The one summary composer (TS `summaryForActiveSession`): the
+    // roster feed, `get_state`, and list rows all serve it, so the
+    // live flags (`isRunningTools` from the core's in-flight tool
+    // calls, `isBashRunning` from the user bash) never drift between
+    // surfaces.
+    let mut summary = session_summary(
+        core,
+        &self
+            .engine
+            .effective_thinking_level()
+            .unwrap_or_else(|| "default".to_string()),
+        self.engine.model_metadata(),
+        self.engine.model_fallback_message(),
+        self.user_bash.is_running(),
+    );
+    // The worker's roster-delta counter at snapshot time, and the
+    // process instance that read it — the pair is one snapshot:
+    // the supervisor's pull gate orders the summary against the
+    // watermark of the generation that took it, so a delta still
+    // in flight when the pull answered (a sequence at or below
+    // the counter) is dropped instead of overwriting the pull's
+    // fresher state. Both reads run under the caller's core
+    // lock, and every push stamps its snapshot after the state
+    // change it describes and before its counter increment, so
+    // a counter this summary embeds already includes every
+    // change the snapshot reflects. The PRE-first-push stamp of
+    // zero is a sequenced counter (the supervisor gates it like
+    // any other — a delayed pre-push pull never overwrites a
+    // newer delta's state); only a summary that carries no
+    // counter at all is the unsequenced legacy write.
+    summary.roster_delta_sequence = Some(
+        self.roster_delta_sequence
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    summary.worker_instance_id = (!self.config.worker_instance_id.is_empty())
+        .then(|| self.config.worker_instance_id.clone());
+    summary
+}
 
-    pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
-        session_snapshot(core)
-    }
+pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
+    session_snapshot(core)
+}
 
-    /// Push one roster delta from a command arm (the model/thinking
-    /// switch seams): the same frame the turn runner's busy flips push,
-    /// so a switch reaches the subscribed roster surfaces (the agents
-    /// view) without a turn — the TS roster-flush parity for
-    /// `thinking_level_changed` and the `set_model`/`cycle_model`
-    /// handlers.
-    pub(crate) fn push_roster_delta(&self) {
-        self.roster_pushes.push();
-    }
+/// Push one roster delta from a command arm (the model/thinking
+/// switch seams): the same frame the turn runner's busy flips push,
+/// so a switch reaches the subscribed roster surfaces (the agents
+/// view) without a turn — the TS roster-flush parity for
+/// `thinking_level_changed` and the `set_model`/`cycle_model`
+/// handlers.
+pub(crate) fn push_roster_delta(&self) {
+    self.roster_pushes.push();
+}
 
-    pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
-        let store = core.store.as_ref();
-        let model = self.engine.model_metadata();
-        let model_fast_mode = model
-            .as_ref()
-            .and_then(|model| model.get("id"))
-            .and_then(Value::as_str)
-            .is_some_and(supports_fast_mode);
-        AgentConnectionState {
-            is_streaming: core.busy,
-            is_compacting: core.compacting,
-            active_session_id: Some(core.active_session_id.clone()),
-            cwd: core.cwd.clone(),
-            model,
-            thinking_level: self
-                .engine
-                .effective_thinking_level()
-                .unwrap_or_else(|| "default".to_string()),
-            // The effective tier: the preference clamped to the model's
-            // fast-mode support (`priority` degrades to `default`).
-            service_tier: crate::setting_switches::service_tier_wire_name(
-                effective_service_tier(core.service_tier, model_fast_mode)
-                    .unwrap_or(pa_types::ai::ServiceTier::Auto),
-            )
-            .to_string(),
-            // The resolved model's supported levels (TS `getSupportedThinkingLevels`
-            // in `getState`): a non-reasoning model reports ["off"], which the
-            // client treats as no thinking surface.
-            available_thinking_levels: self
-                .engine
-                .supported_thinking_levels()
-                .unwrap_or_else(|| vec!["off".to_string()]),
-            is_bash_running: self.user_bash.is_running(),
-            retry_attempt: 0,
-            steering_mode: core.steering_mode.clone(),
-            follow_up_mode: core.follow_up_mode.clone(),
-            session_file: store.map(|s| s.path.to_string_lossy().to_string()),
-            session_id: store
-                .map(|s| s.session_id().to_string())
-                .unwrap_or_default(),
-            session_name: store.and_then(|s| s.session_name().map(str::to_string)),
-            session_dir: store
-                .and_then(|s| s.path.parent())
-                .map(|p| p.to_string_lossy().to_string()),
-            leaf_id: store.and_then(|s| s.leaf_id().map(str::to_string)),
-            auto_compaction_enabled: core.auto_compaction_enabled,
-            message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
-            session_actions: session_snapshot(core),
-            compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
-            goal: self.engine.goal_state_value(),
-            scoped_models: core.scoped_models.clone(),
-            active_tool_names: Vec::new(),
-            context_usage: None,
-        }
-    }
-
-    /// Persist the queue lanes to the worker recovery journal (crash-safe
-    /// queue recovery; TS keeps session files free of daemon bookkeeping).
-    /// Call after releasing the core lock: `record_recovery` takes the locks
-    /// in the opposite order.
-    pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
-        let mut guard = self.recovery.lock().unwrap();
-        let Some(journal) = guard.as_mut() else {
-            return;
-        };
-        let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
-    }
-
-    /// One queue-lane recovery checkpoint through the worker's own
-    /// journal: the lane snapshot and the busy verdict ride one locked
-    /// read (`checkpoint_queue_recovery`).
-    pub(crate) fn checkpoint_queue(&self, checkpoint: QueueCheckpoint) {
-        checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint);
-    }
-
-    pub(crate) fn record_recovery(&self, busy: bool, operation: &str) -> Result<()> {
-        let mut guard = self.recovery.lock().unwrap();
-        let Some(journal) = guard.as_mut() else {
-            return Ok(());
-        };
-        let core = self.core.lock().unwrap();
-        let store = core.store.as_ref();
-        journal.record(
-            &core.active_session_id,
-            store.map_or("", crate::session_store::SessionFile::session_id),
-            store
-                .map(|s| s.path.to_string_lossy().to_string())
-                .as_deref(),
-            busy,
-            operation,
+pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
+    let store = core.store.as_ref();
+    let model = self.engine.model_metadata();
+    let model_fast_mode = model
+        .as_ref()
+        .and_then(|model| model.get("id"))
+        .and_then(Value::as_str)
+        .is_some_and(supports_fast_mode);
+    AgentConnectionState {
+        is_streaming: core.busy,
+        is_compacting: core.compacting,
+        active_session_id: Some(core.active_session_id.clone()),
+        cwd: core.cwd.clone(),
+        model,
+        thinking_level: self
+            .engine
+            .effective_thinking_level()
+            .unwrap_or_else(|| "default".to_string()),
+        // The effective tier: the preference clamped to the model's
+        // fast-mode support (`priority` degrades to `default`).
+        service_tier: crate::setting_switches::service_tier_wire_name(
+            effective_service_tier(core.service_tier, model_fast_mode)
+                .unwrap_or(pa_types::ai::ServiceTier::Auto),
         )
+        .to_string(),
+        // The resolved model's supported levels (TS `getSupportedThinkingLevels`
+        // in `getState`): a non-reasoning model reports ["off"], which the
+        // client treats as no thinking surface.
+        available_thinking_levels: self
+            .engine
+            .supported_thinking_levels()
+            .unwrap_or_else(|| vec!["off".to_string()]),
+        is_bash_running: self.user_bash.is_running(),
+        retry_attempt: 0,
+        steering_mode: core.steering_mode.clone(),
+        follow_up_mode: core.follow_up_mode.clone(),
+        session_file: store.map(|s| s.path.to_string_lossy().to_string()),
+        session_id: store
+            .map(|s| s.session_id().to_string())
+            .unwrap_or_default(),
+        session_name: store.and_then(|s| s.session_name().map(str::to_string)),
+        session_dir: store
+            .and_then(|s| s.path.parent())
+            .map(|p| p.to_string_lossy().to_string()),
+        leaf_id: store.and_then(|s| s.leaf_id().map(str::to_string)),
+        auto_compaction_enabled: core.auto_compaction_enabled,
+        message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
+        session_actions: session_snapshot(core),
+        compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
+        goal: self.engine.goal_state_value(),
+        scoped_models: core.scoped_models.clone(),
+        active_tool_names: Vec::new(),
+        context_usage: None,
     }
+}
 
-    /// Sequence and broadcast one `session_event` frame at the worker
-    /// level (the TS `_emit` backing for switch notifications).
-    pub(crate) fn emit_worker_event(&self, event: Value) {
-        emit_worker_event_with(&self.core, &self.events, event);
-    }
+/// Persist the queue lanes to the worker recovery journal (crash-safe
+/// queue recovery; TS keeps session files free of daemon bookkeeping).
+/// Call after releasing the core lock: `record_recovery` takes the locks
+/// in the opposite order.
+pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
+    let mut guard = self.recovery.lock().unwrap();
+    let Some(journal) = guard.as_mut() else {
+        return;
+    };
+    let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
+}
 
-    /// Record one durable custom row and broadcast its
-    /// `message_start`/`message_end` pair (the TS `_emit` for rows the
-    /// session appends outside a turn: `append_custom_message`, the
-    /// `refine` outcome and notice, restored prefix rows).
-    pub(crate) fn emit_custom_row(&self, message: Value) {
-        {
-            let mut core = self.core.lock().unwrap();
-            if let Some(store) = core.store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom_message",
-                    json!({
-                        "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                        "content": message.get("content").cloned().unwrap_or(Value::Null),
-                        "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                        "details": message.get("details").cloned().unwrap_or(Value::Null),
-                    }),
-                );
-            }
-        }
-        self.emit_worker_event(json!({ "type": "message_start", "message": message }));
-        self.emit_worker_event(json!({ "type": "message_end", "message": message }));
-    }
+/// One queue-lane recovery checkpoint through the worker's own
+/// journal: the lane snapshot and the busy verdict ride one locked
+/// read (`checkpoint_queue_recovery`).
+pub(crate) fn checkpoint_queue(&self, checkpoint: QueueCheckpoint) {
+    checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint);
+}
 
-    /// Sequence and broadcast one `session_event` for the queue projection.
-    pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
+pub(crate) fn record_recovery(&self, busy: bool, operation: &str) -> Result<()> {
+    let mut guard = self.recovery.lock().unwrap();
+    let Some(journal) = guard.as_mut() else {
+        return Ok(());
+    };
+    let core = self.core.lock().unwrap();
+    let store = core.store.as_ref();
+    journal.record(
+        &core.active_session_id,
+        store.map_or("", crate::session_store::SessionFile::session_id),
+        store
+            .map(|s| s.path.to_string_lossy().to_string())
+            .as_deref(),
+        busy,
+        operation,
+    )
+}
+
+/// Sequence and broadcast one `session_event` frame at the worker
+/// level (the TS `_emit` backing for switch notifications).
+pub(crate) fn emit_worker_event(&self, event: Value) {
+    emit_worker_event_with(&self.core, &self.events, event);
+}
+
+/// Record one durable custom row and broadcast its
+/// `message_start`/`message_end` pair (the TS `_emit` for rows the
+/// session appends outside a turn: `append_custom_message`, the
+/// `refine` outcome and notice, restored prefix rows).
+pub(crate) fn emit_custom_row(&self, message: Value) {
+    {
         let mut core = self.core.lock().unwrap();
-        // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
-        // empty queue before and after a turn is not an update).
-        if core.last_action_snapshot.as_ref() == Some(snapshot) {
-            return Ok(());
+        if let Some(store) = core.store.as_mut() {
+            let _ = store.persist_entry(
+                "custom_message",
+                json!({
+                    "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                    "content": message.get("content").cloned().unwrap_or(Value::Null),
+                    "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                    "details": message.get("details").cloned().unwrap_or(Value::Null),
+                }),
+            );
         }
-        core.last_action_snapshot = Some(snapshot.clone());
-        let sequence = core.last_event_sequence + 1;
-        core.last_event_sequence = sequence;
-        let meta = create_daemon_event_meta(
-            &core.active_session_id,
-            sequence,
-            None,
-            Some(&core.generation),
-        );
-        let outbound = DaemonOutbound::SessionEvent {
-            active_session_id: core.active_session_id.clone(),
-            event: json!({ "type": "session_action_update", "actions": snapshot }),
-            meta: Some(meta),
-            rest: Map::default(),
-        };
-        let payload = serde_json::to_vec(&outbound)?;
-        drop(core);
-        self.events.send(OutboundFrame::session_event(payload));
-        Ok(())
     }
+    self.emit_worker_event(json!({ "type": "message_start", "message": message }));
+    self.emit_worker_event(json!({ "type": "message_end", "message": message }));
+}
 
-    pub(crate) fn emit_session_closed(
-        &self,
-        active_session_id: &str,
-        reason: DaemonSessionClosedReason,
-    ) -> Result<()> {
-        let mut core = self.core.lock().unwrap();
-        let sequence = core.last_event_sequence + 1;
-        core.last_event_sequence = sequence;
-        let meta = create_daemon_event_meta(
-            &core.active_session_id,
-            sequence,
-            None,
-            Some(&core.generation),
-        );
-        let outbound = DaemonOutbound::SessionClosed {
-            active_session_id: active_session_id.to_string(),
-            reason,
-            meta: Some(meta),
-            rest: Map::default(),
-        };
-        let payload = serde_json::to_vec(&outbound)?;
-        drop(core);
-        self.events.send(OutboundFrame::session_event(payload));
-        Ok(())
+/// Sequence and broadcast one `session_event` for the queue projection.
+pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
+    let mut core = self.core.lock().unwrap();
+    // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
+    // empty queue before and after a turn is not an update).
+    if core.last_action_snapshot.as_ref() == Some(snapshot) {
+        return Ok(());
     }
+    core.last_action_snapshot = Some(snapshot.clone());
+    let sequence = core.last_event_sequence + 1;
+    core.last_event_sequence = sequence;
+    let meta = create_daemon_event_meta(
+        &core.active_session_id,
+        sequence,
+        None,
+        Some(&core.generation),
+    );
+    let outbound = DaemonOutbound::SessionEvent {
+        active_session_id: core.active_session_id.clone(),
+        event: json!({ "type": "session_action_update", "actions": snapshot }),
+        meta: Some(meta),
+        rest: Map::default(),
+    };
+    let payload = serde_json::to_vec(&outbound)?;
+    drop(core);
+    self.events.send(OutboundFrame::session_event(payload));
+    Ok(())
+}
+
+pub(crate) fn emit_session_closed(
+    &self,
+    active_session_id: &str,
+    reason: DaemonSessionClosedReason,
+) -> Result<()> {
+    let mut core = self.core.lock().unwrap();
+    let sequence = core.last_event_sequence + 1;
+    core.last_event_sequence = sequence;
+    let meta = create_daemon_event_meta(
+        &core.active_session_id,
+        sequence,
+        None,
+        Some(&core.generation),
+    );
+    let outbound = DaemonOutbound::SessionClosed {
+        active_session_id: active_session_id.to_string(),
+        reason,
+        meta: Some(meta),
+        rest: Map::default(),
+    };
+    let payload = serde_json::to_vec(&outbound)?;
+    drop(core);
+    self.events.send(OutboundFrame::session_event(payload));
+    Ok(())
+}
+}
 
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
