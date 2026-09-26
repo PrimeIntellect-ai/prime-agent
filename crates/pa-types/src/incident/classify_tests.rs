@@ -158,7 +158,10 @@ fn classifies_worker_events_for_windows_named_pipe_sockets() {
             ("component", serde_json::json!("coding-agent.daemon")),
             ("socketPath", serde_json::json!(socket_path)),
             ("pid", serde_json::json!(53615)),
-            ("msg", serde_json::json!("uncaught exception: Error: write EPIPE")),
+            (
+                "msg",
+                serde_json::json!("uncaught exception: Error: write EPIPE"),
+            ),
         ]),
     ];
     let events = collect_incident_events(&entries, &collect_worker_pid_map(&entries));

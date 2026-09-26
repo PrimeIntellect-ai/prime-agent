@@ -98,13 +98,14 @@ fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
         decoy
             .set_times(std::fs::FileTimes::new().set_modified(future))
             .expect("future mtime");
-        let newest =
-            std::fs::File::open(agent_dir.join("logs/daemon.sock.98ed5cb2.log"))
-                .expect("open newest log");
+        let newest = std::fs::File::open(agent_dir.join("logs/daemon.sock.98ed5cb2.log"))
+            .expect("open newest log");
         newest
-            .set_times(std::fs::FileTimes::new().set_modified(
-                std::time::SystemTime::now() + std::time::Duration::from_secs(30),
-            ))
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+                ),
+            )
             .expect("newest mtime");
         let text = report_text("2026-09-10T20:00", "2026-09-10T20:30");
         assert!(text.contains("daemon.sock.98ed5cb2.log"), "{text}");
