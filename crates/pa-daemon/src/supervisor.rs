@@ -64,7 +64,8 @@ use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
-    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, UPDATE_PREPARING_MESSAGE,
+    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, PrepareState,
+    UPDATE_PREPARING_MESSAGE,
 };
 use crate::update_roster::{
     build_update_roster, supervisor_identity, UpdateRosterInputs, WorkerSnapshot,
@@ -4379,8 +4380,8 @@ impl Supervisor {
     /// The OS-signal drain step (SIGTERM/SIGINT; the loop in
     /// `crate::signal_drain` runs this once per received signal): the
     /// first signal enters the graceful drain, and any later signal - or
-    /// one that finds a client-command shutdown or an update exit
-    /// already in flight - force-exits instead.
+    /// one that finds a client-command shutdown or an update restart
+    /// already committed to its exit - force-exits instead.
     ///
     /// The gate flips synchronously, so from this moment every later
     /// client command is refused at the dispatch gate and every create
@@ -4397,12 +4398,15 @@ impl Supervisor {
     /// Returns `true` when this call started the drain (the signal loop
     /// keeps waiting for the force signal); `false` when a drain or exit
     /// was already in flight (the caller is the forced exit). The update
-    /// restart's exit ordering is preserved: a signal that finds
-    /// `accept_exit` already published never flips the shutdown gate, so
-    /// it cannot convert the descriptor-preserving update exit into a
-    /// terminal stop pass.
+    /// restart's exit windows are guarded on both ends: a signal that
+    /// finds the coordinator in `Stopping` (workers already being stopped
+    /// with their descriptors kept for the successor) or `accept_exit`
+    /// already published never flips the shutdown gate, so it cannot
+    /// convert the descriptor-preserving update exit into a terminal
+    /// stop pass.
     pub(crate) fn begin_signal_drain(self: &Arc<Self>) -> bool {
-        if self.accept_exit.load(Ordering::SeqCst)
+        if self.update_prepare.active_state() == Some(PrepareState::Stopping)
+            || self.accept_exit.load(Ordering::SeqCst)
             || self.shutting_down.swap(true, Ordering::SeqCst)
         {
             return false;
@@ -4417,10 +4421,6 @@ impl Supervisor {
         tokio::spawn(async move {
             supervisor.ensure_shutdown_started().await;
         });
-        // Console note last: a dead stderr pipe must not unwind an armed drain.
-        eprintln!(
-            "pa-daemon: received shutdown signal; draining before exit (a second signal forces it)"
-        );
         true
     }
 }
@@ -5220,11 +5220,19 @@ mod tests {
             .await
             .expect("the drain routes the worker's shutdown")
             .expect("the routed channel stays open");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(
-            !supervisor.accept_exit.load(Ordering::SeqCst),
-            "the stop pass must wait for the settling turn"
-        );
+        // While the settle is held the pass can never finish (the routed
+        // reply is the flush barrier), so assert it stays unexited across
+        // a polled window: a fire-and-forget drain that retired the
+        // worker early fails here deterministically, not on one fixed
+        // sleep.
+        let hold_deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while std::time::Instant::now() < hold_deadline {
+            assert!(
+                !supervisor.accept_exit.load(Ordering::SeqCst),
+                "the stop pass must wait for the settling turn"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let _ = settle_release_tx.send(());
         tokio::time::timeout(Duration::from_secs(2), turn_settled_rx)
             .await
@@ -5305,6 +5313,41 @@ mod tests {
         assert!(
             !supervisor.shutting_down.load(Ordering::SeqCst),
             "the update exit must not become a terminal stop pass"
+        );
+
+        // The update's committed stop window (the coordinator's Stopping
+        // state, before exit_for_update publishes accept_exit): a signal
+        // forces without flipping the gate, so the terminal pass can never
+        // tombstone and delete the descriptors the successor must adopt.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let update_id = UpdateId::from("u-signal".to_string());
+        let budget = UpdateTimeoutBudget::from_env();
+        supervisor
+            .update_prepare
+            .begin(update_id.clone(), util::now_ms(), &budget);
+        supervisor.update_prepare.drain_complete(&update_id);
+        supervisor
+            .update_prepare
+            .snapshot_written(&update_id, util::now_ms(), &budget);
+        supervisor.update_prepare.prepare_acked(&update_id);
+        supervisor.update_prepare.commit(&update_id);
+        assert_eq!(
+            supervisor.update_prepare.active_state(),
+            Some(PrepareState::Stopping),
+            "the transaction reached the committed stop window"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the committed update stop forces"
+        );
+        assert!(
+            !supervisor.shutting_down.load(Ordering::SeqCst),
+            "the committed update stop must not become a terminal stop pass"
         );
     }
 }
