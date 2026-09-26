@@ -213,7 +213,7 @@ impl Supervisor {
     /// (registration, adoption, and create flows).
     pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "get_state",
                 json!({}),

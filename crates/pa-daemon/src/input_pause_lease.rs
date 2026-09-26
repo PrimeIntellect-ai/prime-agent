@@ -196,7 +196,7 @@ impl Supervisor {
             "clientId": owner_connection,
         });
         let mut response = match self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "acquire_session_input_pause",
                 payload,
@@ -309,7 +309,7 @@ impl Supervisor {
             "clientId": entry.owner_connection_id,
         });
         let response = self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "release_session_input_pause",
                 payload,
@@ -382,7 +382,7 @@ impl Supervisor {
                     "clientId": entry.owner_connection_id,
                 });
                 let released = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "release_session_input_pause",
                         payload,
