@@ -237,8 +237,8 @@ impl Supervisor {
                 "Prompt admission was cancelled.",
             );
         }
-        let (worker_admission_id, timeout) =
-            match connection.prompt_admissions.with(&key, |admission| {
+        let Some((worker_admission_id, timeout)) =
+            connection.prompt_admissions.with(&key, |admission| {
                 (
                     admission.worker_admission_id.clone(),
                     if matches!(
@@ -250,16 +250,14 @@ impl Supervisor {
                         ROUTE_TIMEOUT_MS
                     },
                 )
-            }) {
-                Some(fields) => fields,
-                // An admission that vanished before the route: the prompt
-                // routes through the generic path (TS `admission undefined`).
-                None => {
-                    return self
-                        .route_client_command(command, client_id, attached, command_id, type_name)
-                        .await
-                }
-            };
+            })
+        else {
+            // An admission that vanished before the route: the prompt
+            // routes through the generic path (TS `admission undefined`).
+            return self
+                .route_client_command(command, client_id, attached, command_id, type_name)
+                .await;
+        };
         // Resolve the session (the generic route's wake-aware resolution).
         let mut rebound_to: Option<String> = None;
         let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {

@@ -181,7 +181,7 @@ pub fn text_block(text: impl Into<String>) -> ContentBlock {
     ContentBlock::Text(TextContent {
         text: text.into(),
         text_signature: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 
@@ -190,7 +190,7 @@ pub fn image_block(data: impl Into<String>, mime_type: impl Into<String>) -> Con
     ContentBlock::Image(ImageContent {
         data: data.into(),
         mime_type: mime_type.into(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     })
 }
 

@@ -3,6 +3,7 @@
 
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier};
+use std::fmt::Write;
 
 /// Remove all escape sequences (CSI, OSC, DCS, APC/PM/SOS, and ordinary
 /// two-char escapes), leaving plain text — the exact port of TS `stripAnsi`
@@ -96,7 +97,7 @@ pub fn line_to_ansi(line: &Line) -> String {
     for span in line {
         let codes = sgr_codes(span);
         if let Some(codes) = codes {
-            out.push_str(&format!("\x1b[{codes}m"));
+            let _ = write!(out, "\x1b[{codes}m");
             open = true;
         }
         out.push_str(&span.content);
