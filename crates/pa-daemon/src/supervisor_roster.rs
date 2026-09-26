@@ -13,6 +13,7 @@ use pa_types::daemon::agent_roster::AgentRosterEntry;
 use pa_types::daemon::DaemonOutbound;
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::lease::canonical_session_path;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
@@ -212,7 +213,13 @@ impl Supervisor {
     /// (registration, adoption, and create flows).
     pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         let response = self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         if let Ok(response) = response {
             if response.success {

@@ -11,6 +11,7 @@ mod accept_loop;
 mod adoption;
 mod launch_budget;
 mod options;
+mod routing;
 
 use adoption::{AdoptionBoot, AdoptionOutcome};
 use launch_budget::{
@@ -26,6 +27,10 @@ use supervision::STABLE_LIFETIME_MS;
 
 pub(crate) use options::ClientRouting;
 pub use options::SupervisorOptions;
+
+// The routing consts and refusal string keep their crate::supervisor::* paths stable
+// (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
+pub(crate) use routing::{LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +50,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
     PersistedSupervisorConfig, SUPERVISOR_CONFIG_FILE_NAME,
@@ -73,29 +79,6 @@ use crate::update_roster::{
 };
 use crate::update_stop::{stop_workers_gracefully, WorkerStopVerdict, WORKER_REQUEST_TIMEOUT_MS};
 use crate::{socket, util};
-
-pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
-/// The route failure for a worker whose command channel is gone (never
-/// connected, or the writer pump broke on a dead socket): the request did
-/// not leave the supervisor, so the replacement-aware route may retry it
-/// against the next connection without risking a duplicate landing.
-pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
-
-/// Resolve a pending request whose frame provably never reached the worker
-/// (a failed frame write, or a request still queued when the writer pump
-/// ended) with the not-connected failure: `route_command` surfaces it as
-/// the unambiguous retryable error, never as an ambiguous timeout.
-async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
-    if let Some(reply) = resident.pending.lock().await.remove(request_id) {
-        let _ = reply.send(response_failure(
-            Some(request_id),
-            "route",
-            WORKER_NOT_CONNECTED,
-            None,
-        ));
-    }
-}
-pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
 
 pub struct Supervisor {
     pub(crate) options: SupervisorOptions,
@@ -211,7 +194,7 @@ impl Supervisor {
                 ),
             },
         )?;
-        let (events, _) = broadcast::channel(4096);
+        let (events, _) = broadcast::channel(crate::backpressure::EVENT_RING_CAPACITY);
         let log = paths::RotatingLog::new(paths::daemon_log_path(
             &options.socket_path,
             &options.agent_dir,
@@ -773,7 +756,13 @@ impl Supervisor {
             {
                 let command = if kill_stop { "kill" } else { "shutdown" };
                 let _ = self
-                    .route_command(resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        resident,
+                        command,
+                        json!({}),
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -984,130 +973,6 @@ impl Supervisor {
         };
         drop(guard);
         outcome
-    }
-
-    pub(crate) async fn route_command(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        command_type: &str,
-        payload: Value,
-        timeout_ms: u64,
-    ) -> Result<DaemonResponse> {
-        let cmd_tx = {
-            let guard = resident.cmd_tx.lock().await;
-            guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
-        };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let request_id = uuid::Uuid::new_v4().to_string();
-        resident
-            .pending
-            .lock()
-            .await
-            .insert(request_id.clone(), reply_tx);
-        cmd_tx
-            .send(WorkerRequest {
-                request_id: request_id.clone(),
-                command_type: command_type.to_string(),
-                payload,
-            })
-            .map_err(|_| anyhow!(WORKER_NOT_CONNECTED))?;
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-            // The writer pump resolves provably-unsent requests with the
-            // not-connected failure: surface it as the retryable route
-            // error instead of a worker response.
-            Ok(Ok(response))
-                if !response.success && response.error.as_deref() == Some(WORKER_NOT_CONNECTED) =>
-            {
-                Err(anyhow!(WORKER_NOT_CONNECTED))
-            }
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
-            Err(_) => {
-                // A timed-out request's reply slot must not sit in the
-                // pending map forever (a wedged worker never answers, and
-                // repeated bounded-timeout routes would otherwise grow the
-                // map without bound).
-                resident.pending.lock().await.remove(&request_id);
-                Err(anyhow!("Session worker timed out"))
-            }
-        }
-    }
-
-    /// Route one client-facing command to a resident worker, waiting out an
-    /// in-flight worker replacement (crash backoff, relaunch, create
-    /// replay) inside the caller's own timeout budget instead of failing
-    /// into the dead window: a child's detached task prompt that fires while
-    /// its worker is being replaced must land exactly once, never bounce
-    /// off a dead socket and never overtake the replayed session into
-    /// existence. The wait ends only once the replacement's create replay
-    /// completed; a send that fails with the unambiguous not-connected
-    /// error (the request never left the supervisor) is retried against the
-    /// next connection, while ambiguous failures (timeouts, dropped
-    /// replies) are returned as-is so a possibly-processed command is
-    /// never duplicated.
-    pub(crate) async fn route_command_ready(
-        self: &Arc<Self>,
-        resident: &Arc<ResidentWorker>,
-        command_type: &str,
-        payload: Value,
-        timeout_ms: u64,
-    ) -> Result<DaemonResponse> {
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            self.await_route_ready(resident, deadline).await?;
-            let remaining_ms = deadline
-                .saturating_duration_since(tokio::time::Instant::now())
-                .as_millis() as u64;
-            match self
-                .route_command(resident, command_type, payload.clone(), remaining_ms)
-                .await
-            {
-                // The socket died between the liveness check and the send
-                // (or the writer pump broke on an earlier request): the
-                // command never reached a worker, so waiting for the
-                // replacement and sending again cannot duplicate it.
-                Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
-                    if tokio::time::Instant::now() >= deadline
-                        || resident.route_state().retired
-                        || self.is_stopping(resident)
-                    {
-                        return Err(error);
-                    }
-                }
-                other => return other,
-            }
-        }
-    }
-
-    /// Wait until the resident is route-ready (a live connection whose
-    /// session create completed), bailing fast on retired/stopping workers
-    /// and on the deadline otherwise.
-    async fn await_route_ready(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        deadline: tokio::time::Instant,
-    ) -> Result<()> {
-        let mut state = resident.route_state_watcher();
-        loop {
-            let current = *state.borrow_and_update();
-            if current.connected && current.session_ready {
-                return Ok(());
-            }
-            if current.retired || self.is_stopping(resident) {
-                bail!(WORKER_NOT_CONNECTED);
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                bail!("Session worker timed out");
-            }
-            // Sleep until the route state moves or the deadline passes.
-            match tokio::time::timeout_at(deadline, state.changed()).await {
-                Ok(Ok(())) => {}
-                // The resident (and its watch sender) was dropped entirely.
-                Ok(Err(_)) => bail!(WORKER_NOT_CONNECTED),
-                Err(_) => bail!("Session worker timed out"),
-            }
-        }
     }
 
     /// Launch a brand-new worker for a create command.
@@ -1332,7 +1197,13 @@ impl Supervisor {
         };
         let mut child = child;
         let response = match self
-            .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "create",
+                create_payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -1515,13 +1386,30 @@ impl Supervisor {
         // Completed dispatches flow back through this channel so the loop
         // keeps writing: a long command (a turn, a compaction) must not
         // block this client's events or its other commands, like the TS
-        // daemon's async command handlers.
-        let (dispatch_tx, mut dispatch_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Vec<Value>, bool)>();
+        // daemon's async command handlers. Bounded at
+        // [`crate::backpressure::CLIENT_OUTBOUND_CAPACITY`]: a client that
+        // reads nothing stalls only its own dispatch tasks once the queue
+        // fills — memory stays bounded per connection — while every other
+        // client and worker is unaffected.
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+            crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
+        );
+        // One dispatch slot per concurrent command. The read arm is armed
+        // only while a slot is free — at the bound the loop stops reading
+        // the client's socket (the client's own send buffer carries its
+        // input: transport-level flow control instead of unbounded task
+        // spawn), while the dispatch and event arms keep draining, so the
+        // running tasks free their slots and the loop always re-arms the
+        // reader. A spawned task holds its slot until its response bundle
+        // has been handed to the queue, so a task parked on a full
+        // outbound queue still counts against this connection's bound.
+        let dispatch_slots = Arc::new(tokio::sync::Semaphore::new(
+            crate::backpressure::CLIENT_DISPATCH_CONCURRENCY,
+        ));
         loop {
             line.clear();
             tokio::select! {
-                read = reader.read_line(&mut line) => {
+                read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break };
                     if read == 0 {
                         break;
@@ -1530,6 +1418,13 @@ impl Supervisor {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // The arm's guard proved a slot free (this loop is
+                    // the only slot acquirer, and slots only free while
+                    // the loop is between iterations), so the non-blocking
+                    // take always succeeds.
+                    let dispatch_slot = Arc::clone(&dispatch_slots)
+                        .try_acquire_owned()
+                        .expect("the read arm's guard held a dispatch slot");
                     let supervisor = Arc::clone(&self);
                     let effective_client_id = Arc::clone(&effective_client_id);
                     let attached = Arc::clone(&attached);
@@ -1554,7 +1449,7 @@ impl Supervisor {
                                 &stream_tx,
                             )
                             .await;
-                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                        if dispatch_tx.send((lines, stop)).await.is_err() && stop {
                             // The initiating connection left before its response
                             // was selected. Only a terminal shutdown owns the
                             // descriptor-deleting stop pass; an update restart
@@ -1572,6 +1467,10 @@ impl Supervisor {
                                 supervisor.ensure_shutdown_started().await;
                             }
                         }
+                        // The slot frees only once the bundle is in the
+                        // queue: a task parked on a full outbound queue
+                        // still counts against this connection's bound.
+                        drop(dispatch_slot);
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
@@ -1632,7 +1531,18 @@ impl Supervisor {
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // A lagged receiver means the shared event ring
+                        // ([`crate::backpressure::EVENT_RING_CAPACITY`])
+                        // dropped this many events for THIS connection:
+                        // the loss itself is the broadcast's defined
+                        // backpressure, but it must never stay invisible
+                        // (finding 4a) — the daemon log records which
+                        // client lost how much.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            self.log_line(&format!(
+                                "client {connection_id} lagged on the event ring: {skipped} events dropped"
+                            ));
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -1659,7 +1569,13 @@ impl Supervisor {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(&resident, "detach", payload, ROUTE_TIMEOUT_MS)
+                    .route_command(
+                        &resident,
+                        "detach",
+                        payload,
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
             }
         }
@@ -1687,7 +1603,7 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -1829,7 +1745,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -2461,7 +2377,13 @@ impl Supervisor {
             let resident = Arc::clone(resident);
             async move {
                 let response = self
-                    .route_command(&resident, "update_snapshot", json!({}), rpc_timeout)
+                    .route_command(
+                        &resident,
+                        "update_snapshot",
+                        json!({}),
+                        rpc_timeout,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await?;
                 if !response.success {
                     anyhow::bail!(
@@ -3064,7 +2986,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
-        stream: &tokio::sync::mpsc::UnboundedSender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -3177,8 +3099,29 @@ impl Supervisor {
                 // A failed send is the connection loop's death notice (its
                 // receiver is gone): the remaining folds serve nobody, so
                 // the callback stops the scan (the response travels the
-                // same dead channel and drops with it).
-                stream_rows.send((vec![item, progress], false)).is_ok()
+                // same dead channel and drops with it). The scan runs on
+                // the blocking pool, so it must never wait on client I/O:
+                // a FULL queue skips the PROGRESS frame first and retries
+                // the row (the row is the data; the frame is a UI hint),
+                // and a still-full queue skips the row too — the terminal
+                // response carries the authoritative rows regardless,
+                // and the fold still has to visit every file for the data
+                // itself.
+                let mut bundle = (vec![item, progress], false);
+                loop {
+                    match stream_rows.try_send(bundle) {
+                        Ok(()) => break true,
+                        Err(mpsc::error::TrySendError::Full((mut unsent, stopped))) => {
+                            if unsent.len() > 1 {
+                                unsent.pop();
+                                bundle = (unsent, stopped);
+                                continue;
+                            }
+                            break true;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break false,
+                    }
+                }
             });
             (infos, file_total)
         });
@@ -3259,7 +3202,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 item["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![item], false));
+            let _ = stream.send((vec![item], false)).await;
         }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
@@ -3301,7 +3244,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 completion["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![completion], false));
+            let _ = stream.send((vec![completion], false)).await;
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the
@@ -3526,7 +3469,13 @@ impl Supervisor {
     /// fallback for an unreachable worker.
     async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
         let response = self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         match response {
             Ok(response) if response.success => response
@@ -3619,7 +3568,13 @@ impl Supervisor {
         // authoritative create summary instead of failing the spawn (the
         // session is durable at this point; the child is healthy).
         let summary = match self
-            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                &resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) if response.success => {
@@ -3774,7 +3729,13 @@ impl Supervisor {
         }
         for resident in self.registry.list().await {
             let response = self
-                .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             if let Ok(response) = response {
                 if let Some(data) = &response.data {
@@ -3793,429 +3754,57 @@ impl Supervisor {
         Ok(())
     }
 
-    pub(crate) async fn route_client_command(
+    /// The plain kill's stop aftermath, run on every route outcome: TS's
+    /// root-kill block wraps the forward in a `finally`
+    /// (daemon-supervisor.ts: `try { response = await
+    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
+    /// so a kill a hung worker never answers still completes the stop —
+    /// the graceful `shutdown` route bounded by the route budget, then
+    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
+    /// hard-deadline escalation — and the stopped worker's session lease
+    /// frees through the dead-owner reclaim instead of outliving the
+    /// command behind a route that never answers.
+    ///
+    /// The stop runs first and its failure gates the belt: the only
+    /// `Err` [`Self::stop_worker`] takes is the stop tombstone's persist
+    /// (the stop never durably started — TS's `stopWorkerUntracked`
+    /// throws before any teardown), so the worker stays untouched and
+    /// the kill stays retryable. The belt below must never run against
+    /// a live worker: it cancels the session tree's jobs, archives the
+    /// root file, and sweeps a ledger delete's child artifacts while
+    /// the worker's resident is still serving and its transcript may
+    /// still grow.
+    async fn finish_plain_kill_stop(
         self: &Arc<Self>,
-        command: &DaemonCommand,
-        client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
-        command_id: String,
-        type_name: String,
-    ) -> (Vec<Value>, bool) {
-        // TS routing gate: the generic forward requires the
-        // `activeSessionId` field (present-but-empty is an unknown session,
-        // the same error TS `findWorkerForClient` produces). A command that
-        // addresses no session and has no supervisor arm here cannot be
-        // routed - the TS arms for the optional-selector commands
-        // (agent_messages_*, cron_*, heartbeats_list, detach-all,
-        // saved-session renames/deletes) land with their breadth waves.
-        let Some(selector) = command_active_session_id(command) else {
-            return (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &format!("Supervisor cannot route daemon command: {type_name}"),
-                    None,
-                ))],
-                false,
-            );
-        };
-        let selector = selector.to_string();
-        // The rebind target when the selector addresses a superseded id: a
-        // binding whose session has a live resident again (a new worker took
-        // the session file over). The routed command is rewritten to the
-        // current id, so the rest of this route - and the response handling
-        // below - addresses the session's current worker.
-        let mut rebound_to: Option<String> = None;
-        let resident = if let Ok(resident) = self.registry.resolve(&selector).await {
-            resident
-        } else {
-            // Spec §10.4: attach-by-durable-id at any time. A restore
-            // pass may still be bringing the rostered session up, so
-            // the command queues server-side behind the pass (no
-            // client-visible retry); a settled restore answers with the
-            // per-row failure (session file + manual-resume hint)
-            // instead of the plain unknown-session error.
-            self.await_restore_target(&selector).await;
-            match self.registry.resolve(&selector).await {
-                Ok(resident) => resident,
-                Err(_) => {
-                    // The stale-active-id rebind: the selector is a
-                    // superseded id the binding table still maps to the
-                    // session's durable identity, and a live resident
-                    // owns that identity now. The command failed before
-                    // it ever reached a worker, so routing it once to
-                    // the current resident delivers it exactly once.
-                    if let Some(resident) = self.binding_target(&selector).await {
-                        // A detach addressed to a superseded id has
-                        // no worker to reach: the stale worker is
-                        // gone (its client-side state died with it),
-                        // and forwarding the detach to the
-                        // replacement would drop the very attach
-                        // the client may have just established there
-                        // (the worker keys its detach by client). The
-                        // supervisor retires the stale address
-                        // itself and answers the detach.
-                        if matches!(command, DaemonCommand::Detach { .. }) {
-                            attached.lock().unwrap().retain(|id| id != &selector);
-                            return (
-                                vec![response_line(&response_success(
-                                    Some(&command_id),
-                                    &type_name,
-                                    None,
-                                ))],
-                                false,
-                            );
-                        }
-                        rebound_to =
-                            Some(self.rebind_connection(&selector, &resident, attached).await);
-                        resident
-                    } else {
-                        let message = self
-                            .restore_failure_for(&selector)
-                            .unwrap_or_else(|| format!("Unknown active session: {selector}"));
-                        return (
-                            vec![response_line(&response_failure(
-                                Some(&command_id),
-                                &type_name,
-                                &message,
-                                None,
-                            ))],
-                            false,
-                        );
-                    }
-                }
-            }
-        };
-        // A kill is the worker's own root kill (TS `isRootKill`) — a
-        // parent's child-close cascade carries the `rlmCloseReason` marker
-        // and is NOT one (TS forwards a child close without a supervisor
-        // stop): only the plain kill tombstones and finalizes. The stop
-        // tombstone persists BEFORE the worker is told (TS
-        // `persistWorkerStopTombstone(worker, true)`), so a supervisor that
-        // dies mid-stop adopts the tombstone instead of relaunching the
-        // killed worker, and the durable half of the stop (the session
-        // tree's scheduled-job cancel + the `archived` state belt) re-runs.
-        // The plain-kill gate (TS `isRootKill`): the `rlmCloseReason`
-        // marker is the parent's child-close cascade and only ever targets
-        // a subagent session — a top-level target is ALWAYS a plain kill
-        // regardless of the wire marker (a client cannot forge the softer
-        // close semantics for a root session; the finalize belt below
-        // cancels its jobs and archives its file either way).
-        let plain_kill = match command {
-            DaemonCommand::Kill { rest, .. } => {
-                let no_marker = !rest.contains_key("rlmCloseReason");
-                let target_depth = resident
-                    .descriptor
-                    .lock()
-                    .await
-                    .create_command
-                    .rest
-                    .get("rlmDepth")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                no_marker || target_depth == 0
-            }
-            _ => false,
-        };
-        if plain_kill {
-            if let Err(error) = self.persist_stop_tombstone(&resident).await {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &format!("Failed to persist the session stop: {error:#}"),
-                        None,
-                    ))],
-                    false,
-                );
-            }
+        resident: &Arc<ResidentWorker>,
+        rest: &Map<String, Value>,
+    ) {
+        if let Err(error) = self.stop_worker(resident).await {
+            self.log_line(&format!(
+                "session worker {} stop after kill failed: {error:#}; the stop never durably started and stays retryable",
+                resident.worker_id
+            ));
+            return;
         }
-        // A delete flows through the kill route with the `rlmLedgerDelete`
-        // marker (the parent-side `delete_subagent`). The deletion boundary
-        // is persisted BEFORE the teardown (TS `recordRlmSubagentDeletion`):
-        // a failed tombstone is a failed deletion with the child still
-        // alive and retryable; a plain stop carries no marker and must not
-        // tombstone the child - its passive row survives the stop.
-        if let DaemonCommand::Kill { rest, .. } = command {
-            if let Some(reason) = rest
-                .get("rlmLedgerDelete")
-                .and_then(Value::as_str)
-                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-            {
-                let child_id = rest
+        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
+        // kill's durable half): the killed session tree's scheduled jobs
+        // cancel durably and the root file carries the `archived` state,
+        // so no wake pass can revive the stopped session. A
+        // ledger-tombstoned delete also sweeps the deleted child's
+        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        let deleted_child = rest
+            .get("rlmLedgerDelete")
+            .and_then(Value::as_str)
+            .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+            .map(|_| crate::stop_cleanup::DeletedChild {
+                child_id: rest
                     .get("rlmChildId")
                     .and_then(Value::as_str)
-                    .map(str::to_string);
-                if let Err(error) = self
-                    .tombstone_rlm_child(&resident, child_id.as_deref(), reason)
-                    .await
-                {
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &format!("Failed to delete RLM subagent: {error:#}"),
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-            }
-        }
-        if let DaemonCommand::Attach {
-            telemetry_disabled: Some(true),
-            ..
-        }
-        | DaemonCommand::Reattach {
-            telemetry_disabled: Some(true),
-            ..
-        } = command
-        {
-            let worker_disabled = {
-                let descriptor = resident.descriptor.lock().await;
-                descriptor.telemetry_disabled
-            };
-            if worker_disabled != Some(true) {
-                // TS `assertTelemetryAttachAllowed`: a telemetry-disabled
-                // client may not attach to a worker running with telemetry
-                // enabled.
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
-        let timeout = if matches!(
-            command,
-            DaemonCommand::PromptAndWait { .. }
-                | DaemonCommand::WaitForIdle { .. }
-                // Headless completion settles a whole autonomous run.
-                | DaemonCommand::WaitForHeadlessCompletion { .. }
-                // Compaction runs a summarizer model call, like a turn.
-                | DaemonCommand::Compact { .. }
-                // A tree navigation may run a branch-summary model call.
-                | DaemonCommand::NavigateTree { .. }
-        ) {
-            LONG_ROUTE_TIMEOUT_MS
-        } else {
-            ROUTE_TIMEOUT_MS
-        };
-        let (worker_command, mut payload) = match client_command_payload(command, client_id) {
-            Ok(payload) => payload,
-            Err(error) => {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &error.to_string(),
-                        None,
-                    ))],
-                    false,
-                )
-            }
-        };
-        // A rebind retargets the routed frame: the worker reads the session
-        // selector the payload carries, and the superseded id is not one it
-        // knows. A rebound reattach routes as the worker's attach - the
-        // worker has no reattach arm; the reattach semantics (detach-mark
-        // clearing, replacement snapshot purpose) live supervisor-side.
-        let mut worker_command = worker_command;
-        if let Some(current) = &rebound_to {
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("activeSessionId".to_string(), json!(current));
-            }
-            if worker_command == "reattach" {
-                worker_command = "attach";
-            }
-        }
-        // Client-facing routes wait out an in-flight worker replacement
-        // inside the command's own budget: a command aimed at a worker that
-        // crashed and is being relaunched (crash backoff, relaunch, create
-        // replay) must not be lost to the dead window, and must never
-        // overtake the replayed session into existence.
-        let response = self
-            .route_command_ready(&resident, worker_command, payload, timeout)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        self.finalize_worker_stop(resident, deleted_child.as_ref())
             .await;
-        match response {
-            Ok(mut response) => {
-                // Worker replies carry no client request id; clients match
-                // responses by the id they sent, so stamp it back here.
-                response.id = Some(command_id.clone());
-                // A rebound reattach routed as the worker's attach still
-                // answers as the command the client sent.
-                if rebound_to.is_some() && type_name == "reattach" {
-                    response.command = type_name.clone();
-                }
-                if let DaemonCommand::Attach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                }
-                | DaemonCommand::Reattach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                } = command
-                {
-                    if response.success {
-                        if let Some(data) = response.data.as_mut() {
-                            let active_id = data
-                                .get("activeSessionId")
-                                .and_then(Value::as_str)
-                                .map_or_else(|| resident.worker_id.clone(), str::to_string);
-                            self.note_daemon_event(
-                                if matches!(command, DaemonCommand::Reattach { .. }) {
-                                    "reattach"
-                                } else {
-                                    "attach"
-                                },
-                                None,
-                            );
-                            // The binding table learns the id the worker
-                            // reports (a durable-id or file-stem attach
-                            // resolves to the worker's current id), keyed
-                            // by the session's durable identity.
-                            let (session_id, session_file) = {
-                                let descriptor = resident.descriptor.lock().await;
-                                (
-                                    descriptor.root_session_id.clone(),
-                                    descriptor.session_file.clone(),
-                                )
-                            };
-                            self.record_session_binding(
-                                &active_id,
-                                session_id.as_deref(),
-                                session_file.as_deref(),
-                            );
-                            let mut attached = attached.lock().unwrap();
-                            if !attached.iter().any(|id| id == &active_id) {
-                                attached.push(active_id.clone());
-                            }
-                            // The client's own capability set, not the
-                            // supervisor's worker-facing one, is echoed in
-                            // the attach result.
-                            let client_capabilities = attach_client_capabilities(
-                                capabilities.as_deref(),
-                                *supports_extension_ui,
-                            );
-                            if let Some(client) = data.get_mut("client") {
-                                client["capabilities"] = json!(client_capabilities);
-                            }
-                            if wants_chunked(&client_capabilities) {
-                                let purpose = if matches!(command, DaemonCommand::Reattach { .. }) {
-                                    SnapshotPurpose::Replacement
-                                } else {
-                                    SnapshotPurpose::Attach
-                                };
-                                return streamed_attach_lines(response, &active_id, purpose);
-                            }
-                            return (vec![response_line(&response)], false);
-                        }
-                    }
-                    return (vec![response_line(&response)], false);
-                }
-                if let DaemonCommand::Detach { .. } = command {
-                    if response.success {
-                        self.note_daemon_event("detach", None);
-                        // The retire removes the RESIDENT's active id - the
-                        // id the attached vec actually holds (the selector
-                        // may be a durable-id alias for the same session).
-                        // A rebound detach never reaches this handler; the
-                        // rebind seam retires its superseded address itself.
-                        attached
-                            .lock()
-                            .unwrap()
-                            .retain(|id| id != &resident.worker_id);
-                    }
-                }
-                if let DaemonCommand::Kill { rest, .. } = command {
-                    if response.success {
-                        // The kill route's own tombstone already persisted
-                        // before the forward, so the stop's durable intent
-                        // stands even when this pass fails; a failure is
-                        // observable (logged) instead of silently
-                        // skipping the retire/registry/passivation tail —
-                        // the boot's tombstoned-stop finalization owns
-                        // whatever this pass could not finish.
-                        if let Err(error) = self.stop_worker(&resident).await {
-                            self.log_line(&format!(
-                                "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
-                                resident.worker_id
-                            ));
-                        }
-                        // TS `stopWorkerUntracked`'s archived-stop finalize
-                        // (the plain kill's durable half): the killed
-                        // session tree's scheduled jobs cancel durably and
-                        // the root file carries the `archived` state, so no
-                        // wake pass can revive the stopped session. A
-                        // ledger-tombstoned delete also sweeps the deleted
-                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
-                        // A marker-carrying child close is a cascade, not a
-                        // stop: no finalize (the child's own close arms
-                        // already carried the parent's reason).
-                        if plain_kill {
-                            let deleted_child = rest
-                                .get("rlmLedgerDelete")
-                                .and_then(Value::as_str)
-                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-                                .map(|_| crate::stop_cleanup::DeletedChild {
-                                    child_id: rest
-                                        .get("rlmChildId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                });
-                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
-                                .await;
-                        }
-                    }
-                }
-                if let DaemonCommand::Rename { name, .. } = command {
-                    // A subagent rename is durable in the ledger, so the
-                    // passive roster keeps the new name after passivation.
-                    if response.success {
-                        let descriptor = resident.descriptor.lock().await;
-                        let is_child = descriptor
-                            .create_command
-                            .rest
-                            .get("rlmDepth")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            >= 1;
-                        let session_file = descriptor.session_file.clone();
-                        drop(descriptor);
-                        if is_child {
-                            if let Some(session_file) = session_file {
-                                if let Ok(ledger) = self.rlm_spawn_ledger_for(None).await {
-                                    if let Err(error) =
-                                        ledger.append_rename_by_child_path(&session_file, name)
-                                    {
-                                        self.log_line(&format!(
-                                            "failed to append RLM ledger rename: {error:#}"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                (vec![response_line(&response)], false)
-            }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
-        }
     }
 
     pub(crate) async fn stop_worker(
@@ -4239,7 +3828,13 @@ impl Supervisor {
         // fail fast instead of parking on this worker.
         resident.note_retired();
         let _ = self
-            .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
         // The per-session stop shares the terminal-stop contract: the
         // descriptor dies only with a provably-gone process, so a worker
@@ -4344,7 +3939,13 @@ impl Supervisor {
                 continue;
             }
             let _ = self
-                .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    &resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             self.retire_worker_after_stop(&resident).await;
         }
@@ -4694,7 +4295,13 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
     ) -> Result<()> {
         resident.intentional_stop.store(true, Ordering::SeqCst);
         let response = self
-            .route_command(resident, "shutdown", json!({}), timeout.as_millis() as u64)
+            .route_command(
+                resident,
+                "shutdown",
+                json!({}),
+                timeout.as_millis() as u64,
+                RouteAdmission::SupervisorInternal,
+            )
             .await?;
         if !response.success {
             anyhow::bail!(
@@ -5091,6 +4698,174 @@ mod tests {
         );
     }
 
+    /// A kill whose stop never durably started — the stop tombstone's
+    /// persist fails, the only `Err` `stop_worker` takes — must not run
+    /// the kill's belt: the worker is untouched and the kill stays
+    /// retryable (TS `stopWorkerUntracked` throws before any teardown).
+    /// The belt otherwise cancels the session tree's jobs, archives the
+    /// root file, and — for a ledger delete — sweeps the child's
+    /// artifacts against a live worker whose resident still serves the
+    /// file (its stores may still grow).
+    #[tokio::test]
+    async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_file = sessions_dir.join("live-1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"version\":3,\"id\":\"live-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+        )
+        .unwrap();
+        // The live child's artifact partition: a ledger delete's belt
+        // would sweep it; the gated belt must leave it in place.
+        let artifacts = agent_dir.join("session-artifacts").join("live-1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: Some(session_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the stop tombstone's
+        // atomic write cannot land there (the rename onto a directory
+        // fails), so the stop never durably starts.
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        // A ledger-delete kill (delete_subagent's shape: the rest carries
+        // the marker, so the plain-kill path owns it).
+        let rest = Map::from_iter([
+            ("rlmLedgerDelete".to_string(), json!("user")),
+            ("rlmChildId".to_string(), json!("child-1")),
+        ]);
+        supervisor.finish_plain_kill_stop(&resident, &rest).await;
+
+        // The stop never started: the resident stays owned (retryable)
+        // and the live child's artifacts survive the belt.
+        assert!(
+            supervisor.registry.get("w-live").await.is_some(),
+            "the stop never durably started, so the worker stays owned"
+        );
+        assert!(
+            artifacts.join("scheduled-jobs.json").is_file(),
+            "a belt gated behind a failed stop must not sweep a live child's artifacts"
+        );
+    }
+
+    /// A plain kill holds the route-side tombstone when its stop's
+    /// redundant re-write fails: the durable intent is already on disk,
+    /// so the stop proceeds (the escalation runs, the registry row goes,
+    /// the stop is intentional) instead of aborting and leaving the
+    /// killed worker running on its session lease until the next boot —
+    /// the finding-#5 symptom. The belt gate stays keyed on the stop
+    /// that never durably started: no tombstone at all still fails.
+    #[tokio::test]
+    async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: None,
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            // The route-side tombstone the plain kill's pre-route persist
+            // wrote before the forward.
+            stop_requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+            archive_on_stop: Some(true),
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the tombstone's redundant
+        // re-write fails (the rename onto a directory cannot land).
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        supervisor
+            .stop_worker(&resident)
+            .await
+            .expect("the durable tombstone must carry the stop past its failed re-write");
+
+        assert!(
+            supervisor.registry.get("w-live").await.is_none(),
+            "the stop completed: the worker left the registry"
+        );
+        assert!(
+            resident.intentional_stop.load(Ordering::SeqCst),
+            "the stop is intentional"
+        );
+    }
+
     /// The first OS signal's drain: the gate rejects new work, every
     /// client gets the `daemon_closing` event, and the running turn
     /// settles inside its worker's routed `shutdown` before the stop
@@ -5133,7 +4908,10 @@ mod tests {
         // The fake worker connection: the routed `shutdown` reply is the
         // flush barrier, so it is held until the test releases the turn's
         // settle.
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        // The bounded command-channel type (the backpressure lane's
+        // request-path bound): one slot is plenty for the single routed
+        // `shutdown`.
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
         *resident.cmd_tx.lock().await = Some(cmd_tx);
         let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
         let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
@@ -5328,5 +5106,97 @@ mod tests {
             !supervisor.shutting_down.load(Ordering::SeqCst),
             "the committed update stop must not become a terminal stop pass"
         );
+    }
+
+    /// A client that falls behind the shared event ring loses events (the
+    /// broadcast's defined backpressure), but never silently anymore
+    /// (finding 4a): the loss becomes a durable daemon-log line naming the
+    /// client and the dropped count. Drives a real connection loop
+    /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lagged_client_event_stream_is_logged() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        // The test's client only reads; its write half stays held so the
+        // connection's writes fail only when the test ends.
+        let (client_read, _client_write) = client_side.into_split();
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The handshake greeting arrives before the loop's first poll.
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        // The greeting is written BEFORE the loop subscribes to the
+        // event ring, so the flood must wait for the subscription to
+        // exist — sends into a receiver-less ring are dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while supervisor.events.receiver_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the connection loop never subscribed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Flood the ring well past its capacity with frames too big for
+        // the client's socket buffer: the connection loop parks in its
+        // event write, its receiver falls out of the ring's live window,
+        // and the parked write only completes once the drain frees the
+        // buffer again.
+        let capacity = crate::backpressure::EVENT_RING_CAPACITY;
+        let padding = "x".repeat(2048);
+        let flood = capacity + 2048;
+        for index in 0..flood {
+            let _ = supervisor.events.send((
+                ClientRouting::Broadcast,
+                json!({ "type": "session_event", "index": index, "padding": padding }),
+            ));
+        }
+        // Drain the parked connection while watching for the log line: the
+        // loop unparks as the reader frees the socket buffer, its next
+        // event read reports the dropped span, and the loss lands in the
+        // daemon log. The quiet counter only bounds an idle connection,
+        // never a live one (a slow runner may pace the backlog, so the
+        // drain continues as long as the log line has not landed).
+        let mut buffer = vec![0u8; 64 * 1024];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("lagged on the event ring") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lagged drain was never logged; log: {log}"
+            );
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(_) | Err(_)) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        };
+        let line = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("lagged on the event ring"))
+            .expect("the lag line");
+        assert!(
+            line.contains("events dropped"),
+            "the log names the dropped count: {line}"
+        );
+        connection.abort();
     }
 }

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success};
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
@@ -200,6 +201,7 @@ impl Supervisor {
                 "acquire_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
+                RouteAdmission::ClientRequest,
             )
             .await
         {
@@ -312,6 +314,7 @@ impl Supervisor {
                 "release_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
+                RouteAdmission::ClientRequest,
             )
             .await;
         let mut response = match response {
@@ -384,6 +387,7 @@ impl Supervisor {
                         "release_session_input_pause",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                     .is_ok_and(|response| response.success);

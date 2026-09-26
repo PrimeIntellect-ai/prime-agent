@@ -63,7 +63,17 @@ pub(crate) struct ResidentWorker {
     pub(crate) worker_id: String,
     pub(crate) descriptor: Mutex<DaemonWorkerDescriptor>,
     pub(crate) descriptor_path: PathBuf,
-    pub(crate) cmd_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerRequest>>>,
+    /// The worker's command pump channel. Bounded at
+    /// [`crate::backpressure::WORKER_INFLIGHT_CAPACITY`]: admission (the
+    /// in-flight permits below) precedes enqueue, so the queue and the
+    /// in-flight set share one bound.
+    pub(crate) cmd_tx: Mutex<Option<tokio::sync::mpsc::Sender<WorkerRequest>>>,
+    /// The worker's in-flight permits (one per admitted request, held
+    /// until its reply resolves): the bounded-admission seam of
+    /// [`crate::backpressure`]. A client command that finds this empty is
+    /// refused with the typed overload error; supervisor-internal routes
+    /// wait.
+    pub(crate) inflight: Arc<tokio::sync::Semaphore>,
     /// Pending replies for in-flight requests on the current connection.
     pub(crate) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<DaemonResponse>>>,
     pub(crate) intentional_stop: AtomicBool,
@@ -127,6 +137,9 @@ impl ResidentWorker {
             descriptor: Mutex::new(descriptor),
             descriptor_path,
             cmd_tx: Mutex::new(None),
+            inflight: Arc::new(tokio::sync::Semaphore::new(
+                crate::backpressure::WORKER_INFLIGHT_CAPACITY,
+            )),
             pending: Mutex::new(HashMap::new()),
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),

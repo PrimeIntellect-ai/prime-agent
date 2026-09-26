@@ -29,6 +29,40 @@ pub fn enter() -> Result<()> {
     Ok(())
 }
 
+/// Arm the interactive surface's first-draw mount: the alt-screen
+/// enter (a fresh process), the queued clear, and the cursor hide ride
+/// the FIRST draw's single flush instead of the setup's — a direct open
+/// paints nothing until its first frame is ready, so the shell (or the
+/// handed-off surface) stays visible through the attach, and no mid-gap
+/// stdout flush (the kitty probe, a mode enable) can carry the queued
+/// clear out early over it.
+pub(crate) fn arm_first_draw_mount() {
+    MOUNT_ARMED.store(true, Ordering::SeqCst);
+}
+
+/// Queue the alternate-screen enter for the caller's flush (the armed
+/// first-draw mount): the enter, the clear, and the frame must land in
+/// ONE flush — an enter that flushes on its own switches to the blank
+/// alternate buffer ahead of the frame that fills it.
+///
+/// # Errors
+///
+/// Returns `Err` when writing the alternate-screen enter sequence to
+/// the caller's buffer fails.
+pub(crate) fn enter_queued(out: &mut std::io::Stdout) -> anyhow::Result<()> {
+    if !ACTIVE.swap(true, Ordering::SeqCst) {
+        crossterm::queue!(out, EnterAlternateScreen)?;
+    }
+    Ok(())
+}
+
+/// Take the armed mount (the first draw after the setup owns it).
+pub(crate) fn take_first_draw_mount() -> bool {
+    MOUNT_ARMED.swap(false, Ordering::SeqCst)
+}
+
+static MOUNT_ARMED: AtomicBool = AtomicBool::new(false);
+
 /// Leave the alternate screen. A no-op when the screen is not active, so a
 /// teardown that runs after another surface already left it cannot emit a
 /// stray restore.

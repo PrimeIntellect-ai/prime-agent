@@ -444,7 +444,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
-    use super::super::anthropic_callback::CALLBACK_PORT_LOCK;
+    use super::super::anthropic_callback::{registered_port_stages, CALLBACK_PORT_LOCK};
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -651,6 +651,9 @@ mod tests {
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let credentials = login_anthropic(&http, &ui).await.unwrap();
@@ -684,6 +687,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_exchange_surfaces_the_ts_message() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -698,6 +704,9 @@ mod tests {
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -733,6 +742,9 @@ mod tests {
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(
@@ -748,6 +760,9 @@ mod tests {
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
@@ -762,6 +777,9 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_paste_ends_the_login() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::ready()), None);
         let error = login_anthropic(&http, &ui).await.unwrap_err();
@@ -771,6 +789,9 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_prompt_ends_the_login() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
@@ -783,6 +804,9 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
         let _port = CALLBACK_PORT_LOCK.lock().await;
+        if !registered_port_stages() {
+            return; // the registered port is busy: this run cannot stage it.
+        }
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http();
@@ -801,10 +825,9 @@ mod tests {
         // and the browser redirect settles the code. Skip when another
         // process holds the port — the bind-failure path is its own
         // invariant.
-        let Ok(probe) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)) else {
+        if !registered_port_stages() {
             return; // the registered port is busy: this run cannot stage it.
-        };
-        drop(probe);
+        }
         let http = Arc::new(token_http());
         let ui = Arc::new(ScriptedUi::new(Some(ScriptedAnswer::Pending), None));
         let flow_ui = Arc::clone(&ui);

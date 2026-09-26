@@ -1,9 +1,15 @@
-//! The `/settings` inline menu (TS `SettingsSelectorComponent` over the
-//! the TS TUI `SettingsList`): label/value rows with descriptions, Enter/Space
-//! cycling values, Enter opening the submenus (thinking level, theme,
-//! warnings), Esc closing, and type-to-search over the labels. The caller
-//! owns the row data (daemon state + settings seam reads) and executes the
-//! change actions; this module owns navigation, filtering, and rendering.
+//! The `/settings` inline menu — a tabbed settings surface (Claude Code's
+//! `/config` groups its settings into tab categories; ours adapts the
+//! grouping to our rows, inline in the shared menu-panel grammar): a tab
+//! strip under the bordered search field, each tab a list of label/value
+//! rows with descriptions, Enter/Space cycling values, Enter opening the
+//! submenus (thinking level, theme, warnings), Esc closing, and
+//! type-to-search over the active tab's labels. The caller owns the row
+//! data (daemon state + settings seam reads) and executes the change
+//! actions; this module owns navigation, filtering, and rendering, and
+//! `tabs` owns the grouping and the strip.
+
+mod tabs;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::search_input::SearchInput;
@@ -80,16 +86,33 @@ struct SubmenuState {
     selected: usize,
 }
 
-/// The settings menu (TS `SettingsList` with `enableSearch`).
+/// The settings menu (TS `SettingsList` with `enableSearch`, grouped into
+/// tabs): the strip rides under the search field, each tab owns its own
+/// search input, filtered window, and selection.
 #[derive(Debug)]
 pub struct SettingsMenu {
     rows: Vec<SettingsMenuRow>,
-    filtered: Vec<usize>,
-    selected: usize,
-    search: SearchInput,
+    tabs: Vec<SettingsTab>,
+    /// The active tab (its rows render under the strip).
+    tab: usize,
     sub: Option<SubmenuState>,
     /// TS `SettingsList` maxVisible (the component is constructed with 10).
     max_visible: usize,
+}
+
+/// One tab: the settings rows it groups (as indices into
+/// `SettingsMenu::rows`) with its own search input, filtered window, and
+/// selection — switching tabs moves the focus only (the TS
+/// `ConfigurationMenuComponent` keeps each tab's body, search input
+/// included, alive the same way), so coming back restores where the user
+/// was.
+#[derive(Debug)]
+struct SettingsTab {
+    name: &'static str,
+    rows: Vec<usize>,
+    filtered: Vec<usize>,
+    search: SearchInput,
+    selected: usize,
 }
 
 /// The TS settings-menu rows in the TS order, with the current values the
@@ -323,14 +346,28 @@ pub struct SettingsCurrentValues {
 
 impl SettingsMenu {
     pub fn new(rows: Vec<SettingsMenuRow>) -> Self {
+        let tabs = tabs::row_indices(&rows)
+            .into_iter()
+            .map(|(name, rows)| SettingsTab {
+                name,
+                filtered: rows.clone(),
+                rows,
+                search: SearchInput::new(),
+                selected: 0,
+            })
+            .collect();
         SettingsMenu {
-            filtered: (0..rows.len()).collect(),
+            tabs,
+            tab: 0,
             rows,
-            selected: 0,
-            search: SearchInput::new(),
             sub: None,
             max_visible: 10,
         }
+    }
+
+    /// The active tab, mutably.
+    fn active_mut(&mut self) -> &mut SettingsTab {
+        &mut self.tabs[self.tab]
     }
 
     /// One key id (TS `SettingsList.handleInput`, submenu first).
@@ -348,19 +385,58 @@ impl SettingsMenu {
             }
             return action;
         }
+        // An empty row set carries no tabs (the menu renders its empty
+        // state): only the close keys act.
+        if self.tabs.is_empty() {
+            if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
+                return SettingsMenuAction::Cancel;
+            }
+            return SettingsMenuAction::None;
+        }
+        // Tab switching (Claude Code's /config switches its tabs with Tab
+        // and the arrows): the arrows and Tab keys always switch; digits
+        // jump straight to their tab while the search field is empty (an
+        // active query takes digits as search text, so type-to-search is
+        // never blocked).
+        match key {
+            "left" | "shift+tab" => {
+                self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len());
+                return SettingsMenuAction::None;
+            }
+            "right" | "tab" => {
+                self.switch_tab((self.tab + 1) % self.tabs.len());
+                return SettingsMenuAction::None;
+            }
+            _ => {}
+        }
+        if self.tabs[self.tab].search.value().is_empty() {
+            if let [character] = key.chars().collect::<Vec<char>>()[..] {
+                if let Some(tab) = character
+                    .to_digit(10)
+                    .filter(|digit| *digit > 0)
+                    .map(|digit| digit as usize - 1)
+                    .filter(|tab| *tab < self.tabs.len())
+                {
+                    self.switch_tab(tab);
+                    return SettingsMenuAction::None;
+                }
+            }
+        }
         if kb.matches(key, "tui.select.up") {
-            if !self.filtered.is_empty() {
-                self.selected = if self.selected == 0 {
-                    self.filtered.len() - 1
+            let tab = self.active_mut();
+            if !tab.filtered.is_empty() {
+                tab.selected = if tab.selected == 0 {
+                    tab.filtered.len() - 1
                 } else {
-                    self.selected - 1
+                    tab.selected - 1
                 };
             }
             return SettingsMenuAction::None;
         }
         if kb.matches(key, "tui.select.down") {
-            if !self.filtered.is_empty() {
-                self.selected = (self.selected + 1) % self.filtered.len();
+            let tab = self.active_mut();
+            if !tab.filtered.is_empty() {
+                tab.selected = (tab.selected + 1) % tab.filtered.len();
             }
             return SettingsMenuAction::None;
         }
@@ -371,10 +447,11 @@ impl SettingsMenu {
             return SettingsMenuAction::Cancel;
         }
         // TS sanitizes the input (a bare space types nothing) and every
-        // printable key edits the search field.
+        // printable key edits the active tab's search field.
         if let [character] = key.chars().collect::<Vec<char>>()[..] {
             if !character.is_control() {
-                self.search.handle_key(key, kb);
+                let tab = self.active_mut();
+                tab.search.handle_key(key, kb);
                 self.apply_filter();
             }
         }
@@ -384,7 +461,10 @@ impl SettingsMenu {
     /// Enter/Space on the selection (TS `activateItem`): submenus open;
     /// value rows cycle to the next value.
     fn activate_selected(&mut self) -> SettingsMenuAction {
-        let Some(&row_index) = self.filtered.get(self.selected) else {
+        let Some(tab) = self.tabs.get(self.tab) else {
+            return SettingsMenuAction::None;
+        };
+        let Some(&row_index) = tab.filtered.get(tab.selected) else {
             return SettingsMenuAction::None;
         };
         let row = &mut self.rows[row_index];
@@ -513,24 +593,39 @@ impl SettingsMenu {
         }
     }
 
-    /// Re-filter the rows (TS `applyFilter`, fuzzy over the label).
+    /// Switch to a tab: a pure focus move — every tab keeps its own
+    /// search input, filtered window, and selection, so nothing resets
+    /// on the way back.
+    fn switch_tab(&mut self, tab: usize) {
+        self.tab = tab;
+    }
+
+    /// Re-filter the active tab's rows (TS `applyFilter`, fuzzy over the
+    /// label): the query scopes to the tab it was typed in, and a fresh
+    /// query lands the tab's selection on its first match.
     fn apply_filter(&mut self) {
-        let query = self.search.value();
-        let kept: Vec<SettingsMenuRow> = if query.is_empty() {
-            self.rows.clone()
+        let query = self.tabs[self.tab].search.value().to_string();
+        let tab = &mut self.tabs[self.tab];
+        tab.filtered = if query.is_empty() {
+            tab.rows.clone()
         } else {
-            crate::fuzzy::fuzzy_filter(&self.rows, query, |row| row.label.to_string())
+            let candidates: Vec<SettingsMenuRow> = tab
+                .rows
+                .iter()
+                .map(|&index| self.rows[index].clone())
+                .collect();
+            crate::fuzzy::fuzzy_filter(&candidates, &query, |row| row.label.to_string())
+                .iter()
+                .map(|row| {
+                    tab.rows
+                        .iter()
+                        .find(|&index| &self.rows[*index] == row)
+                        .copied()
+                        .expect("fuzzy keeps row values")
+                })
+                .collect()
         };
-        self.filtered = kept
-            .iter()
-            .map(|row| {
-                self.rows
-                    .iter()
-                    .position(|candidate| candidate == row)
-                    .expect("fuzzy keeps row values")
-            })
-            .collect();
-        self.selected = 0;
+        tab.selected = 0;
     }
 
     /// Render (TS `render`): the shared menu panel over the settings rows
@@ -542,43 +637,52 @@ impl SettingsMenu {
             return self.render_submenu(sub, theme, width, kb);
         }
         let mut lines: Vec<crate::Line> = Vec::new();
-        // The search field: the shared bordered field with its
-        // placeholder.
-        lines.extend(crate::menu_panel::search_field_lines(
-            theme,
-            width,
-            self.search.value(),
-            self.search.cursor(),
-            true,
-            "Search settings",
-        ));
         if self.rows.is_empty() {
             lines.push(crate::menu_panel::no_match_row(
                 theme,
                 width,
                 "No settings available",
             ));
-            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
+            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb, 0)));
             return lines;
         }
-        if self.filtered.is_empty() {
+        let tab = &self.tabs[self.tab];
+        // The search field: the shared bordered field with its
+        // placeholder, over the active tab's own query.
+        lines.extend(crate::menu_panel::search_field_lines(
+            theme,
+            width,
+            tab.search.value(),
+            tab.search.cursor(),
+            true,
+            "Search settings",
+        ));
+        // The tab strip rides directly under the search field's bottom
+        // border: the tabs name the lists below them.
+        let names: Vec<&'static str> = self.tabs.iter().map(|tab| tab.name).collect();
+        lines.push(tabs::strip_row(theme, width, &names, self.tab));
+        if tab.filtered.is_empty() {
             lines.push(crate::menu_panel::no_match_row(
                 theme,
                 width,
                 "No matching settings",
             ));
-            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
+            lines.push(crate::menu_panel::hint_row(
+                theme,
+                width,
+                &hint(kb, self.tabs.len()),
+            ));
             return lines;
         }
-        let start = self
+        let start = tab
             .selected
             .saturating_sub(self.max_visible / 2)
-            .min(self.filtered.len().saturating_sub(self.max_visible));
-        let end = (start + self.max_visible).min(self.filtered.len());
-        for (position, row_index) in self.filtered[start..end].iter().enumerate() {
+            .min(tab.filtered.len().saturating_sub(self.max_visible));
+        let end = (start + self.max_visible).min(tab.filtered.len());
+        for (position, &row_index) in tab.filtered[start..end].iter().enumerate() {
             let position = start + position;
-            let row = &self.rows[*row_index];
-            let selected = position == self.selected;
+            let row = &self.rows[row_index];
+            let selected = position == tab.selected;
             lines.push(crate::menu_panel::menu_row(
                 theme,
                 width,
@@ -587,15 +691,15 @@ impl SettingsMenu {
                 selected,
             ));
         }
-        if start > 0 || end < self.filtered.len() {
+        if start > 0 || end < tab.filtered.len() {
             lines.push(crate::menu_panel::scroll_row(
                 theme,
                 width,
-                self.selected + 1,
-                self.filtered.len(),
+                tab.selected + 1,
+                tab.filtered.len(),
             ));
         }
-        if let Some(&row_index) = self.filtered.get(self.selected) {
+        if let Some(&row_index) = tab.filtered.get(tab.selected) {
             let row = &self.rows[row_index];
             if !row.description.is_empty() {
                 lines.push(Vec::new());
@@ -612,7 +716,11 @@ impl SettingsMenu {
                 }
             }
         }
-        lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
+        lines.push(crate::menu_panel::hint_row(
+            theme,
+            width,
+            &hint(kb, self.tabs.len()),
+        ));
         lines
     }
 
@@ -681,11 +789,19 @@ impl SettingsMenu {
 }
 
 /// The menu's key hint: the shared hint-row grammar, this surface's
-/// vocabulary (the search field types, Enter/Space cycles a row; Space is
-/// a literal key the menu always handles, an unbound Enter drops its
-/// label, an unbound Esc drops the close segment).
-fn hint(kb: &KeybindingsManager) -> String {
+/// vocabulary (the search field types, the arrows and the number keys
+/// switch tabs, Enter/Space cycles a row; Space is a literal key the menu
+/// always handles, an unbound Enter drops its label, an unbound Esc drops
+/// the close segment).
+fn hint(kb: &KeybindingsManager, tabs: usize) -> String {
     let mut segments = vec!["Type to search".to_string()];
+    if tabs > 0 {
+        segments.push(format!(
+            "{}/{}/1-{tabs} tabs",
+            format_key_text("left"),
+            format_key_text("right")
+        ));
+    }
     segments.push(match kb.first_key("tui.select.confirm") {
         Some(key) => format!("{}/Space change", format_key_text(&key)),
         None => "Space change".to_string(),
@@ -742,36 +858,82 @@ mod menu_tests {
     }
 
     #[test]
-    fn rows_follow_the_ts_splice_order() {
-        let rows = menu();
-        let ids: Vec<&str> = rows.rows.iter().map(|row| row.id).collect();
+    fn tabs_partition_the_settings_rows() {
+        let menu = menu();
+        let tabs: Vec<(&str, Vec<&str>)> = menu
+            .tabs
+            .iter()
+            .map(|tab| {
+                (
+                    tab.name,
+                    tab.rows.iter().map(|&index| menu.rows[index].id).collect(),
+                )
+            })
+            .collect();
         assert_eq!(
-            ids,
+            tabs,
             vec![
-                "autocompact",
-                "show-images",
-                "auto-resize-images",
-                "block-images",
-                "skill-commands",
-                "builtin-skills",
-                "show-hardware-cursor",
-                "editor-padding",
-                "autocomplete-max-visible",
-                "clear-on-shrink",
-                "terminal-progress",
-                "fullscreen",
-                "idle-eviction-minutes",
-                "steering-mode",
-                "follow-up-mode",
-                "transport",
-                "mermaid-rendering",
-                "quiet-startup",
-                "tree-filter-mode",
-                "warnings",
-                "thinking",
-                "theme",
+                (
+                    "General",
+                    vec![
+                        "autocompact",
+                        "steering-mode",
+                        "follow-up-mode",
+                        "quiet-startup",
+                        "warnings"
+                    ]
+                ),
+                ("Models", vec!["thinking", "transport"]),
+                (
+                    "Display",
+                    vec![
+                        "theme",
+                        "fullscreen",
+                        "terminal-progress",
+                        "clear-on-shrink",
+                        "show-images",
+                        "auto-resize-images",
+                        "block-images",
+                        "mermaid-rendering"
+                    ]
+                ),
+                (
+                    "Editor",
+                    vec![
+                        "editor-padding",
+                        "autocomplete-max-visible",
+                        "show-hardware-cursor"
+                    ]
+                ),
+                (
+                    "Agents",
+                    vec![
+                        "skill-commands",
+                        "builtin-skills",
+                        "idle-eviction-minutes",
+                        "tree-filter-mode"
+                    ]
+                ),
             ]
         );
+        // The tabs carry every settings row exactly once.
+        let grouped: usize = menu.tabs.iter().map(|tab| tab.rows.len()).sum();
+        assert_eq!(grouped, menu.rows.len());
+    }
+
+    #[test]
+    fn an_empty_row_set_keeps_the_empty_state_and_closes() {
+        let mut menu = SettingsMenu::new(Vec::new());
+        // No tab state exists: the navigation keys no-op (never panic)
+        // and the empty state renders with the tab-less hint.
+        assert_eq!(menu.handle_key("down", &kb()), SettingsMenuAction::None);
+        assert_eq!(menu.handle_key("2", &kb()), SettingsMenuAction::None);
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("No settings available")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+        assert_eq!(menu.handle_key("esc", &kb()), SettingsMenuAction::Cancel);
     }
 
     #[test]
@@ -797,10 +959,8 @@ mod menu_tests {
     #[test]
     fn enter_opens_the_thinking_submenu_and_selection_applies() {
         let mut menu = menu();
-        // Walk to the thinking row (the 21st).
-        for _ in 0..20 {
-            menu.handle_key("down", &kb());
-        }
+        // 2 jumps to the Models tab (thinking lives there).
+        menu.handle_key("2", &kb());
         assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
         // The submenu renders its title and options.
         let text = render_text(&menu);
@@ -819,18 +979,16 @@ mod menu_tests {
         );
         // The submenu is gone (the hint line is back).
         let text = render_text(&menu);
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+        assert!(text.iter().any(|row| {
+            row.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close")
+        }));
     }
 
     #[test]
     fn theme_submenu_previews_and_esc_restores() {
         let mut menu = menu();
-        // Walk to the theme row (the 22nd).
-        for _ in 0..21 {
-            menu.handle_key("down", &kb());
-        }
+        // 3 jumps to the Display tab (theme leads it).
+        menu.handle_key("3", &kb());
         menu.handle_key("enter", &kb());
         // Selection change previews.
         assert_eq!(
@@ -851,17 +1009,132 @@ mod menu_tests {
     }
 
     #[test]
-    fn typing_filters_and_esc_cancels() {
+    fn typing_filters_the_active_tab_and_esc_cancels() {
         let mut menu = menu();
+        // 2 jumps to the Models tab (thinking + transport).
+        menu.handle_key("2", &kb());
         for key in ["t", "r", "a", "n", "s", "p"] {
             menu.handle_key(key, &kb());
         }
         let text = render_text(&menu);
-        // The filter keeps the transport row visible and drops unrelated
-        // rows from the window.
+        // The filter keeps the transport row visible and drops the
+        // tab's other row from the window.
         assert!(text.iter().any(|row| row.contains("Transport")));
-        assert!(!text.iter().any(|row| row.contains("Auto-compact")));
+        assert!(!text.iter().any(|row| row.contains("Thinking")));
         assert_eq!(menu.handle_key("esc", &kb()), SettingsMenuAction::Cancel);
+    }
+
+    #[test]
+    fn switching_tabs_shows_that_tabs_settings() {
+        let mut menu = menu();
+        // General opens first.
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Auto-compact")));
+        // 4 jumps to the Editor tab: the editor-side settings only.
+        menu.handle_key("4", &kb());
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("Editor padding")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Autocomplete max items")));
+        assert!(text.iter().any(|row| row.contains("Show hardware cursor")));
+        assert!(!text.iter().any(|row| row.contains("Auto-compact")));
+        assert!(!text.iter().any(|row| row.contains("Theme")));
+    }
+
+    #[test]
+    fn arrows_and_tab_keys_switch_tabs() {
+        let mut menu = menu();
+        // right: General → Models.
+        menu.handle_key("right", &kb());
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Transport")));
+        // tab: Models → Display.
+        menu.handle_key("tab", &kb());
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Fullscreen rendering")));
+        // shift+tab: Display → Models.
+        menu.handle_key("shift+tab", &kb());
+        // left: Models → General.
+        menu.handle_key("left", &kb());
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Auto-compact")));
+        // left from the first tab wraps to the last (Agents).
+        menu.handle_key("left", &kb());
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Skill commands")));
+    }
+
+    #[test]
+    fn digits_type_into_an_active_query() {
+        let mut menu = menu();
+        // With an active query, digits are search text: 2 does not jump
+        // to the Models tab (a jump would clear the search).
+        menu.handle_key("s", &kb());
+        menu.handle_key("2", &kb());
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("s2")));
+        assert!(text.iter().any(|row| row.contains("No matching settings")));
+    }
+
+    #[test]
+    fn switching_tabs_keeps_each_tabs_search_and_selection() {
+        let mut menu = menu();
+        // Down selects steering mode on General; the round trip keeps it.
+        menu.handle_key("down", &kb());
+        menu.handle_key("2", &kb());
+        menu.handle_key("1", &kb());
+        assert_eq!(
+            menu.handle_key("enter", &kb()),
+            SettingsMenuAction::Change {
+                id: "steering-mode",
+                value: "one-at-a-time".to_string()
+            }
+        );
+        // Each tab keeps its own query: typing on General, switching to
+        // Models and back, the filter and the field still hold. The
+        // arrows switch even under an active query (digits would type).
+        for key in ["w", "a", "r", "n"] {
+            menu.handle_key(key, &kb());
+        }
+        menu.handle_key("right", &kb());
+        assert!(render_text(&menu)
+            .iter()
+            .any(|row| row.contains("Transport")));
+        menu.handle_key("left", &kb());
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("warn")));
+        assert!(text.iter().any(|row| row.contains("Warnings")));
+        assert!(!text.iter().any(|row| row.contains("Quiet startup")));
+    }
+
+    #[test]
+    fn the_strip_lists_the_tabs_and_marks_the_active_one() {
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
+        let lines = menu().render(&theme, 100, &KeybindingsManager::new());
+        // The strip rides directly under the search field.
+        let text: String = lines[3].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text, "  1 General  2 Models  3 Display  4 Editor  5 Agents");
+        let active = lines[3]
+            .iter()
+            .find(|span| span.content == "General")
+            .expect("the active tab renders");
+        assert_eq!(
+            active.style,
+            theme
+                .fg_style(ThemeColor::Accent)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        );
+        let inactive = lines[3]
+            .iter()
+            .find(|span| span.content == "Models")
+            .expect("an inactive tab renders");
+        assert_eq!(inactive.style, theme.fg_style(ThemeColor::Muted));
     }
 
     #[test]
@@ -871,12 +1144,16 @@ mod menu_tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Automatically compact context when it gets too large")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+        assert!(text.iter().any(|row| {
+            row.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close")
+        }));
         // The selected first row carries the menu marker and its value
         // rides the row's trailing cluster (the shared menu-row grammar).
-        assert!(text.iter().any(|row| row.contains("\u{203a} Auto-compact")));
-        assert!(text.iter().any(|row| row.contains("on ")));
+        let selected = text
+            .iter()
+            .find(|row| row.starts_with("\u{203a}"))
+            .expect("the selected row carries the marker");
+        assert!(selected.contains("Auto-compact"));
+        assert!(selected.contains("true"));
     }
 }

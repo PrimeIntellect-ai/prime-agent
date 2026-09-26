@@ -50,6 +50,15 @@ ROOT = Path(__file__).resolve().parent.parent
 # code the assemble_artifacts.py pipeline packs with).
 sys.path.insert(0, str(ROOT / "scripts" / "release"))
 from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir  # noqa: E402
+# The shipped-content policy (runtime dev-only files, user-facing docs) lives
+# with the CI payload producer so the local dry-run and the published
+# tarball carry identical content; this packer imports it instead of
+# redefining it. verify_release.py already imports from the same module.
+from assemble_artifacts import (  # noqa: E402
+    RUNTIME_EXCLUDED_NAMES,
+    RUNTIME_EXCLUDED_SUFFIXES,
+    SHIPPED_DOC_ENTRIES,
+)
 # `--root` re-anchors asset discovery (workspace version, prime-agent-runtime,
 # skills, docs, README) so integration tests can package synthetic trees.
 
@@ -81,7 +90,13 @@ REQUIRED_FILES = (
     "mcp-services.bundled.json",
     "prime-agent-runtime/pyproject.toml",
     "prime-agent-runtime/src/rlm/repl.py",
+    # Every user-facing doc SHIPPED_DOC_ENTRIES gates the local dry-run too
+    # (the adversarial-review docs gate: a curated doc missing from the
+    # repo must fail packaging, not silently ship an empty docs entry).
     "docs/MODEL-SURFACE.md",
+    "docs/RUST_QUICKSTART.md",
+    "docs/keybindings.md",
+    "docs/FEATURE_PARITY.md",
 )
 REQUIRED_DIRS = ("prime-agent-runtime/src/rlm", "skills")
 
@@ -128,24 +143,36 @@ def release_platform():
     return f"{system}-{arch}"
 
 
-def include_path(relative):
+def include_path(relative, extra_excluded_names=frozenset(), extra_excluded_suffixes=()):
     parts = Path(relative).parts
     return not any(
-        part in EXCLUDED_NAMES or part.endswith(EXCLUDED_SUFFIXES) for part in parts
+        part in EXCLUDED_NAMES
+        or part in extra_excluded_names
+        or part.endswith(EXCLUDED_SUFFIXES)
+        or part.endswith(extra_excluded_suffixes)
+        for part in parts
     )
 
 
-def copy_tree(source, target):
+def copy_tree(source, target, extra_excluded_names=frozenset(),
+              extra_excluded_suffixes=(), only_files=None):
     """Copy an asset tree, rejecting symlinks and excluded entries (the TS
     `includeBinaryAsset` filter: a stale `.venv` or cache never ships, and an
-    unexpected symlink fails the packaging instead of riding the artifact)."""
+    unexpected symlink fails the packaging instead of riding the artifact).
+
+    `extra_excluded_*` widen the exclusion set for one asset (the runtime's
+    dev-only files); `only_files` restricts the TOP LEVEL to a whitelist (the
+    user-facing docs subset) while nested content ships normally.
+    """
     if not source.is_dir():
         raise SystemExit(f"error: missing packaging asset directory: {source}")
 
     def walk(source_dir, relative):
         for entry in sorted(source_dir.iterdir(), key=lambda item: item.name):
+            if only_files is not None and not relative.parts and entry.name not in only_files:
+                continue
             entry_relative = relative / entry.name
-            if not include_path(entry_relative):
+            if not include_path(entry_relative, extra_excluded_names, extra_excluded_suffixes):
                 continue
             if entry.is_symlink():
                 raise SystemExit(f"error: unexpected symlink in binary assets: {entry}")
@@ -186,7 +213,14 @@ def stage(root, binary, version, stage_dir, catalog_assets):
     for name in BUNDLED_CATALOG_FILES:
         shutil.copy2(catalog_assets / name, stage_dir / name)
     for name in TREE_ASSETS:
-        copy_tree(root / name, stage_dir / name)
+        if name == "prime-agent-runtime":
+            copy_tree(root / name, stage_dir / name,
+                      extra_excluded_names=RUNTIME_EXCLUDED_NAMES,
+                      extra_excluded_suffixes=RUNTIME_EXCLUDED_SUFFIXES)
+        elif name == "docs":
+            copy_tree(root / name, stage_dir / name, only_files=SHIPPED_DOC_ENTRIES)
+        else:
+            copy_tree(root / name, stage_dir / name)
     shutil.copy2(root / "README.md", stage_dir / "README.md")
     # The license ships with the binary (TS binaryAssets keeps LICENSE beside
     # it; the release pipeline packages it the same way).

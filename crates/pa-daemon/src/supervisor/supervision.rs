@@ -1,5 +1,6 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
+use super::routing::fail_unsent_request;
 use super::*;
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
@@ -252,7 +253,13 @@ impl Supervisor {
             }
         };
         let response = match self
-            .route_command(resident, "create", payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command(
+                resident,
+                "create",
+                payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -270,7 +277,13 @@ impl Supervisor {
             // A shutdown raced the relaunch: stop the freshly spawned worker
             // instead of leaving it running with nobody supervising it.
             let _ = self
-                .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command(
+                    resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             let mut child = child;
             let _ = child.kill().await;
@@ -387,13 +400,19 @@ impl Supervisor {
         };
 
         let executable = std::env::current_exe().context("resolve pa-daemon executable")?;
+        let stderr_log_path =
+            crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id);
+        let stderr_log = crate::worker_stderr::open_for_spawn(&stderr_log_path)?;
         let mut command = Command::new(&executable);
         command
             .arg("worker")
             .envs(launch_env)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
+            // The worker's stderr lands in its per-worker log (not the
+            // supervisor's inherited stderr, which a detached supervisor
+            // never had): the launch failure errors below tail this file.
+            .stderr(std::process::Stdio::from(stderr_log));
         if std::path::Path::new(&cwd).is_dir() {
             command.current_dir(&cwd);
         }
@@ -434,7 +453,10 @@ impl Supervisor {
         {
             let mut child = child;
             let _ = child.kill().await;
-            return Err(error);
+            return Err(crate::worker_stderr::not_ready_with_tail(
+                error,
+                &stderr_log_path,
+            ));
         }
         Ok(child)
     }
@@ -457,7 +479,12 @@ impl Supervisor {
             .await
             .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
         let (reader, mut writer) = stream.split();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<WorkerRequest>();
+        // Bounded at the in-flight capacity (the admission seam in
+        // `route_command` refuses or waits before enqueueing): no
+        // unbounded channel remains on the request path, and a wedged
+        // writer can park at most this many frames.
+        let (cmd_tx, mut cmd_rx) =
+            mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
         resident.pending.lock().await.clear();
         let events = self.events.clone();
         // The connection epoch ties both pumps to this connection: only they
@@ -724,6 +751,7 @@ impl Supervisor {
                     "workerInstanceId": None::<String>,
                 }),
                 auth_budget_ms,
+                RouteAdmission::SupervisorInternal,
             )
             .await
             .map_err(|error| {
@@ -733,7 +761,16 @@ impl Supervisor {
                 // what actually happened (never the generic route timeout
                 // text, which pointed triage at the wrong seam).
                 if error.to_string() == "Session worker timed out" {
-                    anyhow!("session worker {} did not come up in time", resident.worker_id)
+                    // The worker answered nothing inside the launch budget:
+                    // its captured stderr tail rides the failure (the same
+                    // evidence the probe arm carries).
+                    crate::worker_stderr::not_ready_with_tail(
+                        anyhow!("session worker {} did not come up in time", resident.worker_id),
+                        &crate::worker_stderr::log_path(
+                            &self.options.agent_dir,
+                            &resident.worker_id,
+                        ),
+                    )
                 } else {
                     error
                 }
