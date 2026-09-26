@@ -719,6 +719,7 @@ pub(crate) async fn sync_python_skills(
         .collect();
     let python_str = python.to_string_lossy().to_string();
     let mut installed: HashMap<String, BootstrapPythonSkill> = current_python_skills;
+    let mut missing: Vec<&BootstrapPythonSkill> = Vec::new();
     for skill in python_skills {
         let key = bootstrap_skill_key(skill);
         if installed.get(&key).is_some_and(|existing| {
@@ -727,27 +728,54 @@ pub(crate) async fn sync_python_skills(
         }) {
             continue;
         }
-        let result = run_async(
-            uv,
-            &[
-                "pip".to_string(),
-                "install".to_string(),
-                "--python".to_string(),
-                python_str.clone(),
-                "--editable".to_string(),
-                skill.package_path.clone(),
-            ],
-        )
-        .await;
-        match result {
+        missing.push(skill);
+    }
+    if !missing.is_empty() {
+        // One uv invocation installs the whole batch of missing skills: a
+        // fresh kernel bootstrap otherwise pays one process plus build-backend
+        // startup per metadata-only editable install (measured: nine serial
+        // installs ~1.9s, one batched invocation ~0.4s, warm uv cache). A
+        // batch failure falls back to the per-skill loop so one broken skill
+        // still costs only its own warning and never blocks the rest.
+        let mut install_args = vec![
+            "pip".to_string(),
+            "install".to_string(),
+            "--python".to_string(),
+            python_str.clone(),
+        ];
+        for skill in &missing {
+            install_args.push("--editable".to_string());
+            install_args.push(skill.package_path.clone());
+        }
+        if run_async(uv, &install_args).await.is_ok() {
             // A changed pyproject (hash moved) replaces the stale record.
-            Ok(()) => {
-                installed.insert(key, skill.clone());
+            for skill in &missing {
+                installed.insert(bootstrap_skill_key(skill), (*skill).clone());
             }
-            Err(error) => options.report(&format!(
-                "Warning: Python skill {} failed to install and will be unavailable: {error}",
-                skill.import_name
-            )),
+        } else {
+            for skill in &missing {
+                let result = run_async(
+                    uv,
+                    &[
+                        "pip".to_string(),
+                        "install".to_string(),
+                        "--python".to_string(),
+                        python_str.clone(),
+                        "--editable".to_string(),
+                        skill.package_path.clone(),
+                    ],
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        installed.insert(bootstrap_skill_key(skill), (*skill).clone());
+                    }
+                    Err(error) => options.report(&format!(
+                        "Warning: Python skill {} failed to install and will be unavailable: {error}",
+                        skill.import_name
+                    )),
+                }
+            }
         }
     }
     let mut merged: Vec<BootstrapPythonSkill> = installed.into_values().collect();
@@ -1973,5 +2001,153 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
         // No records at all: nothing is covered.
         assert!(!recorded_skills_cover(&None, &current));
         assert!(recorded_skills_cover(&None, &[]));
+    }
+
+    #[cfg(unix)]
+    fn fake_uv(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let uv = dir.join("uv");
+        std::fs::write(&uv, script).unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        uv
+    }
+
+    #[cfg(unix)]
+    fn uv_invocations(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("uv.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_sync_batches_missing_installs_into_one_uv_call() {
+        // A fake uv records its args: every missing skill must land in ONE
+        // invocation, and already-installed skills must stay out of it.
+        let dir = tempfile::tempdir().unwrap();
+        let uv = fake_uv(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                dir.path().join("uv.log").display()
+            ),
+        );
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/edit")).unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/goal")).unwrap();
+        write_bootstrap_version(
+            &venv,
+            "sha256:rt",
+            &[skill(
+                "edit",
+                dir.path().join("skills/edit").to_str().unwrap(),
+                "h1",
+            )],
+        )
+        .unwrap();
+        let skills = vec![
+            skill(
+                "edit",
+                dir.path().join("skills/edit").to_str().unwrap(),
+                "h1",
+            ),
+            skill(
+                "goal",
+                dir.path().join("skills/goal").to_str().unwrap(),
+                "h2",
+            ),
+        ];
+        sync_python_skills(
+            uv.to_str().unwrap(),
+            &venv,
+            dir.path().join("python").as_path(),
+            "sha256:rt",
+            &skills,
+            &EnsureKernelPythonOptions::default(),
+        )
+        .await
+        .unwrap();
+        let calls = uv_invocations(dir.path());
+        assert_eq!(calls.len(), 1, "one batched uv invocation: {calls:?}");
+        assert!(
+            calls[0].contains("goal"),
+            "the missing skill installs: {calls:?}"
+        );
+        assert!(
+            !calls[0].contains("skills/edit"),
+            "the installed skill is not reinstalled: {calls:?}"
+        );
+        assert_eq!(calls[0].matches("--editable").count(), 1);
+        let version = read_bootstrap_version(&venv).expect("version written");
+        assert_eq!(
+            version.python_skills.as_ref().map(Vec::len),
+            Some(2),
+            "both skills recorded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
+        // A batch covering several skills fails; the fallback retries each
+        // missing skill alone, so one broken skill still costs only its own
+        // warning and the healthy skills still install.
+        let dir = tempfile::tempdir().unwrap();
+        let uv = fake_uv(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in *broken*) exit 1;; esac\nexit 0\n",
+                dir.path().join("uv.log").display()
+            ),
+        );
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        let skills = vec![
+            skill("edit", "/skills/edit", "h1"),
+            skill("broken", "/skills/broken", "h2"),
+        ];
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut options = EnsureKernelPythonOptions::default();
+        let sink = warnings.clone();
+        options.on_progress = Some(std::sync::Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_string());
+        }));
+        sync_python_skills(
+            uv.to_str().unwrap(),
+            &venv,
+            dir.path().join("python").as_path(),
+            "sha256:rt",
+            &skills,
+            &options,
+        )
+        .await
+        .unwrap();
+        let calls = uv_invocations(dir.path());
+        assert_eq!(
+            calls.len(),
+            3,
+            "one failed batch then one call per skill: {calls:?}"
+        );
+        assert!(
+            calls[0].contains("edit") && calls[0].contains("broken"),
+            "the batch covers both skills: {calls:?}"
+        );
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("broken"),
+            "one warning naming the broken skill: {warnings:?}"
+        );
+        let version = read_bootstrap_version(&venv).expect("version written");
+        let recorded = version
+            .python_skills
+            .as_ref()
+            .expect("skills recorded")
+            .iter()
+            .map(|s| s.import_name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
     }
 }
