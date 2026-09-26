@@ -909,21 +909,29 @@ impl HeartbeatsPicker {
 
     /// The list's bottom hint line: every shortcut in one line (the close
     /// key never repeats). The open and close segments carry both of
-    /// their keys — the confirm/openSelected pair opens the detail
-    /// drill-in, the back/cancel pair closes from the list.
+    /// their keys while both are bound — the confirm/openSelected pair
+    /// opens the detail drill-in, the back/cancel pair closes from the
+    /// list — and an override that empties one of the pair drops that
+    /// key (the hint never advertises a key the handler does not take;
+    /// the confirm/cancel fallbacks are the pane's core keys).
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
+        let bound = |binding: &str| kb.first_key(binding).map(|key| format_key_text(&key));
+        let open = match bound("app.heartbeats.openSelected") {
+            Some(detail) => format!("{}/{}", key("tui.select.confirm", "Enter"), detail),
+            None => key("tui.select.confirm", "Enter"),
+        };
+        let close = match bound("app.modal.back") {
+            Some(back) => format!("{}/{}", back, key("tui.select.cancel", "Esc")),
+            None => key("tui.select.cancel", "Esc"),
+        };
         format!(
-            "{}/{} move \u{b7} {}/{} open \u{b7} {}/{} close",
+            "{}/{} move \u{b7} {open} open \u{b7} {close} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
-            key("app.heartbeats.openSelected", "\u{2192}"),
-            key("app.modal.back", "\u{2190}"),
-            key("tui.select.cancel", "Esc"),
         )
     }
 
@@ -1432,6 +1440,35 @@ mod tests {
                 "every row fits the width"
             );
         }
+    }
+
+    /// An override that empties the open-selected or back binding drops
+    /// its key from the list hint (the hint never advertises a key the
+    /// handler does not take); the pane's core keys keep their labels.
+    #[test]
+    fn the_list_hint_drops_unbound_keys() {
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.modal.back".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("↑/↓ move · Enter/→ open · Esc close")),
+            "the emptied back binding drops the arrow: {text:?}"
+        );
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.heartbeats.openSelected".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("↑/↓ move · Enter open · ←/Esc close")),
+            "the emptied open binding drops the arrow: {text:?}"
+        );
     }
 
     /// The table fills the full width of the TUI (the operator's

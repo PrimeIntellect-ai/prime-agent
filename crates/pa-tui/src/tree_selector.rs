@@ -367,19 +367,28 @@ impl TreeSelector {
     }
 }
 
-/// Render the summarize choice list (the three TS options; row one is
-/// "No summary").
 /// The key pair every inner pane's bottom hint renders (TS
-/// `ExtensionSelectorComponent`'s `keyHint` pair): the confirm and cancel
-/// keys from the effective bindings, so a user `keybindings.json`
-/// override moves the hint with the handler. The action words name what
-/// the keys do on that pane.
+/// `ExtensionSelectorComponent`'s `keyHint` pair): each segment carries
+/// its binding's first effective key — `tui.select.cancel` defaults to
+/// two keys, and the one-line hint shows the primary, the crate's
+/// `key_hint` grammar — and a user override that empties a binding
+/// drops its segment, so the hint never advertises a default key the
+/// pane no longer takes. The action words name what the keys do on that
+/// pane.
 fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action: &str) -> String {
-    let confirm = crate::keybindings::format_key_text(&kb.get_keys("tui.select.confirm").join("/"));
-    let cancel = crate::keybindings::format_key_text(&kb.get_keys("tui.select.cancel").join("/"));
-    format!("  {confirm} {confirm_action}  {cancel} {cancel_action}")
+    let segments = [
+        crate::menu_panel::key_hint(kb, &["tui.select.confirm"], confirm_action),
+        crate::menu_panel::key_hint(kb, &["tui.select.cancel"], cancel_action),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join("  ");
+    format!("  {segments}")
 }
 
+/// Render the summarize choice list (the three TS options; row one is
+/// "No summary").
 fn render_choice(
     theme: &Theme,
     width: usize,
@@ -487,7 +496,11 @@ mod tests {
     }
 
     /// The summarize pane's select/back pair and the input panes'
-    /// save/cancel pair render from the effective bindings.
+    /// save/cancel pair render from the effective bindings: each
+    /// segment carries its binding's FIRST key (tui.select.cancel
+    /// defaults to escape and ctrl+c; the one-line hint names the
+    /// primary), and an override that empties a binding drops its
+    /// segment instead of advertising the default key.
     #[test]
     fn inner_pane_hints_render_the_effective_bindings() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -503,5 +516,15 @@ mod tests {
         sel.handle_key(&kb, "ctrl+m");
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Ctrl+M select  Esc back"), "{text}");
+        // An emptied cancel binding drops the back segment: the hint
+        // keeps the confirm segment alone, never the default Esc.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("  Enter select\n"), "{text}");
+        assert!(!text.contains("Esc back"), "{text}");
     }
 }

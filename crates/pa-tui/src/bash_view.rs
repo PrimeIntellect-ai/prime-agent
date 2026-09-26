@@ -770,19 +770,28 @@ impl BashView {
         lines
     }
     /// The list's bottom hint line: the back and cancel keys both close
-    /// from the list, so the close segment carries both.
+    /// from the list while both are bound, and an override that empties
+    /// the back binding drops its key (the hint never advertises a key
+    /// the handler does not take; the cancel fallback is the pane's
+    /// core key).
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
+        let close = match kb.first_key("app.modal.back") {
+            Some(back) => format!(
+                "{}/{}",
+                format_key_text(&back),
+                key("tui.select.cancel", "Esc")
+            ),
+            None => key("tui.select.cancel", "Esc"),
+        };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {}/{} close",
+            "{}/{} move \u{b7} {} open \u{b7} {close} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
             key("tui.select.confirm", "Enter"),
-            key("app.modal.back", "\u{2190}"),
-            key("tui.select.cancel", "Esc"),
         )
     }
 
@@ -1250,6 +1259,25 @@ mod tests {
         for line in &frame {
             assert!(crate::width::spans_width(line) <= 70);
         }
+    }
+
+    /// An override that empties the back binding drops its key from the
+    /// list hint (the hint never advertises a key the handler does not
+    /// take); the pane's core keys keep their labels.
+    #[test]
+    fn the_list_hint_drops_unbound_keys() {
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.modal.back".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let view = BashView::new(activities(), 24);
+        let frame = view.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(
+                |row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")
+            ),
+            "the emptied back binding drops the arrow: {text:?}"
+        );
     }
 
     /// The columns distribute across the full TUI width (the operator's

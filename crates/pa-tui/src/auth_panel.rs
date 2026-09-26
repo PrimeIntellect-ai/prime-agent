@@ -512,12 +512,6 @@ impl AuthPanel {
     /// panel back to the flow after the match (the arms never hold the
     /// input's reply past its last use).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) {
-        // Ctrl+C cancels the mounted input like Esc (the surfaces that
-        // consume the pair note it handled).
-        if key == "ctrl+c" {
-            self.cancel_input();
-            return;
-        }
         let mut answered = false;
         match &mut self.input {
             PanelInput::Working => {}
@@ -599,29 +593,6 @@ impl AuthPanel {
                 picker.refilter();
             }
         }
-    }
-
-    /// Esc/Ctrl+C on the mounted input: the paste prompt answers `None`
-    /// (the flow cancels), the picker answers `Cancelled` (the stored
-    /// selection stays, TS `onCancel`); no input means nothing to
-    /// cancel.
-    fn cancel_input(&mut self) {
-        match &mut self.input {
-            PanelInput::Working => {}
-            PanelInput::Paste { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(None);
-                }
-                self.input = PanelInput::Working;
-            }
-            PanelInput::Teams { reply, .. } => {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(PrimeTeamPick::Cancelled);
-                }
-                self.input = PanelInput::Working;
-            }
-        }
-        self.notice = None;
     }
 
     /// The panel's rendered rows (the provider selector's panel chrome:
@@ -1027,6 +998,44 @@ mod tests {
         panel.handle_key("k", &kb());
         panel.handle_key("enter", &kb());
         assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
+    }
+
+    /// The cancel keys run through the effective binding (TS
+    /// `LoginDialogComponent.handleInput`): the stock bindings cancel on
+    /// ctrl+c (the binding's second default key), and an override that
+    /// empties the binding takes ctrl+c with it — the panel never
+    /// cancels on a key its binding does not name, so the derived hint
+    /// stays truthful.
+    #[test]
+    fn cancel_runs_through_the_effective_binding() {
+        // The stock bindings: ctrl+c is tui.select.cancel's second key.
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb());
+        assert_eq!(
+            answer.try_recv(),
+            Ok(None),
+            "ctrl+c cancels through the stock binding"
+        );
+        // An emptied cancel binding drops ctrl+c with it: the input
+        // stays mounted, waiting.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb);
+        assert!(
+            answer.try_recv().is_err(),
+            "an emptied cancel binding takes ctrl+c with it"
+        );
+        // A rebound cancel binding moves the cancel key.
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("tui.select.cancel".to_string(), vec!["ctrl+q".to_string()]);
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_key("ctrl+c", &kb);
+        assert!(answer.try_recv().is_err(), "the default key went inert");
+        panel.handle_key("ctrl+q", &kb);
+        assert_eq!(answer.try_recv(), Ok(None), "the rebound key cancels");
     }
 
     /// TS `OAuthPrompt.allowEmpty`: a prompt that allows the blank entry
