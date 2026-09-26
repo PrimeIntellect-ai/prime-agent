@@ -1270,11 +1270,11 @@ mod tests {
             Arc::new(|| false),
             RequestTimingLog::at(&log_path),
         ));
-        let mut options = StreamRequestOptions {
+        let options = StreamRequestOptions {
             session_id: Some("sess-off".to_string()),
+            on_payload: Some(Arc::clone(&marked_hook)),
             ..Default::default()
         };
-        options.on_payload = Some(Arc::clone(&marked_hook));
         let stream = (instrument_stream_fn(wiring_off, Arc::clone(&base_stream_fn)))(
             test_model(),
             LlmContext::default(),
@@ -1300,8 +1300,10 @@ mod tests {
         // returned exactly once (one request-sent entry), the size lands on
         // the later entries, not request-sent.
         let wiring = timing_on(&log_path);
-        let mut on_options = StreamRequestOptions::default();
-        on_options.on_payload = Some(Arc::clone(&marked_hook));
+        let on_options = StreamRequestOptions {
+            on_payload: Some(Arc::clone(&marked_hook)),
+            ..Default::default()
+        };
         let stream = (instrument_stream_fn(wiring, Arc::clone(&base_stream_fn)))(
             test_model(),
             LlmContext::default(),
@@ -1359,16 +1361,15 @@ mod tests {
             Box::pin(async move { Err(anyhow::anyhow!("socket hang up")) })
         });
         // `Box<dyn ModelStream>` is not `Debug`, so the error side is
-        // matched out instead of `unwrap_err`.
-        let error = match instrument_stream_fn(wiring, failing)(
+        // let-else'd out instead of `unwrap_err`.
+        let Err(error) = instrument_stream_fn(wiring, failing)(
             test_model(),
             LlmContext::default(),
             StreamRequestOptions::default(),
         )
         .await
-        {
-            Ok(_) => panic!("the failing stream fn must propagate its error"),
-            Err(error) => error,
+        else {
+            panic!("the failing stream fn must propagate its error");
         };
         assert_eq!(error.to_string(), "socket hang up", "the error propagates");
         let entries = timing_entries(&log_path);
