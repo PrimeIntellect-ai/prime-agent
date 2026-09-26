@@ -1676,13 +1676,15 @@ impl AgentView {
             self.toasts.active(now)
         };
         if !toasts.is_empty() {
-            // The action ack renders as the Success-colored pill: REVERSED
-            // flips the Success color onto the pill's background (the
-            // follow-hint overlay's badge grammar), so the toast reads as a
-            // compact highlighted chip, not a bare line.
+            // The action ack renders as the brand-purple pill (the
+            // operator directive): the theme's Accent token — the same
+            // purple the brand visuals carry — flipped onto the pill's
+            // background by REVERSED (the follow-hint overlay's badge
+            // grammar), so the toast reads as a compact highlighted
+            // chip, not a bare line.
             let style = self
                 .theme
-                .fg_style(crate::theme::ThemeColor::Success)
+                .fg_style(crate::theme::ThemeColor::Accent)
                 .add_modifier(Modifier::REVERSED);
             crate::toast::overlay_toasts(
                 &mut frame,
@@ -3032,8 +3034,9 @@ mod tests {
             "the covered row keeps its content: {:?}",
             rows[toast_row]
         );
-        // The pill reads as a toast chip: the Success color flipped onto
-        // the pill's background (REVERSED), not a bare dim line.
+        // The pill reads as a toast chip: the brand-purple Accent color
+        // flipped onto the pill's background (REVERSED), not a bare dim
+        // line.
         let frame = view.render_frame(60, 24);
         let pill = frame
             .iter()
@@ -3043,6 +3046,22 @@ mod tests {
         assert!(
             pill.style.add_modifier.contains(Modifier::REVERSED),
             "the pill carries the reversed-chip style: {:?}",
+            pill.style
+        );
+        // Regression (the operator's brand-purple directive): the pill's
+        // color is the theme's Accent token — the brand purple the brand
+        // visuals carry — never the completed-action Success green it
+        // replaced.
+        assert_eq!(
+            pill.style.fg,
+            view.theme.fg_style(ThemeColor::Accent).fg,
+            "the pill carries the brand-purple Accent style: {:?}",
+            pill.style
+        );
+        assert_ne!(
+            pill.style.fg,
+            view.theme.fg_style(ThemeColor::Success).fg,
+            "the pill must not carry the action green: {:?}",
             pill.style
         );
         // Consecutive identical actions coalesce: the stack holds one
