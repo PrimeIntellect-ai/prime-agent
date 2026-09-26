@@ -19,6 +19,7 @@ use text_utils::{char_at, split_at_char};
 use wrap::{parse_paste_marker, segment_with_markers};
 
 mod autocomplete;
+mod click;
 mod input;
 mod kill_ring;
 mod layout;

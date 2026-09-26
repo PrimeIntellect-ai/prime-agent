@@ -88,6 +88,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first selection copy (`tui selection used`): `lines` is
     /// the copied text's line count.
     fn selection_used(&self, lines: usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first click-driven interaction (`tui click used`):
+    /// `surface` is `transcript` (a card or condensed-run expand click)
+    /// / `editor` (a prompt-bar caret placement) / `picker` (a menu row
+    /// select).
+    fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A builtin client command was submitted (`agent command used`):
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.
