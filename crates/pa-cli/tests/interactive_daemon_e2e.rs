@@ -4209,6 +4209,7 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // Two submits with NO barrier between them: the second's round trip is
@@ -4338,6 +4339,7 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // The submit's round trip straddles the switch: the switch step
@@ -4460,6 +4462,7 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // No trailing WaitIdle: the plan ends at the submit, and the run's
@@ -4585,6 +4588,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
