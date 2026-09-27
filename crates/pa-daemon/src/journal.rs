@@ -863,18 +863,20 @@ mod tests {
             .unwrap();
         batched
             .record_queue_checkpoint(
-                "s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted", std::slice::from_ref(&item), &[],
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
             )
             .unwrap();
         batched
-            .record_queue_checkpoint(
-                "s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[],
-            )
+            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
             .unwrap();
         batched
-            .record_queue_checkpoint(
-                "s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[],
-            )
+            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
             .unwrap();
 
         let strip_stamps = |path: &std::path::Path| -> Vec<Value> {
@@ -916,16 +918,13 @@ mod tests {
         let path = temp_path("allornothing.recovery.jsonl");
         fs::write(&path, "").unwrap();
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        journal
-            .record("s1", "sess1", None, false, "ready")
-            .unwrap();
+        journal.record("s1", "sess1", None, false, "ready").unwrap();
         // Replace the journal with a directory: every open for append now
         // fails, so the checkpoint cannot land either record.
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        let result = journal.record_queue_checkpoint(
-            "s1", "sess1", None, true, "prompt_accepted", &[], &[],
-        );
+        let result =
+            journal.record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[]);
         assert!(result.is_err());
         // The in-memory verdict did not advance over the failed append.
         assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
