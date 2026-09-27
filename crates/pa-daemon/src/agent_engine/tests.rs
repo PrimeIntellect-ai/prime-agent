@@ -5638,3 +5638,286 @@ async fn early_resume_clears_the_park_and_cancels_the_wake() {
         "the pending wake cancels on resume"
     );
 }
+
+// --- cold-open-residual oracles: the persisted depth scan and the shared
+// --- window goal seed (P2b/P3/P4). Both differential tests pin the new
+// --- fast paths against the reference readers over fixture classes.
+
+/// The reference reader the depth scan replaced, verbatim: the whole-file
+/// read plus a full `parse_session_entries` walk. The scan
+/// (`model::persisted_rlm_max_depth`) must match it on every class.
+fn persisted_rlm_max_depth_reference(path: Option<&str>) -> Option<u64> {
+    let path = std::path::Path::new(path?)?;
+    let content = std::fs::read_to_string(path).ok()?;
+    crate::session_store::parse_session_entries(&content)
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            (entry.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+                && entry.get("customType").and_then(serde_json::Value::as_str)
+                    == Some("rlm_max_depth_state"))
+                .then(|| {
+                    entry
+                        .get("data")
+                        .and_then(|data| data.get("maxDepth"))
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .flatten()
+        })
+}
+
+fn depth_override_row(id: &str, depth: serde_json::Value) -> String {
+    json!({
+        "type": "custom",
+        "id": id,
+        "timestamp": "2026-01-01T00:00:02.000Z",
+        "customType": "rlm_max_depth_state",
+        "data": { "maxDepth": depth },
+    })
+    .to_string()
+}
+
+/// The depth scan matches the reference reader over every row class: the
+/// common absent case, a present override (last and mid-file), a
+/// non-`u64` bound that must not stop the scan, malformed lines, the
+/// shape-loose row a typed store reader would skip (no `id`), the
+/// transcript-text marker false-positive gate, CRLF lines, multi-byte
+/// content, the invalid-UTF-8 file (both readers return `None`), and
+/// the empty/missing/absent-path fallthroughs.
+#[test]
+fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
+    let header = json!({
+        "type": "session", "version": 3, "id": "s",
+        "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
+    })
+    .to_string();
+    let message = json!({
+        "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
+        "message": { "role": "user", "content": "we ship rlm_max_depth_state fixes", "timestamp": 0 },
+    })
+    .to_string();
+    let unicode_message = json!({
+        "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
+        "message": { "role": "user", "content": "emoji \u{1f69b}\u{1f69b} bytes across boundaries", "timestamp": 0 },
+    })
+    .to_string();
+    // The shape-loose row: parses as a raw `Value` (the reference's row
+    // shape) but would fail the typed `SessionEntry` reader (no `id`) -
+    // the scan must see it exactly like the reference does.
+    let shape_loose = json!({
+        "type": "custom",
+        "timestamp": "2026-01-01T00:00:03.000Z",
+        "customType": "rlm_max_depth_state",
+        "data": { "maxDepth": 7 },
+    })
+    .to_string();
+    let malformed = r#"{"type": "message", "id": "broken""#;
+
+    let classes: Vec<(&str, String)> = vec![
+        ("absent", vec![header.clone(), message.clone()].join("\n")),
+        ("present_last", vec![
+            header.clone(),
+            message.clone(),
+            depth_override_row("d1", json!(5)),
+        ]
+        .join("\n")),
+        ("present_mid", vec![
+            header.clone(),
+            message.clone(),
+            depth_override_row("d1", json!(5)),
+            message.clone(),
+        ]
+        .join("\n")),
+        // A newer row whose bound does not parse as u64 must not stop
+        // the scan: the older valid row still wins (the reference's
+        // `find_map` continues past it).
+        ("non_u64_bound_continues", vec![
+            header.clone(),
+            message.clone(),
+            depth_override_row("d1", json!(5)),
+            depth_override_row("d2", json!("many")),
+        ]
+        .join("\n")),
+        ("missing_bound_continues", vec![
+            header.clone(),
+            message.clone(),
+            depth_override_row("d1", json!(5)),
+            json!({
+                "type": "custom", "id": "d2", "timestamp": "2026-01-01T00:00:04.000Z",
+                "customType": "rlm_max_depth_state", "data": {},
+            })
+            .to_string(),
+        ]
+        .join("\n")),
+        ("malformed_lines_skipped", vec![
+            header.clone(),
+            malformed.to_string(),
+            depth_override_row("d1", json!(9)),
+            malformed.to_string(),
+        ]
+        .join("\n")),
+        ("shape_loose_row_found", vec![
+            header.clone(),
+            message.clone(),
+            shape_loose.clone(),
+        ]
+        .join("\n")),
+        ("marker_text_not_a_row", vec![
+            header.clone(),
+            message.clone(),
+            json!({
+                "type": "message", "id": "m2", "timestamp": "2026-01-01T00:00:02.000Z",
+                "message": { "role": "assistant", "content": "rlm_max_depth_state", "timestamp": 0 },
+            })
+            .to_string(),
+        ]
+        .join("\n")),
+        ("crlf_lines", vec![
+            header.clone(),
+            message.clone(),
+            depth_override_row("d1", json!(11)),
+        ]
+        .join("\r\n")),
+        ("unicode_content_absent", vec![
+            header.clone(),
+            unicode_message.clone(),
+        ]
+        .join("\n")),
+        ("unicode_content_present", vec![
+            header.clone(),
+            unicode_message.clone(),
+            depth_override_row("d1", json!(3)),
+        ]
+        .join("\n")),
+        ("empty_file", String::new()),
+    ];
+    for (name, content) in classes {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut bytes = content.clone().into_bytes();
+        if !bytes.is_empty() {
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let path_str = path.display().to_string();
+        assert_eq!(
+            model::persisted_rlm_max_depth(Some(&path_str)),
+            persisted_rlm_max_depth_reference(Some(&path_str)),
+            "depth class {name}"
+        );
+    }
+    // An invalid UTF-8 byte anywhere voids the override for both
+    // readers (the reference's whole-file `read_to_string` fails).
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut bytes = format!(
+            "{header}\n{message}\n{}\n",
+            depth_override_row("d1", json!(5))
+        )
+        .into_bytes();
+        bytes.push(0xff);
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        let path_str = path.display().to_string();
+        assert_eq!(
+            model::persisted_rlm_max_depth(Some(&path_str)),
+            persisted_rlm_max_depth_reference(Some(&path_str)),
+            "depth class invalid_utf8"
+        );
+        assert!(
+            model::persisted_rlm_max_depth(Some(&path_str)).is_none(),
+            "invalid utf8 voids the override"
+        );
+    }
+    // Missing file and absent path: the TS fallthrough keeps the
+    // create-carried bound for both readers.
+    assert_eq!(model::persisted_rlm_max_depth(None), None);
+    assert_eq!(
+        model::persisted_rlm_max_depth(None),
+        persisted_rlm_max_depth_reference(None)
+    );
+    let missing = "/nonexistent-cold-open-residual/session.jsonl";
+    assert_eq!(
+        model::persisted_rlm_max_depth(Some(missing)),
+        persisted_rlm_max_depth_reference(Some(missing))
+    );
+}
+
+/// The shared window's goal seed must equal the reference goal reader
+/// over the windowed and fallback classes, including the off-branch
+/// row both readers must skip (the window walk's on-path gate and the
+/// fallback's active-branch scan agree).
+#[test]
+fn shared_window_goal_seed_matches_persisted_goal_state() {
+    let header = json!({
+        "type": "session", "version": 3, "id": "s",
+        "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
+    });
+    let message = |id: &str, parent: &str, role: &str| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "message": { "role": role, "content": "hi", "timestamp": 0 },
+        })
+    };
+    let goal_row = |id: &str, parent: &str| {
+        json!({
+            "type": "custom", "id": id, "parentId": parent,
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
+            "data": {
+                "active": true, "status": "active", "goalId": "goal-1",
+                "objective": "ship the port", "tokensUsed": 340,
+                "timeUsedSeconds": 9, "continuationsUsed": 2,
+            },
+        })
+    };
+    // (name, rows, terminated tail: an unterminated row forces the
+    // ordinary full-reader fallback for both readers)
+    let classes: Vec<(&str, Vec<serde_json::Value>, bool)> = vec![
+        ("windowed_with_goal", vec![header.clone(), message("m1", "", "user"), goal_row("g1", "m1")], true),
+        ("windowed_no_goal", vec![header.clone(), message("m1", "", "user")], true),
+        (
+            "windowed_off_branch_goal",
+            vec![
+                header.clone(),
+                // The goal links to a row no chain reaches: the active
+                // branch (leaf m2 -> m1 -> header) never visits it.
+                goal_row("g1", "ghost-id"),
+                message("m2", "m1", "assistant"),
+            ],
+            true,
+        ),
+        ("fallback_with_goal", vec![header.clone(), message("m1", "", "user"), goal_row("g1", "m1")], false),
+        ("fallback_no_goal", vec![header.clone(), message("m1", "", "user")], false),
+    ];
+    for (name, rows, terminated) in classes {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut content = rows
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if terminated {
+            content.push('\n');
+        }
+        std::fs::write(&path, content).unwrap();
+        // The shared open's extraction (adopt_built_session's block):
+        // the window's snapshot goal when the window serves, else the
+        // loaded store's active-branch scan.
+        let shared = match pa_core::session::window::WindowedSessionStore::open(&path) {
+            Ok(Some(window)) => window.goal_state().cloned(),
+            Ok(None) | Err(_) => crate::session_store::SessionFile::open(&path)
+                .ok()
+                .as_ref()
+                .and_then(crate::goal_state_persist::goal_state_in_session_file),
+        };
+        assert_eq!(
+            shared,
+            crate::goal_state_persist::persisted_goal_state(Some(&path)),
+            "goal class {name}"
+        );
+    }
+}

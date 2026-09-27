@@ -414,23 +414,55 @@ impl AgentSessionEngine {
 /// resumed session re-seeds its depth bound from. `None` when the file
 /// carries no override (or cannot be read - an unreadable file keeps the
 /// create-carried bound, exactly the TS fallthrough).
+///
+/// The fast path reads the file ONCE and parses only the lines carrying
+/// the `rlm_max_depth_state` marker: the reference reader this replaces
+/// paid a whole-file read plus a full `parse_session_entries` walk of
+/// every row for a row the product almost never writes (10/10
+/// stock-fixture opens measured `present=false`; the parse dominated -
+/// 34.5ms on the 10MiB no-boundary fixture, 66ms on the compacted
+/// classes). The contract is exactly the reference's: the whole file
+/// must be valid UTF-8 (an invalid byte voids the override, whatever
+/// the newer rows said), lines iterate in file order newest-first, a
+/// matching row whose `data.maxDepth` does not parse as `u64` does not
+/// stop the scan, and malformed lines are skipped. The reference body
+/// moved verbatim into the differential oracle in
+/// `agent_engine/tests.rs` (`persisted_rlm_max_depth_reference`).
 pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?);
-    let content = std::fs::read_to_string(path).ok()?;
-    crate::session_store::parse_session_entries(&content)
-        .iter()
+    let path = std::path::Path::new(path?)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
+        &mut bytes,
+    )
+    .ok()?;
+    let content = std::str::from_utf8(&bytes).ok()?;
+    content
+        .lines()
         .rev()
-        .find_map(|entry| {
-            (entry.get("type").and_then(Value::as_str) == Some("custom")
-                && entry.get("customType").and_then(Value::as_str) == Some("rlm_max_depth_state"))
-            .then(|| {
-                entry
-                    .get("data")
-                    .and_then(|data| data.get("maxDepth"))
-                    .and_then(Value::as_u64)
-            })
-            .flatten()
-        })
+        // The marker gate never misses a match (a custom row's JSON
+        // always carries its `customType` literal) and skips the parse
+        // for every other line of the transcript.
+        .filter(|line| line.contains("rlm_max_depth_state"))
+        .find_map(rlm_max_depth_row)
+}
+
+/// One candidate line's depth bound: `Some(depth)` when the line is the
+/// matching custom row with a parseable `data.maxDepth`, `None` when it
+/// is not a match or the bound does not parse (the reference's
+/// `find_map` continues past both).
+fn rlm_max_depth_row(line: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("custom") {
+        return None;
+    }
+    if value.get("customType").and_then(Value::as_str) != Some("rlm_max_depth_state") {
+        return None;
+    }
+    value
+        .get("data")
+        .and_then(|data| data.get("maxDepth"))
+        .and_then(Value::as_u64)
 }
 
 /// The saved model context of a session file (TS

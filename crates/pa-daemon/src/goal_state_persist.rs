@@ -26,8 +26,17 @@ pub(crate) fn persisted_goal_state(path: Option<&Path>) -> Option<GoalState> {
     if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(path) {
         return window.goal_state().cloned();
     }
-    let file = SessionFile::open(path).ok()?;
-    file.branch()
+    goal_state_in_session_file(&SessionFile::open(path).ok()?)
+}
+
+/// The newest valid goal state along a loaded store's ACTIVE branch (the
+/// full-reader fallback arm of [`persisted_goal_state`]): the same scan
+/// `SessionFile`'s loaded rows already answer, so callers holding the
+/// store share one full read for both the goal and the branch entries
+/// instead of paying it twice.
+pub(crate) fn goal_state_in_session_file(store: &SessionFile) -> Option<GoalState> {
+    store
+        .branch()
         .iter()
         .rev()
         .find_map(|entry| goal_state_from_raw(&entry.type_, &entry.fields))
