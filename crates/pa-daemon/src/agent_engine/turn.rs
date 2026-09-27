@@ -1866,3 +1866,69 @@ impl AgentSessionEngine {
         Ok(TurnOnce::None)
     }
 }
+
+/// Serialize a pa-agent message through the session wire shape (adds `role`).
+/// Wire form of one provider stream event (TS `assistantMessageEvent`):
+/// the event `type` plus the `delta` when the event carries one.
+fn stream_event_value(event: &pa_agent::stream::AssistantMessageEvent) -> Option<Value> {
+    use pa_agent::stream::AssistantMessageEvent;
+    let (kind, delta) = match event {
+        AssistantMessageEvent::Start { .. } => ("start", None),
+        AssistantMessageEvent::TextStart { .. } => ("text_start", None),
+        AssistantMessageEvent::TextDelta { delta, .. } => ("text_delta", Some(delta.as_str())),
+        AssistantMessageEvent::TextEnd { .. } => ("text_end", None),
+        AssistantMessageEvent::ThinkingStart { .. } => ("thinking_start", None),
+        AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+            ("thinking_delta", Some(delta.as_str()))
+        }
+        AssistantMessageEvent::ThinkingEnd { .. } => ("thinking_end", None),
+        AssistantMessageEvent::ToolCallStart { .. } => ("toolcall_start", None),
+        AssistantMessageEvent::ToolCallDelta { delta, .. } => {
+            ("toolcall_delta", Some(delta.as_str()))
+        }
+        AssistantMessageEvent::ToolCallEnd { .. } => ("toolcall_end", None),
+        AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => return None,
+    };
+    match delta {
+        Some(delta) => Some(json!({ "type": kind, "delta": delta })),
+        None => Some(json!({ "type": kind })),
+    }
+}
+
+/// Wire form of one tool result (the TS tool-execution event payload).
+fn tool_result_wire_value(result: &pa_agent::types::AgentToolResult) -> Value {
+    let content: Vec<Value> = result
+        .content
+        .iter()
+        .map(|block| serde_json::to_value(block).unwrap_or(Value::Null))
+        .collect();
+    json!({ "content": content, "details": result.details })
+}
+
+fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) -> Option<Value> {
+    use pa_agent::types::Message as LoopMessage;
+    let session_message = match agent_message {
+        pa_agent::types::AgentMessage::Standard(LoopMessage::User(user)) => {
+            pa_types::session::AgentMessage::User(json_round_trip(user)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::Assistant(assistant)) => {
+            pa_types::session::AgentMessage::Assistant(json_round_trip(assistant)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::ToolResult(tool_result)) => {
+            pa_types::session::AgentMessage::ToolResult(json_round_trip(tool_result)?)
+        }
+        // A custom row (the harness digest, a goal-context row): the
+        // payload is the session-shape custom message and the wire form is
+        // the tagged session message — the payload plus the row's role
+        // (TS `agent_end.messages` carries custom rows in this shape).
+        pa_agent::types::AgentMessage::Custom(custom) => {
+            let mut value = custom.payload.clone();
+            let object = value.as_object_mut()?;
+            object
+                .entry("role".to_string())
+                .or_insert_with(|| Value::String(custom.role.clone()));
+            return Some(value);
+        }
+    };
+    serde_json::to_value(&session_message).ok()
+}
