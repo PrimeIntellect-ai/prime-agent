@@ -5784,7 +5784,17 @@ impl SessionUi {
         };
         if let Some(warning) = auth.0.anthropic_subscription_warning().await {
             self.anthropic_subscription_warning_shown = true;
-            self.note_as(&format!("\u{26a0} {warning}"), StatusKind::Warning, view);
+            // The warning STACKS, never rewrites: `note_as` would replace
+            // the just-shown `Model: ...` or login-success confirmation
+            // row in place (TS `showStatus`'s back-to-back rewrite); a
+            // plain pushed row keeps both, and clearing the status index
+            // keeps the NEXT status from rewriting the warning either.
+            view.push_entry(ChatEntry::Status {
+                text: format!("\u{26a0} {warning}"),
+                kind: StatusKind::Warning,
+            });
+            self.last_status_index = None;
+            self.dirty = true;
         }
     }
 

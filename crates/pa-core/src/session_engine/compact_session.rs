@@ -515,14 +515,16 @@ pub async fn execute_compaction(
             };
             // A JoinError (the closure panicked) degrades to the session
             // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning.
-            let routed =
-                join.await
-                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
-                        model: options.model.clone(),
-                        api_key: options.api_key.clone(),
-                        headers: None,
-                    });
+            // selector resolves to the fallback with the warning. The
+            // fallback keeps the merged headers (the registry's single
+            // owner of the team header).
+            let routed = join.await.unwrap_or_else(|_| {
+                super::auxiliary_model::session_fallback_with_headers(
+                    context,
+                    &options.model,
+                    options.api_key.clone(),
+                )
+            });
             (routed.model, routed.api_key, routed.headers)
         }
         None => (options.model.clone(), options.api_key.clone(), None),
