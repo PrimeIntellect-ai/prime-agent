@@ -360,8 +360,17 @@ impl SessionUi {
             AuthPanelRequest::ProviderSettled { provider, outcome } => {
                 self.auth_panel_cancel = None;
                 view.auth_panel = None;
+                // TS `onLoginCompleted` fires on a COMPLETED login: a
+                // cancelled or errored flow never draws the warning (and
+                // never consumes the once-per-session gate).
+                let completed = matches!(
+                    outcome,
+                    crate::provider_auth::ProviderAuthOutcome::Status(_)
+                );
                 self.apply_auth_outcome(outcome, &provider, view).await;
-                self.maybe_warn_anthropic_subscription_auth(&provider, view);
+                if completed {
+                    self.maybe_warn_anthropic_subscription_auth(&provider, view);
+                }
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;

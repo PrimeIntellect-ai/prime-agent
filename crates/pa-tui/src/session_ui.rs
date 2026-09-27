@@ -1833,10 +1833,13 @@ impl SessionUi {
     }
 
     /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
-    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// slice (`onLoginCompleted`): a COMPLETED Anthropic subscription
     /// login draws the ban-risk warning once per session, gated by the
     /// settings toggle (`warnings.anthropicExtraUsage`, TS default
-    /// true — an absent settings seam keeps the default).
+    /// true — an absent settings seam keeps the warning ENABLED).
+    /// The warning STACKS — `note_as` would rewrite the just-shown
+    /// login-success row in place — and carries the same `⚠` prefix as
+    /// the credential-detection arm.
     pub(crate) fn maybe_warn_anthropic_subscription_auth(
         &mut self,
         provider: &str,
@@ -1844,19 +1847,20 @@ impl SessionUi {
     ) {
         if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
             || self.anthropic_subscription_warning_shown
-            || self
+            || !self
                 .client_settings
                 .as_ref()
-                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+                .is_none_or(|settings| settings.warnings_anthropic_extra_usage())
         {
             return;
         }
         self.anthropic_subscription_warning_shown = true;
-        self.note_as(
-            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
-            StatusKind::Warning,
-            view,
-        );
+        view.push_entry(ChatEntry::Status {
+            text: format!("\u{26a0} {ANTHROPIC_SUBSCRIPTION_AUTH_WARNING}"),
+            kind: StatusKind::Warning,
+        });
+        self.last_status_index = None;
+        self.dirty = true;
     }
 
     /// The credential-detection arm of TS
