@@ -108,8 +108,6 @@ const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 /// gates it).
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
 
-/// Live UI state for one attached daemon session.
-
 /// One backgrounded compaction-abort outcome (the abort supervision's UI
 /// recovery): a failed abort request surfaces as the transcript note and
 /// clears the stuck compaction loader locally — when even the abort could
