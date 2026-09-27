@@ -182,7 +182,6 @@ pub struct AgentSessionEngine {
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
-    turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     /// The live quota park (TS `AgentSession._quotaPark`): shared with the
     /// park callback the retry chain consults (an owned, `'static` future
     /// over `&self` state), so it lives in an `Arc` the callback clones.
