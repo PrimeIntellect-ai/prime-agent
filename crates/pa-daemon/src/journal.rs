@@ -33,6 +33,37 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Append several records as ONE durable write: one open, all lines in one
+/// `write_all`, one `fsync`. The records land together or not at all — a
+/// batched checkpoint keeps its all-or-nothing shape (the busy verdict
+/// never publishes without the queue snapshot it describes), and the
+/// journal's on-disk bytes are exactly what the same records appended one
+/// by one would produce.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory, the open, a serialization,
+/// the write, or the sync fails; a partial write may leave truncated
+/// trailing lines, which the loader skips like any crash-truncated record.
+pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open journal {}", path.display()))?;
+    let mut lines = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut lines, record)?;
+        lines.push(b'\n');
+    }
+    file.write_all(&lines)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// How the temp journal lands on its path.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
@@ -536,6 +567,75 @@ impl WorkerRecoveryJournal {
         Ok(())
     }
 
+    /// Record the queue snapshot and the busy/operation verdict in ONE
+    /// durable append (the queue-checkpoint pair `checkpoint_queue_recovery`
+    /// writes): the snapshot line and the verdict line share a single open,
+    /// write, and `fsync`, so a checkpoint costs one journal flush instead
+    /// of two. The on-disk order matches the sequential form exactly — the
+    /// snapshot record first, then the verdict — and the verdict still
+    /// never publishes over a snapshot that did not persist (the batch is
+    /// all-or-nothing). An unchanged verdict appends the snapshot alone,
+    /// like the sequential pair does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either record cannot be serialized or the
+    /// batched append fails, or when the all-idle compaction fails after a
+    /// changed verdict landed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_queue_checkpoint(
+        &mut self,
+        active_session_id: &str,
+        session_id: &str,
+        session_file: Option<&str>,
+        busy: bool,
+        operation: &str,
+        steering: &[WorkerQueueItemRecord],
+        follow_up: &[WorkerQueueItemRecord],
+    ) -> Result<()> {
+        let snapshot = WorkerQueueSnapshotRecord {
+            version: QUEUE_SNAPSHOT_VERSION,
+            r#type: QUEUE_SNAPSHOT_RECORD_TYPE.to_string(),
+            active_session_id: active_session_id.to_string(),
+            steering: steering.to_vec(),
+            follow_up: follow_up.to_vec(),
+            recorded_at: crate::util::now_iso(),
+        };
+        let verdict_unchanged = self.latest.get(active_session_id).is_some_and(|previous| {
+            previous.busy == busy
+                && previous.operation == operation
+                && previous.session_file.as_deref() == session_file
+        });
+        let record = if verdict_unchanged {
+            None
+        } else {
+            Some(WorkerRecoveryRecord {
+                active_session_id: active_session_id.to_string(),
+                session_id: session_id.to_string(),
+                session_file: session_file.map(str::to_string),
+                busy,
+                operation: operation.to_string(),
+                recorded_at: crate::util::now_iso(),
+            })
+        };
+        let mut batch = Vec::with_capacity(2);
+        batch.push(serde_json::to_value(&snapshot)?);
+        if let Some(record) = &record {
+            batch.push(serde_json::to_value(record)?);
+        }
+        append_records(&self.path, &batch)?;
+        self.queue_snapshots
+            .insert(active_session_id.to_string(), snapshot);
+        if let Some(record) = record {
+            let all_idle = self.latest.values().all(|entry| !entry.busy) && !busy;
+            self.latest.insert(active_session_id.to_string(), record);
+            if all_idle {
+                self.compact()?;
+            }
+        }
+        Ok(())
+    }
+
     /// The latest persisted queue rows for `active_session_id`.
     pub fn latest_queue_snapshot(
         &self,
@@ -721,6 +821,114 @@ mod tests {
             .record("s2", "sess2", None, false, "shutdown")
             .unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The batched queue checkpoint and the sequential form produce the
+    /// same journal: same lines in the same order, same latest records,
+    /// same restorable queue snapshots (the `recorded_at` stamps differ only
+    /// because the two runs cannot share a clock instant).
+    #[test]
+    fn worker_journal_batched_checkpoint_matches_sequential_form() {
+        let sequential_path = temp_path("sequential.recovery.jsonl");
+        let batched_path = temp_path("batched.recovery.jsonl");
+        let mut sequential = WorkerRecoveryJournal::open(&sequential_path).unwrap();
+        let mut batched = WorkerRecoveryJournal::open(&batched_path).unwrap();
+        let item = WorkerQueueItemRecord {
+            message: "steer me".to_string(),
+            priority: Some(crate::worker::QueuePriority::Human),
+            preview: Some("preview".to_string()),
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+            policy: queue_policy_default(),
+        };
+        // Admitted (snapshot + busy verdict), settle (snapshot + idle
+        // verdict + compaction), then an unchanged-verdict checkpoint whose
+        // snapshot lands alone in both forms.
+        sequential
+            .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
+            .unwrap();
+        sequential
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
+        sequential
+            .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
+            .unwrap();
+        // An unchanged verdict: the snapshot still lands, alone.
+        sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
+        sequential
+            .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
+            .unwrap();
+        batched
+            .record_queue_checkpoint(
+                "s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted", std::slice::from_ref(&item), &[],
+            )
+            .unwrap();
+        batched
+            .record_queue_checkpoint(
+                "s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[],
+            )
+            .unwrap();
+        batched
+            .record_queue_checkpoint(
+                "s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[],
+            )
+            .unwrap();
+
+        let strip_stamps = |path: &std::path::Path| -> Vec<Value> {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let mut value: Value = serde_json::from_str(line).unwrap();
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("recordedAt");
+                        object.remove("recorded_at");
+                    }
+                    value
+                })
+                .collect()
+        };
+        assert_eq!(
+            strip_stamps(&sequential_path),
+            strip_stamps(&batched_path),
+            "the batched checkpoint writes the same journal lines as the sequential form"
+        );
+        let latest_a = sequential.get_latest();
+        let latest_b = batched.get_latest();
+        assert_eq!(latest_a.len(), latest_b.len());
+        assert_eq!(latest_a[0].busy, latest_b[0].busy);
+        assert_eq!(latest_a[0].operation, latest_b[0].operation);
+        let restored = WorkerRecoveryJournal::read_queue_snapshot(&batched_path, "s1").unwrap();
+        assert_eq!(restored, Some((Vec::new(), Vec::new())));
+        let _ = fs::remove_dir_all(sequential_path.parent().unwrap());
+        let _ = fs::remove_dir_all(batched_path.parent().unwrap());
+    }
+
+    /// The busy verdict rides the snapshot's single flush: a checkpoint
+    /// whose batched append fails lands NEITHER record (no verdict over an
+    /// unpersisted snapshot, and no snapshot without its flush).
+    #[test]
+    fn worker_journal_batched_checkpoint_is_all_or_nothing() {
+        let path = temp_path("allornothing.recovery.jsonl");
+        fs::write(&path, "").unwrap();
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", None, false, "ready")
+            .unwrap();
+        // Replace the journal with a directory: every open for append now
+        // fails, so the checkpoint cannot land either record.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let result = journal.record_queue_checkpoint(
+            "s1", "sess1", None, true, "prompt_accepted", &[], &[],
+        );
+        assert!(result.is_err());
+        // The in-memory verdict did not advance over the failed append.
+        assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
