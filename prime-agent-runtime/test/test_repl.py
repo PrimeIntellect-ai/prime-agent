@@ -2526,6 +2526,28 @@ class SnapshotRestoreBoundsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.repl_module._read_snapshot_records(fh, 256 * 1024 * 1024, 16 * 1024 * 1024)
 
+    def test_oversized_declared_record_name_is_capped_before_reading(self):
+        """A corrupt or sparse snapshot declaring a multi-gigabyte RECORD NAME must
+        fail the aggregate cap BEFORE fh.read(name_len) allocates it (the same OOM
+        class the blob caps close; Macroscope PR #2744 HIGH repl.py:729)."""
+        import dill
+
+        magic = self.repl_module._SNAPSHOT_MAGIC
+        huge_len = 2 * 1024 * 1024 * 1024
+        path = os.path.join(self.dir, "sparse-name-state.dill")
+        with open(path, "wb") as fh:
+            fh.write(magic)
+            # A valid first record the reader must survive past.
+            fh.write(self._frame(b"ok", dill.dumps(b"x")))
+            # Then the huge-name header, with the file's APPARENT size made to
+            # cover it (a sparse file: no real bytes, so the size check alone
+            # passes it — the cap must reject first).
+            fh.write(huge_len.to_bytes(4, "little"))
+            fh.truncate(fh.tell() + huge_len)
+        with open(path, "rb") as fh:
+            with self.assertRaises(ValueError):
+                self.repl_module._read_snapshot_records(fh, 256 * 1024 * 1024, 16 * 1024 * 1024)
+
     def test_failed_revival_merges_no_backfill(self):
         import dill
 

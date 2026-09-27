@@ -120,11 +120,15 @@ impl Inner {
             // transport hiccup in the replacement kernel, the repair step
             // timeout) with the on-disk payload perfectly good. Only the
             // retry guard drops — the lazy path must not spin on it. The
-            // dispose-flush protection STAYS: a never-restored namespace
-            // must not overwrite the fresher on-disk payload on the next
-            // shutdown (Macroscope PR #2744: clearing it here removed the
-            // protection for every transient failure).
+            // dispose-flush protection is ARMED: the namespace the
+            // replacement kernel carries was never restored from the
+            // payload, so the next shutdown must not overwrite the
+            // fresher on-disk payload with it (Macroscope PR #2744:
+            // a failed repair restore must keep the guard, and ARM it
+            // even after a successful earlier restore — the payload is
+            // still the fresher copy the next boot needs).
             lock(&self.guarded).pending_restore = false;
+            lock(&self.guarded).restore_incomplete = true;
             return;
         }
 

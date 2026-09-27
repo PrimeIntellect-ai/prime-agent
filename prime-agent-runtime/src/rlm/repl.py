@@ -728,6 +728,12 @@ def _read_snapshot_records(fh: Any, max_bytes: int, max_variable_bytes: int) -> 
         name_len = int.from_bytes(header, "little")
         if fh.tell() + name_len + 8 > size:
             raise ValueError("truncated snapshot record")
+        # The name is bounded by the same aggregate cap as the blobs: a
+        # corrupt or sparse snapshot declaring a multi-gigabyte name must
+        # fail the cap BEFORE the read allocates it (the same OOM class
+        # the blob caps close).
+        if name_len > max_bytes:
+            raise ValueError("snapshot record name exceeds the aggregate byte cap")
         name = fh.read(name_len)
         raw_len = fh.read(8)
         blob_len = int.from_bytes(raw_len, "little")
