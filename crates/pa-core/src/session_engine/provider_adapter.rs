@@ -124,7 +124,8 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
     )
 }
 
-/// Stream one completion against `model` with `api_key`.
+/// Stream one completion against `model` with `api_key` and the
+/// auth-resolved request `headers`.
 fn stream_once(
     model: Model,
     api_key: Option<String>,

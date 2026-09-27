@@ -13,6 +13,30 @@ use super::types::AuthStorageData;
 /// Locked read/modify/write over the auth document. `update` returns
 /// `(result, next)`; `next: Some` writes it back atomically.
 pub trait AuthStorageBackend: Send + Sync {
+    /// The document's current content, exactly what [`Self::with_lock`]'s
+    /// read arm would deliver, without a write-back channel. Implementations
+    /// may serve a process-cached copy validated against the file as it
+    /// stands; `FileAuthStorageBackend` does (the TS product keeps one
+    /// `AuthStorage` per session and reads its in-memory snapshot, so its
+    /// per-turn path takes no lock at all, while this port rebuilds the
+    /// storage per call and would otherwise pay the full lock cycle each
+    /// time). Writers must still go through [`Self::with_lock`], whose
+    /// read-modify-write file protocol is untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when preparing or locking the document fails, as
+    /// `with_lock` would. An unreadable document is `Ok(None)`, not an
+    /// error, matching `with_lock`'s best-effort read.
+    fn read(&self) -> Result<Option<String>> {
+        let mut content = None;
+        self.with_lock(&mut |current| {
+            content = current;
+            Ok(((), None))
+        })?;
+        Ok(content)
+    }
+
     /// # Errors
     ///
     /// Returns an error when the backend fails to acquire its lock, when
@@ -126,7 +150,119 @@ fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The stat identity a cached read is validated against: device, inode,
+/// mtime (nanoseconds), and length. Every writer the protocol knows either
+/// replaces the document by atomic rename (a new inode) or rewrites it in
+/// place (a new mtime), so a matching identity means the cached content is
+/// byte-identical to what a locked read would return right now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+    len: u64,
+}
+
+#[cfg(unix)]
+fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mtime_sec: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        len: metadata.len(),
+    })
+}
+
+#[cfg(windows)]
+fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    let modified = metadata.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(FileIdentity {
+        dev: 0,
+        ino: 0,
+        mtime_sec: since.as_secs() as i64,
+        mtime_nsec: since.subsec_nanos() as i64,
+        len: metadata.len(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stat_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
+}
+
+/// One validated document read held in the process-wide read-through cache.
+struct CachedRead {
+    identity: FileIdentity,
+    content: String,
+}
+
+/// Validated content per auth document, process-wide: the read-through
+/// cache for [`FileAuthStorageBackend::read`]. Entries live for the process
+/// (a handful of small documents per process, mirroring the process-lock
+/// registry's lifetime policy); a stat identity that no longer matches
+/// simply misses and re-reads, so entries never outlive their file.
+static READ_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRead>>> = OnceLock::new();
+
+/// The process-wide read-through cache, created on first use.
+fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
+    READ_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl AuthStorageBackend for FileAuthStorageBackend {
+    /// The consolidated read arm: on a cache hit, one `stat` and the
+    /// cached content (no lock protocol at all — the TS session's own
+    /// per-turn reads take no lock either); on a miss, the full locked
+    /// protocol cycle, byte-identical to `with_lock`'s read arm, which
+    /// also populates the cache. The same-process mutex still orders
+    /// this against in-process writers (see [`process_lock`]), and an
+    /// external write changes the stat identity, so the next read
+    /// misses and re-reads fresh.
+    fn read(&self) -> Result<Option<String>> {
+        let _process_guard = process_lock(&self.auth_path);
+        let now_identity = fs::metadata(&self.auth_path)
+            .ok()
+            .and_then(|metadata| stat_identity(&metadata));
+        if let Some(identity) = now_identity {
+            let cache = read_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = cache.get(&self.auth_path) {
+                if entry.identity == identity {
+                    return Ok(Some(entry.content.clone()));
+                }
+            }
+        }
+        // Miss: the full protocol read — the lock protocol is unchanged.
+        self.ensure_parent_dir()?;
+        self.ensure_file_exists()?;
+        // A read can arrive before the document's initializer created it
+        // (the up-front stat was then `None`), so the identity that pairs
+        // with this read is the document as it now stands.
+        let now_identity = fs::metadata(&self.auth_path)
+            .ok()
+            .and_then(|metadata| stat_identity(&metadata));
+        let guard = self.acquire_lock()?;
+        let content = fs::read_to_string(&self.auth_path).ok();
+        drop(guard);
+        if let (Some(identity), Some(content)) = (now_identity, content.as_deref()) {
+            read_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    self.auth_path.clone(),
+                    CachedRead {
+                        identity,
+                        content: content.to_string(),
+                    },
+                );
+        }
+        Ok(content)
+    }
+
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
@@ -217,6 +353,103 @@ mod tests {
         assert_eq!(
             parse_storage_data(None).unwrap().keys(),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn read_creates_the_document_like_with_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        // A fresh agent dir: the miss path runs the full protocol, so the
+        // exclusive-create initializer writes exactly "{}" exactly as
+        // `with_lock` would.
+        assert_eq!(backend.read().unwrap().as_deref(), Some("{}"));
+        assert!(dir.path().join("auth.json").is_file());
+    }
+
+    #[test]
+    fn read_hits_do_not_run_the_lock_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        backend.read().unwrap();
+        // A second instance on the same path: the first read populated the
+        // process-wide cache, so this read is a hit and serves the cached
+        // copy without touching the lock protocol.
+        let backend2 = FileAuthStorageBackend::new(&path);
+        assert_eq!(backend2.read().unwrap().as_deref(), Some("{}"));
+        assert!(
+            !crate::platform::lock_dir::LockDir::path_for(&path).exists(),
+            "a read hit leaves no lock artifact"
+        );
+    }
+
+    #[test]
+    fn read_sees_external_atomic_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        backend.read().unwrap();
+        // An external atomic write (the protocol every writer uses): the
+        // temp file renames over the document, changing the inode, so the
+        // next read must miss and return the new content.
+        let temp = dir.path().join("external.tmp");
+        fs::write(&temp, r#"{ "written": "externally" }"#).unwrap();
+        fs::rename(&temp, &path).unwrap();
+        assert_eq!(
+            backend.read().unwrap().as_deref(),
+            Some(r#"{ "written": "externally" }"#)
+        );
+    }
+
+    #[test]
+    fn read_sees_external_in_place_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        backend.read().unwrap();
+        // An in-place external write keeps the inode but changes the
+        // mtime (and here the size too): the identity must not match.
+        fs::write(&path, r#"{ "rewritten": "in place" }"#).unwrap();
+        assert_eq!(
+            backend.read().unwrap().as_deref(),
+            Some(r#"{ "rewritten": "in place" }"#)
+        );
+    }
+
+    #[test]
+    fn read_hits_serve_the_validated_copy_under_a_foreign_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        assert_eq!(backend.read().unwrap().as_deref(), Some("{}"));
+        // A foreign lock directory (another process mid-write) would make
+        // `with_lock` retry 10x and fail; a validated hit serves the
+        // cached copy — the document has not changed, so locking for a
+        // pure read serves nothing the TS session's in-memory read would.
+        fs::create_dir(crate::platform::lock_dir::LockDir::path_for(&path)).unwrap();
+        assert_eq!(backend.read().unwrap().as_deref(), Some("{}"));
+        fs::remove_dir(crate::platform::lock_dir::LockDir::path_for(&path)).unwrap();
+    }
+
+    #[test]
+    fn read_sees_this_process_with_lock_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        backend.read().unwrap();
+        // A write through the unchanged `with_lock` protocol, then a read:
+        // the atomic rename changes the inode, so the read misses and
+        // serves what was written.
+        backend
+            .with_lock(&mut |current| {
+                assert_eq!(current.as_deref(), Some("{}"));
+                Ok(((), Some(r#"{ "written": "locally" }"#.to_string())))
+            })
+            .unwrap();
+        assert_eq!(
+            backend.read().unwrap().as_deref(),
+            Some(r#"{ "written": "locally" }"#)
         );
     }
 }
