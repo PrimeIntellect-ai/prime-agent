@@ -17,10 +17,15 @@ pub(crate) struct ModelCatalogUpdate {
 
 impl SessionUi {
     /// The catalog entry for the current model (the `/fast` eligibility
-    /// check needs the provider and api, not just the id).
+    /// check needs the provider and api, not just the id): the
+    /// provider-aware match of [`find_current_model_entry`].
     pub(super) fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
         let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
+        find_current_model_entry(
+            &self.model_catalog,
+            view.chrome.model_provider.as_deref(),
+            model_id,
+        )
     }
 
     /// Open the `/model` picker over the cached catalog, its search
@@ -155,15 +160,13 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The session's current model, matched against the picker catalog (the
-    /// daemon state reports the id; the catalog entry supplies the
-    /// provider).
+    /// The session's current model, resolved against the picker catalog
+    /// with the same provider-aware match as [`Self::current_model_entry`]
+    /// (the daemon state reports the id and, when known, the provider; a
+    /// same-id entry under another provider is a different model and never
+    /// wins the picker's `current` marker or selection).
     fn current_model(&self, view: &AgentView) -> Option<CurrentModel> {
-        let model_id = view.chrome.model_id.as_deref()?;
-        let model = self
-            .model_catalog
-            .iter()
-            .find(|model| model.id == model_id)?;
+        let model = self.current_model_entry(view)?;
         Some(CurrentModel {
             provider: model.provider.clone(),
             model_id: model.id.clone(),
@@ -305,7 +308,7 @@ impl SessionUi {
                 // so `/new` sessions start on it too (TS settings default).
                 self.model_selection.provider = Some(provider.to_string());
                 self.model_selection.model = Some(model_id.to_string());
-                self.refresh_model_label(model_id, view).await;
+                self.refresh_model_label(provider, model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
                 self.maybe_warn_anthropic_subscription_auth_if_subscribed(Some(provider), view)
                     .await;
@@ -420,10 +423,19 @@ impl SessionUi {
     /// that omits it falls back to the picked model (`state.model ??
     /// fallbackModel`) — the switch already succeeded, so the label must
     /// move even when the worker's summary cannot re-resolve the model.
-    /// The tray's effort suffix follows the same read: a switch clamps
-    /// the level (a model without the old level re-resolves it), and a
-    /// model without reasoning renders the bare id.
-    async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
+    /// The provider follows the same ladder (the state's `model.provider`
+    /// over the picked provider): the picker resolves the current model by
+    /// provider plus id, so a same-id entry under another provider must
+    /// never own the `current` marker after the switch. The tray's effort
+    /// suffix follows the same read: a switch clamps the level (a model
+    /// without the old level re-resolves it), and a model without
+    /// reasoning renders the bare id.
+    async fn refresh_model_label(
+        &mut self,
+        picked_provider: &str,
+        picked_model_id: &str,
+        view: &mut AgentView,
+    ) {
         let state = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -435,19 +447,26 @@ impl SessionUi {
             )
             .await;
         if let Ok(data) = state {
-            let model_id = data
-                .get("model")
+            let model = data.get("model");
+            let model_id = model
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
                 .map_or_else(|| picked_model_id.to_string(), str::to_string);
+            let model_provider = model
+                .and_then(|model| model.get("provider"))
+                .and_then(Value::as_str)
+                .map_or_else(|| picked_provider.to_string(), str::to_string);
             view.chrome.model_id = Some(model_id);
+            view.chrome.model_provider = Some(model_provider);
             view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
         } else {
             // The picked model's effort is unknown when the read fails:
             // a stale suffix would pair the new model with the old
             // model's level (a combination TS never renders), so the
-            // bare id wins.
+            // bare id wins. The switch itself carried the picked
+            // provider, so the provider moves even here.
             view.chrome.model_id = Some(picked_model_id.to_string());
+            view.chrome.model_provider = Some(picked_provider.to_string());
             view.chrome.thinking_suffix = None;
         }
         self.dirty = true;
@@ -461,4 +480,95 @@ pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
     menu_rows.saturating_sub(1).max(1)
+}
+
+/// The catalog entry the session's current model resolves to (TS's
+/// `modelsAreEqual` key: provider plus id). The daemon reports the
+/// provider next to the id; when it does, ONLY the session's own
+/// provider's entry matches — two providers can carry the same id
+/// (prime-inference and openrouter both list `z-ai/glm-5.3`), and the
+/// first same-id entry in the catalog is a different model. A missing
+/// provider (older daemons) falls back to the id alone, and a provider
+/// whose entry the catalog lacks resolves nothing rather than another
+/// provider's same-id model.
+fn find_current_model_entry<'a>(
+    catalog: &'a [pa_types::ai::Model],
+    provider: Option<&str>,
+    model_id: &str,
+) -> Option<&'a pa_types::ai::Model> {
+    match provider {
+        Some(provider) => catalog
+            .iter()
+            .find(|model| model.provider == provider && model.id == model_id),
+        None => catalog.iter().find(|model| model.id == model_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(provider: &str, id: &str) -> pa_types::ai::Model {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": format!("{provider}/{id}"),
+            "api": "openai-completions",
+            "provider": provider,
+            "baseUrl": "https://example.invalid/v1",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000,
+            "maxTokens": 4096,
+        }))
+        .expect("mock model deserializes")
+    }
+
+    /// The operator's duplicate-id repro: a session on
+    /// `prime-inference/z-ai/glm-5.3` must resolve the prime-inference
+    /// entry even though openrouter's same-id entry sits FIRST in the
+    /// catalog — the id-only find the picker previously used adopted
+    /// openrouter's row as the current model.
+    #[test]
+    fn the_provider_disambiguates_duplicate_ids() {
+        let catalog = vec![
+            entry("openrouter", "z-ai/glm-5.3"),
+            entry("prime-inference", "z-ai/glm-5.3"),
+        ];
+        let resolved = find_current_model_entry(&catalog, Some("prime-inference"), "z-ai/glm-5.3");
+        assert_eq!(
+            resolved.map(|model| model.provider.as_str()),
+            Some("prime-inference"),
+            "the session's own provider's entry wins, not the first same-id entry"
+        );
+    }
+
+    /// A known provider NEVER adopts another provider's same-id model: a
+    /// catalog without the session's own entry resolves nothing, and the
+    /// picker shows no current row rather than the wrong provider's.
+    #[test]
+    fn a_known_provider_never_adopts_another_providers_same_id() {
+        let catalog = vec![entry("openrouter", "z-ai/glm-5.3")];
+        let resolved = find_current_model_entry(&catalog, Some("prime-inference"), "z-ai/glm-5.3");
+        assert!(
+            resolved.is_none(),
+            "a missing own-provider entry must resolve no current model"
+        );
+    }
+
+    /// Older daemons report no provider: the id alone resolves, keeping
+    /// the pre-provider behavior for them.
+    #[test]
+    fn a_missing_provider_falls_back_to_the_id() {
+        let catalog = vec![
+            entry("openrouter", "z-ai/glm-5.3"),
+            entry("prime-inference", "z-ai/glm-5.3"),
+        ];
+        let resolved = find_current_model_entry(&catalog, None, "z-ai/glm-5.3");
+        assert_eq!(
+            resolved.map(|model| model.provider.as_str()),
+            Some("openrouter"),
+            "without a provider the id-only fallback keeps resolving the first match"
+        );
+    }
 }
