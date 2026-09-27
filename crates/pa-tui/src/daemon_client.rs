@@ -976,10 +976,18 @@ pub fn is_update_restarting_rejection(error: &anyhow::Error) -> bool {
 pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
     // Case-insensitive: the TUI's own bounded requests say
     // "timed out after Nms ...", the daemon client's hello/connect paths
-    // "Timed out after Nms ...".
-    error
-        .chain()
-        .any(|cause| cause.to_string().to_lowercase().contains("timed out after"))
+    // "Timed out after Nms ...". ANCHORED at the chain link's start, the
+    // shape of TS's own transport-timeout checks: every genuine emitter
+    // begins its message with the phrase, so an error that merely
+    // QUOTES a timeout (the update-restart wait's deadline error inlines
+    // the last attempt's text) never matches and keeps its dedicated
+    // guidance handoff.
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .to_lowercase()
+            .starts_with("timed out after")
+    })
 }
 
 /// Whether an error means the daemon connection could not carry the

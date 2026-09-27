@@ -81,6 +81,13 @@ pub enum DaemonErrorInfo {
     /// supervisor's answer to a saturated route (the Codex
     /// `-32001 "Server overloaded; retry later."` analog on our wire).
     WorkerOverloaded,
+    /// A `code` this build does not know (a newer daemon's typed
+    /// refusal): forwards-compatibility — the unknown code must degrade
+    /// to the plain refusal message that rides the same response instead
+    /// of failing the response's deserialization, which would drop the
+    /// refusal and leave the request riding to its timeout.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Saved-session row pushed by `session_list_item` progress events.
@@ -490,5 +497,21 @@ mod tests {
         rt::<DaemonOutbound>(
             r#"{"type":"session_snapshot_chunk","activeSessionId":"s","snapshotId":"sn","index":0,"messages":[{"role":"assistant","content":[{"type":"text","text":"t"}],"api":"a","provider":"p","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1}]}"#,
         );
+    }
+
+    /// A typed refusal this build does not know degrades to
+    /// [`DaemonErrorInfo::Unknown`] instead of failing the response's
+    /// deserialization: a newer daemon's unknown `code` must leave the
+    /// plain refusal message (which rides the same response) to classify
+    /// the rejection, never drop the response to the request timeout.
+    #[test]
+    fn an_unknown_error_info_code_degrades_to_unknown() {
+        let parsed: DaemonErrorInfo =
+            serde_json::from_str(r#"{"code":"some_future_code"}"#).expect("parse");
+        assert_eq!(parsed, DaemonErrorInfo::Unknown);
+        // The known codes keep their typed shape.
+        let typed: DaemonErrorInfo =
+            serde_json::from_str(r#"{"code":"update_restarting"}"#).expect("parse");
+        assert_eq!(typed, DaemonErrorInfo::UpdateRestarting);
     }
 }

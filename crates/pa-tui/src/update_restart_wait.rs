@@ -195,32 +195,39 @@ where
 /// rotating log file is the only safe sink.
 fn log_update_restart_wait(error: &anyhow::Error) {
     use std::io::Write;
-    let write = || -> std::io::Result<()> {
-        // TS `appendRotatingLog`: the oversize log rolls to `.old`, then
-        // the line appends; every failure stays silent (a broken log dir
-        // must not break the open).
-        const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-        let Some(agent_dir) = pa_types::platform::agent_dir() else {
-            return Ok(());
+    // The rotating-log write is synchronous filesystem work, so it runs
+    // on a blocking thread, fire-and-forget: a stalled agent-home
+    // filesystem must never block the wait's retry loop (the select's
+    // deadline arm cannot fire while the task is blocked), and the
+    // record stays best-effort silent either way.
+    let line = format!(
+        "[{}] Waiting for daemon update restart to finish before opening: {error:#}",
+        now_iso()
+    );
+    tokio::task::spawn_blocking(move || {
+        let write = || -> std::io::Result<()> {
+            // TS `appendRotatingLog`: the oversize log rolls to `.old`,
+            // then the line appends; every failure stays silent (a broken
+            // log dir must not break the open).
+            const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+            let Some(agent_dir) = pa_types::platform::agent_dir() else {
+                return Ok(());
+            };
+            let dir = agent_dir.join("logs");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("client-errors.log");
+            if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
+                let _ = std::fs::remove_file(dir.join("client-errors.log.old"));
+                let _ = std::fs::rename(&path, dir.join("client-errors.log.old"));
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)?;
+            writeln!(file, "{line}")
         };
-        let dir = agent_dir.join("logs");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("client-errors.log");
-        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
-            let _ = std::fs::remove_file(dir.join("client-errors.log.old"));
-            let _ = std::fs::rename(&path, dir.join("client-errors.log.old"));
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&path)?;
-        writeln!(
-            file,
-            "[{}] Waiting for daemon update restart to finish before opening: {error:#}",
-            now_iso()
-        )
-    };
-    let _ = write();
+        let _ = write();
+    });
 }
 
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` — the TS `new Date().toISOString()` shape
