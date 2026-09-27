@@ -5686,115 +5686,127 @@ fn depth_override_row(id: &str, depth: serde_json::Value) -> String {
 /// the empty/missing/absent-path fallthroughs.
 #[test]
 fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
-    let header = json!({
-        "type": "session", "version": 3, "id": "s",
-        "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
-    })
-    .to_string();
-    let message = json!({
-        "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
-        "message": { "role": "user", "content": "we ship rlm_max_depth_state fixes", "timestamp": 0 },
-    })
-    .to_string();
-    let unicode_message = json!({
-        "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
-        "message": { "role": "user", "content": "emoji \u{1f69b}\u{1f69b} bytes across boundaries", "timestamp": 0 },
-    })
-    .to_string();
+    let header = || {
+        json!({
+            "type": "session", "version": 3, "id": "s",
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
+        })
+        .to_string()
+    };
+    let message = || {
+        json!({
+            "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
+            "message": { "role": "user", "content": "we ship rlm_max_depth_state fixes", "timestamp": 0 },
+        })
+        .to_string()
+    };
+    let unicode_message = || {
+        json!({
+            "type": "message", "id": "m1", "timestamp": "2026-01-01T00:00:01.000Z",
+            "message": { "role": "user", "content": "emoji \u{1f69b}\u{1f69b} bytes across boundaries", "timestamp": 0 },
+        })
+        .to_string()
+    };
     // The shape-loose row: parses as a raw `Value` (the reference's row
     // shape) but would fail the typed `SessionEntry` reader (no `id`) -
     // the scan must see it exactly like the reference does.
-    let shape_loose = json!({
-        "type": "custom",
-        "timestamp": "2026-01-01T00:00:03.000Z",
-        "customType": "rlm_max_depth_state",
-        "data": { "maxDepth": 7 },
-    })
-    .to_string();
-    let malformed = r#"{"type": "message", "id": "broken""#;
+    let shape_loose = || {
+        json!({
+            "type": "custom",
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "customType": "rlm_max_depth_state",
+            "data": { "maxDepth": 7 },
+        })
+        .to_string()
+    };
+    let malformed = || r#"{"type": "message", "id": "broken""#.to_string();
+    let missing_bound_row = || {
+        json!({
+            "type": "custom", "id": "d2", "timestamp": "2026-01-01T00:00:04.000Z",
+            "customType": "rlm_max_depth_state", "data": {},
+        })
+        .to_string()
+    };
+    let marker_text_row = || {
+        json!({
+            "type": "message", "id": "m2", "timestamp": "2026-01-01T00:00:02.000Z",
+            "message": { "role": "assistant", "content": "rlm_max_depth_state", "timestamp": 0 },
+        })
+        .to_string()
+    };
 
-    let classes: Vec<(&str, String)> = vec![
-        ("absent", vec![header.clone(), message.clone()].join("\n")),
-        ("present_last", vec![
-            header.clone(),
-            message.clone(),
-            depth_override_row("d1", json!(5)),
-        ]
-        .join("\n")),
-        ("present_mid", vec![
-            header.clone(),
-            message.clone(),
-            depth_override_row("d1", json!(5)),
-            message.clone(),
-        ]
-        .join("\n")),
+    let classes: Vec<(&str, String)> = [
+        ("absent", [header(), message()].join("\n")),
+        (
+            "present_last",
+            [header(), message(), depth_override_row("d1", json!(5))].join("\n"),
+        ),
+        (
+            "present_mid",
+            [header(), message(), depth_override_row("d1", json!(5)), message()].join("\n"),
+        ),
         // A newer row whose bound does not parse as u64 must not stop
         // the scan: the older valid row still wins (the reference's
         // `find_map` continues past it).
-        ("non_u64_bound_continues", vec![
-            header.clone(),
-            message.clone(),
-            depth_override_row("d1", json!(5)),
-            depth_override_row("d2", json!("many")),
-        ]
-        .join("\n")),
-        ("missing_bound_continues", vec![
-            header.clone(),
-            message.clone(),
-            depth_override_row("d1", json!(5)),
-            json!({
-                "type": "custom", "id": "d2", "timestamp": "2026-01-01T00:00:04.000Z",
-                "customType": "rlm_max_depth_state", "data": {},
-            })
-            .to_string(),
-        ]
-        .join("\n")),
-        ("malformed_lines_skipped", vec![
-            header.clone(),
-            malformed.to_string(),
-            depth_override_row("d1", json!(9)),
-            malformed.to_string(),
-        ]
-        .join("\n")),
-        ("shape_loose_row_found", vec![
-            header.clone(),
-            message.clone(),
-            shape_loose.clone(),
-        ]
-        .join("\n")),
-        ("marker_text_not_a_row", vec![
-            header.clone(),
-            message.clone(),
-            json!({
-                "type": "message", "id": "m2", "timestamp": "2026-01-01T00:00:02.000Z",
-                "message": { "role": "assistant", "content": "rlm_max_depth_state", "timestamp": 0 },
-            })
-            .to_string(),
-        ]
-        .join("\n")),
-        ("crlf_lines", vec![
-            header.clone(),
-            message.clone(),
-            depth_override_row("d1", json!(11)),
-        ]
-        .join("\r\n")),
-        ("unicode_content_absent", vec![
-            header.clone(),
-            unicode_message.clone(),
-        ]
-        .join("\n")),
-        ("unicode_content_present", vec![
-            header.clone(),
-            unicode_message.clone(),
-            depth_override_row("d1", json!(3)),
-        ]
-        .join("\n")),
+        (
+            "non_u64_bound_continues",
+            [
+                header(),
+                message(),
+                depth_override_row("d1", json!(5)),
+                depth_override_row("d2", json!("many")),
+            ]
+            .join("\n"),
+        ),
+        (
+            "missing_bound_continues",
+            [
+                header(),
+                message(),
+                depth_override_row("d1", json!(5)),
+                missing_bound_row(),
+            ]
+            .join("\n"),
+        ),
+        (
+            "malformed_lines_skipped",
+            [
+                header(),
+                malformed(),
+                depth_override_row("d1", json!(9)),
+                malformed(),
+            ]
+            .join("\n"),
+        ),
+        (
+            "shape_loose_row_found",
+            [header(), message(), shape_loose()].join("\n"),
+        ),
+        (
+            "marker_text_not_a_row",
+            [header(), message(), marker_text_row()].join("\n"),
+        ),
+        (
+            "crlf_lines",
+            [
+                header(),
+                message(),
+                depth_override_row("d1", json!(11)),
+            ]
+            .join("\r\n"),
+        ),
+        ("unicode_content_absent", [header(), unicode_message()].join("\n")),
+        (
+            "unicode_content_present",
+            [header(), unicode_message(), depth_override_row("d1", json!(3))].join("\n"),
+        ),
         ("empty_file", String::new()),
-    ];
+    ]
+    .into();
     for (name, content) in classes {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
-        let mut bytes = content.clone().into_bytes();
+        let mut bytes = content.into_bytes();
         if !bytes.is_empty() {
             bytes.push(b'\n');
         }
@@ -5812,7 +5824,9 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut bytes = format!(
-            "{header}\n{message}\n{}\n",
+            "{}\n{}\n{}\n",
+            header(),
+            message(),
             depth_override_row("d1", json!(5))
         )
         .into_bytes();
@@ -5850,10 +5864,12 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
 /// fallback's active-branch scan agree).
 #[test]
 fn shared_window_goal_seed_matches_persisted_goal_state() {
-    let header = json!({
-        "type": "session", "version": 3, "id": "s",
-        "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
-    });
+    let header = || {
+        json!({
+            "type": "session", "version": 3, "id": "s",
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
+        })
+    };
     let message = |id: &str, parent: &str, role: &str| {
         json!({
             "type": "message", "id": id, "parentId": parent,
@@ -5875,13 +5891,17 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
     };
     // (name, rows, terminated tail: an unterminated row forces the
     // ordinary full-reader fallback for both readers)
-    let classes: Vec<(&str, Vec<serde_json::Value>, bool)> = vec![
-        ("windowed_with_goal", vec![header.clone(), message("m1", "", "user"), goal_row("g1", "m1")], true),
-        ("windowed_no_goal", vec![header.clone(), message("m1", "", "user")], true),
+    let classes: Vec<(&str, Vec<serde_json::Value>, bool)> = [
+        (
+            "windowed_with_goal",
+            vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
+            true,
+        ),
+        ("windowed_no_goal", vec![header(), message("m1", "", "user")], true),
         (
             "windowed_off_branch_goal",
             vec![
-                header.clone(),
+                header(),
                 // The goal links to a row no chain reaches: the active
                 // branch (leaf m2 -> m1 -> header) never visits it.
                 goal_row("g1", "ghost-id"),
@@ -5889,9 +5909,14 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             ],
             true,
         ),
-        ("fallback_with_goal", vec![header.clone(), message("m1", "", "user"), goal_row("g1", "m1")], false),
-        ("fallback_no_goal", vec![header.clone(), message("m1", "", "user")], false),
-    ];
+        (
+            "fallback_with_goal",
+            vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
+            false,
+        ),
+        ("fallback_no_goal", vec![header(), message("m1", "", "user")], false),
+    ]
+    .into();
     for (name, rows, terminated) in classes {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
