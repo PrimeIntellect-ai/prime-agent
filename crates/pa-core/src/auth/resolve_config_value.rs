@@ -151,9 +151,7 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(resolve_config_value(&format!("!{command}")), None);
         }
-        let runs = std::fs::read_to_string(&counter)
-            .map(|text| text.lines().count())
-            .unwrap_or(0);
+        let runs = std::fs::read_to_string(&counter).map_or(0, |text| text.lines().count());
         let _ = std::fs::remove_file(&counter);
         assert_eq!(runs, 3, "failed commands are re-run on each lookup");
     }

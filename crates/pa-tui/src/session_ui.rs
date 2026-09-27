@@ -7014,8 +7014,7 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
-                self
-                    .maybe_warn_anthropic_subscription_auth_if_subscribed(Some(provider), view)
+                self.maybe_warn_anthropic_subscription_auth_if_subscribed(Some(provider), view)
                     .await;
                 SetModelOutcome::Switched
             }
@@ -7060,7 +7059,6 @@ impl SessionUi {
         }
     }
 
-
     /// The credential-detection arm of TS
     /// `maybeWarnAboutAnthropicSubscriptionAuth` (#2645): the startup,
     /// model-selection, and api-key-save triggers need the ACTIVE
@@ -7083,8 +7081,7 @@ impl SessionUi {
         let warnings_enabled = self
             .client_settings
             .as_ref()
-            .map(|settings| settings.warnings_anthropic_extra_usage())
-            .unwrap_or(true);
+            .is_none_or(|settings| settings.warnings_anthropic_extra_usage());
         if !warnings_enabled || provider != Some("anthropic") {
             return;
         }

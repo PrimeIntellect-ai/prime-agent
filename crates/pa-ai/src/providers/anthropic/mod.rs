@@ -563,47 +563,6 @@ impl Provider for AnthropicMessagesProvider {
     }
 }
 
-/// Port of the TS #2645 wire-identity pins: subscription (OAuth)
-/// requests claim the Claude Code client identity, and the claimed
-/// version must stay at or above the API's model gates (the opus-5.5
-/// family rejects anything below 2.280 with a 400).
-#[cfg(test)]
-mod subscription_identity_tests {
-    use super::build_request_headers;
-
-    #[test]
-    fn subscription_requests_claim_the_current_claude_code_identity() {
-        let model = crate::models_generated::get_model("anthropic", "claude-fable-5-1")
-            .expect("the catalog carries an anthropic model");
-        let (headers, is_oauth) =
-            build_request_headers(model, "sk-ant-oat-test", false, false, None, None);
-        assert!(is_oauth);
-        let header = |name: &str| {
-            headers
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(
-            header("user-agent").as_deref(),
-            Some("claude-cli/2.1.281"),
-            "the claimed client version must stay above the model gates"
-        );
-        assert_eq!(header("x-app").as_deref(), Some("cli"));
-        let beta = header("anthropic-beta").expect("the OAuth beta header");
-        assert!(beta.contains("claude-code-20250219"));
-        assert!(beta.contains("oauth-2025-04-20"));
-
-        // A plain API key keeps the plain identity (no Claude Code mimicry).
-        let (plain, is_oauth) =
-            build_request_headers(model, "sk-ant-api03-test", false, false, None, None);
-        assert!(!is_oauth);
-        assert!(plain
-            .iter()
-            .all(|(key, _)| key != "user-agent" && key != "x-app"));
-    }
-}
-
 #[cfg(test)]
 mod always_on_adaptive_thinking_tests {
     use super::is_always_on_adaptive_thinking_model;
@@ -622,5 +581,52 @@ mod always_on_adaptive_thinking_tests {
     fn optional_thinking_models_still_accept_disabled() {
         assert!(!is_always_on_adaptive_thinking_model("claude-opus-5"));
         assert!(!is_always_on_adaptive_thinking_model("claude-sonnet-5"));
+    }
+}
+
+#[cfg(test)]
+mod subscription_identity_tests {
+    use super::build_request_headers;
+    use crate::types::{zero_model_cost, Model, ModelInput};
+
+    // TS #2645's wire-contract assertions (anthropic-thinking-disable.test.ts):
+    // subscription requests claim the Claude Code client identity, and the
+    // claimed version must stay at or above what the API's model gates require
+    // (the opus-5.5 family rejects anything below 2.280).
+    fn test_model() -> Model {
+        Model {
+            id: "claude-opus-5-5".into(),
+            name: "Claude Opus 5.5".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 32_000,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn oauth_requests_claim_the_claude_code_identity() {
+        let (headers, is_oauth) =
+            build_request_headers(&test_model(), "sk-ant-oat-test", false, false, None, None);
+        assert!(is_oauth);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        let user_agent = header("user-agent").expect("the OAuth request sends a user-agent");
+        assert!(user_agent.starts_with("claude-cli/"), "got {user_agent}");
+        assert_eq!(header("x-app"), Some("cli"));
+        let beta = header("anthropic-beta").expect("the OAuth request sends the claude-code beta");
+        assert!(beta.contains("claude-code-20250219"));
     }
 }

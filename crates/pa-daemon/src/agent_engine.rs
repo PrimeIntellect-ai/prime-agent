@@ -2687,6 +2687,13 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> TurnResult {
+        #[derive(Clone)]
+        struct FailoverPrimary {
+            model: pa_types::ai::Model,
+            thinking_level: pa_agent::types::ThinkingLevel,
+            api_key: Option<String>,
+            headers: Option<std::collections::BTreeMap<String, String>>,
+        }
         // Model resolution and session construction are hard failures: they
         // never reach the provider, so the retry loop does not apply (the
         // TS loop only classifies provider stream failures).
@@ -2780,13 +2787,6 @@ impl AgentSessionEngine {
         // The failover-captured primary target state (TS `_backupModel`):
         // the model, its thinking level, and its resolved request auth,
         // restored when the turn settles back onto the primary.
-        #[derive(Clone)]
-        struct FailoverPrimary {
-            model: pa_types::ai::Model,
-            thinking_level: pa_agent::types::ThinkingLevel,
-            api_key: Option<String>,
-            headers: Option<std::collections::BTreeMap<String, String>>,
-        }
         let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
             std::cell::RefCell::new(None);
         let result = self.runtime.block_on(

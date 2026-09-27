@@ -2712,6 +2712,29 @@ fn the_startup_chain_refuses_models_outside_the_allowlist() {
     assert_eq!(model.id, "mock-1");
 }
 
+/// TS #2497: the auth storage is the single team-header owner. The
+/// request auth a session's provider target carries resolves the
+/// stored Prime team as `X-Prime-Team-ID` — with the provider-side
+/// fallback deleted, these merged headers are what keeps the team on
+/// the wire.
+#[tokio::test]
+async fn request_auth_carries_the_stored_team_header() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_auth(&agent_dir);
+    let engine = restore_test_engine(dir.path(), Some("prime-inference"), None);
+    let model = engine.resolve_registry_model().expect("resolved model");
+    assert_eq!(model.provider, "prime-inference");
+    let (api_key, headers) = engine.resolve_request_key_and_headers(&model);
+    assert_eq!(api_key.as_deref(), Some("test-key"));
+    let headers = headers.expect("merged request headers");
+    assert_eq!(
+        headers.get("X-Prime-Team-ID").map(String::as_str),
+        Some("team-1"),
+        "the stored team ships as the team header"
+    );
+}
+
 /// The revival race this lane fixes (the 2026-09-23 05:57 fleet kill):
 /// a revived session (scheduled wake / update restore / worker
 /// relaunch — a create without model flags) resolves against the cold
