@@ -12,7 +12,7 @@ use crate::providers::bedrock::{bedrock_exception_message, map_stop_reason};
 use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, ThinkingContent, ToolCall,
 };
-use crate::utils_inner::json_parse::parse_streaming_json;
+use crate::utils_inner::json_parse::{parse_streaming_json, StreamingJsonAccumulator};
 use crate::utils_inner::stream_failure::ProviderError;
 
 /// Scratch state for the Converse Stream event loop.
@@ -22,15 +22,42 @@ pub(crate) struct BedrockStreamState {
 }
 
 enum BlockSlot {
-    Text { index: usize },
-    Thinking { index: usize },
-    ToolUse { index: usize, partial_json: String },
+    Text {
+        index: usize,
+    },
+    Thinking {
+        index: usize,
+    },
+    ToolUse {
+        index: usize,
+        partial_json: StreamingJsonAccumulator,
+    },
 }
 
 impl BedrockStreamState {
     pub(crate) fn new() -> Self {
         Self {
             slots: HashMap::new(),
+        }
+    }
+
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
+    /// preview may lag the accumulated text under the growth throttle.
+    pub(crate) fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
+        for slot in self.slots.values_mut() {
+            let BlockSlot::ToolUse {
+                index,
+                partial_json,
+            } = slot
+            else {
+                continue;
+            };
+            let Some(Value::Object(map)) = partial_json.flush() else {
+                continue;
+            };
+            if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*index) {
+                block.arguments = map;
+            }
         }
     }
 }
@@ -151,7 +178,7 @@ fn handle_content_block_start(
             content_block_index,
             BlockSlot::ToolUse {
                 index,
-                partial_json: String::new(),
+                partial_json: StreamingJsonAccumulator::default(),
             },
         );
         writer.push(AssistantMessageEvent::ToolcallStart {
@@ -229,12 +256,11 @@ fn handle_content_block_delta(
         }) = state.slots.get_mut(&content_block_index)
         {
             let index = *index;
-            partial_json.push_str(tool_input);
-            let parsed = parse_streaming_json(Some(partial_json));
-            if let AssistantContent::ToolCall(block) = &mut output.content[index] {
-                if let Value::Object(map) = parsed {
-                    block.arguments = map;
-                }
+            let parsed = partial_json.append(tool_input);
+            if let (Some(Value::Object(map)), Some(AssistantContent::ToolCall(block))) =
+                (parsed, output.content.get_mut(index))
+            {
+                block.arguments = map;
             }
             let partial = output.clone();
             writer.push(AssistantMessageEvent::ToolcallDelta {
@@ -337,7 +363,7 @@ fn handle_content_block_stop(
             index,
             partial_json,
         } => {
-            let parsed = parse_streaming_json(Some(partial_json.as_str()));
+            let parsed = parse_streaming_json(Some(partial_json.text()));
             let call = if let AssistantContent::ToolCall(block) = &mut output.content[index] {
                 if let Value::Object(map) = parsed {
                     block.arguments = map;
