@@ -1,0 +1,1 @@
+- Changed the daemon to take its supervisor and worker command lists from the protocol command table, and daemon-hosted subagents to take their session options from the same mapping as in-process subagents. No behavior change.

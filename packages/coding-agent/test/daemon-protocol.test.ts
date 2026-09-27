@@ -7,6 +7,7 @@ import {
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_COMMAND_PLANE,
+	DAEMON_COMMAND_TYPES,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
 	type DaemonCommand,
@@ -16,6 +17,7 @@ import {
 	isSessionPlaneDaemonCommand,
 	isSessionSummary,
 	salvageDaemonCommandId,
+	WORKER_DAEMON_COMMAND_TYPES,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
 	type DaemonWorkerDescriptor,
@@ -210,6 +212,21 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_COMMAND_PLANE.list).toBe("control");
 		expect(DAEMON_COMMAND_PLANE.prompt).toBe("session");
 		expect(isSessionPlaneDaemonCommand("no_such_command")).toBe(false);
+	});
+
+	it("admits every compatibility-table command, and workers reject only supervisor-only commands", () => {
+		const supervisorOnly = [
+			"complete_owned_session",
+			"get_direct_worker_transport",
+			"list_agent_peers",
+			"promote_owned_session",
+			"reattach",
+			"roster_subscribe",
+			"roster_unsubscribe",
+		];
+		const commands = Object.keys(DAEMON_COMMAND_COMPATIBILITY);
+		expect([...DAEMON_COMMAND_TYPES]).toEqual(commands);
+		expect([...WORKER_DAEMON_COMMAND_TYPES]).toEqual(commands.filter((command) => !supervisorOnly.includes(command)));
 	});
 
 	it("reports replay availability from resume cursors", () => {

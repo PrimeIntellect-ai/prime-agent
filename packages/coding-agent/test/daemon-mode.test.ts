@@ -23,7 +23,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 import { AGENT_FAMILY_REACH_ERROR, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
-import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
+import { type CreateAgentSessionRuntimeFactory, rlmSubagentRuntimeSpec } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
@@ -120,29 +120,43 @@ describe("daemon mode helpers", () => {
 				hasRunningRlmChildren: () => false,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
+			const spawnOptions = (id: string, ignoreSessionIds?: string[]): CreateRlmSubagentRuntimeOptions => ({
+				parentSession: parentState.runtime.session,
+				id,
+				prompt: "complete and persist",
+				sessionName: "real-worker",
+				sessionDir: join(parentManager.getSessionArtifactDir()!, id),
+				model: { provider: "test", id: "model" } as Model<Api>,
+				thinkingLevel: "off" as const,
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: id,
+				spawnedByRequestId: "a".repeat(32),
+				spawnCode: "rlm.spawn()",
+				...(ignoreSessionIds ? { ignoreSessionIds } : {}),
+			});
 			const spawn = (id: string, ignoreSessionIds?: string[]) =>
-				internals.createRlmSubagentRuntime(parentState, {
-					parentSession: parentState.runtime.session,
-					id,
-					prompt: "complete and persist",
-					sessionName: "real-worker",
-					sessionDir: join(parentManager.getSessionArtifactDir()!, id),
-					model: { provider: "test", id: "model" } as Model<Api>,
-					thinkingLevel: "off" as const,
-					serviceTier: null,
-					scopedModels: [],
-					activeToolNames: [],
-					customTools: [],
-					includeGoals: false,
-					includeCompactSkill: false,
-					rlmDepth: 1,
-					rlmMaxDepth: 4,
-					rlmParentNodeId: id,
-					...(ignoreSessionIds ? { ignoreSessionIds } : {}),
-				});
+				internals.createRlmSubagentRuntime(parentState, spawnOptions(id, ignoreSessionIds));
 			const admission = spawn("child-1");
 			await expect(spawn("child-2")).rejects.toThrow('Agent name "real-worker" is unavailable');
 			const childRuntime = await admission;
+			const spec = rlmSubagentRuntimeSpec(spawnOptions("child-1"));
+			expect(createRuntime).toHaveBeenCalledWith(
+				expect.objectContaining({
+					sessionOptions: expect.objectContaining(spec.sessionOptions),
+					runtimeMetadata: {
+						...spec.runtimeMetadata,
+						createdAt: expect.any(Number),
+						parentActiveSessionId: parentState.activeSessionId,
+					},
+				}),
+			);
 			const edges = await internals.rlmSpawnLedger().liveEdges();
 			expect(edges.filter((edge) => edge.name === "real-worker")).toHaveLength(1);
 			const childState = [...internals.sessions.values()].find(

@@ -74,6 +74,7 @@ import {
 	type AgentSessionRuntimeMetadata,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
+	rlmSubagentRuntimeSpec,
 } from "../../core/agent-session-runtime.js";
 import {
 	type AgentCronJob,
@@ -182,6 +183,7 @@ import {
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
+	WORKER_DAEMON_COMMAND_TYPES,
 } from "./daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import {
@@ -287,109 +289,6 @@ function workerSupervisorLostExitMs(): number {
 	const raw = Number(process.env[WORKER_SUPERVISOR_LOST_EXIT_MS_ENV]);
 	return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_WORKER_SUPERVISOR_LOST_EXIT_MS;
 }
-
-const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
-	"ack_result",
-	"list",
-	"list_saved_sessions",
-	"create",
-	"attach",
-	"detach",
-	"kill",
-	"rename",
-	"prompt",
-	"cancel_prompt_admission",
-	"prompt_and_wait",
-	"steer",
-	"follow_up",
-	"restore_next_turn",
-	"restore_actions",
-	"append_custom_message",
-	"resume_queue",
-	"send_message",
-	"agent_messages_status",
-	"agent_messages_pause",
-	"agent_messages_resume",
-	"agent_messages_clear",
-	"abort",
-	"abort_and_send_queued",
-	"start_side_question",
-	"abort_side_question",
-	"execute_bash",
-	"execute_bash_and_wait",
-	"abort_bash",
-	"cancel_rlm_child",
-	"delete_rlm_subagent",
-	"wait_for_idle",
-	"wait_for_headless_completion",
-	"get_session_header",
-	"get_state",
-	"get_connection_state",
-	"get_messages",
-	"get_rlm_children",
-	"get_session_stats",
-	"get_context_tree",
-	"get_commands",
-	"get_resource_snapshot",
-	"replace_acp_mcp_servers",
-	"get_model_catalog",
-	"get_available_models",
-	"get_queue",
-	"mutate_queued_message",
-	"clear_queue",
-	"abort_and_clear_queue",
-	"acquire_session_input_pause",
-	"release_session_input_pause",
-	"cron_list",
-	"heartbeats_list",
-	"heartbeat_manage",
-	"cron_add",
-	"cron_cancel",
-	"heartbeat_get",
-	"heartbeat_set",
-	"heartbeat_update",
-	"set_model",
-	"cycle_model",
-	"set_scoped_models",
-	"set_thinking_level",
-	"set_service_tier",
-	"cycle_thinking_level",
-	"set_transport",
-	"set_steering_mode",
-	"set_follow_up_mode",
-	"set_auto_compaction",
-	"set_auto_retry",
-	"compact",
-	"refine",
-	"abort_compaction",
-	"abort_branch_summary",
-	"abort_retry",
-	"reload",
-	"new_session",
-	"switch_session",
-	"fork",
-	"navigate_tree",
-	"import_jsonl",
-	"export_html",
-	"export_jsonl",
-	"set_session_name",
-	"get_rlm_max_depth_status",
-	"set_rlm_max_depth",
-	"rename_saved_session",
-	"delete_saved_session",
-	"get_session_context",
-	"get_session_tree",
-	"get_user_messages_for_forking",
-	"get_last_assistant_text",
-	"get_system_prompt",
-	"get_tool_definition",
-	"set_session_entry_label",
-	"extension_ui_response",
-	"prepare_update_restart",
-	"retry_worker",
-	"restart",
-	"shutdown",
-]);
 
 const DAEMON_CLIENT_CAPABILITY_SET: ReadonlySet<string> = new Set(DAEMON_SUPPORTED_CLIENT_CAPABILITIES);
 const CLIENT_CATCHUP_RETRY_MS = 250;
@@ -2947,23 +2846,16 @@ export class AgentDaemon {
 		});
 		let stateRef: ActiveSessionState | undefined;
 		// Subagents inherit the parent's client env (e.g. herdr pane identity).
-		const runtime = await withClientEnv(parentState.clientEnv, () =>
-			createAgentSessionRuntime(this.options.createRuntime, {
+		const runtime = await withClientEnv(parentState.clientEnv, () => {
+			const spec = rlmSubagentRuntimeSpec(options);
+			return createAgentSessionRuntime(this.options.createRuntime, {
 				cwd: sessionManager.getCwd(),
 				agentDir: parentState.runtime.services.agentDir,
 				sessionManager,
 				sessionStartEvent: { type: "session_start", reason: "startup" },
 				sessionConfig: parentState.runtime.runtimeConfig,
 				sessionOptions: {
-					model: options.model,
-					thinkingLevel: options.thinkingLevel,
-					serviceTier: options.serviceTier,
-					scopedModels: options.scopedModels,
-					initialActiveToolNames: options.activeToolNames,
-					allowedToolNames: options.allowedToolNames,
-					customTools: options.customTools,
-					includeGoals: options.includeGoals,
-					includeCompactSkill: options.includeCompactSkill,
+					...spec.sessionOptions,
 					agentMessageController: this.createAgentMessageController(() => stateRef),
 					agentObserveController: this.createAgentObserveController(() => stateRef),
 					rlmHeartbeatController: {
@@ -2992,28 +2884,10 @@ export class AgentDaemon {
 							return this.deleteRlmHeartbeatForState(stateRef, id);
 						},
 					},
-					rlmDepth: options.rlmDepth,
-					rlmMaxDepth: options.rlmMaxDepth,
-					rlmSessionDir: options.sessionDir,
-					rlmParentNodeId: options.rlmParentNodeId,
-					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
-					semanticParentSessionId: options.parentSession.sessionId,
-					semanticSpawnedByRequestId: options.spawnedByRequestId,
 				},
-				runtimeMetadata: {
-					kind: "subagent",
-					createdAt: Date.now(),
-					parentActiveSessionId: parentState.activeSessionId,
-					parentSessionId: options.parentSession.sessionId,
-					parentSessionFile: options.parentSession.sessionFile,
-					rlmChildId: options.id,
-					rlmParentNodeId: options.rlmParentNodeId,
-					prompt: options.prompt,
-					spawnCode: options.spawnCode,
-					sessionDir: options.sessionDir,
-				},
-			}),
-		);
+				runtimeMetadata: { ...spec.runtimeMetadata, parentActiveSessionId: parentState.activeSessionId },
+			});
+		});
 		let state: ActiveSessionState;
 		try {
 			state = await this.addRuntime(
@@ -4031,7 +3905,7 @@ export class AgentDaemon {
 				return;
 			}
 
-			if (typeof parsed.type !== "string" || !DAEMON_COMMAND_TYPES.has(parsed.type)) {
+			if (typeof parsed.type !== "string" || !WORKER_DAEMON_COMMAND_TYPES.has(parsed.type)) {
 				const commandName = typeof parsed.type === "string" ? parsed.type : "unknown";
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
 				this.write(client, failure(commandId, commandName, `Unknown daemon command: ${commandName}`));

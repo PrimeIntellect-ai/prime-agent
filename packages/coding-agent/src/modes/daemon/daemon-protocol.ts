@@ -863,6 +863,24 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	shutdown: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
+/** Commands only the supervisor serves; a worker rejects them as unknown. */
+const SUPERVISOR_ONLY_DAEMON_COMMANDS: ReadonlySet<string> = new Set([
+	"complete_owned_session",
+	"get_direct_worker_transport",
+	"list_agent_peers",
+	"promote_owned_session",
+	"reattach",
+	"roster_subscribe",
+	"roster_unsubscribe",
+] satisfies DaemonCommandName[]);
+
+/** Commands the supervisor admits: every command in the compatibility table. */
+export const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set(Object.keys(DAEMON_COMMAND_COMPATIBILITY));
+
+export const WORKER_DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set(
+	[...DAEMON_COMMAND_TYPES].filter((type) => !SUPERVISOR_ONLY_DAEMON_COMMANDS.has(type)),
+);
+
 /**
  * Which endpoint serves each command when a client holds both a supervisor
  * (control-plane) and a direct worker (session-plane) connection. Session is
