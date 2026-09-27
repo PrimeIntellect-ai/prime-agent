@@ -125,8 +125,7 @@ impl ExitGuard {
     /// still read as recorded.
     fn ms(&self, at: Instant) -> u64 {
         at.checked_duration_since(self.state.base)
-            .map(|elapsed| elapsed.as_millis() as u64 + 1)
-            .unwrap_or(1)
+            .map_or(1, |elapsed| elapsed.as_millis() as u64 + 1)
     }
 
     /// Observe one key from the terminal reader: a Ctrl+C press inside the

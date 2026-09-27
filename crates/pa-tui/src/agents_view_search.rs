@@ -1,9 +1,12 @@
 //! The agents-view session search: a picker over the session's identity
 //! fields — the display NAME (primary), the durable session ID, and the
-//! CWD. The TS corpus fields — the first message, the transcript text,
-//! the recap summary, file paths — never match (a deliberate divergence
-//! from TS `session-view-search.ts`, which joined them; the query
-//! language stays TS-shaped).
+//! CWD. The name target is the SESSION column's own title — the
+//! `session_title` ladder over the merged summary, clipped to the
+//! column's width cap — so a prompt-derived title is searchable exactly
+//! as far as the column displays it. The TS corpus fields — the full
+//! first message, the transcript text, file paths — never match (a
+//! deliberate divergence from TS `session-view-search.ts`, which joined
+//! them; the query language stays TS-shaped).
 //!
 //! Matching follows the session/command-picker standard (VS Code
 //! quick-open `fuzzyScorer.ts` + `filters.ts`; Zed's project switcher;
@@ -24,7 +27,9 @@ const STRICT_FUZZY_MAX_TOKEN_SCORE: f64 = 25.0;
 /// One record's match targets, in rank order (lower tier ranks first).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionSearchText {
-    /// The session display name (daemon `sessionName`, saved `name`).
+    /// The SESSION column's title: the `session_title` ladder over the
+    /// merged summary (`sessionName`, then the first message, then the
+    /// cwd basename, then the id), clipped to the column's width cap.
     pub name: String,
     /// The durable session id (daemon `sessionId`, saved `id`).
     pub id: String,
@@ -383,8 +388,8 @@ mod tests {
     #[test]
     fn transcript_and_roster_fields_never_match() {
         // The corpus is name + id + cwd only: first messages, transcript
-        // text, the recap summary, and session paths have no tier to hit.
-        for query in ["backoff", "deploy", "recap", "sessions", "jsonl"] {
+        // text, and session paths have no tier to hit.
+        for query in ["backoff", "deploy", "sessions", "jsonl"] {
             assert!(
                 score(query).is_none(),
                 "{query:?} matches nothing in the restricted corpus"

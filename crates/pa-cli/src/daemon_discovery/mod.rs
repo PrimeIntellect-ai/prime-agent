@@ -201,7 +201,10 @@ pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bo
     let Some(name) = socket_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.starts_with("worker-") && name.ends_with(".sock")
+    name.starts_with("worker-")
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "sock")
 }
 
 /// Listening daemons in this state root (TS `scanListeningDaemons`). The OS
@@ -230,9 +233,8 @@ pub(crate) fn is_daemon_process_listening(
 /// so even a root handed in on purpose cannot sweep them.
 #[cfg(unix)]
 fn scan_socket_dir(socket_dir: &Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(socket_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = std::fs::read_dir(socket_dir) else {
+        return Vec::new();
     };
     let mut sockets = Vec::new();
     for entry in entries.flatten() {
@@ -256,9 +258,7 @@ fn scan_socket_dir(_socket_dir: &Path) -> Vec<PathBuf> {
 #[cfg(unix)]
 fn is_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_socket())
-        .unwrap_or(false)
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
 /// One tracked worker from a supervisor descriptor (TS `TrackedWorker`).
@@ -282,11 +282,7 @@ pub(crate) fn find_all_tracked_workers(agent_dir: &Path) -> Vec<TrackedWorker> {
     };
     let mut workers = Vec::new();
     for directory in entries.flatten() {
-        if !directory
-            .file_type()
-            .map(|kind| kind.is_dir())
-            .unwrap_or(false)
-        {
+        if !directory.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let Ok(files) = std::fs::read_dir(directory.path()) else {
@@ -407,7 +403,7 @@ pub(crate) fn probe_daemon(socket_path: &Path) -> ProbeResult {
         cwd: None,
         session_dir: None,
         include_client_owned: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     if let Ok(response) = client.request_with_timeout(list, timeout_ms) {
         if response.success {
@@ -452,9 +448,8 @@ pub(crate) fn verify_hello_supervisor_pid(
     }
     match pa_types::platform::process::is_process_alive(pid) {
         Ok(true) => {}
-        Ok(false) => return None,
         // EPERM-equivalent: the process exists but is not ours to signal.
-        Err(_) => return None,
+        Ok(false) | Err(_) => return None,
     }
     if let Some(expected) = expected_process_start_id {
         if pa_types::platform::process::process_start_id(pid).as_deref() != Some(expected) {

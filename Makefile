@@ -23,11 +23,38 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live + staged workflow files (see ci/workflows/README.md for
-# why part of the set is still staged).
+# Lints the live workflow files (.github/workflows/; promoted from
+# ci/workflows/ via make activate-workflows) plus the still-staged
+# ci/workflows/ci.yml, which is clean under actionlint. The staged
+# benchmark.yml still carries pre-existing findings (the custom
+# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
+# config; SC2012 info) and stays out of this gate until its lane owner
+# cleans it up.
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml ci/workflows/benchmark.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
+
+# GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
+# GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
+# 22.04 release baseline. No-op on non-GNU hosts; the authoritative gate runs
+# in CI inside the ubuntu:22.04 build container. POSIX sh throughout: make
+# runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
+glibc-gate:
+	@case "$(TARGET)" in *-linux-gnu) \
+		if ! objdump -T "$(GLIBC_BINARY)" >/dev/null 2>&1; then \
+			echo "glibc-gate: unable to inspect $(GLIBC_BINARY) with objdump (build and split first)" >&2; exit 1; \
+		fi; \
+		syms="$$(objdump -T "$(GLIBC_BINARY)" | grep -o 'GLIBC_[0-9.]*' || true)"; \
+		if [ -z "$$syms" ]; then \
+			echo "glibc-gate: no GLIBC symbols found in $(GLIBC_BINARY) - refusing to pass without evidence" >&2; exit 1; \
+		fi; \
+		max_glibc="$$(printf '%s\n' "$$syms" | sort -Vu | tail -1)"; \
+		echo "highest GLIBC symbol required: $${max_glibc}"; \
+		top="$$(printf '%s\nGLIBC_2.35\n' "$$max_glibc" | sort -Vu | tail -1)"; \
+		if [ "$$top" != "GLIBC_2.35" ]; then \
+			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
+		fi \
+		;; esac
 
 # Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox
@@ -56,6 +83,25 @@ CATALOG_ASSETS_DIR = target/catalog-assets
 CATALOG_ASSETS_MODE ?= fixture
 CATALOG_ASSETS_FLAG = --catalog-assets $(CATALOG_ASSETS_DIR)
 
+# Mirror the Linux CI split: Cargo's executable remains unstripped and the
+# archive receives a separate shipped ELF plus its detached decoder.
+ifneq ($(filter %-unknown-linux-gnu,$(TARGET)),)
+RELEASE_BINARY = target/release/dist/prime-agent
+RELEASE_DECODER = target/release/dist/prime-agent-$(VERSION)-$(if $(filter aarch64-%,$(TARGET)),linux-arm64,linux-x64).debug.gz
+RELEASE_ASSEMBLE_FLAGS = --binary $(RELEASE_BINARY) --decoder $(RELEASE_DECODER)
+RELEASE_SPLIT = python3 scripts/release/split_debug.py --binary target/release/prime-agent --shipped $(RELEASE_BINARY) --out target/release/dist --version "$(VERSION)" --target "$(TARGET)"
+RELEASE_VERIFY_DECODER = python3 scripts/release/verify_decoders.py target/release/dist
+RELEASE_PACKAGE_BUILD = cargo build --release --locked --workspace
+RELEASE_PACKAGE_FLAGS = --binary $(RELEASE_BINARY) --decoder $(RELEASE_DECODER) --skip-build
+GLIBC_BINARY = $(RELEASE_BINARY)
+else
+RELEASE_ASSEMBLE_FLAGS =
+RELEASE_SPLIT = :
+RELEASE_VERIFY_DECODER = :
+RELEASE_PACKAGE_BUILD = :
+RELEASE_PACKAGE_FLAGS =
+endif
+
 # Live-catalog asset generation (network fetch; packaging parity with the
 # TS release flow — CI itself uses the fixture snapshot for reliability).
 catalog-assets:
@@ -67,10 +113,13 @@ catalog-assets-fixture:
 
 release-dry-run:
 	cargo build --release --locked --workspace
+	$(RELEASE_SPLIT)
+	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
-		$(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+		$(RELEASE_ASSEMBLE_FLAGS) $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+	$(RELEASE_VERIFY_DECODER)
 	python3 scripts/release/verify_release.py \
 		--dist-dir target/release/dist --version "$(VERSION)" --target "$(TARGET)"
 
@@ -81,10 +130,13 @@ GIT_SHA := $(shell git rev-parse HEAD)
 
 continuous-dry-run:
 	cargo build --release --locked --workspace
+	$(RELEASE_SPLIT)
+	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
-		--sha "$(GIT_SHA)" $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+		--sha "$(GIT_SHA)" $(RELEASE_ASSEMBLE_FLAGS) $(CATALOG_ASSETS_FLAG) --out-dir target/release/dist
+	$(RELEASE_VERIFY_DECODER)
 	python3 scripts/release/verify_release.py \
 		--dist-dir target/release/dist --version "$(VERSION)" --target "$(TARGET)" \
 		--sha "$(GIT_SHA)"
@@ -99,8 +151,10 @@ audit-build:
 # hash, and tar the artifact under target/release-package. Generates the
 # bundled catalog assets first (same modes as the dry-runs above).
 package:
+	$(RELEASE_PACKAGE_BUILD)
+	$(RELEASE_SPLIT)
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
-	python3 scripts/package_release.py $(CATALOG_ASSETS_FLAG)
+	python3 scripts/package_release.py $(RELEASE_PACKAGE_FLAGS) $(CATALOG_ASSETS_FLAG)
 
 # Bundled-catalog gates (scripts/release/test_catalog_assets.py): the
 # offline fixture passes the full packer validation, the packer hard-fails
@@ -122,4 +176,4 @@ activate-workflows:
 	git push origin main
 	@echo "workflows live: verify with gh workflow list (continuous + release active)"
 
-.PHONY: check deny windows-cross actionlint perf-wave release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates

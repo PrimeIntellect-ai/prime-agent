@@ -122,17 +122,18 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
             if decision.should_continue {
                 add_autonomous_continuation(state);
                 let text = match decision.reason {
-                    AutonomousDecisionReason::GateFailed => state
-                        .last_gate_failure
-                        .as_ref()
-                        .map(|failure| {
-                            build_autonomous_gate_failure_continuation(
-                                failure,
-                                state.gates.max_retries,
-                                now_millis(),
-                            )
-                        })
-                        .unwrap_or_else(|| super::autonomous_continuation_text(state)),
+                    AutonomousDecisionReason::GateFailed => {
+                        state.last_gate_failure.as_ref().map_or_else(
+                            || super::autonomous_continuation_text(state),
+                            |failure| {
+                                build_autonomous_gate_failure_continuation(
+                                    failure,
+                                    state.gates.max_retries,
+                                    now_millis(),
+                                )
+                            },
+                        )
+                    }
                     _ => super::autonomous_continuation_text(state),
                 };
                 return AutonomousFollowUp::Continue { text };
@@ -147,9 +148,10 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
                     }
                 }
                 AutonomousDecisionReason::LimitReached => {
-                    let reason = autonomous_limit_reason(state, now_millis())
-                        .map(AutonomousStopReason::Limit)
-                        .unwrap_or(AutonomousStopReason::GateRetryExhausted);
+                    let reason = autonomous_limit_reason(state, now_millis()).map_or(
+                        AutonomousStopReason::GateRetryExhausted,
+                        AutonomousStopReason::Limit,
+                    );
                     AutonomousFollowUp::Stop {
                         reason,
                         status: Box::new(autonomous_status(state)),
@@ -181,7 +183,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: "working".to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "faux".to_string(),
             provider: "faux".to_string(),
@@ -194,7 +196,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -318,7 +320,7 @@ mod tests {
         match after_turn(&driver, &mut state).await {
             AutonomousFollowUp::Stop { reason, status } => {
                 assert_eq!(reason, AutonomousStopReason::GatePassed);
-                assert!(status.gate_attempts["make check"] == 0);
+                assert_eq!(status.gate_attempts["make check"], 0);
             }
             other => panic!("expected stop, got {other:?}"),
         }

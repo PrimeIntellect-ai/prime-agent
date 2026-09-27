@@ -30,7 +30,7 @@
 //! (see [`filter_enhanced_key_events`]): key releases are dropped (TS
 //! tui.ts dispatch filter) and a duplicate-reporting kitty terminal's
 //! raw-text twin of a plain CSI-u character is deduplicated (TS
-//! StdinBuffer `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
+//! `StdinBuffer` `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,8 +95,7 @@ where
         ReaderInput::Event(event) => on_event(event),
         // Surfaces without a mouse dispatch consume reports; a
         // reassembled report is terminal noise they must not type.
-        ReaderInput::Mouse(_) => true,
-        ReaderInput::BurstPaste(_) => true,
+        ReaderInput::Mouse(_) | ReaderInput::BurstPaste(_) => true,
     });
 }
 
@@ -173,7 +172,7 @@ where
                             Ok(event) => {
                                 events.push(event);
                                 match crossterm::event::poll(Duration::ZERO) {
-                                    Ok(true) => continue,
+                                    Ok(true) => {}
                                     _ => break,
                                 }
                             }
@@ -274,7 +273,7 @@ fn forward(
 /// - Key releases are dropped before any surface sees them (TS tui.ts:
 ///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — the only
 ///   TS opt-ins are example extensions, which this port does not ship).
-/// - The kitty-printable dedup (TS StdinBuffer
+/// - The kitty-printable dedup (TS `StdinBuffer`
 ///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
 ///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
 ///   and the raw character for one keypress (Italian-style layouts, TS
@@ -352,17 +351,14 @@ fn merge_legacy_meta_escapes(events: Vec<Event>) -> Vec<Event> {
             continue;
         }
         let (consumed, repaired) = decode_meta_escape_body(&events[index + 1..]);
-        match repaired {
-            Some(mut key) => {
-                key.modifiers |= KeyModifiers::ALT;
-                out.push(Event::Key(key));
-                index += 1 + consumed;
-            }
+        if let Some(mut key) = repaired {
+            key.modifiers |= KeyModifiers::ALT;
+            out.push(Event::Key(key));
+            index += 1 + consumed;
+        } else {
             // Not a wrapped sequence: keep the escape (and re-scan the rest).
-            None => {
-                out.push(events[index].clone());
-                index += 1;
-            }
+            out.push(events[index].clone());
+            index += 1;
         }
     }
     out
@@ -421,12 +417,12 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
         .chain(body.iter().copied())
         .collect();
     let (code, modifiers) = match inner.as_str() {
-        "\x1bOA" => (KeyCode::Up, KeyModifiers::NONE),
-        "\x1bOB" => (KeyCode::Down, KeyModifiers::NONE),
-        "\x1bOC" => (KeyCode::Right, KeyModifiers::NONE),
-        "\x1bOD" => (KeyCode::Left, KeyModifiers::NONE),
-        "\x1bOH" => (KeyCode::Home, KeyModifiers::NONE),
-        "\x1bOF" => (KeyCode::End, KeyModifiers::NONE),
+        "\x1bOA" | "\x1b[A" => (KeyCode::Up, KeyModifiers::NONE),
+        "\x1bOB" | "\x1b[B" => (KeyCode::Down, KeyModifiers::NONE),
+        "\x1bOC" | "\x1b[C" => (KeyCode::Right, KeyModifiers::NONE),
+        "\x1bOD" | "\x1b[D" => (KeyCode::Left, KeyModifiers::NONE),
+        "\x1bOH" | "\x1b[H" | "\x1b[7~" => (KeyCode::Home, KeyModifiers::NONE),
+        "\x1bOF" | "\x1b[F" | "\x1b[8~" => (KeyCode::End, KeyModifiers::NONE),
         // rxvt-style ctrl arrows over SS3 (TS keys.ts keys.ctrl map).
         "\x1bOa" => (KeyCode::Up, KeyModifiers::CONTROL),
         "\x1bOb" => (KeyCode::Down, KeyModifiers::CONTROL),
@@ -436,19 +432,11 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
         "\x1bOQ" => (KeyCode::F(2), KeyModifiers::NONE),
         "\x1bOR" => (KeyCode::F(3), KeyModifiers::NONE),
         "\x1bOS" => (KeyCode::F(4), KeyModifiers::NONE),
-        "\x1b[A" => (KeyCode::Up, KeyModifiers::NONE),
-        "\x1b[B" => (KeyCode::Down, KeyModifiers::NONE),
-        "\x1b[C" => (KeyCode::Right, KeyModifiers::NONE),
-        "\x1b[D" => (KeyCode::Left, KeyModifiers::NONE),
-        "\x1b[H" => (KeyCode::Home, KeyModifiers::NONE),
-        "\x1b[F" => (KeyCode::End, KeyModifiers::NONE),
         "\x1b[Z" => (KeyCode::BackTab, KeyModifiers::NONE),
         "\x1b[2~" => (KeyCode::Insert, KeyModifiers::NONE),
         "\x1b[3~" => (KeyCode::Delete, KeyModifiers::NONE),
         "\x1b[5~" => (KeyCode::PageUp, KeyModifiers::NONE),
         "\x1b[6~" => (KeyCode::PageDown, KeyModifiers::NONE),
-        "\x1b[7~" => (KeyCode::Home, KeyModifiers::NONE),
-        "\x1b[8~" => (KeyCode::End, KeyModifiers::NONE),
         // rxvt-style shift+arrows over SS3-lite CSI (TS keys.ts
         // LEGACY_SHIFT_SEQUENCES) — Option+Shift+Up arrives meta-wrapped on
         // those terminals.
@@ -936,7 +924,7 @@ mod tests {
 
     /// rxvt-family rows inside the wrapper: shift+arrows (`\x1b[a`),
     /// ctrl+arrows over SS3 (`\x1bOa`), the `$`/`^` tilde complements, and
-    /// the home/end alternates - the TS LEGACY_SHIFT/CTRL/KEY rows its
+    /// the home/end alternates - the TS `LEGACY_SHIFT/CTRL/KEY` rows its
     /// strip-and-match still reaches through the wrapper.
     #[test]
     fn wrapped_rxvt_modifier_rows_decode() {

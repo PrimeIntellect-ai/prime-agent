@@ -57,7 +57,7 @@ impl<'a> WrapOutput<'a> {
 pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     match next {
         Some(next) => {
-            !next.sep_blank && !(exclude_lists && matches!(next.kind, BlockKind::List { .. }))
+            !(next.sep_blank || exclude_lists && matches!(next.kind, BlockKind::List { .. }))
         }
         None => false,
     }

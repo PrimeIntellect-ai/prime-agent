@@ -53,7 +53,7 @@ pub(crate) static RESTORE_ATTEMPTS: std::sync::atomic::AtomicUsize =
 /// Serializes the tests that read [`RESTORE_ATTEMPTS`]: the counter is
 /// process-global and the test threads run in parallel, so a reader must
 /// hold this lock across its read window (the unwind-guard test's
-/// catch_unwind and the interactive error-path test's run both take it).
+/// `catch_unwind` and the interactive error-path test's run both take it).
 #[cfg(test)]
 pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

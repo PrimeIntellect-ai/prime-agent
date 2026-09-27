@@ -1,4 +1,4 @@
-//! OSC 133 zone markers (FinalTerm shell integration).
+//! OSC 133 zone markers (`FinalTerm` shell integration).
 //!
 //! The interactive transcript marks message rows with the standard prompt/
 //! output zone sequences so terminal shell-integration users get working

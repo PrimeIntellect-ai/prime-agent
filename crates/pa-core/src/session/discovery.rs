@@ -95,7 +95,11 @@ fn normalize_hex_session_id(id: &str) -> Option<String> {
 
 /// `looksLikeSessionPath`: separators or a `.jsonl` suffix mean a path.
 pub fn looks_like_session_path(selector: &str) -> bool {
-    selector.contains('/') || selector.contains('\\') || selector.ends_with(".jsonl")
+    selector.contains('/')
+        || selector.contains('\\')
+        || selector
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("jsonl"))
 }
 
 /// `normalizeCwd`: an absolute path without symlink resolution.
@@ -180,6 +184,12 @@ fn resolve_unique_match(
 /// Resolve a `--resume` selector against the session directory, mirroring
 /// `resolveSessionPath`: path-like selectors pass through, then exact and
 /// partial matches are tried local-first, global second.
+///
+/// # Errors
+///
+/// Returns [`SessionSelectorError::Ambiguous`] when a match tier contains
+/// several sessions, and [`SessionSelectorError::NotFound`] when no session
+/// matches the selector.
 pub fn resolve_session_path(
     selector: &str,
     cwd: &Path,
@@ -331,7 +341,7 @@ mod tests {
                 parent_session: None,
                 rlm_depth: Some(0),
                 git: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         std::fs::write(
@@ -397,7 +407,9 @@ mod tests {
                 sorted.sort();
                 assert_eq!(sorted, vec!["aaaa0001".to_string(), "aaaa0002".to_string()]);
             }
-            other => panic!("expected an ambiguous error, got {other:?}"),
+            other @ SessionSelectorError::NotFound { .. } => {
+                panic!("expected an ambiguous error, got {other:?}")
+            }
         }
         // The rendered message lists matches in scan order; only the shape is
         // order-independent to assert here.

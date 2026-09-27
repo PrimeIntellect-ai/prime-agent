@@ -65,9 +65,8 @@ async fn run_command(program: &str, args: &[&str], timeout: Duration) -> Option<
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) | Err(_) => return None,
+    let Ok(Ok(output)) = tokio::time::timeout(timeout, child.wait_with_output()).await else {
+        return None;
     };
     if !output.status.success() {
         return None;
@@ -83,13 +82,9 @@ fn is_wsl() -> bool {
     if std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSLENV").is_some() {
         return true;
     }
-    std::fs::read_to_string("/proc/version")
-        .map(|version| {
-            version.contains("microsoft")
-                || version.contains("Microsoft")
-                || version.contains("WSL")
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/version").is_ok_and(|version| {
+        version.contains("microsoft") || version.contains("Microsoft") || version.contains("WSL")
+    })
 }
 
 /// Whether this is a Wayland session (TS `isWaylandSession`).
@@ -226,8 +221,7 @@ fn unique_suffix() -> String {
     hasher.write_u64(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_nanos() as u64),
     );
     hasher.write_u32(std::process::id());
     format!("{:016x}", hasher.finish())
@@ -243,7 +237,7 @@ async fn read_via_osascript() -> Option<ClipboardImage> {
     let temp_path = temp_dir.join(format!("prime-agent-clip-{}.png", unique_suffix()));
     let path_str = temp_path.to_str()?.to_string();
     let script = format!(
-        r#"ObjC.import('Cocoa');
+        r"ObjC.import('Cocoa');
 const pb = $.NSPasteboard.generalPasteboard;
 const types = pb.types.allObjects;
 if (!types.containsObject($.NSPasteboardTypePNG)) {{
@@ -253,7 +247,7 @@ if (!types.containsObject($.NSPasteboardTypePNG)) {{
     const text = $.NSString.alloc.initWithDataEncoding(data, $.NSISOLatin1StringEncoding);
     text.writeToFileAtomicallyEncodingError('{path_str}', false, $.NSISOLatin1StringEncoding, null);
     'ok'
-}}"#
+}}"
     );
     let output = run_command(
         "osascript",

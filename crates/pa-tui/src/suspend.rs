@@ -248,13 +248,6 @@ mod tests {
     /// recorded and the seam real.
     #[test]
     fn a_suspend_cycle_releases_and_re_applies_mouse_tracking() {
-        let _guard = seam_lock();
-        let mut out = std::io::stdout();
-        let was_active = crate::mouse_tracking::active();
-        if !was_active {
-            crate::mouse_tracking::enable(&mut out).expect("enable");
-        }
-
         struct SeamTerminal {
             out: std::io::Stdout,
         }
@@ -267,6 +260,12 @@ mod tests {
             fn resume(&mut self) -> Result<()> {
                 crate::mouse_tracking::enable(&mut self.out)
             }
+        }
+        let _guard = seam_lock();
+        let mut out = std::io::stdout();
+        let was_active = crate::mouse_tracking::active();
+        if !was_active {
+            crate::mouse_tracking::enable(&mut out).expect("enable");
         }
 
         let log = Cycle::shared();

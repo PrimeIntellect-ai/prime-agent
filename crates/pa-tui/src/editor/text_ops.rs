@@ -22,10 +22,7 @@ impl Editor {
             self.push_undo_snapshot();
             let before_cursor = char_prefix(&line, self.cursor_col);
             let graphemes = self.segment(&before_cursor);
-            let last_len = graphemes
-                .last()
-                .map(|g| g.segment.chars().count())
-                .unwrap_or(1);
+            let last_len = graphemes.last().map_or(1, |g| g.segment.chars().count());
             let (before, after) = split_at_char(&line, self.cursor_col);
             let before = char_prefix(&before, before.chars().count() - last_len);
             self.lines[self.cursor_line] = format!("{before}{after}");
@@ -61,8 +58,7 @@ impl Editor {
             let first_len = self
                 .segment(&after_cursor)
                 .first()
-                .map(|g| g.segment.chars().count())
-                .unwrap_or(1);
+                .map_or(1, |g| g.segment.chars().count());
             // Drop the first atomic segment after the cursor (TS
             // `handleForwardDelete`: before + after with the segment
             // removed — an atomic marker goes whole).

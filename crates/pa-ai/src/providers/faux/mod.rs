@@ -3,8 +3,10 @@
 //! prompt-cache simulation, token-paced streaming with aborts, and queued
 //! response factories.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+use serde_json::Map;
 
 use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEventStream, AssistantMessageEventWriter,
@@ -14,7 +16,7 @@ use crate::types::{
     done_reason, error_reason, zero_model_cost, AssistantContent, AssistantMessage,
     AssistantMessageEvent, Context, ErrorStopReason, ImageContent, Message, MessageExt, Model,
     ModelCost, ModelInput, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, ToolCall, ToolResultMessage, Usage, UserMessageContent,
+    ThinkingContent, ToolCall, ToolResultMessage, Usage, UsageCost, UserMessageContent,
 };
 use crate::utils_inner::diagnostics::now_ms;
 use rand::Rng;
@@ -47,7 +49,7 @@ pub fn faux_text(text: &str) -> AssistantContent {
     AssistantContent::Text(TextContent {
         text: text.to_string(),
         text_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -56,7 +58,7 @@ pub fn faux_thinking(thinking: &str) -> AssistantContent {
         thinking: thinking.to_string(),
         thinking_signature: None,
         redacted: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -66,13 +68,11 @@ pub fn faux_tool_call(
     id: Option<&str>,
 ) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall {
-        id: id
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| random_id("tool")),
+        id: id.map_or_else(|| random_id("tool"), std::string::ToString::to_string),
         name: name.to_string(),
         arguments: arguments.as_object().cloned().unwrap_or_default(),
         thought_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -107,7 +107,7 @@ pub fn faux_assistant_message(
         stop_reason_raw: None,
         error_message: options.error_message,
         timestamp: options.timestamp.unwrap_or_else(now_ms),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -154,6 +154,45 @@ struct FauxSharedState {
     received_api_keys: Mutex<Vec<Option<String>>>,
     pending: Mutex<Vec<FauxResponseStep>>,
     prompt_cache: Mutex<HashMap<String, String>>,
+    /// The last served step, recorded on every serve: an exhausted queue
+    /// re-serves it in repeat-last mode instead of erroring (the record
+    /// is kept regardless of the mode, so repeat-last switched on after
+    /// serving still has a step to re-serve). Verification harness only;
+    /// see [`FauxProviderRegistration::set_repeat_last_response`].
+    last_served: Mutex<Option<FauxResponseStep>>,
+    /// Repeat-last mode (verification harness only): `false` by default,
+    /// so an exhausted queue keeps erroring with "No more faux responses
+    /// queued" — the response-budget contract every existing harness
+    /// scripts against.
+    repeat_last_response: std::sync::atomic::AtomicBool,
+}
+
+impl FauxSharedState {
+    /// The next scripted step: the queued front, or — in repeat-last mode
+    /// — the last served step again once the queue ran dry, or `None`
+    /// (the caller's exhaustion error). The dequeue and the last-served
+    /// publish share one hold of the pending `Mutex`, so overlapping
+    /// stream calls cannot observe an emptied queue with a stale or
+    /// missing last-served step.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending or last-served `Mutex` is poisoned (a thread
+    /// panicked while holding it).
+    fn next_step(&self) -> Option<FauxResponseStep> {
+        let repeat = self
+            .repeat_last_response
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut pending = self.pending.lock().unwrap();
+        match pending.pop_front_step() {
+            Some(step) => {
+                *self.last_served.lock().unwrap() = Some(step.clone());
+                Some(step)
+            }
+            None if repeat => self.last_served.lock().unwrap().clone(),
+            None => None,
+        }
+    }
 }
 
 impl FauxProviderRegistration {
@@ -171,28 +210,73 @@ impl FauxProviderRegistration {
     }
 
     /// Call count across all requests against this registration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counter `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
     }
 
     /// The API key each recorded request carried (per call, in order):
     /// summarizer arms that must follow the session's live key pin on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recorded-keys `Mutex` is poisoned (a thread panicked
+    /// while holding the lock).
     pub fn received_api_keys(&self) -> Vec<Option<String>> {
         self.state.received_api_keys.lock().unwrap().clone()
     }
 
     /// Replace the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn set_responses(&self, responses: Vec<FauxResponseStep>) {
         *self.state.pending.lock().unwrap() = responses;
     }
 
     /// Append to the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn append_responses(&self, responses: Vec<FauxResponseStep>) {
         self.state.pending.lock().unwrap().extend(responses);
     }
 
+    /// Number of queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn get_pending_response_count(&self) -> usize {
         self.state.pending.lock().unwrap().len()
+    }
+
+    /// Switch the registration into repeat-last mode: once the queued
+    /// responses run out, the provider serves the last response again on
+    /// every further call instead of erroring with "No more faux
+    /// responses queued". Verification harness only — the goal-continuation
+    /// churn of a scripted session can mint one model turn per natural
+    /// turn end for as long as an arrival latency keeps a pause in
+    /// flight, so a harness that must never run dry opts in
+    /// (`register_faux_provider_from_script`, the `repeatLastResponse`
+    /// script key). The last served step is recorded on every serve, so
+    /// switching the mode on after responses have already been served
+    /// still has a step to re-serve. The default stays `false`: the
+    /// finite queue and its exhaustion error are the response-budget
+    /// contract the existing harnesses script against.
+    pub fn set_repeat_last_response(&self, repeat: bool) {
+        self.state
+            .repeat_last_response
+            .store(repeat, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Unregister the provider from the api registry.
@@ -341,7 +425,7 @@ fn with_usage_estimate(
         cache_read,
         cache_write,
         total_tokens: input + output_tokens + cache_read + cache_write,
-        cost: Default::default(),
+        cost: UsageCost::default(),
     };
     message
 }
@@ -406,7 +490,7 @@ fn create_error_message(
         stop_reason_raw: None,
         error_message: Some(message.to_string()),
         timestamp: now_ms(),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 
@@ -438,10 +522,7 @@ async fn stream_with_deltas(
 ) {
     let mut partial = message.clone();
     partial.content = Vec::new();
-    if signal
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
-    {
+    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
         let aborted = create_aborted_message(&partial);
         writer.push(AssistantMessageEvent::Error {
             reason: ErrorStopReason::Aborted,
@@ -456,10 +537,7 @@ async fn stream_with_deltas(
     });
 
     for index in 0..message.content.len() {
-        if signal
-            .map(tokio_util::sync::CancellationToken::is_cancelled)
-            .unwrap_or(false)
-        {
+        if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             let aborted = create_aborted_message(&partial);
             writer.push(AssistantMessageEvent::Error {
                 reason: ErrorStopReason::Aborted,
@@ -479,7 +557,7 @@ async fn stream_with_deltas(
                         thinking: String::new(),
                         thinking_signature: None,
                         redacted: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                 writer.push(AssistantMessageEvent::ThinkingStart {
                     content_index: index as u64,
@@ -491,10 +569,7 @@ async fn stream_with_deltas(
                     max_token_size,
                 ) {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -524,7 +599,7 @@ async fn stream_with_deltas(
                 partial.content.push(AssistantContent::Text(TextContent {
                     text: String::new(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
                 writer.push(AssistantMessageEvent::TextStart {
                     content_index: index as u64,
@@ -534,10 +609,7 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&text_block.text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -565,9 +637,9 @@ async fn stream_with_deltas(
                 partial.content.push(AssistantContent::ToolCall(ToolCall {
                     id: tool_call_block.id.clone(),
                     name: tool_call_block.name.clone(),
-                    arguments: Default::default(),
+                    arguments: Map::default(),
                     thought_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
                 writer.push(AssistantMessageEvent::ToolcallStart {
                     content_index: index as u64,
@@ -579,10 +651,7 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&arguments_text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -637,61 +706,6 @@ pub struct RegisterFauxProviderOptions {
 
 /// Register a faux provider and return its handle.
 pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderRegistration {
-    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
-    let provider_name = options
-        .provider
-        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
-    let source_id = random_id("faux-provider");
-    let max = options.token_size_max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
-    let min = options
-        .token_size_min
-        .unwrap_or(DEFAULT_MIN_TOKEN_SIZE)
-        .clamp(1, max);
-    let state = Arc::new(FauxSharedState {
-        call_count: Mutex::new(0),
-        received_api_keys: Mutex::new(Vec::new()),
-        pending: Mutex::new(Vec::new()),
-        prompt_cache: Mutex::new(HashMap::new()),
-    });
-    let tokens_per_second = options.tokens_per_second;
-
-    let model_definitions = options.models.unwrap_or_else(|| {
-        vec![FauxModelDefinition {
-            id: DEFAULT_MODEL_ID.to_string(),
-            name: Some(DEFAULT_MODEL_NAME.to_string()),
-            reasoning: Some(false),
-            input: Some(vec![ModelInput::Text, ModelInput::Image]),
-            cost: None,
-            context_window: Some(128_000),
-            max_tokens: Some(16_384),
-        }]
-    });
-    let models: Vec<Model> = model_definitions
-        .iter()
-        .map(|definition| Model {
-            id: definition.id.clone(),
-            name: definition
-                .name
-                .clone()
-                .unwrap_or_else(|| definition.id.clone()),
-            api: api.clone(),
-            provider: provider_name.clone(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            reasoning: definition.reasoning.unwrap_or(false),
-            thinking_level_map: None,
-            input: definition
-                .input
-                .clone()
-                .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
-            cost: definition.cost.unwrap_or_else(zero_model_cost),
-            context_window: definition.context_window.unwrap_or(128_000),
-            max_tokens: definition.max_tokens.unwrap_or(16_384),
-            featured: None,
-            headers: None,
-            compat: None,
-        })
-        .collect();
-
     struct FauxStream {
         api: String,
         provider: String,
@@ -713,7 +727,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             options: Option<&StreamOptions>,
         ) -> AssistantMessageEventStream {
             let (writer, reader) = create_assistant_message_event_stream();
-            let step = self.state.pending.lock().unwrap().pop_front_step();
+            let step = self.state.next_step();
             *self.state.call_count.lock().unwrap() += 1;
             self.state
                 .received_api_keys
@@ -737,7 +751,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                         on_response(
                             crate::types::ProviderResponse {
                                 status: 200,
-                                headers: Default::default(),
+                                headers: BTreeMap::default(),
                             },
                             &model,
                         );
@@ -776,17 +790,17 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                         if delay_ms > 0 {
                             let hold =
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms));
-                            let cancelled =
-                                match options.as_ref().and_then(|options| options.signal.clone()) {
-                                    Some(signal) => tokio::select! {
-                                        _ = hold => false,
-                                        _ = signal.cancelled() => true,
-                                    },
-                                    None => {
-                                        hold.await;
-                                        false
-                                    }
-                                };
+                            let cancelled = if let Some(signal) =
+                                options.as_ref().and_then(|options| options.signal.clone())
+                            {
+                                tokio::select! {
+                                    () = hold => false,
+                                    () = signal.cancelled() => true,
+                                }
+                            } else {
+                                hold.await;
+                                false
+                            };
                             if cancelled {
                                 // The real providers' abort path: the request
                                 // dies mid-flight (ProviderError::Aborted),
@@ -853,6 +867,62 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
         }
     }
 
+    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
+    let provider_name = options
+        .provider
+        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
+    let source_id = random_id("faux-provider");
+    let max = options.token_size_max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
+    let min = options
+        .token_size_min
+        .unwrap_or(DEFAULT_MIN_TOKEN_SIZE)
+        .clamp(1, max);
+    let state = Arc::new(FauxSharedState {
+        call_count: Mutex::new(0),
+        received_api_keys: Mutex::new(Vec::new()),
+        pending: Mutex::new(Vec::new()),
+        prompt_cache: Mutex::new(HashMap::new()),
+        ..Default::default()
+    });
+    let tokens_per_second = options.tokens_per_second;
+
+    let model_definitions = options.models.unwrap_or_else(|| {
+        vec![FauxModelDefinition {
+            id: DEFAULT_MODEL_ID.to_string(),
+            name: Some(DEFAULT_MODEL_NAME.to_string()),
+            reasoning: Some(false),
+            input: Some(vec![ModelInput::Text, ModelInput::Image]),
+            cost: None,
+            context_window: Some(128_000),
+            max_tokens: Some(16_384),
+        }]
+    });
+    let models: Vec<Model> = model_definitions
+        .iter()
+        .map(|definition| Model {
+            id: definition.id.clone(),
+            name: definition
+                .name
+                .clone()
+                .unwrap_or_else(|| definition.id.clone()),
+            api: api.clone(),
+            provider: provider_name.clone(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            reasoning: definition.reasoning.unwrap_or(false),
+            thinking_level_map: None,
+            input: definition
+                .input
+                .clone()
+                .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
+            cost: definition.cost.unwrap_or_else(zero_model_cost),
+            context_window: definition.context_window.unwrap_or(128_000),
+            max_tokens: definition.max_tokens.unwrap_or(16_384),
+            featured: None,
+            headers: None,
+            compat: None,
+        })
+        .collect();
+
     let stream_impl = FauxStream {
         api: api.clone(),
         provider: provider_name,
@@ -890,7 +960,7 @@ pub fn faux_image(data: &str, mime_type: &str) -> ImageContent {
     ImageContent {
         data: data.to_string(),
         mime_type: mime_type.to_string(),
-        rest: Default::default(),
+        rest: Map::default(),
     }
 }
 

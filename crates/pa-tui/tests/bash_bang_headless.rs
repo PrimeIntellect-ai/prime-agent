@@ -70,6 +70,17 @@ struct MockSupervisor {
     /// flight there (the delayed `turn_end` thread) never lands its
     /// end on the wire.
     link_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Hold the streaming turn's end until the SECOND dispatched bash
+    /// run (the ack) arrives instead of a wall-clock delay: the client's
+    /// render barriers gate the ack behind the captured pending regime,
+    /// so the flush is written strictly after the hold was observed —
+    /// no CI-load reordering of the stream and the end can coalesce
+    /// them. Pairs with `end_delay_ms: 0` (the ack's own `bash_end`
+    /// lands on the wire before the signal below fires).
+    turn_end_after_bash_ack: bool,
+    /// Signals the delayed turn-end thread that the ack bash run
+    /// arrived (a `Mutex<bool>` + `Condvar` pair).
+    bang_ack: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl MockSupervisor {
@@ -85,6 +96,8 @@ impl MockSupervisor {
             update_restart_after_bash: false,
             foreign_main_run_after_side_run: false,
             link_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            turn_end_after_bash_ack: false,
+            bang_ack: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         }
     }
 
@@ -203,7 +216,7 @@ impl MockSupervisor {
                                 "success": true,
                             }),
                         );
-                        if self.turn_end_delay_ms > 0 {
+                        if self.turn_end_delay_ms > 0 || self.turn_end_after_bash_ack {
                             // One open model turn the client streams while its
                             // bash run mounts: the assistant message stays
                             // open until the delayed end settles it.
@@ -249,9 +262,29 @@ impl MockSupervisor {
                             );
                             let mut delayed = writer.try_clone().expect("clone delayed writer");
                             let delay = self.turn_end_delay_ms;
+                            let waits_for_ack = self.turn_end_after_bash_ack;
                             let link_closed = self.link_closed.clone();
+                            let bang_ack = self.bang_ack.clone();
                             std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(delay));
+                                if waits_for_ack {
+                                    // The ack-gated end: hold the turn open
+                                    // until the ack bash run arrives (the
+                                    // client's barriers prove the pending
+                                    // regime was captured before it was even
+                                    // typed), with a generous backstop so a
+                                    // broken chain still settles the turn
+                                    // and the asserts run instead of a hang.
+                                    let (lock, cvar) = &*bang_ack;
+                                    let _ = cvar
+                                        .wait_timeout_while(
+                                            lock.lock().expect("ack lock"),
+                                            std::time::Duration::from_secs(60),
+                                            |arrived| !*arrived,
+                                        )
+                                        .expect("ack wait");
+                                } else {
+                                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                                }
                                 if link_closed.load(std::sync::atomic::Ordering::SeqCst) {
                                     return;
                                 }
@@ -320,7 +353,11 @@ impl MockSupervisor {
                             .get("excludeFromContext")
                             .and_then(Value::as_bool)
                             .unwrap_or(false);
-                        self.bash_requests.lock().unwrap().push(command.clone());
+                        let request_ordinal = {
+                            let mut requests = self.bash_requests.lock().unwrap();
+                            requests.push(command.clone());
+                            requests.len()
+                        };
                         write_json(
                             &mut writer,
                             &json!({
@@ -429,6 +466,18 @@ impl MockSupervisor {
                                 write_session_event(&mut delayed, &end);
                             });
                         }
+                        // The ack of an ack-gated turn: signal the held
+                        // end thread now that this run's events (including
+                        // its `bash_end`) are on the wire, so the turn's
+                        // end always lands behind them (the one FIFO
+                        // session-event channel keeps the flush ordered
+                        // after every held card's run).
+                        if self.turn_end_after_bash_ack && request_ordinal == 2 {
+                            let (lock, cvar) = &*self.bang_ack;
+                            let mut arrived = lock.lock().expect("ack lock");
+                            *arrived = true;
+                            cvar.notify_all();
+                        }
                     }
                     _ => {
                         write_json(
@@ -521,7 +570,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -543,8 +592,9 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }
@@ -598,12 +648,14 @@ fn run_plan_with(
     let _ = handle.join();
     RunOutcome {
         frames: outcome.frames,
-        bash_requests: Arc::try_unwrap(bash_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
-        side_question_requests: Arc::try_unwrap(side_question_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        bash_requests: Arc::try_unwrap(bash_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
+        side_question_requests: Arc::try_unwrap(side_question_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
     }
 }
 
@@ -813,13 +865,54 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
 fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     let steps = vec![
         HeadlessStep::Submit("run a turn".to_string()),
-        HeadlessStep::WaitMs(400),
+        // The bang must land while the client has APPLIED the turn's
+        // admission. The streamed assistant text is the stable witness:
+        // it renders only after `turn_start` (the same FIFO session-event
+        // channel carries both, so the text's frame proves the turn is
+        // active on the client), and nothing un-renders it. The loader's
+        // "Writing" label is NOT a stable witness — the backgrounded
+        // submit's outcome note re-arms the loader to "Waiting" whenever
+        // it lands (two channels, so load can order it after the stream
+        // event), and the old fixed turn-end delay could coalesce the
+        // whole turn before any "Writing" frame rendered, starving the
+        // barrier outright. With the mock holding the turn open for the
+        // ack bang (below), the barrier's frame is provably pre-end:
+        // the flush cannot exist on the wire yet.
+        HeadlessStep::WaitRender {
+            needle: "Let me run the long check.".to_string(),
+            timeout_ms: 30_000,
+        },
         HeadlessStep::Submit("!echo mid".to_string()),
+        // The pending regime's capture: the first frame carrying the
+        // card. The turn end is still unwritten (the mock ends the turn
+        // only after the ack bang below, which this plan dispatches only
+        // past this barrier), so this frame is necessarily the pending
+        // regime — the flush can neither land first nor coalesce with
+        // it, whatever the load does to the delivery order.
+        HeadlessStep::WaitRender {
+            needle: "$ echo mid".to_string(),
+            timeout_ms: 30_000,
+        },
+        // The settle proof for the first run before the ack: the running
+        // marker paints in every frame while the run is open and clears
+        // when its `bash_end` applies, so the pop means the ack cannot
+        // hit the already-running guard (a coalesced start+end pair
+        // never paints the marker and pops at arming with the run
+        // already settled).
+        HeadlessStep::WaitGone {
+            needle: "Running... (".to_string(),
+            timeout_ms: 30_000,
+        },
+        // The ack: the mock's own causal trigger for the turn end —
+        // dispatched only after the pending frame was captured above,
+        // so the flush lands strictly after the hold regime was
+        // observed (its own card rides the same flush).
+        HeadlessStep::Submit("!echo ack".to_string()),
         HeadlessStep::WaitMs(400),
         HeadlessStep::WaitMs(1000),
     ];
     let run = run_plan_with(steps, |supervisor| {
-        supervisor.turn_end_delay_ms = 1200;
+        supervisor.turn_end_after_bash_ack = true;
     });
     let both: Vec<&String> = run
         .frames
@@ -839,14 +932,24 @@ fn a_bang_during_a_streaming_turn_holds_then_flushes() {
             .position(|line| line.contains(needle))
             .expect("the needle's row")
     };
+    // The loader row by its activity label, not its spinner glyph: the
+    // label is delivery-order-dependent (a late submit outcome re-arms
+    // the armed loader back to "Waiting" after the stream event set
+    // "Writing", and this mock emits exactly one text-bearing event, so
+    // nothing restores it) — but the pair is a closed set for this
+    // scenario, and the row it names is the execution indicator the
+    // assertion protects. The card's own running row shares the glyph
+    // and must not match.
+    let loader_row_of = |frame: &str| -> usize {
+        frame
+            .lines()
+            .position(|line| line.contains("Waiting") || line.contains("Writing"))
+            .expect("the working loader row")
+    };
     let pending = both[0];
     assert!(
         row_of(pending, "Let me run the long check.") < row_of(pending, "$ echo mid")
-            && row_of(pending, "$ echo mid")
-                < pending
-                    .lines()
-                    .position(|line| line.contains("Writing"))
-                    .expect("the working loader row"),
+            && row_of(pending, "$ echo mid") < loader_row_of(pending),
         "while the turn streams the card holds above the execution indicator:\n{pending}"
     );
     let flushed = both[both.len() - 1];

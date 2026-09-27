@@ -510,7 +510,6 @@ fn csi_key(payload: &[u8]) -> Option<Event> {
         b'O' => Some(Event::FocusLost),
         // Cursor position and device attributes: crossterm parks these as
         // internal events its `read()` never yields.
-        b'R' | b'c' => None,
         _ => None,
     }
 }
@@ -532,8 +531,7 @@ fn modifier_params(body: &[u8]) -> (KeyModifiers, KeyEventKind) {
             .bytes()
             .next_back()
             .filter(u8::is_ascii_digit)
-            .map(|b| b - b'0')
-            .unwrap_or(1);
+            .map_or(1, |b| b - b'0');
         return (parse_modifiers(mask), KeyEventKind::Press);
     };
     let mut parts = mods_field.split(':');
@@ -778,7 +776,7 @@ mod tests {
             sgr(64, 20, 5, true),  // wheel up
             sgr(65, 20, 5, true),  // wheel down
             sgr(0, 100, 30, true), // three-digit coordinates
-            sgr(35, 7, 9, true),   // hover motion (consumed)
+            sgr(35, 7, 9, true),   // hover motion (the hover affordance's report)
             sgr(1, 3, 4, true),    // middle press (consumed)
         ]
     }
@@ -803,7 +801,7 @@ mod tests {
             .filter_map(|out| match out {
                 GuardOutput::Mouse(report) => Some(*report),
                 GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
-                _ => None,
+                GuardOutput::Event(_) => None,
             })
             .collect()
     }
@@ -1024,12 +1022,22 @@ mod tests {
                     b'u' => {
                         let text = std::str::from_utf8(&payload[..payload.len() - 1])
                             .expect("corpus is ascii");
-                        let codepoint: u32 = text
-                            .split(';')
-                            .next()
-                            .expect("non-empty")
-                            .parse()
-                            .expect("corpus");
+                        let mut fields = text.split(';');
+                        let codepoint: u32 =
+                            fields.next().expect("non-empty").parse().expect("corpus");
+                        // `parse_csi_u_encoded_key_code`: the modifier
+                        // mask rides the second field (the shift-enter
+                        // corpus, `CSI 13;2u`).
+                        let mut modifiers = KeyModifiers::empty();
+                        if let Some(mods) = fields.next() {
+                            let mask: u8 = mods
+                                .split(':')
+                                .next()
+                                .unwrap_or_default()
+                                .parse()
+                                .expect("corpus");
+                            modifiers = parse_modifiers(mask);
+                        }
                         if (57399..=57426).contains(&codepoint) {
                             // translate_functional_key_code: the keypad
                             // block decodes to its characters, Enter, and
@@ -1068,10 +1076,20 @@ mod tests {
                             ));
                         }
                         match codepoint {
-                            27 => ModelParse::Event(Event::Key(KeyCode::Esc.into())),
+                            27 => ModelParse::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Esc,
+                                modifiers,
+                            ))),
+                            // `\r` maps to Enter before the char row
+                            // (crossterm's own match), so the corpus's
+                            // `CSI 13;2u` projects Enter+SHIFT.
+                            13 => ModelParse::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                modifiers,
+                            ))),
                             c => ModelParse::Event(Event::Key(KeyEvent::new(
                                 KeyCode::Char(char::from_u32(c).expect("corpus")),
-                                KeyModifiers::NONE,
+                                modifiers,
                             ))),
                         }
                     }
@@ -1133,13 +1151,15 @@ mod tests {
 
     /// The report a run must produce: the SGR decode filtered through the
     /// dispatch filter both paths share (`mouse::from_crossterm` consumes
-    /// hover motion and the non-left buttons).
+    /// the non-left buttons; the buttonless hover motion now maps
+    /// through — the hover affordance's report, operator directive
+    /// 2026-09-26).
     fn expected_report(report: &str) -> Vec<Report> {
         crate::mouse::parse_sgr_mouse_event(report)
             .filter(|r| {
                 matches!(
                     r.button,
-                    mouse::BUTTON_LEFT | mouse::WHEEL_UP | mouse::WHEEL_DOWN
+                    mouse::BUTTON_LEFT | mouse::WHEEL_UP | mouse::WHEEL_DOWN | mouse::BUTTON_NONE
                 )
             })
             .into_iter()
@@ -1259,7 +1279,7 @@ mod tests {
         let now = Instant::now();
         assert!(guard.feed(esc_press(), now).is_empty());
         assert!(guard
-            .flush_expired(now + HOLD - Duration::from_millis(1))
+            .flush_expired((now + HOLD).checked_sub(Duration::from_millis(1)).unwrap())
             .is_empty());
         assert_eq!(
             guard.flush_expired(now + HOLD),
@@ -1625,6 +1645,70 @@ mod tests {
                 KeyCode::Char('4'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT
             ))]
+        );
+    }
+
+    /// A split kitty shift+enter (`CSI 13;2u`) reassembles into exactly
+    /// the Enter+SHIFT event the unsplit parse delivers, at every read
+    /// boundary — the operator's 2026-09-24 shift+enter directive rides
+    /// the same seam every kitty key does.
+    #[test]
+    fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
+        for split in [1usize, 2, 5, 8] {
+            let events = read_projection(b"\x1b[13;2u", &[split]);
+            let outputs = run_guard(events.clone());
+            assert_eq!(
+                leaks(&outputs),
+                vec![Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::SHIFT
+                ))],
+                "split at {split}: {events:?} as {outputs:?}"
+            );
+        }
+        // The unsplit form passes through untouched (the guard is
+        // invisible): crossterm's own parse of `CSI 13;2u` is the same
+        // event.
+        let outputs = run_guard(vec![Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        ))]);
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    /// The composed seam: a split kitty shift+enter reassembles through
+    /// the guard, decodes to the `shift+enter` key id, and lands in the
+    /// editor as a newline — never a submit.
+    #[test]
+    fn a_split_shift_enter_inserts_a_newline_in_the_editor() {
+        let outputs = run_guard(read_projection(b"\x1b[13;2u", &[1]));
+        let key = leaks(&outputs)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Key(key) => Some(key),
+                _ => None,
+            })
+            .expect("the shift+enter key");
+        let id = crate::keys::key_event_to_id(&key).expect("the key id");
+        assert_eq!(id, "shift+enter");
+        let mut editor = crate::editor::Editor::new();
+        editor.handle_input("a");
+        editor.handle_input(&id);
+        assert_eq!(editor.get_lines(), vec!["a", ""]);
+        // The newline press carries only its Changed event — a submit
+        // never rides along.
+        assert!(
+            editor
+                .take_events()
+                .into_iter()
+                .all(|event| !matches!(event, crate::editor::EditorEvent::Submitted(_))),
+            "the newline press never submits"
         );
     }
 }

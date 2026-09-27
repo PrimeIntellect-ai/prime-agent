@@ -109,6 +109,8 @@ mod tests {
     use crate::theme::ColorMode;
 
     #[test]
+    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+    #[allow(clippy::unicode_not_nfc)]
     fn count_sink_skips_paint_and_matches_panel_geometry() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let card = ToolCallCard::default();

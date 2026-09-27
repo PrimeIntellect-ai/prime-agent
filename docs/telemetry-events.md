@@ -154,20 +154,28 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (fresh homes complete the flow silently — trace sharing ships pre-configured; the retained opt-out question has no error/abort path yet) |
-| `auth_category` | string | `none` (no auth step in the flow) |
-| `provider_category` | string | `unknown` |
+| `outcome` | string | `success` (the completion marker writes only on a completed flow; an aborted sign-in never completes) |
+| `auth_category` | string | the resolved startup model's credential source (TS `telemetryAuthCategory`): `api_key` / `oauth` / `mcp_static_token` for stored credentials, `runtime_api_key` / `environment` / `prime_cli` / `models_json` / `fallback` / `stale` for their sources, `none` when no model resolved |
+| `provider_category` | string | the resolved startup model's provider (TS `telemetryProviderCategory`), `unknown` when no model resolved |
 
 ### `daemon event`
 
 Supervision lifecycle, emitted by the supervisor process. Counts only,
 never session payload. `session_rebound`: a client command addressed a
 superseded active session id and the supervisor rebound it to the
-session's current worker (the stale-id rebind).
+session's current worker (the stale-id rebind). `registration_refused`:
+a live worker's `worker_register` was refused with the unknown-worker
+verdict (no descriptor exists for its identity) — the refused-
+registration self-heal retires the worker so its session lease releases;
+one event per refusal (the retired worker never re-registers).
+`worker_overloaded`: a request-shaped client command was refused at the
+target worker's in-flight bound (or its full queue) with the typed
+`worker_overloaded` error — the bound-adoption signal (how often
+saturation bites in the field); one event per refusal.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption`, `registration_refused`, `worker_overloaded` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
 | `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / how many served saved-session rows carry a usage summary / how many tombstoned ledger edges received the deletion's durable usage amendment / one wedged-worker compaction the supervisor declared aborted |
 | `source` | string | only for `deleted_child_usage_captured`: `rlm_delete` (the kill route's finalize), `saved_delete` (the saved-session delete's pre-unlink tombstone), `adoption` (an interrupted delete finished from the ledger tombstone at boot) |
@@ -275,6 +283,16 @@ client run (adoption; later copies in the same run are not reported).
 | property | type | notes |
 |---|---|---|
 | `lines` | number | the copied text's line count |
+
+### `tui click used`
+
+The interactive surface's first click-driven interaction per client run
+(adoption; later clicks in the same run are not reported): a mouse or touch
+plain click fired one of the clickable surfaces' actions.
+
+| property | type | notes |
+|---|---|---|
+| `surface` | string | `transcript` (a card or condensed-run expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
 
 ### `tui enhanced keys`
 
@@ -401,8 +419,8 @@ The user opened an activity view from the dock (the operator's
 direct-navigation redesign): dock Enter or a second Alt+A opens the
 focused group's own view directly — the scoped agents view, the
 heartbeats view, or the bash view (the grouped panel is gone). The goal
-indicator is read-only and does not emit this event. No command, output,
-prompt, or goal content is collected.
+indicator is read-only and does not emit this event. No command,
+output, prompt, or goal content is collected.
 
 | property | type | notes |
 |---|---|---|
@@ -411,13 +429,17 @@ prompt, or goal content is collected.
 ### `tui menu opened`
 
 A menu surface opened (adoption of the unified menu panel): `source` is
-`command` (the bare slash submission — `/model`, `/mcp`) or `tab` (a typed
-partial + Tab in the command's argument context, opening the menu filtered
-to the match). Never carries prompt or search content.
+`command` (the bare slash submission — `/model`, `/mcp`, `/settings`) or
+`tab` (a typed partial + Tab in the command's argument context, opening the
+menu filtered to the match). The read-only info panel commands report
+their own `menu` names (the operator's 2026-09-26 inline-panel directive:
+`/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
+`/hotkeys`, the `/traces` status and preview blocks, and `/list`). Never
+carries prompt or search content.
 
 | property | type | notes |
 |---|---|---|
-| `menu` | string | `model` / `mcp` |
+| `menu` | string | `model` / `mcp` / `settings` / `context` / `session` / `system-prompt` / `logs` / `changelog` / `hotkeys` / `traces` / `list` |
 | `source` | string | `command` / `tab` |
 
 ### `tui prompt stash`

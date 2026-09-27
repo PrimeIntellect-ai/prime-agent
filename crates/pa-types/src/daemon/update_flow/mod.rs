@@ -6,7 +6,7 @@
 //! the FSM drivers and watchdogs are owned by pa-daemon/pa-cli.
 //!
 //! Naming convention: `intent.json`, `marker.json`, and `roster.json` are
-//! Rust-owned scratch artifacts and use snake_case field names exactly as the
+//! Rust-owned scratch artifacts and use `snake_case` field names exactly as the
 //! spec writes them. `status.json` keeps the TS status-file schema (camelCase
 //! field names, TS `DaemonUpdateRestartStatus` parity), extended with the
 //! spec's `updateId`/`state`/`epoch` fields, so differential tests against the

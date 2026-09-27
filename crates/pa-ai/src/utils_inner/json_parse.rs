@@ -5,6 +5,8 @@
 //! strings keep their content, truncated containers are closed, incomplete
 //! keys/values are dropped), and fail only on genuinely invalid input.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value};
 
 const VALID_JSON_ESCAPES: [char; 8] = ['"', '\\', '/', 'b', 'f', 'n', 'r', 't'];
@@ -55,9 +57,6 @@ pub fn repair_json(json: &str) -> String {
         if ch == '\\' {
             let next_char = chars.get(index + 1).copied();
             match next_char {
-                None => {
-                    repaired.push_str("\\\\");
-                }
                 Some('u') => {
                     let digits: String = chars[index + 2..(index + 6).min(chars.len())]
                         .iter()
@@ -66,7 +65,7 @@ pub fn repair_json(json: &str) -> String {
                         && digits.len() == 4
                         && digits.chars().all(|c| c.is_ascii_hexdigit());
                     if digits_ok {
-                        repaired.push_str(&format!("\\u{digits}"));
+                        let _ = write!(repaired, "\\u{digits}");
                         index += 5;
                         continue;
                     }
@@ -77,7 +76,7 @@ pub fn repair_json(json: &str) -> String {
                     repaired.push(next);
                     index += 1;
                 }
-                Some(_) => {
+                None | Some(_) => {
                     repaired.push_str("\\\\");
                 }
             }
@@ -97,15 +96,21 @@ pub fn repair_json(json: &str) -> String {
 }
 
 /// Parse JSON; when parsing fails, retry once against the repaired text.
+///
+/// # Errors
+///
+/// Returns the original parse error when the text stays invalid after repair
+/// (including when the repair leaves it unchanged), otherwise the parse error
+/// of the repaired text.
 pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
     match serde_json::from_str::<Value>(json) {
         Ok(value) => Ok(value),
         Err(error) => {
             let repaired = repair_json(json);
-            if repaired != json {
-                serde_json::from_str::<Value>(&repaired)
-            } else {
+            if repaired == json {
                 Err(error)
+            } else {
+                serde_json::from_str::<Value>(&repaired)
             }
         }
     }
@@ -123,6 +128,12 @@ pub enum ParseError {
 /// Tolerant partial-JSON parser. `Ok` means a usable value was recovered
 /// (possibly a partial one); `Err(ParseError::Invalid)` means the input is not
 /// parseable JSON even with truncation tolerance.
+///
+/// # Errors
+///
+/// Returns `Err(ParseError::Invalid)` when the input is not usable even with
+/// truncation tolerance: a truncated top-level literal, malformed input, or
+/// trailing non-whitespace after the recovered value.
 pub fn parse_partial_json(input: &str) -> Result<Value, ParseError> {
     let mut parser = PartialParser {
         chars: input.chars().collect(),
@@ -168,7 +179,6 @@ impl PartialParser {
 
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         match self.peek() {
-            None => Err(ParseError::Invalid),
             Some('{') => self.parse_object(),
             Some('[') => self.parse_array(),
             Some('"') => self.parse_string().map(|(value, _)| Value::String(value)),
@@ -176,7 +186,7 @@ impl PartialParser {
             Some('f') => self.parse_literal("false", Value::Bool(false)),
             Some('n') => self.parse_literal("null", Value::Null),
             Some(ch) if ch == '-' || ch.is_ascii_digit() => self.parse_number(),
-            Some(_) => Err(ParseError::Invalid),
+            None | Some(_) => Err(ParseError::Invalid),
         }
     }
 
@@ -408,11 +418,10 @@ impl PartialParser {
             }
 
             // Key: on EOF inside the key string the pair is dropped.
-            let (key, key_closed) = match self.parse_string() {
-                Ok(result) => result,
-                // parse_string never fails on truncation, only on invalid
-                // escape sequences inside the key.
-                Err(_) => return Err(ParseError::Invalid),
+            // parse_string never fails on truncation, only on invalid
+            // escape sequences inside the key.
+            let Ok((key, key_closed)) = self.parse_string() else {
+                return Err(ParseError::Invalid);
             };
             self.skip_whitespace();
             if !key_closed || self.peek() != Some(':') {
@@ -474,6 +483,71 @@ pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
         return value;
     }
     Value::Object(Map::new())
+}
+
+const EAGER_PARSE_LENGTH: usize = 8 * 1024;
+
+/// Streamed tool-call argument JSON with a best-effort parsed preview (port of
+/// the TS `StreamingJsonAccumulator`).
+///
+/// Re-parsing the whole buffer on every delta is quadratic in the argument
+/// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
+/// buffer grew by 1/16 since the last parse, keeping total parse work linear.
+/// Callers still parse `text` with [`parse_streaming_json`] when the block
+/// ends.
+pub struct StreamingJsonAccumulator {
+    text: String,
+    /// Buffer length in UTF-16 code units, the metric of the TS reference
+    /// (`String::length`); maintained incrementally so `append` stays O(delta).
+    len_utf16: usize,
+    parsed_length: usize,
+}
+
+impl StreamingJsonAccumulator {
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let len_utf16 = text.chars().map(char::len_utf16).sum();
+        Self {
+            text,
+            len_utf16,
+            parsed_length: 0,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Appends a delta and returns a fresh partial parse, or `None` while the
+    /// refresh is throttled (the caller keeps the previous preview).
+    pub fn append(&mut self, delta: &str) -> Option<Value> {
+        self.text.push_str(delta);
+        self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
+        let length = self.len_utf16;
+        // `length - parsed_length < parsed_length / 16` (the TS float
+        // comparison) in exact integer form.
+        if length > EAGER_PARSE_LENGTH && 16 * (length - self.parsed_length) < self.parsed_length {
+            return None;
+        }
+        Some(self.parse())
+    }
+
+    /// Parses text not covered by the last returned parse; `None` when the
+    /// preview is already current.
+    pub fn flush(&mut self) -> Option<Value> {
+        (self.parsed_length != self.len_utf16).then(|| self.parse())
+    }
+
+    fn parse(&mut self) -> Value {
+        self.parsed_length = self.len_utf16;
+        parse_streaming_json(Some(&self.text))
+    }
+}
+
+impl Default for StreamingJsonAccumulator {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
 }
 
 #[cfg(test)]
@@ -542,5 +616,100 @@ mod tests {
         assert_eq!(parse_streaming_json(None), json!({}));
         assert_eq!(parse_streaming_json(Some("  ")), json!({}));
         assert_eq!(parse_streaming_json(Some("garbage {")), json!({}));
+    }
+
+    #[test]
+    fn accumulator_keeps_exact_live_parse_while_small() {
+        let mut acc = StreamingJsonAccumulator::default();
+        assert_eq!(acc.flush(), None);
+        // `\q` is an invalid escape and the raw newline is invalid JSON: the
+        // preview must still track the repaired partial parse exactly.
+        let text = concat!(
+            r#"{"command":"say \"hi\"","note":"bad \q escape","#,
+            r#""multi":"line"#,
+            "\n",
+            r#"break"}"#
+        );
+        for ch in text.chars() {
+            let mut one = [0u8; 4];
+            let preview = acc.append(ch.encode_utf8(&mut one));
+            assert_eq!(preview, Some(parse_streaming_json(Some(acc.text()))));
+        }
+    }
+
+    #[test]
+    fn accumulator_throttles_large_buffers_to_linear_parse_work_and_flushes_the_tail() {
+        let mut acc = StreamingJsonAccumulator::default();
+        let payload = format!(r#"{{"content":"{}"}}"#, "x".repeat(256 * 1024));
+        let mut last_parsed_length = 0usize;
+        let mut parses = 0usize;
+        for offset in (0..payload.len()).step_by(16) {
+            let delta = &payload[offset..(offset + 16).min(payload.len())];
+            if acc.append(delta).is_some() {
+                parses += 1;
+                last_parsed_length = acc.text().len();
+            } else {
+                // The ASCII payload makes byte length equal the TS
+                // `text.length` (UTF-16 code units).
+                assert!(acc.text().len() - last_parsed_length < last_parsed_length / 16 + 1);
+            }
+        }
+        assert!(parses < 700);
+        assert_eq!(acc.flush(), Some(parse_streaming_json(Some(acc.text()))));
+        assert_eq!(acc.flush(), None);
+    }
+
+    // Benchmark, not a CI test: measures the throttled accumulator against
+    // the pre-PR per-delta reparse. Run with:
+    // cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore = "benchmark; see the comment above for the run command"]
+    fn accumulator_benchmark_10k_deltas() {
+        // Synthetic tool-call arguments through a 10k-delta stream: the
+        // per-delta whole-buffer reparse (pre-PR behavior) vs the
+        // growth-throttled accumulator.
+        let payload = format!(
+            r#"{{"content":"{}","path":"/tmp/stream.json"}}"#,
+            "x".repeat(150 * 1024)
+        );
+        let delta_count = 10_000usize;
+        let delta_len = payload.len().div_ceil(delta_count);
+
+        let mut parses = 0usize;
+        let mut parsed_bytes = 0usize;
+        let started = std::time::Instant::now();
+        let mut buffer = String::new();
+        for offset in (0..payload.len()).step_by(delta_len) {
+            buffer.push_str(&payload[offset..(offset + delta_len).min(payload.len())]);
+            let _ = parse_streaming_json(Some(&buffer));
+            parses += 1;
+            parsed_bytes += buffer.len();
+        }
+        let per_delta_reparse = started.elapsed();
+
+        let mut parses_after = 0usize;
+        let mut parsed_bytes_after = 0usize;
+        let started = std::time::Instant::now();
+        let mut acc = StreamingJsonAccumulator::default();
+        for offset in (0..payload.len()).step_by(delta_len) {
+            if acc
+                .append(&payload[offset..(offset + delta_len).min(payload.len())])
+                .is_some()
+            {
+                parses_after += 1;
+                parsed_bytes_after += acc.text().len();
+            }
+        }
+        let accumulator = started.elapsed();
+
+        eprintln!(
+            "accumulator_benchmark_10k_deltas payload_bytes={} deltas={} \
+             per_delta_reparse parses={parses} parsed_bytes={parsed_bytes} elapsed_ms={:.1} \
+             accumulator parses={parses_after} parsed_bytes={parsed_bytes_after} elapsed_ms={:.1}",
+            payload.len(),
+            delta_count,
+            per_delta_reparse.as_secs_f64() * 1000.0,
+            accumulator.as_secs_f64() * 1000.0,
+        );
     }
 }

@@ -15,6 +15,21 @@ pub struct FileOperations {
 
 /// Maximum files kept per summary block.
 const FILE_LIST_MAX_ENTRIES: usize = 200;
+/// Maximum combined characters the two file blocks may add to a summary
+/// (TS #2385 `FILE_LIST_MAX_COMBINED_CHARS`): repeated compactions merge
+/// the lists carried in the previous entry's details, so without a
+/// character cap the appended block grows without bound.
+const FILE_LIST_MAX_COMBINED_CHARS: usize = 6_000;
+
+/// Combined characters the two lists occupy (TS `fileListChars`: each
+/// path plus its newline in the block).
+fn file_list_chars(read_files: &[String], modified_files: &[String]) -> usize {
+    read_files
+        .iter()
+        .chain(modified_files)
+        .map(|file| file.chars().count() + 1)
+        .sum()
+}
 /// Maximum characters for a serialized tool result.
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
 /// Characters kept from the end of a truncated tool result.
@@ -59,7 +74,12 @@ pub fn extract_file_ops_from_message(message: &AgentMessage, file_ops: &mut File
     }
 }
 
-/// Final file lists: read-only files and modified files, sorted and capped.
+/// Final file lists: read-only files and modified files, sorted and
+/// capped. Both lists cap at [`FILE_LIST_MAX_ENTRIES`] (sorted, then
+/// truncated) and at [`FILE_LIST_MAX_COMBINED_CHARS`] combined characters
+/// (TS #2385): read-only entries are the least valuable and drop first,
+/// from the alphabetical end; modified entries drop only after the
+/// read-only list is empty.
 pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String>) {
     let mut modified: BTreeSet<String> = file_ops.edited.clone();
     modified.extend(file_ops.written.iter().cloned());
@@ -71,7 +91,20 @@ pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String
         .cloned()
         .collect();
     let modified_files: Vec<String> = modified.into_iter().take(FILE_LIST_MAX_ENTRIES).collect();
-    (read_only, modified_files)
+    let mut read_files = read_only;
+    while !read_files.is_empty()
+        && file_list_chars(&read_files, &modified_files) > FILE_LIST_MAX_COMBINED_CHARS
+    {
+        read_files.pop();
+    }
+    let mut modified_files = modified_files;
+    while !modified_files.is_empty()
+        && read_files.is_empty()
+        && file_list_chars(&read_files, &modified_files) > FILE_LIST_MAX_COMBINED_CHARS
+    {
+        modified_files.pop();
+    }
+    (read_files, modified_files)
 }
 
 /// Format file lists as XML tags (empty when no files).
@@ -93,6 +126,52 @@ pub fn format_file_operations(read_files: &[String], modified_files: &[String]) 
         return String::new();
     }
     format!("\n\n{}", sections.join("\n\n"))
+}
+
+/// Remove `<read-files>`/`<modified-files>` blocks from a stored summary
+/// (TS #2385 `stripFileListBlocks`). The blocks are re-appended
+/// mechanically after every summarization (`compute_file_lists` +
+/// [`format_file_operations`]) and the lists live on in the compaction
+/// entry's details; feeding the stale blocks back into the update prompt
+/// makes the model re-summarize them, so the lists compound and drift
+/// across repeated compactions. Strip them before a previous summary
+/// reaches the summarizer — the details plus the fresh append remain the
+/// single source of truth. Blocks mid-summary (hook- or handwritten
+/// summaries) strip too; the newlines introducing a block strip with it,
+/// and an open tag without its close never matched the TS regex, so it
+/// stays — and the scan resumes after it so later complete blocks still
+/// strip, exactly like the regex's global scan.
+pub fn strip_file_list_blocks(summary: &str) -> String {
+    let mut result = String::with_capacity(summary.len());
+    let mut rest = summary;
+    loop {
+        // The earliest open tag wins, mirroring the TS regex's scan.
+        let next = ["read-files", "modified-files"]
+            .iter()
+            .filter_map(|tag| rest.find(&format!("<{tag}>")).map(|pos| (pos, *tag)))
+            .min_by_key(|(pos, _)| *pos);
+        let Some((pos, tag)) = next else {
+            result.push_str(rest);
+            break;
+        };
+        let close = format!("</{tag}>");
+        let after_open = pos + tag.len() + 2;
+        let Some(close_offset) = rest[after_open..].find(&close) else {
+            // An open tag without its close never matched the TS regex, so
+            // it stays; the scan resumes after it and still strips later
+            // complete blocks instead of bailing out with the whole rest.
+            result.push_str(&rest[..after_open]);
+            rest = &rest[after_open..];
+            continue;
+        };
+        let end = after_open + close_offset + close.len();
+        // The block's introducing newlines strip with it (the regex's
+        // leading `(?:\n*)`).
+        let before = &rest[..pos];
+        result.push_str(before.trim_end_matches('\n'));
+        rest = &rest[end..];
+    }
+    result.trim_end().to_string()
 }
 
 /// Truncate keeping head and tail within the budget, marking the elision.
@@ -124,15 +203,26 @@ fn user_text(content: &pa_types::ai::UserContent) -> String {
                 pa_types::ai::UserContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(""),
+            .collect::<String>(),
     }
 }
 
 /// Serialize conversation messages to text so the model summarizes rather
 /// than continues. Tool results are truncated.
+///
+/// Tool calls are serialized with a sequential `#N` prefix and results
+/// repeat the matching index, so repeated calls of the same tool pair
+/// unambiguously (TS #2424).
 pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
     let mut parts: Vec<String> = Vec::new();
+    // Tool calls are serialized with a 1-based sequential index and
+    // results repeat the index of their call (matched by tool call id),
+    // so repeated calls of the same tool pair unambiguously in the
+    // summarizer input. The short index stands in for the raw provider
+    // tool call id, which can exceed 450 characters on some providers.
+    let mut tool_call_indices: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut tool_call_index: usize = 0;
     for message in messages {
         match message {
             AgentMessage::User(user) => {
@@ -165,7 +255,9 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            tool_calls.push(format!("{}({args})", call.name));
+                            tool_call_index += 1;
+                            tool_call_indices.insert(call.id.clone(), tool_call_index);
+                            tool_calls.push(format!("#{tool_call_index} {}({args})", call.name));
                         }
                     }
                 }
@@ -190,11 +282,27 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                         pa_types::ai::UserContentBlock::Text(text) => Some(text.text.clone()),
                         _ => None,
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
                 if !content.is_empty() {
+                    // Label the tool name, error status, and the index of
+                    // the paired call so the summarizer can match each
+                    // result to its `#N`-prefixed entry in the [Assistant
+                    // tool calls] lines even when the same tool is called
+                    // repeatedly in one turn. Results whose call is not
+                    // part of the input (extension callers may pass
+                    // partial message lists) fall back to the name-only
+                    // label.
+                    let index_suffix = tool_call_indices
+                        .get(&result.tool_call_id)
+                        .map(|index| format!(" #{index}"))
+                        .unwrap_or_default();
+                    let label = if result.is_error {
+                        format!("[Tool result ({}, error){index_suffix}]", result.tool_name)
+                    } else {
+                        format!("[Tool result ({}){index_suffix}]", result.tool_name)
+                    };
                     parts.push(format!(
-                        "[Tool result]: {}",
+                        "{label}: {}",
                         truncate_for_summary(&content, TOOL_RESULT_MAX_CHARS)
                     ));
                 }
@@ -230,7 +338,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -242,14 +350,14 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(pa_types::ai::TextContent {
                     text: "doing it".to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
                 pa_types::ai::AssistantContentBlock::ToolCall(pa_types::ai::ToolCall {
                     id: "tc1".to_string(),
                     name: "edit".to_string(),
                     arguments,
                     thought_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ],
             api: "openai-completions".to_string(),
@@ -263,7 +371,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -292,7 +400,7 @@ mod tests {
             })),
             is_error: false,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         extract_file_ops_from_message(&result, &mut ops);
         assert!(ops.edited.contains("/pkg/lib.rs"));
@@ -307,6 +415,226 @@ mod tests {
         let text = serialize_conversation(&messages);
         assert!(text.starts_with("[User]: do the thing"));
         assert!(text.contains("[Assistant]: doing it"));
+        assert!(text.contains("[Assistant tool calls]: #1 edit(path=\"/src/main.rs\")"));
+    }
+
+    fn tool_result(
+        text: &str,
+        tool_name: &str,
+        is_error: bool,
+        tool_call_id: &str,
+    ) -> AgentMessage {
+        AgentMessage::ToolResult(pa_types::ai::ToolResultMessage {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: vec![pa_types::ai::UserContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: text.to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            details: None,
+            is_error,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
+    }
+
+    fn assistant_with_tool_calls(calls: &[(&str, &str, &str)]) -> AgentMessage {
+        AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: calls
+                .iter()
+                .map(|(id, name, code)| {
+                    let mut arguments = serde_json::Map::new();
+                    arguments.insert("code".to_string(), serde_json::json!(code));
+                    pa_types::ai::AssistantContentBlock::ToolCall(pa_types::ai::ToolCall {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments,
+                        thought_signature: None,
+                        rest: serde_json::Map::default(),
+                    })
+                })
+                .collect(),
+            api: "openai-completions".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::ToolUse,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
+    }
+
+    /// Short success results label with the tool name (TS #2424:
+    /// `[Tool result (bash)]`), and error results mark the failure
+    /// (`[Tool result (edit, error)]`).
+    #[test]
+    fn tool_result_labels_carry_the_tool_name_and_error_marker() {
+        assert_eq!(
+            serialize_conversation(std::slice::from_ref(&tool_result(
+                "the output",
+                "bash",
+                false,
+                "tc1"
+            ))),
+            "[Tool result (bash)]: the output"
+        );
+        assert_eq!(
+            serialize_conversation(std::slice::from_ref(&tool_result(
+                "the failure",
+                "edit",
+                true,
+                "tc1"
+            ))),
+            "[Tool result (edit, error)]: the failure"
+        );
+    }
+
+    /// Repeated calls of the same tool pair with their results through the
+    /// sequential `#N` index on both the call and the result label, so the
+    /// summarizer can match each result to its call by position (TS
+    /// #2424's pairing fix).
+    #[test]
+    fn repeated_same_tool_calls_pair_by_index() {
+        let messages = vec![
+            assistant_with_tool_calls(&[("c1", "ipython", "a"), ("c2", "ipython", "b")]),
+            tool_result("first output", "ipython", false, "c1"),
+            tool_result("second output", "ipython", true, "c2"),
+        ];
+        let expected = [
+            "[Assistant tool calls]: #1 ipython(code=\"a\"); #2 ipython(code=\"b\")",
+            "[Tool result (ipython) #1]: first output",
+            "[Tool result (ipython, error) #2]: second output",
+        ]
+        .join("\n\n");
+        assert_eq!(serialize_conversation(&messages), expected);
+    }
+
+    /// A result whose call was not serialized (a partial message list from
+    /// an extension caller) falls back to the name-only label (TS #2424's
+    /// orphan arm).
+    #[test]
+    fn orphan_tool_result_falls_back_to_the_name_only_label() {
+        let messages = vec![
+            assistant_with_tool_calls(&[("c1", "bash", "ls")]),
+            tool_result("orphan output", "ipython", false, "tc-orphan"),
+        ];
+        let expected = [
+            "[Assistant tool calls]: #1 bash(code=\"ls\")",
+            "[Tool result (ipython)]: orphan output",
+        ]
+        .join("\n\n");
+        assert_eq!(serialize_conversation(&messages), expected);
+    }
+
+    /// The combined character cap (TS #2385): the two file blocks may add
+    /// at most 6000 characters to a summary. Read-only entries are the
+    /// least valuable and drop first, from the alphabetical end; modified
+    /// entries drop only after the read-only list is empty.
+    #[test]
+    fn file_lists_cap_combined_chars_dropping_read_only_first() {
+        // 37-char entries: each contributes 38 chars, so the cap keeps
+        // 157 (157*38 = 5966; 158*38 = 6004).
+        let long: Vec<String> = (0..250).map(|i| format!("read-{i:032}")).collect();
+        let file_ops = FileOperations {
+            read: long.iter().cloned().collect(),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, long[..157].to_vec());
+        assert!(file_list_chars(&read_files, &modified_files) <= FILE_LIST_MAX_COMBINED_CHARS);
+
+        // Read-only entries still present: modified entries never shed,
+        // even over the combined budget.
+        let file_ops = FileOperations {
+            read: long.iter().cloned().collect(),
+            edited: BTreeSet::from(["modified.rs".to_string()]),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, long[..157].to_vec());
+        assert_eq!(modified_files, vec!["modified.rs".to_string()]);
+
+        // A modified-only list over the budget drops from its
+        // alphabetical end once the read-only list is empty. 36-char
+        // entries contribute 37 chars each, so the cap keeps 162
+        // (162*37 = 5994; 163*37 = 6031).
+        let modified_all: Vec<String> = (0..250).map(|i| format!("mod-{i:032}")).collect();
+        let file_ops = FileOperations {
+            edited: modified_all.iter().cloned().collect(),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert!(read_files.is_empty());
+        assert_eq!(modified_files, modified_all[..162].to_vec());
+
+        // Under the cap nothing drops.
+        let file_ops = FileOperations {
+            read: BTreeSet::from(["a.rs".to_string()]),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, vec!["a.rs".to_string()]);
+        assert!(modified_files.is_empty());
+    }
+
+    /// The stored summary's file blocks strip before the update prompt (TS
+    /// #2385 `stripFileListBlocks`): end blocks, mid-summary blocks, and
+    /// blocks-only summaries; an open tag without its close never matched
+    /// the TS regex, so it stays.
+    #[test]
+    fn strip_file_list_blocks_removes_read_and_modified_blocks() {
+        // Blocks riding the end of a stored summary.
+        assert_eq!(
+            strip_file_list_blocks(
+                "the summary\n\n<read-files>\na.rs\nb.rs\n</read-files>\n\n<modified-files>\nc.rs\n</modified-files>"
+            ),
+            "the summary"
+        );
+        // Blocks mid-summary (hook- or handwritten summaries).
+        assert_eq!(
+            strip_file_list_blocks("before\n\n<modified-files>m.rs</modified-files>\n\nafter"),
+            "before\n\nafter"
+        );
+        // A summary that contained only file blocks leaves nothing.
+        assert_eq!(
+            strip_file_list_blocks(
+                "<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\n</modified-files>"
+            ),
+            ""
+        );
+        // No blocks: unchanged except the trailing trim (TS `.trimEnd()`).
+        assert_eq!(strip_file_list_blocks("plain summary\n\n"), "plain summary");
+        // An open tag without its close stays.
+        assert_eq!(
+            strip_file_list_blocks("a <read-files> b"),
+            "a <read-files> b"
+        );
+        // An unclosed tag never matched the TS regex, but the scan
+        // resumes after it: a later complete block still strips (the
+        // regex's global pass), so the stale block cannot ride back into
+        // the update prompt behind a malformed tag.
+        assert_eq!(
+            strip_file_list_blocks(
+                "alpha\n\n<read-files> unclosed\n\n<modified-files>\na.txt\n</modified-files>\nend"
+            ),
+            "alpha\n\n<read-files> unclosed\nend"
+        );
+        // The outer close makes one block either way: the regex's lazy
+        // span swallows the inner complete block with the outer tag.
+        assert_eq!(
+            strip_file_list_blocks(
+                "<read-files> x <modified-files>a</modified-files> y </read-files> tail"
+            ),
+            " tail"
+        );
     }
 
     #[test]
@@ -319,13 +647,13 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: long,
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             )],
             details: None,
             is_error: false,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         let text = serialize_conversation(std::slice::from_ref(&result));
         assert!(text.contains("characters truncated; first"));

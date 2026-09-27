@@ -96,10 +96,11 @@ The GitHub token on this box lacks the `workflow` scope. Therefore:
    └───────┬────────────────────────────────────────────────────────────┘
            ▼
    build matrix (needs: tag-check; permissions: contents: read; no secrets)
-   ├── x86_64-unknown-linux-gnu   (ubuntu-24.04)
-   ├── aarch64-unknown-linux-gnu  (ubuntu-24.04-arm, native)
+   ├── x86_64-unknown-linux-gnu   (ubuntu-24.04 host, ubuntu:22.04 container)
+   ├── aarch64-unknown-linux-gnu  (ubuntu-24.04-arm host, ubuntu:22.04 container, native)
    ├── aarch64-apple-darwin       (macos-14)
    └── x86_64-apple-darwin         (macos-13)
+   GNU targets additionally gate on the GLIBC baseline (see §10).
    per target:
      cargo build --release --target <t>  (committed Cargo.lock, -D warnings)
      ./<t>/release/prime-agent --version  == tag version      (livecheck gate)
@@ -380,8 +381,8 @@ kernel session boots without the env override.
 
 | target | runner | status |
 |---|---|---|
-| x86_64-unknown-linux-gnu | ubuntu-24.04 | now |
-| aarch64-unknown-linux-gnu | ubuntu-24.04-arm (native) | now |
+| x86_64-unknown-linux-gnu | ubuntu-24.04 host + `ubuntu:22.04` job container | now |
+| aarch64-unknown-linux-gnu | ubuntu-24.04-arm host + `ubuntu:22.04` job container (native) | now |
 | aarch64-apple-darwin | macos-14 (native arm64) | now |
 | x86_64-apple-darwin | macos-13 (native x64) | now |
 | x86_64-pc-windows-msvc | windows-2022 | reserved, commented entry; shipped when the Windows trait impls land |
@@ -389,6 +390,15 @@ kernel session boots without the env override.
 All four current targets build natively (no cross toolchains, no qemu). musl/baseline
 variants (TS ships them for Bun-specific CPU features) are unnecessary for the Rust binary;
 if a static-linked Linux target is wanted later it slots in as another matrix entry.
+
+**GNU/Linux release baseline: Ubuntu 22.04 (glibc 2.35).** Both GNU targets build
+inside an `ubuntu:22.04` job container so the linked glibc never exceeds the baseline —
+building on the ubuntu-24.04 runner image produced binaries that require GLIBC_2.39 and
+do not start on Ubuntu 22.04 (verified 2026-09-24 on a deploy box). The container image is
+multi-arch, so aarch64 remains a native build (the host runner only supplies CPU). A
+post-build gate in `continuous.yml` and `release.yml` fails the build when the binary
+requires any symbol above `GLIBC_2.35`; the release livecheck runs inside the same
+container, so every GNU release binary is proven to start on 22.04 before promotion.
 
 ## 11. Implementation plan (on approval)
 

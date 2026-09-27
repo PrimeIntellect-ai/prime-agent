@@ -112,7 +112,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => {
                     return serde_json::from_str(line.trim()).expect("parse response line");
                 }
@@ -264,27 +264,53 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     client.send_command("u1", serde_json::json!({ "type": "roster_unsubscribe" }));
     assert_eq!(client.read_response("u1")["success"], true);
 
-    // Stopping the session removes the entry and pushes the removal.
+    // Stopping the session passivates its row (TS
+    // `flipWorkerRosterEntriesInactive`: every stopped non-ephemeral row
+    // stays visible - the operator's rows-disappear report - the push
+    // carries the passivated entry keyed by the roster agent id (TS
+    // `rosterAgentIdForSummary` = session id, not the active/worker id
+    // the commands address), with `lifecycle` still "live", the status
+    // flipped to "inactive", and the live-only fields gone.
     client.send_command(
         "k1",
         serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
     );
     let stopped = client.read_response("k1");
     assert_eq!(stopped["success"], true, "kill failed: {stopped}");
-    // Removal pushes key by the roster agent id (TS `rosterAgentIdForSummary`
-    // = session id), not the active/worker id the commands address.
-    let removed_update = client_b.next_roster_update(|line| {
-        line["removed"]
-            .as_array()
-            .map(|ids| ids.iter().any(|id| id == agent_id.as_str()))
-            .unwrap_or(false)
+    let passivated_update = client_b.next_roster_update(|line| {
+        line["changed"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["agentId"] == agent_id.as_str()
+                    && entry["status"] == "inactive"
+                    && entry["summary"]["lifecycle"] == "live"
+                    && entry["summary"].get("activeSessionId").is_none()
+            })
+        })
     });
-    // TS always carries `changed` (empty for a removal-only push) and
-    // omits `removed` when there are no removals.
+    assert!(
+        passivated_update["removed"].is_null()
+            || passivated_update["removed"] == serde_json::json!([]),
+        "the stop settles in place, it never removes the row: {passivated_update}"
+    );
+    // The snapshot keeps the passivated row: a fresh subscriber (the
+    // agents view's open) still sees the stopped session.
+    client_b.send_command("r3", serde_json::json!({ "type": "roster_subscribe" }));
+    let resubscribed = client_b.read_response("r3");
     assert_eq!(
-        removed_update["changed"],
-        serde_json::json!([]),
-        "removal-only push: {removed_update}"
+        resubscribed["success"], true,
+        "re-subscribe: {resubscribed}"
+    );
+    let roster = resubscribed["data"]["roster"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let entry = roster
+        .iter()
+        .find(|entry| entry["agentId"] == agent_id.as_str())
+        .unwrap_or_else(|| panic!("the passivated row stays in the snapshot: {roster:?}"));
+    assert_eq!(
+        entry["status"], "inactive",
+        "the stopped row is inactive: {entry}"
     );
 }
 
@@ -327,6 +353,13 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     let log = std::fs::File::create(dir.path().join("daemon.log")).expect("log file");
     // Underscore keeps the kill guard alive for the test's scope.
     let _daemon = {
+        struct LoggedDaemon(Child);
+        impl Drop for LoggedDaemon {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         #[allow(clippy::zombie_processes)]
         let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
             .arg("supervisor")
@@ -353,13 +386,6 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
-        }
-        struct LoggedDaemon(Child);
-        impl Drop for LoggedDaemon {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
         }
         LoggedDaemon(child)
     };
@@ -464,14 +490,11 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     );
     let _ = client.read_response("p1");
     let update = client_b.next_roster_update(|line| {
-        line["changed"]
-            .as_array()
-            .map(|entries| {
-                entries.iter().any(|entry| {
-                    entry["agentId"] == serde_json::Value::String(child_agent_id.clone())
-                })
-            })
-            .unwrap_or(false)
+        line["changed"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["agentId"] == serde_json::Value::String(child_agent_id.clone()))
+        })
     });
     let changed = update["changed"].as_array().cloned().unwrap_or_default();
     let changed_child = changed
@@ -491,8 +514,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     let removal = client_b.next_roster_update(|line| {
         line["removed"]
             .as_array()
-            .map(|ids| ids.contains(&serde_json::Value::String(child_agent_id.clone())))
-            .unwrap_or(false)
+            .is_some_and(|ids| ids.contains(&serde_json::Value::String(child_agent_id.clone())))
     });
     assert!(
         removal["removed"]

@@ -33,6 +33,11 @@ fn is_cjk(char: char) -> bool {
 
 /// Tokenize text into lowercase query terms: word runs of letters/digits/marks
 /// (>= 4 chars), CJK runs as overlapping bigrams.
+///
+/// # Panics
+///
+/// The `next().unwrap()` on the first char of a run cannot fire: the run is
+/// checked non-empty right before.
 pub fn harness_query_terms(text: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let mut run = String::new();
@@ -343,9 +348,9 @@ mod tests {
             content: "searches the web for results".to_string(),
             path: "/skills/web".to_string(),
             scope: Some(HarnessScope::Global),
-            reference: Default::default(),
-            arguments: Default::default(),
-            metadata: Default::default(),
+            reference: serde_json::Map::default(),
+            arguments: serde_json::Map::default(),
+            metadata: serde_json::Map::default(),
             source: "test".to_string(),
             created_at: String::new(),
             updated_at: String::new(),
@@ -370,9 +375,9 @@ mod tests {
             content: "the  build is green".to_string(),
             path: "/m/m1".to_string(),
             scope: Some(HarnessScope::Local),
-            reference: Default::default(),
-            arguments: Default::default(),
-            metadata: Default::default(),
+            reference: serde_json::Map::default(),
+            arguments: serde_json::Map::default(),
+            metadata: serde_json::Map::default(),
             source: "test".to_string(),
             created_at: String::new(),
             updated_at: String::new(),

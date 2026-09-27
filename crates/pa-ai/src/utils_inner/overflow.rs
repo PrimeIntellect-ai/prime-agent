@@ -58,10 +58,10 @@ fn non_overflow_patterns() -> &'static Vec<Regex> {
 
 /// Check if an assistant message represents a context overflow error.
 ///
-/// Handles error-based overflow (stop_reason "error" with a pattern-matching
+/// Handles error-based overflow (`stop_reason` "error" with a pattern-matching
 /// message), silent overflow (usage.input exceeds the context window while the
 /// stream reported success), and length-stop overflow (server truncates input,
-/// returns stop_reason "length" with zero output).
+/// returns `stop_reason` "length" with zero output).
 pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u64>) -> bool {
     if message.stop_reason == StopReason::Error {
         if let Some(error_message) = &message.error_message {
@@ -126,6 +126,7 @@ fn content_text(message: &AssistantMessage) -> String {
 mod tests {
     use super::*;
     use crate::types::{Usage, UsageCost};
+    use serde_json::Map;
 
     fn message(
         stop_reason: StopReason,
@@ -145,7 +146,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: error_message.map(std::string::ToString::to_string),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

@@ -29,6 +29,13 @@ struct State {
 /// first use. Concurrent callers on the same directory converge on one id:
 /// the create is exclusive, the winner's state is published fully written,
 /// and losers re-read the winner's state.
+///
+/// # Errors
+///
+/// Returns an error when a filesystem step fails: creating `agent_dir`,
+/// reading an existing state file (a missing file is not an error),
+/// publishing the candidate state (exclusive create, write, sync, hard
+/// link), or atomically replacing invalid state (temp file + rename).
 pub fn install_id(agent_dir: &Path) -> Result<String> {
     let path = agent_dir.join(STATE_FILE);
     if let Some(existing) = read_install_id(&path)? {
@@ -58,15 +65,14 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
             // publish is atomic, so this re-read can only miss on state that
             // was already invalid before the race, never on a winner whose
             // write is still in flight.
-            match read_install_id(&path)? {
-                Some(existing) => Ok(existing),
-                None => {
-                    replace_invalid_state(&path, &payload)?;
-                    // Return the id the state file stores now: a concurrent
-                    // repair may have landed its rename after ours, and every
-                    // caller must converge on the durable id.
-                    Ok(read_install_id(&path)?.unwrap_or(installation_id))
-                }
+            if let Some(existing) = read_install_id(&path)? {
+                Ok(existing)
+            } else {
+                replace_invalid_state(&path, &payload)?;
+                // Return the id the state file stores now: a concurrent
+                // repair may have landed its rename after ours, and every
+                // caller must converge on the durable id.
+                Ok(read_install_id(&path)?.unwrap_or(installation_id))
             }
         }
     }

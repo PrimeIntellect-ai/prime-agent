@@ -124,8 +124,8 @@ the lane.
 
 Done: thin supervisor + per-session worker processes (stages 1-3, #79/#82/#89),
 session self-registration/adoption, chunked snapshot streaming (#74),
-compaction (#85), side questions (#70), status-line recap (#81/#83),
-queue/retry/restart/kill, `send_message` arm, worker robustness (#88),
+compaction (#85), side questions (#70), status-line recap (#81/#83;
+removed 2026-09-25 by operator directive), queue/retry/restart/kill, `send_message` arm, worker robustness (#88),
 32 of ~106 TS command types (`pa-daemon/src/protocol.rs` L25-58
 `KNOWN_COMMAND_TYPES` vs `daemon-supervisor.ts` L244 `DAEMON_COMMAND_TYPES`).
 
@@ -265,7 +265,9 @@ Remaining:
 ## 15. CLI command surface - partial
 
 Wired through the daemon client (#67, `pa-cli/src/daemon_command.rs`):
-`list [--all]`, `attach`, `stop` (kill), `rename`, `send`, `schedule`/cron.
+`list [--all]`, `sessions [--all] [--json]` (TS #2422, the one-line-per-agent
+operator table in `pa-cli/src/sessions_table_format.rs`), `attach`, `stop`
+(kill), `rename`, `send`, `schedule`/cron.
 `package` (#66) and `mcp` (family 12) run to completion; flag/error parity
 rows are differential-tested (`pa-cli/tests/differential_cli.rs`).
 
@@ -303,8 +305,12 @@ implemented (TS `modes/rpc/`, `modes/acp/`).
 
 Done: append-only JSONL session files with TS-parity entry sets (#88: session,
 session_state, message, model_change, service_tier_change,
-thinking_level_change, custom_message, compaction, agent_status),
-checkpoint/restart recovery journal, status-line request parity (#81/#83).
+thinking_level_change, custom_message, compaction, agent_status;
+the agent_status entry kind went with the status-line recap's removal,
+2026-09-25 by operator directive - old journals' entries degrade to
+verbatim unknown rows),
+checkpoint/restart recovery journal, status-line request parity (#81/#83;
+removed with the recap, 2026-09-25).
 
 Remaining: none for `toolResult` entries - the pa-core persisted-session
 listener writes them (hermetic scripted-tool test), the daemon worker
@@ -317,23 +323,52 @@ replay folds tool-result messages onto their pending tool cards
 
 ## 18. First-run onboarding - complete
 
-Splash + "Share agent traces with Prime Intellect?" notice, answerable,
-persisted completion flag (`pa-tui/src/onboarding.rs`;
-`pa-tui/src/interactive.rs` L186-207). Battery-verified
-(`runs/20260917T062810Z` f1: "first-run splash + trace-sharing notice
-rendered and answerable on both sides"). Sanctioned divergence (Kevin,
-2026-09-24): a fresh install ships sharing pre-configured ON, so the flow
-completes silently and the session owns the first frame — the splash +
-question mounts only for an explicit opt-out that never completed
-onboarding, and the persisted flag gates the task mount forever after
-(it never returns); `/traces` stays the change path.
+The full first-run flow (TS #2340): the welcome splash with its
+description paragraphs and single "Log in with Prime Intellect" action,
+the Prime Inference sign-in through the inline auth panel (the merged
+#2730 surface), the default GLM 5.3 model apply after the sign-in, the
+connect-more-providers picker (searchable, pinned Continue row,
+connected marks, per-provider key prompts), and the "Share agent traces
+with Prime Intellect?" question ending the flow
+(`pa-tui/src/onboarding.rs` + `pa-tui/src/onboarding_flow.rs` +
+`pa-tui/src/onboarding_choice.rs`; `pa-tui/src/interactive.rs`
+run_onboarding_phase; the startup gate and readiness probe
+`pa-cli/src/interactive_mode.rs`). First run is the
+settings flag alone (TS `shouldRunOnboarding` parity): a home with a
+ready startup model skips to the question, a not-ready home runs the
+sign-in flow, and an aborted flow (a cancelled or failed sign-in) leaves
+the flag unset so the next launch retries. The original
+battery-verified claim (`runs/20260917T062810Z` f1: "first-run splash +
+trace-sharing notice rendered and answerable on both sides") covered the
+model-ready branch; the full-flow branch is e2e-verified
+(`fresh_home_runs_the_full_sign_in_flow_to_completion`).
+Divergences (operator rulings, Kevin, 2026-09-24): sharing is OPT-IN
+(the later ruling reversing the #2699 pre-configured-ON divergence; TS
+parity restored on the default), and the question is first-run-only: a
+fresh home (no trace choice written) is asked exactly once — the opt-in
+moment — while a home that already carries a standing choice (a
+provisioned/copied config, or a `/traces` change) never sees the
+question: the standing choice stands and the flow still completes
+(TS #2368 asks such homes; deliberately not ported — and in the
+not-ready branch the standing choice skips only the question: the
+sign-in still runs, so an aborted flow's next-launch retry is never
+swallowed by the standing choice). Product divergences from TS: the
+browser OAuth challenge stays unported (the Prime login's paste prompt
+is the sign-in entry, same as the `/login` panel), and the
+default-model apply resolves through the daemon's `set_model` (its
+registry reads the just-stored credential; TS re-resolves client-side
+against the live available models).
+The completion flag gates both the startup task mount and the phase
+itself (the agents-view flow re-runs the phase per session with the same
+task, so the phase re-reads the persisted marker and never re-shows);
+`/traces` stays the change path.
 
 ## 19. Trace sharing - partial
 
-Sharing ships pre-configured ON (Kevin's 2026-09-24 product decision;
-sanctioned divergence — TS defaults off and asks on first run): the
-default IS the configuration (nothing is written until the user opts
-out), the opt-out persists (`set_agent_traces_enabled`,
+Sharing is OPT-IN (operator policy, Kevin 2026-09-24, reversing the
+earlier #2699 pre-configured-ON divergence; TS defaults off and asks on
+first run): unset means OFF, the first-run onboarding question is the
+opt-in moment, the answer persists (`set_agent_traces_enabled`,
 `crates/pa-core/src/settings/manager.rs`), and `/traces` (the command the
 onboarding note advertises) is ported (`pa-tui/src/traces.rs` + the
 composition-root hook `pa-cli/src/client_traces.rs`): the TS status
@@ -398,8 +433,9 @@ dry-run artifact integrity. The heavy sidecar-venv bootstrap
 (`--ignored`) exercises the fresh-venv path.
 
 Remaining: the installer (`install.sh`) itself, R2/native update manifests,
-and release CI (a reference sketch exists at `docs/ci.yml.reference`; merge
-gates run locally via `make check`).
+and release CI (release CI has since gone live as
+`.github/workflows/continuous.yml` + `release.yml`; merge gates run locally
+via `make check`).
 
 ## 22. Platform readiness - in-flight
 

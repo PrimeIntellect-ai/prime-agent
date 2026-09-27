@@ -17,7 +17,7 @@
 //! to do the daemon's own cleanup by hand.
 //!
 //! The genuine refusals stay intact: a truly live foreign holder still
-//! rejects (the hold_refusal e2e), and the create-reuse seam keeps
+//! rejects (the `hold_refusal` e2e), and the create-reuse seam keeps
 //! answering the live worker for every plain open (multi-client attach).
 #![cfg(target_os = "linux")]
 
@@ -132,9 +132,7 @@ fn daemon_log(socket: &Path, agent_dir: &Path) -> PathBuf {
 }
 
 fn log_contains(socket: &Path, agent_dir: &Path, needle: &str) -> bool {
-    std::fs::read_to_string(daemon_log(socket, agent_dir))
-        .map(|log| log.contains(needle))
-        .unwrap_or(false)
+    std::fs::read_to_string(daemon_log(socket, agent_dir)).is_ok_and(|log| log.contains(needle))
 }
 
 /// Wait until the daemon log names `needle`, or panic past `budget`.
@@ -211,7 +209,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -476,7 +474,7 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");
     let replay_grace = Duration::from_secs(4);
     let mut serving_since: Option<Instant> = None;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while !log_contains(&socket, &agent_dir, &give_up) {
         let alive = child_pids_of(supervisor_pid)
             .into_iter()
@@ -608,7 +606,7 @@ fn the_give_up_sweep_reaps_a_live_leftover_of_the_abandoned_id() {
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");
     let replay_grace = Duration::from_secs(4);
     let mut serving_since: Option<Instant> = None;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while !log_contains(&socket, &agent_dir, &give_up) {
         let alive = child_pids_of(supervisor_pid)
             .into_iter()

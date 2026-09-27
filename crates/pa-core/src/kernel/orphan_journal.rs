@@ -1,4 +1,4 @@
-//! Orphan-process journal: how the host tracks bash() children a kernel left
+//! Orphan-process journal: how the host tracks `bash()` children a kernel left
 //! behind, so a killed/crashed kernel cannot leak process groups.
 //!
 //! The Python runtime journals every `bash()` process group under the kernel
@@ -117,6 +117,17 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 }
 
 /// Read the still-active orphan processes recorded by this host process.
+///
+/// # Errors
+///
+/// Returns an error when the journal file cannot be read (a missing file is
+/// an empty record; malformed or partial lines are skipped).
+///
+/// # Panics
+///
+/// The `pid` field of a record is unwrapped, but only after the validity
+/// filter guarantees it is a positive integer, so the unwraps are
+/// unreachable.
 pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
     let owner_pid = std::process::id() as i64;
     let contents = match std::fs::read_to_string(path) {
@@ -134,7 +145,7 @@ pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrp
             continue;
         };
         let valid = record["version"] == 1
-            && record["pid"].as_i64().map(|p| p > 0).unwrap_or(false)
+            && record["pid"].as_i64().is_some_and(|p| p > 0)
             && record["ownerPid"].as_i64() == Some(owner_pid)
             && record["active"].is_boolean()
             && record["recordedAt"].is_string();
@@ -172,13 +183,13 @@ fn should_reap(orphan: &ActiveOrphanProcess) -> bool {
     }
 }
 
-/// Kill a journaled orphan: its process group first (bash() children are
+/// Kill a journaled orphan: its process group first (`bash()` children are
 /// group-contained), then the bare pid.
 pub fn kill_orphan_process(pid: i32) -> bool {
     crate::platform::process::kill_process_group_or_pid(pid)
 }
 
-/// Kill still-active bash() children journaled by the given kernel pid;
+/// Kill still-active `bash()` children journaled by the given kernel pid;
 /// sibling kernels' records are untouched.
 pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
     let Some(path) = journal_path() else {

@@ -3,6 +3,7 @@
 //! registry's private-prime authorization cache.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
@@ -18,7 +19,7 @@ use super::prime_inference_catalog::{
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE: &str = "prime-inference-private-models.json";
 pub const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS: u64 = 5 * 60_000;
 
-/// Foreground entitlement fetch timeout (TS PRIVATE_MODEL_REFRESH_TIMEOUT_MS).
+/// Foreground entitlement fetch timeout (TS `PRIVATE_MODEL_REFRESH_TIMEOUT_MS`).
 pub const PRIVATE_MODEL_TIMEOUT_MS: u64 = 10_000;
 /// Stale-cache background refresh timeout.
 pub const PRIVATE_BACKGROUND_TIMEOUT_MS: u64 = 3_000;
@@ -29,12 +30,20 @@ pub fn get_private_prime_inference_models() -> Vec<Model> {
 }
 
 /// MAC the team id with the bearer token; scope string is disk-cache stable.
+///
+/// # Panics
+///
+/// The `expect` on HMAC key construction cannot fail: HMAC accepts any key
+/// length, so this never panics.
 pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("hmac key");
     mac.update(b"prime-agent:private-prime-authorization:v1\0");
     mac.update(team_id.as_bytes());
     let digest = mac.finalize().into_bytes();
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    digest.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 /// Fetch the team's authorized private models; 401/403 settle to empty.
@@ -190,7 +199,7 @@ pub fn write_private_prime_authorization_cache(
     );
 }
 
-/// PI_OFFLINE=1/true/yes disables network refreshes.
+/// `PI_OFFLINE=1/true/yes` disables network refreshes.
 pub fn is_offline_mode_enabled() -> bool {
     match std::env::var("PI_OFFLINE") {
         Ok(value) => {

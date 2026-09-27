@@ -144,9 +144,16 @@ async fn kill9_mid_session_fails_pending_requests() -> Result<()> {
     ));
 
     let error = event.await.unwrap_err();
+    // The pending request can fail through either transport arm after
+    // the kill: the death watcher's tracked reason ("extension sidecar
+    // stopped"), or the RPC write racing the dying pipe (the write error
+    // — the pipe died BECAUSE of the kill). Both shapes prove the kill9
+    // propagation; the ordering flips under load.
+    let rendered = error.to_string();
     assert!(
-        error.to_string().contains("extension sidecar stopped"),
-        "death reason missing: {error}"
+        rendered.contains("extension sidecar stopped")
+            || rendered.contains("write extension RPC request"),
+        "death reason missing: {rendered}"
     );
     assert!(!host.is_alive());
 

@@ -13,9 +13,7 @@ use crate::paths::hash_key;
 #[cfg(unix)]
 pub fn socket_dir() -> PathBuf {
     let uid = current_uid().unwrap_or_else(|| "user".to_string());
-    let tmp = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     tmp.join(format!("prime-agent-{uid}"))
 }
 

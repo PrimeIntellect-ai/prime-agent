@@ -7,6 +7,7 @@
 //! the agents-back key returns from the child to the agents view.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -120,22 +121,22 @@ fn write_fixture(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\""
     );
     if let Some(parent) = parent {
-        content.push_str(&format!(",\"parentSession\":\"{}\"", parent.display()));
+        let _ = write!(content, ",\"parentSession\":\"{}\"", parent.display());
     }
-    content.push_str(&format!(",\"rlmDepth\":{rlm_depth}}}"));
+    let _ = write!(content, ",\"rlmDepth\":{rlm_depth}}}");
     content.push('\n');
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -183,12 +184,12 @@ fn session_options(
         socket_path: socket.to_path_buf(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         session_dir: Some(session_dir.to_path_buf()),
         script_path: None,
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         no_session: false,
         session,
         initial_message: None,
@@ -209,8 +210,9 @@ fn session_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: rlm_depth,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: has_children,
+        restore_dock_focus: false,
     }
 }
 
@@ -288,15 +290,16 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
             .expect("parent session run");
 
     // The dock renders at attach as the one-line activity row (unfocused,
-    // hint-free by design; Enter is the direct launcher). The count is
-    // the live running count only (the operator's running-count
-    // directive): the passivated child is finished, so the segment reads
-    // zero — the dock stays mounted and selectable because the child
-    // remains browsable history.
+    // hint-free by design; Enter is the direct launcher). The subagents
+    // segment reads `\u{25c6} N subagents` — one consolidated item (the
+    // operator's 2026-09-25 consolidation), the running count riding
+    // the label in the dock's color: the passivated child is finished,
+    // so the count reads zero — the dock stays mounted and selectable
+    // because the child remains browsable history.
     let attached = first_frame_of(&parent_run.frames, "subagent");
     assert!(
         attached.contains("\u{25c6} 0 subagents"),
-        "the unfocused dock shows the running-only subagent count:\n{attached}"
+        "the unfocused dock shows the consolidated subagents segment:\n{attached}"
     );
     // The single Enter opened the scoped agents view directly: no
     // grouped panel frame ever renders.
@@ -332,6 +335,8 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         selected_key: None,
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let view_plan = AgentsHeadlessPlan {
         steps: vec![
