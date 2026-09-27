@@ -197,6 +197,7 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     }
 }
 

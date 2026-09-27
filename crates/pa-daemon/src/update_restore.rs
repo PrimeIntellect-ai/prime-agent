@@ -551,7 +551,7 @@ async fn continuation_treatment(
         return;
     }
     let response = supervisor
-        .route_command(
+        .route_command_typed(
             resident,
             "prompt",
             json!({ "message": UPDATE_RESTART_CONTINUATION_PROMPT }),

@@ -458,6 +458,11 @@ pub(crate) struct SessionUi {
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     /// Snapshot chat entries to fold into the view on the next rebuild.
     pending_snapshot: Option<Vec<ChatEntry>>,
+    /// One-shot: return the freed heap of the first frame that renders
+    /// after an attach fold (the fold itself trims the wire/parse churn;
+    /// the first frame's visible-window materialization is its own,
+    /// bigger transient — see the draw loop's post-frame trim).
+    trim_after_frame: bool,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
     /// Snapshot tray effort suffix for the next rebuild (the attach
@@ -922,6 +927,7 @@ impl SessionUi {
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
+            trim_after_frame: false,
             pending_model: None,
             pending_thinking_suffix: None,
             pending_queue: None,
@@ -1354,7 +1360,18 @@ impl SessionUi {
         // return their freed heap to the OS instead of keeping the load's
         // peak resident for the TUI's lifetime.
         pa_types::memory_release::trim_freed_heap();
+        // The rebuild's first frame materializes the visible window —
+        // its wrap/render churn is the TUI's own transient on top of the
+        // fold's; arm the post-frame trim so that churn returns too
+        // instead of riding the arenas for the process lifetime.
+        self.trim_after_frame = true;
         Ok(())
+    }
+
+    /// Take the one-shot post-first-frame trim request (the draw loop
+    /// consumes it right after the frame it armed paints).
+    pub(crate) fn take_trim_after_frame(&mut self) -> bool {
+        std::mem::take(&mut self.trim_after_frame)
     }
 
     /// Subscribe this client to the live agent roster (TS

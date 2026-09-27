@@ -113,10 +113,23 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                         }
                     }
                     // TS `allMessagesText`: user and assistant text
-                    // content feeds the full-transcript search.
+                    // content feeds the full-transcript search. The legacy
+                    // reference inlines the append (the product's helper
+                    // takes the fold's running char counter now), so the
+                    // oracle stays independent of the perf reshape.
                     if matches!(role, Some("user" | "assistant")) {
                         let text = message_text(message);
-                        append_capped_search_text(&mut all_messages_text, &text);
+                        if !text.is_empty() {
+                            let used = all_messages_text.chars().count();
+                            if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                                if used > 0 {
+                                    all_messages_text.push(' ');
+                                }
+                                let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+                                    - all_messages_text.chars().count();
+                                all_messages_text.extend(text.chars().take(remaining));
+                            }
+                        }
                     }
                 }
             }
@@ -702,4 +715,170 @@ fn epoch_zero_mtime_renders_the_epoch_not_blank() {
     assert_eq!(info.modified, "1970-01-01T00:00:00.000Z");
     assert_fold_matches(&path);
     fs::remove_dir_all(dir).unwrap();
+}
+
+/// The corpus text reads the `content` span the typed parse borrows; the
+/// full-parse path (the legacy reference fold above) re-parses the entry
+/// and reads the same subtree through `message_text`. This matrix pins
+/// the two extractions together for every content shape the fold can
+/// meet on disk, then folds the same rows end to end: each row's text,
+/// the first-message pick, and the capped corpus must agree.
+#[test]
+fn content_borrow_matches_full_parse_across_content_matrix() {
+    let header =
+        json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"});
+    let row = |id: &str, message: Value| json!({"type":"message","id":id,"timestamp":"2026-09-23T00:00:00.000Z","message":message});
+    let messages = vec![
+        // plain string content, user role
+        (row("m0", json!({"role":"user","content":"hello"})), "hello"),
+        // escaped string content: newlines, quotes, backslash, and unicode
+        // escapes at the JSON byte level (built from raw JSON so the
+        // escapes ride the bytes both extraction paths walk)
+        (
+            row(
+                "m1",
+                serde_json::from_str::<Value>(
+                    r#"{"role":"user","content":"line1\nline2 \"quoted\" \\ \"é世界\""}"#,
+                )
+                .unwrap(),
+            ),
+            "line1\nline2 \"quoted\" \\ \"é世界\"",
+        ),
+        // text blocks join with a space (TS `contentToText`)
+        (
+            row(
+                "m2",
+                json!({"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}),
+            ),
+            "hello world",
+        ),
+        // non-text blocks and blocks without string text are skipped
+        (
+            row(
+                "m3",
+                json!({"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"visible"},{"type":"tool_call","name":"t","args":{"a":1}},{"type":"text","text":null},{"type":"text","text":42},{"type":"text"}]}),
+            ),
+            "visible",
+        ),
+        // empty array, empty string, missing content, null content, scalar content
+        (row("m4", json!({"role":"assistant","content":[]})), ""),
+        (row("m5", json!({"role":"assistant","content":""})), ""),
+        (row("m6", json!({"role":"assistant"})), ""),
+        (row("m7", json!({"role":"assistant","content":null})), ""),
+        (row("m8", json!({"role":"assistant","content":42})), ""),
+        (
+            row(
+                "m9",
+                json!({"role":"assistant","content":[{"type":"image","source":{"data":"base64"}}]}),
+            ),
+            "",
+        ),
+        // tool results never feed the corpus, but the extraction still
+        // agrees on their shape
+        (
+            row(
+                "m10",
+                json!({"role":"toolResult","content":[{"type":"text","text":"tool output"}]}),
+            ),
+            "tool output",
+        ),
+        // a block object with extra unknown fields
+        (
+            row(
+                "m11",
+                json!({"role":"assistant","content":[{"id":"b1","type":"text","text":"extra fields","meta":{"x":1}}]}),
+            ),
+            "extra fields",
+        ),
+        // deeply nested unicode escapes inside the content — including a
+        // surrogate pair — at the JSON byte level
+        (
+            row(
+                "m12",
+                serde_json::from_str::<Value>(
+                    r#"{"role":"user","content":"\u672a\u8a60 emoji \ud83d\ude80 tail"}"#,
+                )
+                .unwrap(),
+            ),
+            "未詠 emoji 🚀 tail",
+        ),
+        // a message object with only role (no content at all)
+        (row("m13", json!({"role":"user"})), ""),
+        // scalar content under the user role
+        (row("m14", json!({"role":"user","content":true})), ""),
+    ];
+
+    // Row-level differential: the borrowed-span extraction equals the
+    // full-parse `message_text` for every row in the matrix.
+    for (entry, expected) in &messages {
+        let line = entry.to_string();
+        let full: SessionEntry = serde_json::from_str(&line).unwrap();
+        let reference = full
+            .fields
+            .get("message")
+            .map(message_text)
+            .unwrap_or_default();
+        assert_eq!(&reference, expected, "reference extraction: {line}");
+        let typed: SessionInfoEntry = serde_json::from_str(&line).unwrap();
+        let borrowed = typed
+            .message
+            .as_ref()
+            .map(|message| message_content_text(message.content))
+            .unwrap_or_default();
+        assert_eq!(&borrowed, expected, "borrowed extraction: {line}");
+        assert_eq!(borrowed, reference, "differential: {line}");
+    }
+
+    // Fold-level differential: the same rows through the production fold
+    // and the legacy full-parse reference, with cap-cut appends around
+    // the matrix (multibyte boundary cut, then past the cap).
+    let dir = test_dir();
+    let path = dir.join("session.jsonl");
+    append_rows(&path, std::slice::from_ref(&header));
+    for (entry, _) in &messages {
+        append_rows(&path, std::slice::from_ref(entry));
+    }
+    append_rows(
+        &path,
+        &[
+            row(
+                "cap0",
+                json!({"role":"assistant","content":"x".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS)}),
+            ),
+            row("cap1", json!({"role":"assistant","content":"past the cap"})),
+            row("cap2", json!({"role":"user","content":"past the cap user"})),
+        ],
+    );
+    assert_fold_matches(&path);
+
+    // First-message pick: the first NON-EMPTY user text wins (m0), the
+    // empty-string user rows never claim it, and later users cannot
+    // replace it; the corpus holds every user/assistant text under the
+    // cap in fold order.
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.first_message, "hello");
+    assert!(info.all_messages_text.starts_with("hello line1"));
+    assert!(info.all_messages_text.chars().count() <= SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+
+    // A session whose only user text is empty keeps the no-message label.
+    let empty_dir = test_dir();
+    let empty_path = empty_dir.join("session.jsonl");
+    append_rows(
+        &empty_path,
+        &[
+            header,
+            row("e0", json!({"role":"user","content":""})),
+            row("e1", json!({"role":"user"})),
+            row(
+                "e2",
+                json!({"role":"assistant","content":[{"type":"text","text":"assistant only"}]}),
+            ),
+        ],
+    );
+    assert_fold_matches(&empty_path);
+    let empty_info = read_session_info(&empty_path).unwrap();
+    assert_eq!(empty_info.first_message, "(no messages)");
+
+    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(empty_dir).unwrap();
 }
