@@ -125,6 +125,10 @@ pub struct CompactionSummaryMessage {
     /// Harness digest snapshot attached mechanically at compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_digest: Option<String>,
+    /// Fingerprint of the harness state behind `harness_digest` at
+    /// compaction time; lets cold boundaries skip re-delivery (TS #2400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_state_fingerprint: Option<String>,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
 }
@@ -201,6 +205,10 @@ pub struct CompactionEntry {
     /// Harness digest snapshot taken at compaction time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_digest: Option<String>,
+    /// Fingerprint of the harness state behind `harness_digest` at
+    /// compaction time; lets cold boundaries skip re-delivery (TS #2400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_state_fingerprint: Option<String>,
 }
 
 /// `type: "branch_summary"`.
