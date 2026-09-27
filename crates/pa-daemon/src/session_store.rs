@@ -1288,6 +1288,9 @@ fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Va
     }
     if let Some(harness_digest) = entry.fields.get("harnessDigest") {
         message["harnessDigest"] = harness_digest.clone();
+        if let Some(harness_state_fingerprint) = entry.fields.get("harnessStateFingerprint") {
+            message["harnessStateFingerprint"] = harness_state_fingerprint.clone();
+        }
     }
     message["timestamp"] = json!(timestamp);
     message
@@ -3123,6 +3126,7 @@ mod tests {
                 cost: pa_types::ai::UsageCost::default(),
             }),
             harness_digest: Some("# Continual Harness State".to_string()),
+            harness_state_fingerprint: None,
         };
         let fields = serde_json::to_value(&entry).unwrap();
         let mut session = SessionFile::create("/tmp", None, 0);

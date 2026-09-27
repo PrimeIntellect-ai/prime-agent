@@ -1863,6 +1863,7 @@ mod tests {
                     cost: pa_types::ai::UsageCost::default(),
                 }),
                 harness_digest: None,
+                harness_state_fingerprint: None,
             })
             .unwrap();
         let line = serialize_entry(
