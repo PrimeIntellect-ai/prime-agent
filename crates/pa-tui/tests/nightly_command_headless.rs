@@ -178,9 +178,6 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn theme(&self) -> Option<String> {
         None
     }
-    fn image_model(&self) -> Option<String> {
-        None
-    }
     fn set_theme(&self, _theme: &str) -> Result<()> {
         Ok(())
     }
