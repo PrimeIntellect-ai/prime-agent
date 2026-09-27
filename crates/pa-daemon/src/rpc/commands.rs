@@ -177,7 +177,14 @@ pub fn kick_queue_pump(
             // the generation check: a kick can sample the engine and the
             // generation apart (a replace bumps the generation before it
             // swaps the handle), so the passing-generation-with-old-engine
-            // window retires on the engine identity instead.
+            // window retires on the engine identity instead. A
+            // compaction that armed while this pump was parked on the
+            // idle wait parks it again (the flag covers the whole
+            // abort-to-rebuild window; the rebuild re-kicks the pump
+            // once it settles).
+            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             if state.session.pump_generation() != generation
                 || !state.session.engine_is_live(&engine).await
             {
@@ -395,6 +402,11 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
+    // The compaction is in flight from the abort onward: the flag arms
+    // BEFORE the turn settles, so a pump woken by the abort's idle
+    // settle sees the flag and parks instead of admitting a queued row
+    // into the snapshot window.
+    state.compacting.store(true, Ordering::SeqCst);
     // TS `session.compact` aborts the running turn before the snapshot
     // (`if (!options.skipAbort) await this.abort()`, agent-session.ts):
     // the compaction summarizes a SETTLED transcript, never one a live
@@ -405,7 +417,6 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     // context-rebuilding commands so their rebuilds cannot interleave
     // and install an older snapshot over a newer one.
     let _ops = state.session_ops.lock().await;
-    state.compacting.store(true, Ordering::SeqCst);
     state
         .session
         .write_connection_output(compaction_frame(

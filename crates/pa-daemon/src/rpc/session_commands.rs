@@ -204,6 +204,12 @@ async fn fork_at(
         manager.is_persisted() && manager.get_session_file().is_some()
     };
     if !persisted {
+        // The snapshot and the rebuild serialize with the other
+        // context rebuilders through session_ops (compact/refine hold
+        // the same lane): a rebuild installing a snapshot taken beside
+        // a concurrent compaction would overwrite the compaction's
+        // transcript with the stale branch rows.
+        let _ops = state.session_ops.lock().await;
         let (branch_entries, engine) = {
             let handle = state.session.handle().await;
             let persistence = handle.engine.session.shared_persistence();
