@@ -489,7 +489,7 @@ async fn build_headless_engine_with(
     // The routing decision reads the resolved session model and the
     // requested thinking level (both fixed at build for a headless run).
     let image_model_router = headless_image_model_router(
-        provider_target,
+        std::sync::Arc::clone(&provider_target),
         config.cwd.clone(),
         config.agent_dir.clone(),
         model.clone(),
