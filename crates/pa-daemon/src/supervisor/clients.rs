@@ -492,7 +492,11 @@ impl Supervisor {
                             Some(&command_id),
                             &type_name,
                             UPDATE_PREPARING_MESSAGE,
-                            None,
+                            // TS #2391: the typed `update_restarting` info
+                            // rides beside the unchanged plain message, so
+                            // clients can recognize the normal transient
+                            // state and wait through the restart.
+                            Some(pa_types::daemon::DaemonErrorInfo::UpdateRestarting),
                         )))],
                         false,
                     );

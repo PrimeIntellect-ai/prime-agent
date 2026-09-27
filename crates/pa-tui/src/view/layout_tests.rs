@@ -40,6 +40,74 @@ fn row_pack_expands_byte_exact() {
 }
 
 #[test]
+fn row_pack_expands_every_range_byte_exact_with_many_styles() {
+    // The style-table and running-offset encodings must be invisible:
+    // a row set with more distinct styles than any single entry uses in
+    // practice, long spans past the u16 range, repeated styles, empty
+    // rows, and empty spans, expanded over EVERY contiguous range.
+    let styles: Vec<ratatui::style::Style> = (0..48u8)
+        .map(|i| {
+            let mut style = ratatui::style::Style::new();
+            if i % 2 == 0 {
+                style = style.fg(ratatui::style::Color::Rgb(i, i.wrapping_add(1), 3));
+            }
+            if i % 3 == 0 {
+                style = style.bg(ratatui::style::Color::Indexed(i));
+            }
+            if i % 5 == 0 {
+                style = style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            style
+        })
+        .collect();
+    let long = "x".repeat(70_000);
+    let multi = "\u{1f9e2} unicode \u{754c}".repeat(300);
+    let mut rows: Vec<crate::Line> = vec![
+        vec![
+            crate::Span {
+                style: styles[0],
+                content: long.clone(),
+            },
+            crate::Span {
+                style: styles[47],
+                content: multi,
+            },
+            crate::Span {
+                style: styles[0],
+                content: String::new(),
+            },
+        ],
+        Vec::new(),
+        (0..17)
+            .map(|i| crate::Span {
+                style: styles[i * 3 % 48],
+                content: format!("span {i} padded text"),
+            })
+            .collect(),
+        vec![crate::Span {
+            style: styles[9],
+            content: String::new(),
+        }],
+        vec![crate::Span {
+            style: styles[0],
+            content: long,
+        }],
+    ];
+    rows.push(Vec::new());
+    let pack = RowPack::pack(&rows).expect("representable rows");
+    assert_eq!(pack.len(), rows.len());
+    for from in 0..=rows.len() {
+        for to in from..=rows.len() {
+            assert_eq!(
+                pack.range(from, to),
+                rows[from..to].to_vec(),
+                "range [{from}, {to}) must expand byte-exact"
+            );
+        }
+    }
+}
+
+#[test]
 fn cached_packed_rows_render_identical_to_a_fresh_layout() {
     let mut v = view();
     v.push_entry(ChatEntry::User {
