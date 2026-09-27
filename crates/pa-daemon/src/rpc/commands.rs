@@ -145,12 +145,16 @@ pub fn kick_queue_pump(
     let generation = state.session.pump_generation();
     tokio::spawn(async move {
         let _lane = state.queue_pump.lock().await;
-        if state.session.pump_generation() != generation {
+        if state.session.pump_generation() != generation
+            || !state.session.engine_is_live(&engine).await
+        {
             return;
         }
         let agent = engine.session.agent();
         loop {
-            if state.session.pump_generation() != generation {
+            if state.session.pump_generation() != generation
+                || !state.session.engine_is_live(&engine).await
+            {
                 return;
             }
             if state
@@ -159,11 +163,24 @@ pub fn kick_queue_pump(
             {
                 break;
             }
+            // TS's session-input pump holds its checkpoint while a
+            // compaction is in flight (`_compactionOperation` gates the
+            // pump; compact's finally re-schedules it): a parked row
+            // never delivers into the rebuild's window.
+            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             agent.wait_for_idle().await;
             // Re-check after the idle wait: a replacement that lands in
             // the wait window must retire this pump before it delivers
-            // onto the disposed session.
-            if state.session.pump_generation() != generation {
+            // onto the disposed session. The identity check pairs with
+            // the generation check: a kick can sample the engine and the
+            // generation apart (a replace bumps the generation before it
+            // swaps the handle), so the passing-generation-with-old-engine
+            // window retires on the engine identity instead.
+            if state.session.pump_generation() != generation
+                || !state.session.engine_is_live(&engine).await
+            {
                 return;
             }
             if !agent.has_queued_messages() {
@@ -378,6 +395,12 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
+    // TS `session.compact` aborts the running turn before the snapshot
+    // (`if (!options.skipAbort) await this.abort()`, agent-session.ts):
+    // the compaction summarizes a SETTLED transcript, never one a live
+    // turn is still appending — the abort settles the turn first.
+    engine.session.agent().abort();
+    engine.session.agent().wait_for_idle().await;
     // Compact rebuilds the session context (like refine): serialize the
     // context-rebuilding commands so their rebuilds cannot interleave
     // and install an older snapshot over a newer one.
@@ -396,6 +419,12 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         .compact(instructions.as_deref(), &model, api_key, None)
         .await;
     state.compacting.store(false, Ordering::SeqCst);
+    // TS compact's finally re-schedules the session-input pump
+    // (`_notifySessionInputCheckpointChange` + `_scheduleSessionInputPump`):
+    // the parked rows deliver after the rebuild settles, never into its
+    // window (the pump's compacting gate holds them out mid-rebuild).
+    resume_pump(state);
+    kick_queue_pump(state, &engine);
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {

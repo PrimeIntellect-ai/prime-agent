@@ -168,6 +168,18 @@ impl RpcSession {
         self.pump_epoch.load(Ordering::SeqCst)
     }
 
+    /// Whether `engine` is the live handle's engine (pointer identity):
+    /// a pump spawned against a replaced engine must retire instead of
+    /// delivering onto the session it was spawned with. The generation
+    /// check alone cannot catch a kick that sampled the engine and the
+    /// generation apart (a replace bumps the generation under the lease
+    /// BEFORE it swaps the handle, so a skewed sample can hold the new
+    /// generation with the old engine); the identity check closes that
+    /// window — either check fails and the pump retires.
+    pub async fn engine_is_live(&self, engine: &std::sync::Arc<SessionEngine>) -> bool {
+        std::sync::Arc::ptr_eq(&self.handle.read().await.engine, engine)
+    }
+
     /// Subscribe the current engine's loop events as raw session-event
     /// frames (TS forwards `event.event` verbatim); replaces the previous
     /// subscription.
@@ -298,6 +310,15 @@ impl RpcSession {
         let mut handle = tokio::select! {
             guard = self.handle.write() => guard,
             () = self.signal_shutdown.cancelled() => {
+                // The adopted lease returns to the live handle (every
+                // other refusal arm restores it): the still-published
+                // session keeps its cross-process file claim — the
+                // exiting process releases the lease with its dispose,
+                // never mid-replacement.
+                if adopted_lease.is_some() {
+                    let mut handle = self.handle.write().await;
+                    handle.session_lease = adopted_lease;
+                }
                 return Err("A signal exit is in progress".to_string());
             }
         };

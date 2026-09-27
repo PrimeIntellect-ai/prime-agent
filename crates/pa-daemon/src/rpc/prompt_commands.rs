@@ -51,8 +51,12 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .await
         .map_err(|error| format!("{error:#}"))?;
     resume_pump(state);
-    kick_queue_pump(state, &engine);
     let PromptOutcome::SessionCommand(command) = admission else {
+        // The admitted model turn parks the queued rows behind it
+        // (the pump delivers when the session idles): TS `connection.prompt`
+        // resumes admission and schedules the session-input pump at the
+        // admission.
+        kick_queue_pump(state, &engine);
         return Ok(ResponseData::Absent);
     };
     // The handle guard stays held through the admitted session command's
@@ -64,8 +68,17 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     // writer would deadlock the command against its own guard.
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
-    run_session_command(state.as_ref(), engine, &command, model, api_key).await?;
+    let command_result =
+        run_session_command(state.as_ref(), engine.clone(), &command, model, api_key).await;
     drop(handle);
+    // TS schedules the session-input pump only after the admitted
+    // session command settles (agent-session.ts: compact's finally
+    // calls `_notifySessionInputCheckpointChange` +
+    // `_scheduleSessionInputPump`): a kick before the command would let
+    // the pump deliver parked rows into the rebuild's window. The
+    // command's own error still answers; the pump re-arms either way.
+    kick_queue_pump(state, &engine);
+    command_result?;
     Ok(ResponseData::Absent)
 }
 

@@ -113,6 +113,12 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         .get("entryId")
         .and_then(Value::as_str)
         .ok_or_else(|| "fork requires an entryId".to_string())?;
+    // One replacement lease across the leaf resolution AND the branch
+    // (the fork_at tail's contract): a switch_session or new_session
+    // landing between the lookup and the fork would branch the retired
+    // session against the entry just validated on the live one (TS runs
+    // its read/branch synchronously with no interleave).
+    let lease = state.session.replacement_lease().await;
     // Position "before" (TS `runtimeHost.fork`'s default): the entry must
     // be a user message; the branch moves to its PARENT leaf (the user
     // row is dropped) and the selected text rides the response.
@@ -138,13 +144,17 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         };
         (entry.parent_id().map(str::to_string), user.content.text())
     };
-    fork_at(state, target_leaf, Some(selected_text)).await
+    fork_at(state, target_leaf, Some(selected_text), lease).await
 }
 
 /// `clone` (TS `connection.clone` -> `fork(leafId, { position: "at" })`):
 /// the branch moves to the CURRENT leaf (kept inclusive) with no text; a
 /// session without a current entry answers the TS error.
 async fn clone(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+    // One replacement lease across the leaf read AND the branch (the
+    // fork path's contract): the clone branches the session its leaf
+    // was read from, not one a concurrent switch moved in between.
+    let lease = state.session.replacement_lease().await;
     let leaf = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
@@ -154,7 +164,7 @@ async fn clone(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let Some(leaf_id) = leaf else {
         return Err("Cannot clone session: no current entry selected".to_string());
     };
-    let response = fork_at(state, Some(leaf_id), None).await?;
+    let response = fork_at(state, Some(leaf_id), None, lease).await?;
     // The clone response drops the fork's text (TS `{ cancelled }`).
     match response {
         ResponseData::Present(mut value) => {
@@ -178,13 +188,15 @@ async fn fork_at(
     state: &Arc<RpcState>,
     target_leaf: Option<String>,
     selected_text: Option<String>,
+    lease: tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<ResponseData, String> {
-    // One replacement lease across the whole flow: the fork's reads,
-    // branch, and swap serialize against a concurrent
-    // `new_session`/`switch_session` (TS performs the read/branch
-    // synchronously before its async teardown, so nothing can interleave
-    // between them).
-    let lease = state.session.replacement_lease().await;
+    // The caller (fork/clone) holds the replacement lease across its
+    // leaf resolution and hands it in: the reads, branch, and swap all
+    // serialize against a concurrent `new_session`/`switch_session` (TS
+    // performs the read/branch synchronously before its async teardown,
+    // so nothing can interleave between them). The lease rides the
+    // guard through the branch; the persisted path releases it at the
+    // replace (the failure restart re-arms the pump unheld).
     let persisted = {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
