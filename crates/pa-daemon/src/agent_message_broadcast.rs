@@ -69,7 +69,7 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(
+                    .route_command_typed(
                         resident,
                         command_type,
                         payload,

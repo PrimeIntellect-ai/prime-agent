@@ -116,7 +116,7 @@ impl Supervisor {
     fn broadcast_heartbeats_changed(&self) {
         let _ = self.events.send((
             crate::supervisor::ClientRouting::Broadcast,
-            json!({ "type": "heartbeats_changed" }),
+            std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
 
@@ -131,7 +131,7 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(
+                    .route_command_typed(
                         resident,
                         command_type,
                         payload,
@@ -349,7 +349,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<Value>, bool) {
@@ -408,6 +408,7 @@ impl Supervisor {
             attached,
             command_id.to_string(),
             type_name.to_string(),
+            None,
         )
         .await
     }
@@ -419,7 +420,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<Value>, bool) {
@@ -433,7 +434,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<Value>, bool) {
@@ -448,7 +449,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<Value>, bool) {
@@ -469,6 +470,7 @@ impl Supervisor {
                 attached,
                 command_id.to_string(),
                 type_name.to_string(),
+                None,
             )
             .await;
         if !promote {

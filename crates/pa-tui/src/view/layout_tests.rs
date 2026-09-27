@@ -15,6 +15,69 @@ fn condensed_runs(view: &AgentView) -> Vec<crate::tool_runs::ToolRun> {
 }
 
 #[test]
+fn row_pack_expands_byte_exact() {
+    let styled = ratatui::style::Style::new().fg(ratatui::style::Color::Rgb(1, 2, 3));
+    let plain = ratatui::style::Style::default();
+    let span = |text: &str, is_styled: bool| crate::Span {
+        style: if is_styled { styled } else { plain },
+        content: text.to_string(),
+    };
+    let rows: Vec<crate::Line> = vec![
+        vec![span("one ", true), span("two ", true), span("界", false)],
+        vec![span("", true), span("pad", false), span("", false)],
+        Vec::new(),
+        vec![span("tail", false), span("tail", false)],
+    ];
+    let pack = RowPack::pack(&rows);
+    assert_eq!(pack.len(), rows.len());
+    // every range expands to the exact original spans: same boundaries,
+    // same styles, same content bytes (empty spans included).
+    assert_eq!(pack.range(0, rows.len()), rows);
+    assert_eq!(pack.range(0, 1), rows[0..1].to_vec());
+    assert_eq!(pack.range(1, 3), rows[1..3].to_vec());
+    assert_eq!(pack.range(2, 4), rows[2..4].to_vec());
+    assert_eq!(pack.range(9, 12), Vec::<crate::Line>::new());
+}
+
+#[test]
+fn cached_packed_rows_render_identical_to_a_fresh_layout() {
+    let mut v = view();
+    v.push_entry(ChatEntry::User {
+        text: "hello wrapped text ".repeat(9),
+    });
+    v.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+        blocks: vec![
+            MessageBlock::Text("para one\n\npara two with more words to wrap\n".repeat(2)),
+            MessageBlock::Thinking("thinking body".to_string()),
+        ],
+        has_tool_calls: false,
+        streaming: false,
+        error: None,
+        aborted: false,
+    })));
+    let reference = v.render_frame(37, 24);
+    // a second render replays the packed cache: byte-identical rows.
+    let replayed = v.render_frame(37, 24);
+    assert_eq!(reference, replayed);
+    // a width change re-renders from scratch and matches the same bytes.
+    let mut fresh = view();
+    fresh.push_entry(ChatEntry::User {
+        text: "hello wrapped text ".repeat(9),
+    });
+    fresh.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+        blocks: vec![
+            MessageBlock::Text("para one\n\npara two with more words to wrap\n".repeat(2)),
+            MessageBlock::Thinking("thinking body".to_string()),
+        ],
+        has_tool_calls: false,
+        streaming: false,
+        error: None,
+        aborted: false,
+    })));
+    assert_eq!(fresh.render_frame(37, 24), reference);
+}
+
+#[test]
 fn windows_match_uncached_reference_with_variable_height_and_hidden_entries() {
     let mut view = view();
     for index in 0..80 {

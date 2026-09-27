@@ -2,6 +2,7 @@
 //! the spawn/connect plumbing.
 use super::routing::fail_unsent_request;
 use super::*;
+use crate::registry::WorkerRelay;
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// A crash-path child that lived at least this long proved health: its death
@@ -253,7 +254,7 @@ impl Supervisor {
             }
         };
         let response = match self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "create",
                 payload,
@@ -277,7 +278,7 @@ impl Supervisor {
             // A shutdown raced the relaunch: stop the freshly spawned worker
             // instead of leaving it running with nobody supervising it.
             let _ = self
-                .route_command(
+                .route_command_typed(
                     resident,
                     "shutdown",
                     json!({}),
@@ -545,7 +546,6 @@ impl Supervisor {
         // Reader: route responses to pending requests, forward session events.
         {
             let reader_resident = Arc::clone(resident);
-            let events = events.clone();
             let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
                 let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
@@ -568,25 +568,36 @@ impl Supervisor {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    let Ok(payload) = serde_json::from_slice::<Value>(&frame.payload) else {
-                        continue;
-                    };
                     if outbound_type == "response" {
+                        // The response rides as bytes: the supervisor's
+                        // client-facing route splices the client's command
+                        // id in front of the worker's own line instead of
+                        // parsing, deep-cloning and re-serializing the
+                        // whole tree; the small scalars the route's
+                        // bookkeeping reads (success, the attach's active
+                        // session) travel in the frame's routing header.
+                        // Callers that read the response parse it back
+                        // through `WorkerReply::typed`.
                         if let Some(reply) =
                             reader_resident.pending.lock().await.remove(&request_id)
                         {
-                            let response: DaemonResponse = serde_json::from_value(payload)
-                                .unwrap_or_else(|_| {
-                                    response_failure(
-                                        Some(&request_id),
-                                        "parse",
-                                        "invalid worker response",
-                                        None,
-                                    )
-                                });
-                            let _ = reply.send(response);
+                            let relay = WorkerRelay {
+                                success: frame.header.get("ok").and_then(Value::as_bool),
+                                active_session_id: frame
+                                    .header
+                                    .get("activeSessionId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                payload: frame.payload,
+                            };
+                            let _ = reply.send(WorkerReply::Relayed(relay));
                         }
-                    } else if outbound_type == "session_event" {
+                        continue;
+                    }
+                    let Ok(payload) = serde_json::from_slice::<Value>(&frame.payload) else {
+                        continue;
+                    };
+                    if outbound_type == "session_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
@@ -660,25 +671,30 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, payload));
+                        // The send-time delivery pass (TS handleWorkerFrame
+                        // parity): the session's attached connections get
+                        // the frame through the subscriber registry, other
+                        // connections never wake. A session event without
+                        // an active session id is dropped - TS's
+                        // `!activeSessionId` guard in the same handler, not
+                        // broadcast to every client.
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
+                        }
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, payload));
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
+                        }
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
                         // snapshot can no longer be trusted as fresh (TS
@@ -692,7 +708,8 @@ impl Supervisor {
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
                         // A worker's background catalog refresh changed
                         // the served snapshot: every client re-fetches
@@ -702,7 +719,8 @@ impl Supervisor {
                         // refresh returns the validated snapshot instantly
                         // and lands the fresh catalog through this
                         // broadcast.
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);
@@ -739,7 +757,7 @@ impl Supervisor {
             .as_millis()
             .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "worker_auth",
                 json!({

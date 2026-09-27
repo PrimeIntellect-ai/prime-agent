@@ -435,30 +435,39 @@ async fn run_websocket_attempt(
         };
         let mut start_emitted = false;
         let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-        while let Some(event) = events.recv().await {
-            match event {
-                websocket::WorkerEvent::Event(event) => {
-                    if !start_emitted {
-                        start_emitted = true;
-                        *websocket_started = true;
-                        writer.push(AssistantMessageEvent::Start {
-                            partial: start_partial.clone(),
-                        });
+        // The TS catch settles partial tool calls before the error event
+        // carries the message (TS PR #2783).
+        let streamed: Result<(), CodexStreamError> = async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    websocket::WorkerEvent::Event(event) => {
+                        if !start_emitted {
+                            start_emitted = true;
+                            *websocket_started = true;
+                            writer.push(AssistantMessageEvent::Start {
+                                partial: start_partial.clone(),
+                            });
+                        }
+                        let mapped = map_codex_event(event)?;
+                        processor.handle_event(&mapped.event)?;
+                        if mapped.done {
+                            break;
+                        }
                     }
-                    let mapped = map_codex_event(event)?;
-                    processor.handle_event(&mapped.event)?;
-                    if mapped.done {
+                    websocket::WorkerEvent::Terminal(result) => {
+                        result?;
                         break;
                     }
                 }
-                websocket::WorkerEvent::Terminal(result) => {
-                    result?;
-                    break;
-                }
             }
+            processor.finish()?;
+            Ok(())
         }
-        processor.finish()?;
-        Ok::<(), CodexStreamError>(())
+        .await;
+        if streamed.is_err() {
+            processor.settle_partial_tool_calls();
+        }
+        streamed
     }
     .await;
 
@@ -534,29 +543,38 @@ async fn run_sse_stream(
         })),
     };
     let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-    let mut decoder = SseDecoder::new();
-    loop {
-        let Some(chunk) = response.next_text().await? else {
-            break;
-        };
-        process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
-    }
-    for sse in decoder.finish() {
-        if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
-            continue;
+    // The TS catch settles partial tool calls before the error event carries
+    // the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = SseDecoder::new();
+        loop {
+            let Some(chunk) = response.next_text().await? else {
+                break;
+            };
+            process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
         }
-        let event = parse_json_with_repair(&sse.data).map_err(|error| {
-            CodexStreamError::Protocol(CodexProtocolError {
-                message: format!("Invalid Codex SSE JSON: {error}"),
-                payload: Some(Value::String(sse.data.clone())),
-            })
-            .into_provider_error()
-        })?;
-        let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
-        processor.handle_event(&mapped.event)?;
+        for sse in decoder.finish() {
+            if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
+                continue;
+            }
+            let event = parse_json_with_repair(&sse.data).map_err(|error| {
+                CodexStreamError::Protocol(CodexProtocolError {
+                    message: format!("Invalid Codex SSE JSON: {error}"),
+                    payload: Some(Value::String(sse.data.clone())),
+                })
+                .into_provider_error()
+            })?;
+            let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
+            processor.handle_event(&mapped.event)?;
+        }
+        processor.finish()?;
+        Ok(())
     }
-    processor.finish()?;
-    Ok(())
+    .await;
+    if stream_result.is_err() {
+        processor.settle_partial_tool_calls();
+    }
+    stream_result
 }
 
 fn process_sse_chunk(

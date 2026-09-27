@@ -2,12 +2,23 @@
 //! and the parsed-command execution surface.
 use super::*;
 
-async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
+async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
+    let bytes = line.len();
     writer.write_all(line.as_bytes()).await?;
     writer.flush().await?;
-    Ok(())
+    Ok(bytes)
+}
+
+/// Write one pre-serialized client line (the byte relay's raw form already
+/// carries its trailing newline). Reports the written byte count like
+/// [`write_line`].
+async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -> Result<usize> {
+    let bytes = line.len();
+    writer.write_all(line).await?;
+    writer.flush().await?;
+    Ok(bytes)
 }
 
 pub(crate) fn client_command_payload(
@@ -20,13 +31,32 @@ pub(crate) fn client_command_payload(
         object.insert("clientId".to_string(), json!(client_id));
         // The supervisor always attaches slim, like the TS supervisor's
         // `attachClient`: summary and messages travel inside the snapshot.
-        if matches!(
-            command,
-            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. }
-        ) {
+        // The client's OWN normalized capability set rides alongside as
+        // `clientCapabilities`: the worker echoes it into the attach
+        // result's `client.capabilities`, so the response the supervisor
+        // relays by bytes already carries the echo the supervisor used to
+        // patch into the parsed tree.
+        if let DaemonCommand::Attach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        }
+        | DaemonCommand::Reattach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        } = command
+        {
             object.insert(
                 "capabilities".to_string(),
                 json!(["attach_snapshot", "event_sequence", "slim_attach"]),
+            );
+            object.insert(
+                "clientCapabilities".to_string(),
+                json!(crate::snapshot_stream::attach_client_capabilities(
+                    capabilities.as_deref(),
+                    *supports_extension_ui
+                )),
             );
         }
         // Create carries its fields under `config`; the worker reads them flat.
@@ -42,7 +72,10 @@ pub(crate) fn client_command_payload(
 }
 
 impl Supervisor {
-    pub(super) async fn handle_client(self: Arc<Self>, stream: Box<dyn TransportStream>) -> Result<()> {
+    pub(super) async fn handle_client(
+        self: Arc<Self>,
+        stream: Box<dyn TransportStream>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let client_id = util::new_display_id();
         let hello = DaemonOutbound::DaemonHello {
@@ -75,11 +108,17 @@ impl Supervisor {
         let mut line = String::new();
         let mut events = self.events.subscribe();
         let connection_id = client_id.clone();
+        // Session events ride this per-connection queue (the subscriber
+        // registry resolves delivery at publish time, TS `handleWorkerFrame`
+        // parity); broadcast-class events keep the ring above.
+        let (targeted_tx, mut targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(
+            crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY,
+        );
         // Connection state shared with the per-command dispatch tasks: the
-        // envelope-overridden client id and the attached-session list (the
-        // event arm reads the latter to route session events).
-        let attached: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        // envelope-overridden client id and the attached-session handle
+        // (attach/detach keep the registry and the session list consistent;
+        // the registry insertion is the delivery boundary).
+        let attached = subscribers::ClientSubscriptions::new(connection_id.clone(), targeted_tx);
         let effective_client_id: Arc<std::sync::Mutex<String>> =
             Arc::new(std::sync::Mutex::new(client_id.clone()));
         // Roster subscription flag shared with the per-command dispatch
@@ -97,7 +136,7 @@ impl Supervisor {
         // reads nothing stalls only its own dispatch tasks once the queue
         // fills — memory stays bounded per connection — while every other
         // client and worker is unaffected.
-        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Outbound>, bool)>(
             crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
         );
         // One dispatch slot per concurrent command. The read arm is armed
@@ -182,14 +221,33 @@ impl Supervisor {
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        if let Err(error) = write_line(&mut writer, &outbound).await {
-                            // A failed response write must not strand the
-                            // shutdown: the stop pass still has to run.
-                            if stop {
-                                self.ensure_shutdown_started().await;
+                        let written = match &outbound {
+                            Outbound::Line(value) => write_line(&mut writer, value).await,
+                            Outbound::Raw(line) => write_raw_line(&mut writer, line).await,
+                        };
+                        let bytes = match written {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                // A failed response write must not strand the
+                                // shutdown: the stop pass still has to run.
+                                if stop {
+                                    self.ensure_shutdown_started().await;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
-                        }
+                        };
+                        // A large outbound response (a catalog scan's
+                        // rows, a routed snapshot before the byte relay,
+                        // any locally-built summary of a grown session)
+                        // carried big transients - the Value tree of a
+                        // Line, the shared payload bytes of a Raw - and
+                        // the frame is out, so return the freed heap to
+                        // the OS instead of letting the arenas hold the
+                        // phase's peak for the daemon's lifetime (the
+                        // #2872 phase-boundary guard, mirrored on the
+                        // supervisor's write path).
+                        drop(outbound);
+                        pa_types::memory_release::trim_freed_heap_if_large(bytes);
                     }
                     if stop {
                         // The initiating client's response and daemon_closing
@@ -201,6 +259,34 @@ impl Supervisor {
                         break;
                     }
                 }
+                targeted = targeted_rx.recv() => {
+                    // A session event routed by the subscriber registry at
+                    // publish time: the delivery decision already ran, the
+                    // frame only writes (the queue preserves per-session
+                    // publish order).
+                    if let Some(payload) = targeted {
+                        if let Err(error) = write_line(&mut writer, &payload).await {
+                            // An event-write failure must not strand an
+                            // accepted shutdown: if this connection owns
+                            // the stop, it still starts the pass.
+                            let is_shutdown_owner = self
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && self.shutting_down.load(Ordering::SeqCst)
+                                && !self.accept_exit.load(Ordering::SeqCst)
+                            {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 event = events.recv() => {
                     match event {
                         Ok((routing, payload)) => {
@@ -209,9 +295,6 @@ impl Supervisor {
                                 ClientRouting::BroadcastExcept {
                                     connection_id: excluded,
                                 } => excluded.as_str() != connection_id.as_str(),
-                                ClientRouting::AttachedSession { active_session_id } => {
-                                    attached.lock().unwrap().iter().any(|id| id == active_session_id)
-                                }
                                 ClientRouting::RosterSubscribers => {
                                     roster_subscribed.load(std::sync::atomic::Ordering::SeqCst)
                                 }
@@ -269,13 +352,17 @@ impl Supervisor {
             self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
-        // not stop the session; the worker keeps running).
-        let attached_sessions = attached.lock().unwrap().clone();
+        // not stop the session; the worker keeps running). The registry
+        // entries go first — no session event may be enqueued for a
+        // connection whose loop has exited — then the worker-side detach
+        // routes run as before.
+        attached.detach_all(&self.session_subscribers);
+        let attached_sessions = attached.session_ids();
         for active_session_id in &attached_sessions {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "detach",
                         payload,
@@ -304,12 +391,12 @@ impl Supervisor {
         self: &Arc<Self>,
         line: &str,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
-    ) -> (Vec<Value>, bool) {
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
+    ) -> (Vec<Outbound>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -329,12 +416,12 @@ impl Supervisor {
                     "parse"
                 };
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         id.as_deref(),
                         type_name,
                         &error.to_string(),
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -356,12 +443,12 @@ impl Supervisor {
                 .register(&active_session_id, admission_id)
             {
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         Some(&command_id),
                         "parse",
                         &error,
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -374,12 +461,12 @@ impl Supervisor {
         // gate, so its own response path is unaffected.
         if self.shutting_down.load(Ordering::SeqCst) {
             return (
-                vec![response_line(&response_failure(
+                vec![Outbound::Line(response_line(&response_failure(
                     Some(&command_id),
                     &type_name,
                     "Supervisor is shutting down",
                     None,
-                ))],
+                )))],
                 false,
             );
         }
@@ -401,12 +488,12 @@ impl Supervisor {
             if let Some(state) = self.update_prepare.active_state() {
                 if update_gate_refuses(state, &type_name) {
                     return (
-                        vec![response_line(&response_failure(
+                        vec![Outbound::Line(response_line(&response_failure(
                             Some(&command_id),
                             &type_name,
                             UPDATE_PREPARING_MESSAGE,
                             None,
-                        ))],
+                        )))],
                         false,
                     );
                 }
@@ -434,7 +521,14 @@ impl Supervisor {
         if mutating {
             self.mutation_drain.end();
         }
-        outcome
+        (
+            outcome
+                .0
+                .into_iter()
+                .map(Outbound::Line)
+                .collect::<Vec<_>>(),
+            outcome.1,
+        )
     }
     /// The parsed-command match of [`Self::dispatch_client`], executed under
     /// the mutation-drain latch by that wrapper.
@@ -443,13 +537,13 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -462,7 +556,7 @@ impl Supervisor {
                     ClientRouting::BroadcastExcept {
                         connection_id: connection_id.to_string(),
                     },
-                    closing.clone(),
+                    std::sync::Arc::new(closing.clone()),
                 ));
                 lines.push(closing);
                 // Answer first, then shut down: the connection loop writes
@@ -736,7 +830,7 @@ impl Supervisor {
                 // marked sessions once it answered (TS supervisor detach
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
-                let attached_ids = attached.lock().unwrap().clone();
+                let attached_ids = attached.session_ids();
                 let marked = self
                     .begin_detach_pause_bookkeeping(
                         connection,
@@ -751,6 +845,7 @@ impl Supervisor {
                         attached,
                         command_id.clone(),
                         type_name.clone(),
+                        Some(stream),
                     )
                     .await;
                 // A selector that resolves to nothing detaches nothing and
@@ -793,7 +888,14 @@ impl Supervisor {
                 // generic one (streamed attach included).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let outcome = self
-                    .route_client_command(command, &client_id, attached, command_id, type_name)
+                    .route_client_command(
+                        command,
+                        &client_id,
+                        attached,
+                        command_id,
+                        type_name,
+                        Some(stream),
+                    )
                     .await;
                 let mut cleared = vec![active_session_id.clone(), target_active_session_id.clone()];
                 if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
@@ -926,9 +1028,119 @@ impl Supervisor {
             }
             command => {
                 let client_id = effective_client_id.lock().unwrap().clone();
-                self.route_client_command(command, &client_id, attached, command_id, type_name)
-                    .await
+                self.route_client_command(
+                    command,
+                    &client_id,
+                    attached,
+                    command_id,
+                    type_name,
+                    Some(stream),
+                )
+                .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervisor::SupervisorOptions;
+    use pa_types::platform::transport::TransportStream;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// A client that falls behind the shared event ring loses events (the
+    /// broadcast's defined backpressure), but never silently anymore
+    /// (finding 4a): the loss becomes a durable daemon-log line naming the
+    /// client and the dropped count. Drives a real connection loop
+    /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lagged_client_event_stream_is_logged() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        // The test's client only reads; its write half stays held so the
+        // connection's writes fail only when the test ends.
+        let (client_read, _client_write) = client_side.into_split();
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The handshake greeting arrives before the loop's first poll.
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        // The greeting is written BEFORE the loop subscribes to the
+        // event ring, so the flood must wait for the subscription to
+        // exist — sends into a receiver-less ring are dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while supervisor.events.receiver_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the connection loop never subscribed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Flood the ring well past its capacity with frames too big for
+        // the client's socket buffer: the connection loop parks in its
+        // event write, its receiver falls out of the ring's live window,
+        // and the parked write only completes once the drain frees the
+        // buffer again.
+        let capacity = crate::backpressure::EVENT_RING_CAPACITY;
+        let padding = "x".repeat(2048);
+        let flood = capacity + 2048;
+        for index in 0..flood {
+            let _ = supervisor.events.send((
+                ClientRouting::Broadcast,
+                std::sync::Arc::new(json!({
+                    "type": "session_event", "index": index, "padding": padding
+                })),
+            ));
+        }
+        // Drain the parked connection while watching for the log line: the
+        // loop unparks as the reader frees the socket buffer, its next
+        // event read reports the dropped span, and the loss lands in the
+        // daemon log. The quiet counter only bounds an idle connection,
+        // never a live one (a slow runner may pace the backlog, so the
+        // drain continues as long as the log line has not landed).
+        let mut buffer = vec![0u8; 64 * 1024];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("lagged on the event ring") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lagged drain was never logged; log: {log}"
+            );
+            match tokio::time::timeout(Duration::from_millis(150), client.read(&mut buffer)).await {
+                Ok(Ok(_) | Err(_)) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        };
+        let line = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("lagged on the event ring"))
+            .expect("the lag line");
+        assert!(
+            line.contains("events dropped"),
+            "the log names the dropped count: {line}"
+        );
+        connection.abort();
     }
 }
