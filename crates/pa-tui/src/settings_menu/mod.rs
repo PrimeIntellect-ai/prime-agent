@@ -1117,9 +1117,11 @@ mod menu_tests {
             SettingsMenuAction::SubmenuClosed
         );
         let text = render_text(&menu);
+        // The menu hint returns with its full grammar (the tabs segment
+        // sits between the search and change segments).
         assert!(text
             .iter()
-            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+            .any(|row| row.contains("Enter/Space change · Esc close")));
     }
 
     #[test]
