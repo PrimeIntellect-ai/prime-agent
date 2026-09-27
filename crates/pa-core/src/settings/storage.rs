@@ -2,10 +2,11 @@
 //! (cwd/<config-dir>/settings.json) files with lock-retry and atomic writes.
 //! Port of `FileSettingsStorage` / `InMemorySettingsStorage`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, Result};
 
@@ -85,6 +86,41 @@ impl FileSettingsStorage {
     }
 }
 
+/// Same-process serialization for one settings document (the `#2915`
+/// pattern, proven on the auth lock in `crates/pa-core/src/auth/storage.rs`).
+///
+/// The TS product runs its synchronous settings lock on a single thread, so
+/// two `acquireLock`-style calls in one process can never contend there: the
+/// 10x20ms retry only ever fires against another process. The Rust engine is
+/// threaded, and two worker threads racing the same settings document pay the
+/// full TS retry sleep against each other (strace-verified on this lane: two
+/// threads' `mkdir settings.json.lock` attempts 11us apart, the loser
+/// `clock_nanosleep`s the full 20ms — a stall the auth-lock cycles' own
+/// same-process serialization used to pace away by accident, and which the
+/// auth read-through cache unmasks). A process-local mutex keyed by the
+/// document path serializes same-process callers for the microseconds the
+/// small read/modify/write holds; the file protocol and its retry semantics
+/// are untouched, so a foreign holder (another process) still surfaces
+/// `WouldBlock` and still takes the 10x20ms retry.
+///
+/// The mutex is a leaf: the locked section performs only the document's own
+/// filesystem operations and the caller's `update` callback, and no settings
+/// callback re-enters `with_lock` (every callback is a pure JSON transform).
+/// Poisoning cannot wedge later reads: the file protocol is the correctness
+/// mechanism, so a poisoned mutex is recovered instead of propagated.
+fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = {
+        let mut registry = registry.lock().expect("settings process-lock registry");
+        *registry
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+    };
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl SettingsStorage for FileSettingsStorage {
     fn with_lock(
         &self,
@@ -92,6 +128,7 @@ impl SettingsStorage for FileSettingsStorage {
         update: &mut dyn FnMut(Option<String>) -> Option<String>,
     ) -> Result<()> {
         let path = self.path(scope);
+        let _process_guard = process_lock(path);
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {

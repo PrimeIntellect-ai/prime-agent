@@ -293,7 +293,7 @@ impl Worker {
             Ok(presentation) => presentation,
             Err(reason) => {
                 let failure = response_failure(Some(request_id), "peer_auth", reason, None);
-                self.write_response_frame(sink, request_id, &failure).await;
+                self.write_response_frame(sink, request_id, failure).await;
                 return AuthOutcome::Failed;
             }
         };
@@ -318,12 +318,12 @@ impl Worker {
                     "peer_auth",
                     Some(peer_auth_success_data(&grant)),
                 );
-                self.write_response_frame(sink, request_id, &success).await;
+                self.write_response_frame(sink, request_id, success).await;
                 AuthOutcome::Authenticated
             }
             Err(reason) => {
                 let failure = response_failure(Some(request_id), "peer_auth", reason, None);
-                self.write_response_frame(sink, request_id, &failure).await;
+                self.write_response_frame(sink, request_id, failure).await;
                 AuthOutcome::Failed
             }
         }

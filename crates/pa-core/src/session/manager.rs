@@ -845,7 +845,6 @@ impl SessionManager {
     /// Returns an error when the full-history hydration of the windowed
     /// store fails. A manager without a window is already hydrated and
     /// succeeds without touching the disk.
-    #[cfg(test)]
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         let Some(window) = self.window.as_mut() else {
             return Ok(());
@@ -1864,6 +1863,7 @@ mod tests {
                     cost: pa_types::ai::UsageCost::default(),
                 }),
                 harness_digest: None,
+                harness_state_fingerprint: None,
             })
             .unwrap();
         let line = serialize_entry(

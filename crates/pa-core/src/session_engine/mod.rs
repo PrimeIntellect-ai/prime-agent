@@ -36,6 +36,7 @@ pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod session_commands;
+pub mod session_events;
 pub mod side_question;
 pub mod skills_unavailable_notice;
 pub mod slash_commands;
@@ -88,6 +89,13 @@ pub struct PromptOptions {
     /// steering batch). Each row rides the turn after the primary, with
     /// its own text and images, like the primary.
     pub batch: Vec<PromptBatchRow>,
+    /// TS `returnAfterAccepted: true`: the admitted model turn runs
+    /// detached and the admission returns once its run registers (the TS
+    /// in-process connection's prompt shape: `preflightResult` fires at
+    /// the delivered ticket, the run settles on its own and its events
+    /// follow on the session stream) instead of awaiting the run's
+    /// completion.
+    pub return_after_accepted: bool,
 }
 
 /// One co-delivered user row of a batched prompt admission.
@@ -133,7 +141,7 @@ pub struct AgentSession {
     /// `_performCompaction` reads `getCompactionSettings()` on every
     /// compaction path, `/compact` included); defaults until the engine
     /// wiring resolves them.
-    compaction: compaction::CompactionSettings,
+    compaction: std::sync::RwLock<compaction::CompactionSettings>,
     /// The auxiliary-model routing context (TS `_resolveAuxiliaryModel`'s
     /// settings/registry access): compaction summaries resolve their model
     /// through the `auxiliaryModel` setting, falling back to the session
@@ -238,7 +246,7 @@ impl AgentSession {
             slash_commands: SlashCommandRegistry::builtin(),
             harness_digest,
             digest_pending: std::sync::atomic::AtomicBool::new(false),
-            compaction: compaction::CompactionSettings::default(),
+            compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
             auxiliary_model: None,
             auto_refine_allowed: false,
             auto_refine: refine::AutoRefineGates::default(),
@@ -257,8 +265,22 @@ impl AgentSession {
     /// settings (TS `getCompactionSettings`); the engine wiring calls this
     /// so `/compact` honors `compaction.keepRecentTokens`/`reserveTokens`
     /// like the TS product instead of the defaults.
-    pub fn set_compaction_settings(&mut self, settings: compaction::CompactionSettings) {
-        self.compaction = settings;
+    pub fn set_compaction_settings(&self, settings: compaction::CompactionSettings) {
+        *self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+    }
+
+    /// Toggle automatic compaction for this session (TS
+    /// `setAutoCompactionEnabled`): the live settings the auto-compaction
+    /// arms and `/compact` read.
+    pub fn set_auto_compaction_enabled(&self, enabled: bool) {
+        let mut settings = self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        settings.enabled = enabled;
     }
 
     /// Install the auxiliary-model routing context (TS #2411's
@@ -339,15 +361,21 @@ impl AgentSession {
     /// `getCompactionSettings().enabled` gate the automatic arms check
     /// before any trigger).
     pub fn auto_compaction_enabled(&self) -> bool {
-        self.compaction.enabled
+        self.compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled
     }
 
     /// The resolved compaction settings (TS `getCompactionSettings`): the
     /// in-run continuation consult reads the threshold headroom without
     /// owning the session (a compaction in flight owns it across its
     /// model turn).
-    pub fn compaction_settings(&self) -> &compaction::CompactionSettings {
-        &self.compaction
+    pub fn compaction_settings(&self) -> compaction::CompactionSettings {
+        *self
+            .compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The latest compaction boundary in the live loop context, if any
@@ -393,7 +421,7 @@ impl AgentSession {
                 model,
                 provider_adapter::model_thinking_level(state.thinking_level),
             ),
-            &self.compaction,
+            &self.compaction_settings(),
         )
     }
 
@@ -487,7 +515,7 @@ impl AgentSession {
                     model: model.clone(),
                     api_key,
                     custom_instructions,
-                    settings: self.compaction,
+                    settings: self.compaction_settings(),
                     abort,
                     harness_digest: digest_inputs,
                     auxiliary: self.auxiliary_model.as_ref(),
@@ -774,7 +802,9 @@ impl AgentSession {
     /// # Errors
     ///
     /// Returns an error when the prompt fails validation, the session is
-    /// busy under its admission rule, or the agent rejects the turn.
+    /// busy under its admission rule, or the agent rejects the turn (with
+    /// [`PromptOptions::return_after_accepted`], a rejection after the run
+    /// registers rides the events instead of this result).
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -868,9 +898,19 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+            if options.return_after_accepted {
+                // TS `returnAfterAccepted: true` — the connection's prompt
+                // returns once the admitted turn delivers.
+                self.agent
+                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
+                        prompt_messages,
+                    ))
+                    .await?;
+            } else {
+                self.agent
+                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                    .await?;
+            }
         }
         Ok(PromptOutcome::Prompt)
     }
@@ -1237,6 +1277,22 @@ mod tests {
     /// the engine-level `convert_to_llm` plus a harness-digest context, so
     /// the deferred first-turn digest rides the first prompt.
     async fn digest_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
+            global_dir: tmp.path().join("harness"),
+            local_dir: None,
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        };
+        let session = digest_session_with_harness(provider, harness).await;
+        (session, tmp)
+    }
+
+    async fn digest_session_with_harness(
+        provider: Arc<ScriptedProvider>,
+        harness: crate::session_engine::harness_digest::HarnessDigestContext,
+    ) -> AgentSession {
         let agent = Agent::new(AgentOptions {
             initial_state: AgentInitialState {
                 model: Some(test_model()),
@@ -1247,14 +1303,7 @@ mod tests {
             ..Default::default()
         });
         let tmp = tempfile::tempdir().unwrap();
-        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
-            global_dir: tmp.path().join("harness"),
-            local_dir: None,
-            include_ipython: false,
-            include_shell_examples: false,
-            include_refine: false,
-        };
-        let session = AgentSession::from_session_arc(
+        AgentSession::from_session_arc(
             Arc::new(agent),
             Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
                 tmp.path(),
@@ -1263,8 +1312,253 @@ mod tests {
             Some(harness),
         )
         .await
-        .unwrap();
-        (session, tmp)
+        .unwrap()
+    }
+
+    /// A resumed session over the entries of a prior session (the engine's
+    /// resume wiring: the loop context is the converted built context, the
+    /// manager adopts the same entries).
+    async fn resumed_digest_session(
+        entries: Vec<FileEntry>,
+        harness: crate::session_engine::harness_digest::HarnessDigestContext,
+    ) -> AgentSession {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        let context = crate::session::build_session_context(&entries, None);
+        let loop_messages: Vec<pa_agent::types::AgentMessage> =
+            crate::session_engine::messages::convert_to_llm(&context.messages)
+                .into_iter()
+                .filter_map(|message| {
+                    serde_json::to_value(&message)
+                        .ok()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                })
+                .collect();
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                messages: Some(loop_messages),
+                ..Default::default()
+            },
+            convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        });
+        let mut manager = SessionManager::in_memory(&std::env::temp_dir());
+        manager.adopt_entries(entries);
+        AgentSession::from_session_arc(
+            Arc::new(agent),
+            Arc::new(tokio::sync::Mutex::new(manager)),
+            vec![],
+            Some(harness),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The digest rows in the live loop context (custom wire rows and the
+    /// user turns a rebuild converted) with their fingerprint, when known.
+    async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>)> {
+        let state = session.agent().state().await;
+        state
+            .messages
+            .iter()
+            .filter_map(|message| {
+                crate::session_engine::harness_digest::latest_context_digest_details(
+                    std::slice::from_ref(message),
+                )
+                .map(|details| (details.digest, details.state_fingerprint))
+            })
+            .collect()
+    }
+
+    /// TS #2400 + #2394 at the resume boundary: unchanged harness state
+    /// does not re-deliver a digest that drifted query terms made look
+    /// stale (the state fingerprint matches), and a state change
+    /// re-delivers exactly one digest, replacing the superseded copy
+    /// instead of stacking.
+    #[tokio::test]
+    async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path().join("harness");
+        // Seeded global state: entries whose ranked order differs once the
+        // resume-time query terms mention one of them.
+        let mut state = crate::refinement::empty_harness_state();
+        for (id, title) in [
+            ("alpha_relevant", "Alpha note"),
+            ("middle_plain", "Middle plain note"),
+            ("zeta_relevant", "Zeta note"),
+        ] {
+            state
+                .entries
+                .get_mut(&crate::refinement::RefinementKind::Memory)
+                .unwrap()
+                .insert(
+                    id.to_string(),
+                    crate::refinement::HarnessEntry {
+                        id: id.to_string(),
+                        kind: crate::refinement::RefinementKind::Memory,
+                        title: title.to_string(),
+                        content: format!("{title} about the worktree parity lane."),
+                        path: "general".to_string(),
+                        scope: Some(crate::refinement::HarnessScope::Global),
+                        reference: serde_json::Map::default(),
+                        arguments: serde_json::Map::default(),
+                        metadata: serde_json::Map::default(),
+                        source: "test".to_string(),
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                        version: 1,
+                    },
+                );
+        }
+        crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
+        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
+            global_dir: harness_dir.clone(),
+            local_dir: None,
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        };
+
+        // First session: the deferred first-turn digest rides the turn and
+        // persists (unranked: the pre-turn context has no task signal yet).
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("noted");
+        let session = digest_session_with_harness(Arc::clone(&provider), harness.clone()).await;
+        session
+            .prompt("hello alpha", PromptOptions::default())
+            .await
+            .unwrap();
+        session.agent().wait_for_idle().await;
+        let entries = session.entries().await;
+        let digest_rows: Vec<&FileEntry> = entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry, FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
+            })
+            .collect();
+        assert_eq!(
+            digest_rows.len(),
+            1,
+            "the first turn persisted one digest row"
+        );
+        let FileEntry::CustomMessage {
+            payload: first_row, ..
+        } = digest_rows[0]
+        else {
+            panic!("expected a digest custom entry");
+        };
+        let Some(first_fingerprint) = first_row
+            .details
+            .as_ref()
+            .and_then(|details| details.get("stateFingerprint"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            panic!("the persisted digest row carries its state fingerprint");
+        };
+
+        // Resume over the same entries (converted loop context, adopted
+        // manager): the fresh render ranks `alpha_relevant` first because
+        // the context's task signal mentions it, so only the state
+        // fingerprint can dedupe. The unchanged state must NOT re-deliver.
+        let resumed = resumed_digest_session(entries.clone(), harness.clone()).await;
+        let rows = loop_digest_rows(&resumed).await;
+        assert_eq!(
+            rows,
+            vec![(
+                // The converted user frame carries no fingerprint of its
+                // own; the recovery view is exercised by the no-append.
+                digest_of_entries(&entries),
+                None
+            )],
+            "an unchanged state must not re-deliver at the resume boundary"
+        );
+
+        // Changed disk state: the fingerprint moves, so the boundary
+        // re-delivers — and the fresh row replaces the superseded copy
+        // instead of stacking (TS #2394).
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "resume_test_memory".to_string(),
+                crate::refinement::HarnessEntry {
+                    id: "resume_test_memory".to_string(),
+                    kind: crate::refinement::RefinementKind::Memory,
+                    title: "Resume test memory".to_string(),
+                    content: "Written between resumes.".to_string(),
+                    path: "general".to_string(),
+                    scope: Some(crate::refinement::HarnessScope::Global),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "test".to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    version: 1,
+                },
+            );
+        crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
+        let refreshed = resumed_digest_session(entries.clone(), harness).await;
+        let rows = loop_digest_rows(&refreshed).await;
+        assert_eq!(rows.len(), 1, "the fresh digest replaces the old copy");
+        assert!(
+            rows[0].1.is_some(),
+            "the delivered custom row carries its state fingerprint"
+        );
+        assert!(rows[0].0.contains("Resume test memory"));
+        // The delivered row persisted with its fingerprint. The persisted
+        // transcript keeps every copy (TS #2394: the newest digest remains
+        // authoritative), so the retained row plus the fresh one ride the
+        // file while the live context carries exactly one.
+        let persisted: Vec<String> = refreshed
+            .entries()
+            .await
+            .iter()
+            .filter_map(|entry| match entry {
+                FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type
+                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
+                {
+                    payload
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("stateFingerprint"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0], first_fingerprint);
+        assert_ne!(persisted[1], first_fingerprint);
+        assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
+    }
+
+    /// The digest body of the newest digest custom entry (fixture lookup).
+    fn digest_of_entries(entries: &[FileEntry]) -> String {
+        entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type
+                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
+                {
+                    payload
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("digest"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }
+                _ => None,
+            })
+            .expect("a digest custom entry")
     }
 
     fn user_text(message: &pa_agent::types::Message) -> String {

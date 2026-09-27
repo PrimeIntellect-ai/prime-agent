@@ -1,6 +1,6 @@
 # Sandboxes & Tunnels
 
-Prime Sandboxes are disposable Docker environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
+Prime Sandboxes are disposable VM environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
 
 Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `sandboxes/images.md`, `sandboxes/tunnel.md` under https://docs.primeintellect.ai/
 
@@ -24,14 +24,13 @@ prime sandbox create python:3.11-slim \
   --idle-timeout-minutes 15 \
   --env APP_ENV=staging \
   --secret API_KEY=sk-abc123 \
-  --start-command "python serve.py --port 8000" \
   --yes
 ```
 
-- `--timeout-minutes` caps total lifetime; `--idle-timeout-minutes` reaps the sandbox early when no exec/upload/download/file-read arrives (1 ≤ idle ≤ timeout ≤ 1440; not supported with `--vm`).
-- `--env` values are plain text; `--secret` values are encrypted at rest and obfuscated in output. Both become environment variables inside the container.
-- Default start command is `tail -f /dev/null` (idle, ready for `prime sandbox run`); `--start-command` replaces the image ENTRYPOINT.
-- Outbound internet is on by default; use `--no-network-access` for isolation when running untrusted code.
+- `--timeout-minutes` caps total lifetime; `--idle-timeout-minutes` reaps the sandbox early when no exec/upload/download/file-read arrives (1 ≤ idle ≤ timeout ≤ 1440; for VM sandboxes, `timeout_minutes` may be negative to disable the lifetime deadline).
+- `--env` values are plain text; `--secret` values are encrypted at rest and obfuscated in output. Both become environment variables inside the sandbox.
+- Default start command keeps the sandbox idle, ready for `prime sandbox run`. To run your own process at boot, pass the command after `--` as separate tokens (no shell): `prime sandbox create python:3.11-slim -- python serve.py --port 8000`.
+- Outbound internet is on by default; restrict egress with network allow/deny lists (`prime sandbox network`, or `network_allowlist`/`network_denylist` in the SDK).
 - `--team-id` bills a team; `--yes` skips confirmation in automation.
 
 Custom images: build and push your own via Prime Images (`sandboxes/images.md`).
@@ -55,7 +54,6 @@ client.wait_for_creation(sandbox.id)
 result = client.execute_command(sandbox.id, "python -c 'print(42)'")
 client.upload_file(sandbox.id, "/workspace/data.csv", "./data.csv")
 client.download_file(sandbox.id, "/workspace/output.csv", "./output.csv")
-exposed = client.expose(sandbox.id, port=8000, name="web")   # public URL
 client.delete(sandbox.id)
 ```
 

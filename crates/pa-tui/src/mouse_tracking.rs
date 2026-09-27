@@ -1,10 +1,13 @@
 //! Process-wide SGR mouse tracking state (TS `Terminal.setMouseTracking`).
 //!
 //! The interactive session surface enables button-event tracking (`?1002`)
-//! with SGR encoding (`?1006`) while it owns the terminal and disables both
-//! on exit, mirroring the TS enable/disable byte order. Motion tracking is
-//! deliberately never enabled: native drag-selection keeps working for
-//! terminals without an in-app selection surface.
+//! plus any-event motion (`?1003`, the hover affordance's buttonless
+//! motion reports — operator directive 2026-09-26, a sanctioned divergence:
+//! TS keeps `?1002` alone) with SGR encoding (`?1006`) while it owns the
+//! terminal and disables all three on exit, mirroring the TS byte order
+//! with the `?1003` pair added. The plain button-event mode stays set
+//! under `?1003`: terminals that ignore the any-event mode keep the
+//! native drag-selection reports (`?1002`), so nothing is lost.
 //!
 //! Tracking is enabled blind — probing is not viable (tmux never answers
 //! DECRQM) and unsupporting terminals ignore the mode-sets.
@@ -41,13 +44,15 @@ pub(crate) fn disable(out: &mut Stdout) -> Result<()> {
 }
 
 fn write_enable(out: &mut Stdout) -> Result<()> {
-    out.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+    // `?1003` (any-event) adds the buttonless motion reports the hover
+    // affordance rides; a terminal that ignores it keeps `?1002`.
+    out.write_all(b"\x1b[?1002h\x1b[?1003h\x1b[?1006h")?;
     out.flush()?;
     Ok(())
 }
 
 fn write_disable(out: &mut Stdout) -> Result<()> {
-    out.write_all(b"\x1b[?1006l\x1b[?1002l")?;
+    out.write_all(b"\x1b[?1006l\x1b[?1003l\x1b[?1002l")?;
     out.flush()?;
     Ok(())
 }
