@@ -148,7 +148,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         writer: writer.clone(),
         cwd: options.cwd,
         agent_dir: options.agent_dir,
-        compacting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        compacting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         autonomous: Arc::new(tokio::sync::Mutex::new(
             pa_core::autonomous::create_autonomous_runtime_state(
                 options.autonomous_config.as_ref(),

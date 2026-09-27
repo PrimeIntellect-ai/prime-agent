@@ -105,7 +105,7 @@ async fn run_session_command(
         None
     };
     if is_compact {
-        state.compacting.store(true, Ordering::SeqCst);
+        state.compacting.fetch_add(1, Ordering::SeqCst);
         state
             .session
             .write_connection_output(compaction_frame(
@@ -133,7 +133,7 @@ async fn run_session_command(
         execute_session_command(&engine, &mut params, command).await
     };
     if is_compact {
-        state.compacting.store(false, Ordering::SeqCst);
+        state.compacting.fetch_sub(1, Ordering::SeqCst);
         let result = execution.compaction.as_ref().map(|compaction| {
             crate::compaction::compaction_result_value(&compaction.result, &compaction.entry)
         });

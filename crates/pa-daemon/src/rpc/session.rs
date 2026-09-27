@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pa_agent::agent::Subscription;
@@ -84,6 +84,16 @@ pub struct RpcSession {
     /// against the replaced engine retire instead of delivering queued
     /// input to the disposed session.
     pump_epoch: Arc<AtomicU64>,
+    /// True for the whole span of a whole-session replacement (from the
+    /// pump-epoch bump to the swap's completion or the refusal's
+    /// return): a pump kicked while a replacement is in flight — with a
+    /// CURRENT generation and a still-live engine identity — must not
+    /// deliver onto the engine the swap is about to dispose (the
+    /// unguarded settle lets `steer`/`follow_up`/`prompt` handlers spawn such
+    /// pumps; the epoch and identity checks cannot see the in-flight
+    /// swap). Retire-and-stay-queued semantics: the row delivers on the
+    /// engine that survives the replacement.
+    replacing: Arc<AtomicBool>,
     /// Fired when a signal exit (SIGTERM/SIGHUP) begins: an in-flight
     /// replacement stops waiting the running turn out (it aborts and
     /// refuses), and later replacements answer immediately, so the
@@ -106,6 +116,7 @@ impl RpcSession {
             pending_outputs: Arc::new(tokio::sync::Mutex::new(None)),
             replacement: tokio::sync::Mutex::new(()),
             pump_epoch: Arc::new(AtomicU64::new(0)),
+            replacing: Arc::new(AtomicBool::new(false)),
             signal_shutdown: std::sync::Arc::new(tokio_util::sync::CancellationToken::new()),
         };
         session.resubscribe().await;
@@ -166,6 +177,23 @@ impl RpcSession {
     /// once the session replaced its engine (`n` no longer current).
     pub fn pump_generation(&self) -> u64 {
         self.pump_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Whether a whole-session replacement is in flight (the span from
+    /// the pump-epoch bump to the swap's completion or the refusal's
+    /// return): the queue pump retires — the row stays queued — for the
+    /// engine that survives the replacement to deliver.
+    pub fn is_replacing(&self) -> bool {
+        self.replacing.load(Ordering::SeqCst)
+    }
+
+    /// Arm the replacement-in-flight gate; the returned guard clears it
+    /// on drop, so every return path of the replacement — the refusal
+    /// arms, the failure arms, and the swap's completion — releases the
+    /// gate exactly once.
+    fn replacing_gate(&self) -> ReplacingGate<'_> {
+        self.replacing.store(true, Ordering::SeqCst);
+        ReplacingGate(&self.replacing)
     }
 
     /// Whether `engine` is the live handle's engine (pointer identity):
@@ -275,7 +303,13 @@ impl RpcSession {
         // Retire the pumps spawned against the replaced engine BEFORE the
         // settle: a queued pump that wakes during the wait sees the moved
         // epoch and returns instead of delivering onto the session this
-        // swap is about to dispose.
+        // swap is about to dispose. The in-flight gate holds through the
+        // whole replacement: a pump KICKED during the unguarded settle
+        // (steer/follow_up/prompt handlers coexist with it) carries the
+        // current generation and a live engine identity, so the epoch and
+        // identity checks cannot see this swap — the gate retires it
+        // instead, and the row delivers on the surviving engine.
+        let _replacing = self.replacing_gate();
         self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         // Settle the running turn BEFORE the factory opens the file: the
         // turn's final rows land in the persisted history the
@@ -314,10 +348,13 @@ impl RpcSession {
         // A prompt or steer admitted onto the old engine inside the
         // guard-free settle window (its handle read coexisted with the
         // unguarded settle): the re-acquired write guard blocks every
-        // new admission, the abort settles the sneaked turn under it,
-        // and the wait drains it before the factory opens the file.
-        handle.engine.session.agent().abort();
-        handle.engine.session.agent().wait_for_idle().await;
+        // new admission. TS runs its replacement the other way round —
+        // the session manager OPENS before teardownForReplacement, so
+        // an open failure (the cwd assert, a missing file) never touches
+        // the running turn — the abort defers until the factory succeeds;
+        // a failed build returns with the turn alive on the live session
+        // (agent-session-runtime.ts:422-431).
+        let sneaked_turn = handle.engine.session.agent().state().await.is_streaming;
         // Reopening the currently-owned session file: ADOPT the current
         // lease (TS `acquireReplacementLease` reuses the current lease
         // for the same path) — the lease never leaves this process, so
@@ -370,6 +407,15 @@ impl RpcSession {
                 }
             }
         };
+        // The sneaked turn aborts only now that the replacement exists
+        // (TS teardownForReplacement runs after the open): the turn's
+        // terminal frames still stream (the old feed stays subscribed
+        // until after the settle), and the wait drains it before the
+        // teardown hands the file to the replacement.
+        if sneaked_turn {
+            handle.engine.session.agent().abort();
+            handle.engine.session.agent().wait_for_idle().await;
+        }
         // Subscribe the replacement BEFORE publishing the handle: a
         // prompt dispatched the instant the handle lands finds the
         // subscription attached, so the turn's first events never drop.
@@ -435,5 +481,16 @@ impl RpcSession {
             subscription.unsubscribe().await;
         }
         engine.dispose_kernel().await;
+    }
+}
+
+/// The replacement-in-flight gate's release: clears the flag on drop so
+/// every return path of `replace_locked` releases the gate exactly once
+/// (the arm and every refusal return share one guard).
+struct ReplacingGate<'a>(&'a AtomicBool);
+
+impl Drop for ReplacingGate<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }

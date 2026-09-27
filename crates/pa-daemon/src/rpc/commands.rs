@@ -3,7 +3,7 @@
 //! handlers (TS `rpc-mode.ts`'s `handleCommand` cases). Session-level and
 //! scheduling commands live in [`super::session_commands`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -29,7 +29,7 @@ pub struct RpcState {
     pub agent_dir: std::path::PathBuf,
     /// The compact handler's in-flight flag (TS `session.isCompacting`):
     /// `get_state` reports it while a compact command runs.
-    pub compacting: Arc<AtomicBool>,
+    pub compacting: Arc<AtomicUsize>,
     /// The host-owned autonomous runtime state (`/autonomous` mutates it;
     /// the CLI flags seed it, TS `createAgentSession` parity).
     pub autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
@@ -147,6 +147,7 @@ pub fn kick_queue_pump(
         let _lane = state.queue_pump.lock().await;
         if state.session.pump_generation() != generation
             || !state.session.engine_is_live(&engine).await
+            || state.session.is_replacing()
         {
             return;
         }
@@ -154,6 +155,7 @@ pub fn kick_queue_pump(
         loop {
             if state.session.pump_generation() != generation
                 || !state.session.engine_is_live(&engine).await
+                || state.session.is_replacing()
             {
                 return;
             }
@@ -166,8 +168,10 @@ pub fn kick_queue_pump(
             // TS's session-input pump holds its checkpoint while a
             // compaction is in flight (`_compactionOperation` gates the
             // pump; compact's finally re-schedules it): a parked row
-            // never delivers into the rebuild's window.
-            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+            // never delivers into the rebuild's window. The count (not
+            // a bool) keeps a second compact waiting on session_ops
+            // gated while the first clears its own increment.
+            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
             agent.wait_for_idle().await;
@@ -179,14 +183,15 @@ pub fn kick_queue_pump(
             // swaps the handle), so the passing-generation-with-old-engine
             // window retires on the engine identity instead. A
             // compaction that armed while this pump was parked on the
-            // idle wait parks it again (the flag covers the whole
+            // idle wait parks it again (the count covers the whole
             // abort-to-rebuild window; the rebuild re-kicks the pump
             // once it settles).
-            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) {
+            if state.compacting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
             if state.session.pump_generation() != generation
                 || !state.session.engine_is_live(&engine).await
+                || state.session.is_replacing()
             {
                 return;
             }
@@ -312,7 +317,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     object.insert("isStreaming".to_string(), json!(agent_state.is_streaming));
     object.insert(
         "isCompacting".to_string(),
-        json!(state.compacting.load(Ordering::SeqCst)),
+        json!(state.compacting.load(Ordering::SeqCst) > 0),
     );
     object.insert(
         "steeringMode".to_string(),
@@ -402,11 +407,14 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
-    // The compaction is in flight from the abort onward: the flag arms
+    // The compaction is in flight from the abort onward: the gate arms
     // BEFORE the turn settles, so a pump woken by the abort's idle
-    // settle sees the flag and parks instead of admitting a queued row
-    // into the snapshot window.
-    state.compacting.store(true, Ordering::SeqCst);
+    // settle sees it and parks instead of admitting a queued row into
+    // the snapshot window. The gate is a COUNT: two overlapping compact
+    // commands (a second waiting on session_ops behind the first) each
+    // arm their own increment, and the first's clear leaves the
+    // second's window still gated.
+    state.compacting.fetch_add(1, Ordering::SeqCst);
     // TS `session.compact` aborts the running turn before the snapshot
     // (`if (!options.skipAbort) await this.abort()`, agent-session.ts):
     // the compaction summarizes a SETTLED transcript, never one a live
@@ -429,7 +437,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         .session
         .compact(instructions.as_deref(), &model, api_key, None)
         .await;
-    state.compacting.store(false, Ordering::SeqCst);
+    state.compacting.fetch_sub(1, Ordering::SeqCst);
     // TS compact's finally re-schedules the session-input pump
     // (`_notifySessionInputCheckpointChange` + `_scheduleSessionInputPump`):
     // the parked rows deliver after the rebuild settles, never into its
