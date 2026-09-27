@@ -546,7 +546,6 @@ impl Supervisor {
         // Reader: route responses to pending requests, forward session events.
         {
             let reader_resident = Arc::clone(resident);
-            let events = events.clone();
             let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
                 let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
@@ -672,25 +671,30 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, payload));
+                        // The send-time delivery pass (TS handleWorkerFrame
+                        // parity): the session's attached connections get
+                        // the frame through the subscriber registry, other
+                        // connections never wake. A session event without
+                        // an active session id is dropped - TS's
+                        // `!activeSessionId` guard in the same handler, not
+                        // broadcast to every client.
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
+                        }
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        let routing = active_session_id.map_or(
-                            ClientRouting::Broadcast,
-                            |active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            },
-                        );
-                        let _ = events.send((routing, payload));
+                        if let Some(active_session_id) = active_session_id {
+                            reader_supervisor.publish_session_event(
+                                &active_session_id,
+                                std::sync::Arc::new(payload),
+                            );
+                        }
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
                         // snapshot can no longer be trusted as fresh (TS
@@ -704,7 +708,8 @@ impl Supervisor {
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
                         // A worker's background catalog refresh changed
                         // the served snapshot: every client re-fetches
@@ -714,7 +719,8 @@ impl Supervisor {
                         // refresh returns the validated snapshot instantly
                         // and lands the fresh catalog through this
                         // broadcast.
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);

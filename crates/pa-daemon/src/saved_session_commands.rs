@@ -396,7 +396,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<Value>, bool) {
