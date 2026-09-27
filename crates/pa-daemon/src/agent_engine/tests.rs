@@ -5640,17 +5640,13 @@ async fn early_resume_clears_the_park_and_cancels_the_wake() {
 }
 
 // ---------------------------------------------------------------------------
-// saved_session_context: the windowed-vs-full differential oracle.
+// saved_session_context differential oracle.
 //
-// The windowed-first reader (open_windowed + restored_settings +
-// has_thinking_level) must answer the IDENTICAL saved (provider, model)
-// and thinking level the full-parse reader returned — fixture class by
-// fixture class, not by reasoning. The reference below is the
-// pre-windowed implementation, verbatim.
+// The reader must return the same (provider, model) + thinking level as
+// the full-parse reference below, fixture class by fixture class.
 // ---------------------------------------------------------------------------
 
-/// The pre-windowed reference: the full-parse reader the windowed-first
-/// `saved_session_context` replaced (verbatim body).
+/// The full-parse reference the differential oracle compares against.
 fn full_parse_saved_session_context(
     path: &std::path::Path,
 ) -> Option<super::model::SavedSessionContext> {
@@ -5683,19 +5679,23 @@ fn assert_saved_context_equals_reference(name: &str, path: &std::path::Path) {
     );
 }
 
-/// A session builder for the oracle fixtures: writes to a temp dir and
-/// returns the file path (the caller keeps appending before `rewrite`).
-fn oracle_session() -> (crate::session_store::SessionFile, std::path::PathBuf) {
+/// A session builder for the oracle fixtures. The returned temp dir owns
+/// the scratch tree; hold it until the assertion is done so it cleans up.
+fn oracle_session() -> (
+    crate::session_store::SessionFile,
+    std::path::PathBuf,
+    tempfile::TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.keep().join("session.jsonl");
+    let path = dir.path().join("session.jsonl");
     let mut file = crate::session_store::SessionFile::create("/tmp", None, 0);
     file.set_path(path.clone());
-    (file, path)
+    (file, path, dir)
 }
 
 #[test]
 fn saved_context_windowed_matches_full_parse_without_a_boundary() {
-    let (mut file, path) = oracle_session();
+    let (mut file, path, _dir) = oracle_session();
     file.append_message(json!({"role":"user","content":"hello","timestamp":0}));
     file.append_entry(
         "model_change",
@@ -5712,7 +5712,7 @@ fn saved_context_windowed_matches_full_parse_without_a_boundary() {
 
 #[test]
 fn saved_context_windowed_matches_full_parse_with_changes_inside_the_window() {
-    let (mut file, path) = oracle_session();
+    let (mut file, path, _dir) = oracle_session();
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
@@ -5736,7 +5736,7 @@ fn saved_context_windowed_matches_full_parse_with_changes_inside_the_window() {
 
 #[test]
 fn saved_context_windowed_matches_full_parse_with_model_only_before_the_boundary() {
-    let (mut file, path) = oracle_session();
+    let (mut file, path, _dir) = oracle_session();
     file.append_entry(
         "model_change",
         json!({"provider":"battery","modelId":"mock-1"}),
@@ -5761,7 +5761,7 @@ fn saved_context_windowed_matches_full_parse_with_model_only_before_the_boundary
 
 #[test]
 fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_boundary() {
-    let (mut file, path) = oracle_session();
+    let (mut file, path, _dir) = oracle_session();
     file.append_entry("thinking_level_change", json!({"thinkingLevel":"low"}));
     let mut kept = String::new();
     for i in 0..12 {
@@ -5783,7 +5783,7 @@ fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_bound
 
 #[test]
 fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_row() {
-    let (mut file, path) = oracle_session();
+    let (mut file, path, _dir) = oracle_session();
     let mut kept = String::new();
     for i in 0..12 {
         let id = file

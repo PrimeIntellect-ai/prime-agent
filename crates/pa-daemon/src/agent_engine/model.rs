@@ -448,14 +448,10 @@ pub(crate) struct SavedSessionContext {
 }
 
 pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessionContext> {
-    // Windowed-first: the windowed store answers the same saved-context
-    // semantics (the window walk's model/thinking overlays cover rows the
-    // retained window dropped; `restored_settings` applies them plus any
-    // post-window live rows) without parsing the full history — the cold
-    // resume of a large compacted session otherwise pays a full-file parse
-    // here just to read two scalars. Unsupported or malformed-retained
-    // files fall back to the full open inside `open_windowed` itself, so
-    // every fallback path keeps the pre-windowed behavior.
+    // Reads the saved (provider, model) + thinking level from the
+    // retained window (plus post-window live rows); unsupported files and
+    // malformed retained rows fall back to the full open inside
+    // `open_windowed`.
     let store = crate::session_store::SessionFile::open_windowed(path).ok()?;
     let context = store.restored_settings();
     let thinking = store
