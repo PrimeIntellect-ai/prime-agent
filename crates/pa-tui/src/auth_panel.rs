@@ -163,8 +163,14 @@ pub enum AuthPanelRequest {
     /// A `/mcp` view auth command settled: its status line applies.
     McpSettled { note: String },
     /// The `/traces` login settled: the login's outcome applies (the
-    /// enable intent continues in the session).
-    TracesSettled { outcome: TraceLoginOutcome },
+    /// enable intent continues in the session). `gen` is the login
+    /// run's generation: the arm matches it against the run loop's
+    /// current counter, so a superseded (Esc'd) run's late settle
+    /// cannot clear a newer login (#2845 review).
+    TracesSettled {
+        outcome: TraceLoginOutcome,
+        gen: u64,
+    },
 }
 
 /// A login flow's cooperative cancel signal: the flag the blocking body

@@ -450,6 +450,10 @@ pub(crate) struct SessionUi {
     /// when the flow spawns (so a later key cannot spawn a second flow
     /// over the same panel), consumed by the settle.
     traces_login_run: Option<TracesLoginIntent>,
+    /// The generation of the in-flight traces login: incremented on
+    /// each spawn; a late settle from a superseded run never clears
+    /// the newer login's panel (#2845 review).
+    traces_login_gen: u64,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -917,6 +921,7 @@ impl SessionUi {
             traces_upload_notes,
             pending_traces_login: None,
             traces_login_run: None,
+            traces_login_gen: 0,
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -4498,9 +4503,13 @@ impl SessionUi {
                 view.auth_panel = None;
                 self.note(&note, view);
             }
-            AuthPanelRequest::TracesSettled { outcome } => {
-                view.auth_panel = None;
-                self.finish_traces_login(outcome, view).await;
+            AuthPanelRequest::TracesSettled { outcome, gen } => {
+                // A superseded run's late settle cannot clear a newer
+                // login: the generation guard (#2845 review).
+                if gen == self.traces_login_gen {
+                    view.auth_panel = None;
+                    self.finish_traces_login(outcome, view).await;
+                }
             }
         }
         self.dirty = true;
@@ -4802,13 +4811,15 @@ impl SessionUi {
             return;
         };
         self.traces_login_run = Some(intent);
+        self.traces_login_gen += 1;
+        let gen = self.traces_login_gen;
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
         let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
         traces_dialog.set_cancel_signal(panel.cancel_signal());
         view.auth_panel = Some(traces_dialog);
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
+            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome, gen });
         });
     }
 
