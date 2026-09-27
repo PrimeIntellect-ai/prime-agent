@@ -1044,6 +1044,7 @@ impl SessionUi {
         self.user_bash_running = resync_bash.snap_running;
         self.resync_bash = Some(resync_bash);
         let reconstructed = reconstruct(&attach);
+        let mounted_session_changes = previous != attach.active_session_id;
         self.active_session_id = attach.active_session_id;
         // The new attachment exists (the snapshot above rebuilt from it):
         // retire the superseded id's subscription now, addressed by the
@@ -1157,6 +1158,26 @@ impl SessionUi {
         });
         self.turn_active = streaming;
         self.streaming_index = None;
+        // The turn-end watermark restarts only when the mounted session
+        // CHANGES: the ends the new stream will see belong to the newly
+        // mounted session, and an end owed by the detached session's stream
+        // (a turn whose submit outlived the switch — the daemon keeps
+        // running it, and its end never arrives on this stream) must not
+        // pin the watermark. Without the reset a later prompt's ack would
+        // re-arm `turn_active` against an end count that can never catch
+        // up, and the idle gates would wait for an end that will never
+        // come (the submit-outlived wedge). A SAME-SESSION rebind
+        // (recovery, reconnect) keeps the counters: its stream counts ends
+        // for the same session, and a prompt note that straddled the
+        // recovery still carries comparable values — resetting there would
+        // orphan in-flight acks the same way (a turn that already ended
+        // before the idle snapshot would re-arm `turn_active` with no
+        // `TurnEnded` left to clear it). The mounted snapshot's
+        // `streaming` flag carries the live-turn state across the attach.
+        if mounted_session_changes {
+            self.turn_ends_seen = 0;
+            self.last_prompt_turn_end = 0;
+        }
         // TS `applyConnectionStateSnapshot` -> `bindPromptStashSession`: the
         // stash state follows the stable id of the session now rendered.
         // The initial attach and every in-place switch (`/switch`, `/new`)
