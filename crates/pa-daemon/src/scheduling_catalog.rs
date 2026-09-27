@@ -116,7 +116,7 @@ impl Supervisor {
     fn broadcast_heartbeats_changed(&self) {
         let _ = self.events.send((
             crate::supervisor::ClientRouting::Broadcast,
-            json!({ "type": "heartbeats_changed" }),
+            std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
 
@@ -131,7 +131,7 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(
+                    .route_command_typed(
                         resident,
                         command_type,
                         payload,
@@ -408,6 +408,7 @@ impl Supervisor {
             attached,
             command_id.to_string(),
             type_name.to_string(),
+            None,
         )
         .await
     }
@@ -469,6 +470,7 @@ impl Supervisor {
                 attached,
                 command_id.to_string(),
                 type_name.to_string(),
+                None,
             )
             .await;
         if !promote {
