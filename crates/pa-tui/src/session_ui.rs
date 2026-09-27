@@ -5,6 +5,7 @@
 
 mod auth;
 mod heartbeats;
+mod queue;
 mod stream;
 
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
@@ -295,20 +296,6 @@ enum TracesLoginIntent {
     Enable,
 }
 
-/// TS status notes: the mutation status vocabulary (`applied`, `rejected`,
-/// `invalid`, `unsupported`) maps to the TS status rows; `is_edit` picks the
-/// edit phrasing over the reorder phrasing.
-fn queue_mutation_status_note(status: &str, is_edit: bool) -> String {
-    match status {
-        "invalid" => {
-            "Edited command is not a valid session command; edit kept in the editor".to_string()
-        }
-        "unsupported" => "Queue editing requires a newer daemon".to_string(),
-        _ if is_edit => "Queue changed; edit kept in the editor".to_string(),
-        _ => "Queue changed; reorder not applied".to_string(),
-    }
-}
-
 /// The question a pending confirm answers (TS `showExtensionConfirm`
 /// callers await inline; the TUI loop parks the continuation instead).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,6 +560,13 @@ pub(crate) struct SessionUi {
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
+    /// A scope-back reopen (the agents view's parent/escape key handed
+    /// the pane back from the dock's Subagents panel) restores the dock
+    /// focus once, at the first summary after the attach: the roster is
+    /// seeded by then, so the panel's own group is actionable at the
+    /// first paint or the editor keeps the focus (a later roster must
+    /// not yank the keyboard back mid-composition).
+    pending_dock_focus_restore: bool,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -946,6 +940,7 @@ impl SessionUi {
             bash_updates: activity_updates.bash,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
+            pending_dock_focus_restore: false,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -999,6 +994,12 @@ impl SessionUi {
             .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
+        // The scope-back reopen's restore arms AFTER the attach: every
+        // later attach's rebind reset clears an armed restore (focus
+        // returns to the editor, TS `resetSubagentSummary`), so the
+        // initial attach must carry the reopen's own restore past that
+        // reset to the first summary.
+        session.pending_dock_focus_restore = options.restore_dock_focus;
         Ok(session)
     }
 
@@ -1239,6 +1240,11 @@ impl SessionUi {
         // the editor (TS `resetSubagentSummary` on rebind).
         self.roster.clear();
         self.subagents_focused = false;
+        // A rebind drops an armed scope-back restore with the session it
+        // belonged to: the arriving session's focus is the editor's
+        // (TS `resetSubagentSummary`), never the left session's
+        // panel-exit state.
+        self.pending_dock_focus_restore = false;
         self.subscribe_roster().await;
         // The dock's heartbeat rows follow `dock_fold` (the enum's
         // contract): a first-content-frame attach folds the fresh fetch
@@ -1398,6 +1404,18 @@ impl SessionUi {
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
         let dock = self.activity_dock_state();
+        // A scope-back reopen hands the dock back its focus exactly once,
+        // at the FIRST summary after the attach: the roster is seeded by
+        // then, so the Subagents group rides the rendered row at its
+        // first paint (the operator's 2026-09-26 panel-exit ruling:
+        // leaving the dock's Subagents panel lands on its own dock item,
+        // not the prompt bar) — and a dock that never mounts keeps the
+        // editor's focus; the one-shot means a LATE roster never yanks
+        // the keyboard back mid-composition.
+        if self.pending_dock_focus_restore {
+            self.pending_dock_focus_restore = false;
+            self.subagents_focused = dock.visible();
+        }
         // A focused selection must stay on a rendered group: the arrows
         // visit every group an empty one included, so the selection
         // only moves when its group leaves the row (the goal row ends
@@ -1466,6 +1484,30 @@ impl SessionUi {
         }
     }
 
+    /// Hand the keyboard focus to the compact dock on its selected group:
+    /// the `app.subagents.focus` shortcut and every dock panel's close
+    /// restore (the operator's 2026-09-26 ruling: leaving a panel lands
+    /// on the panel's own dock item, never the prompt bar). The dock owns
+    /// the hand-off exactly while it renders — a session with nothing to
+    /// show keeps the dock unmounted and the focus where it was; every
+    /// group the row renders is traversable, empty ones included, so no
+    /// feed gate remains here.
+    fn focus_activity_dock(&mut self, view: &mut AgentView) -> bool {
+        let dock = self.activity_dock_state();
+        if !dock.visible() {
+            return false;
+        }
+        if !dock.groups().contains(&self.activity_group) {
+            // Only the goal group leaves with its row: the selection
+            // steps back to the group that now ends the row.
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
+        }
+        self.subagents_focused = true;
+        self.update_subagent_summary(view);
+        true
+    }
+
     /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, source: DockFocusSource, view: &mut AgentView) -> bool {
         // The tray override label blocks the hand-off (TS
@@ -1490,25 +1532,7 @@ impl SessionUi {
                 }
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
-            DockFocusSource::Shortcut => {
-                // The dock owns the hand-off exactly while it renders: a
-                // session with nothing to show (no subagent history,
-                // heartbeats, shells, or live goal) keeps the dock
-                // unmounted and the focus in the editor. Every group the
-                // row renders is traversable, empty ones included, so no
-                // feed gate remains here.
-                let dock = self.activity_dock_state();
-                if !dock.visible() {
-                    return false;
-                }
-                if !dock.groups().contains(&self.activity_group) {
-                    // Only the goal group leaves with its row: the
-                    // selection steps back to the group that now ends the
-                    // row.
-                    self.activity_group =
-                        dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-                }
-            }
+            DockFocusSource::Shortcut => return self.focus_activity_dock(view),
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -5782,6 +5806,7 @@ impl SessionUi {
             // `/new` starts a fresh root session: no depth label.
             session_rlm_depth: None,
             session_has_children: false,
+            restore_dock_focus: false,
             client_settings: self.client_settings.clone(),
         }
     }
@@ -6583,6 +6608,10 @@ impl SessionUi {
             || view.editor.keybindings().matches(&id, "app.clear")
         {
             view.goal_panel = None;
+            // The exit restores the dock's own group (the operator's
+            // 2026-09-26 panel-exit ruling): ESC/left lands back on the
+            // goal row, ready to re-open, not on the prompt bar.
+            self.focus_activity_dock(view);
             self.dirty = true;
         }
         Ok(())
@@ -6674,6 +6703,11 @@ impl SessionUi {
         match action {
             Some(BashViewAction::Close) => {
                 view.bash_view = None;
+                // The exit restores the dock's own group (the operator's
+                // 2026-09-26 panel-exit ruling): ESC/left lands back on
+                // the Shells item, ready to re-open, not on the prompt
+                // bar.
+                self.focus_activity_dock(view);
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
                 // The lazy tail: the open asks for the first window only
@@ -8012,170 +8046,6 @@ impl SessionUi {
                 _ => {}
             }
         }
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// Project the browse selection to the view: the dim header row above
-    /// the editor (TS `getQueueSelectionHeader` reads the live selection).
-    fn sync_queue_selection(&mut self, view: &mut AgentView) {
-        view.queue_selected = self.queue_selection.selected().cloned();
-    }
-
-    /// Report a queue-edit adoption event (`tui queue edited`): the seam
-    /// is spawned like the queued-input one, so key handling never waits
-    /// on the telemetry client.
-    fn emit_queue_edit(&self, action: &'static str) {
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.queue_edited(action).await;
-            });
-        }
-    }
-
-    /// TS `browseQueueSelection`: move the selection one parked message
-    /// older/newer and show it in the editor. Entering the browse stashes
-    /// the editor draft; reaching the draft again restores it.
-    fn browse_queue_selection(&mut self, direction: QueueBrowseDirection, view: &mut AgentView) {
-        let entering = !self.queue_selection.is_browsing();
-        let text = self
-            .queue_selection
-            .browse(&view.queued, &view.editor.get_text(), direction);
-        if let Some(text) = text {
-            view.editor.set_text(&text);
-        }
-        // Entering the browse (first selection of a parked message) is the
-        // queue-edit adoption signal; per-arrow moves are not.
-        if entering && self.queue_selection.is_browsing() {
-            self.emit_queue_edit("select");
-        }
-        self.sync_queue_selection(view);
-    }
-
-    /// Send one `mutate_queued_message` and return its status string (TS
-    /// answers every outcome `success` with `{ status }`; only a malformed
-    /// request fails the command, which surfaces as the error here).
-    async fn queue_mutation(
-        &self,
-        lane: QueueLane,
-        index: usize,
-        expected_text: &str,
-        mutation: Value,
-    ) -> Result<Option<String>> {
-        let data = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::MutateQueuedMessage {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    lane: Value::String(lane.wire_name().to_string()),
-                    index: index as u64,
-                    expected_text: expected_text.to_string(),
-                    mutation,
-                    rest: Map::default(),
-                },
-            )
-            .await
-            .map_err(|error| anyhow!("{error:#}"))?;
-        Ok(data
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_string))
-    }
-
-    /// TS `moveQueueSelection`: reorder the selected message one slot
-    /// earlier/later in its lane. The move is mirrored locally - the
-    /// `session_action_update` event may land after the response, and the
-    /// strip and selection must not wait for it (TS mirrors for the same
-    /// reason).
-    async fn move_queue_selection(&mut self, direction: i64, view: &mut AgentView) -> Result<()> {
-        let Some(selected) = self.queue_selection.selected().cloned() else {
-            return Ok(());
-        };
-        let status = self
-            .queue_mutation(
-                selected.lane,
-                selected.index,
-                &selected.text,
-                serde_json::json!({ "type": "move", "direction": direction }),
-            )
-            .await;
-        match status {
-            Ok(Some(status)) if status == "applied" => {
-                self.emit_queue_edit("reorder");
-                let target = selected.index as i64 + direction;
-                crate::queued::mirror_lane_move(
-                    &mut view.queued,
-                    selected.lane,
-                    selected.index,
-                    target,
-                );
-                if target >= 0 {
-                    self.queue_selection.refresh_at(
-                        &view.queued,
-                        selected.lane,
-                        target as usize,
-                        &selected.text,
-                    );
-                }
-                self.sync_queue_selection(view);
-                self.dirty = true;
-            }
-            Ok(Some(status)) => self.note(&queue_mutation_status_note(&status, false), view),
-            // A malformed request (never sent by this build) surfaces the
-            // daemon error like every other command.
-            Ok(None) => {}
-            Err(error) => self.note(&format!("{error:#}"), view),
-        }
-        Ok(())
-    }
-
-    /// TS `applyQueueSelection`: apply the edited editor text to the
-    /// selected parked message. Empty text deletes it; otherwise the edit
-    /// replaces it and moves it to `target_lane` - Enter steers, the
-    /// follow-up key parks it for idle delivery.
-    async fn apply_queue_selection(
-        &mut self,
-        text: &str,
-        target_lane: QueueLane,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(selected) = self.queue_selection.selected().cloned() else {
-            return Ok(());
-        };
-        let trimmed = text.trim();
-        // `images` stays absent on a replace: the server keeps the item's
-        // attachments (some markers cannot be resolved by this client).
-        let mutation = if trimmed.is_empty() {
-            serde_json::json!({ "type": "delete" })
-        } else {
-            serde_json::json!({ "type": "replace", "text": trimmed, "lane": target_lane.wire_name() })
-        };
-        let status = self
-            .queue_mutation(selected.lane, selected.index, &selected.text, mutation)
-            .await;
-        match status {
-            Ok(Some(status)) if status == "applied" => {
-                self.emit_queue_edit(if trimmed.is_empty() { "delete" } else { "edit" });
-                if !trimmed.is_empty() {
-                    view.editor.add_to_history(trimmed);
-                }
-                let draft = self.queue_selection.reset();
-                view.editor.set_text(&draft);
-            }
-            Ok(Some(status)) => {
-                // Enter submissions clear the editor before the mutation;
-                // a failed edit returns to the editor, never swallowed.
-                view.editor.set_text(text);
-                self.note(&queue_mutation_status_note(&status, true), view);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                view.editor.set_text(text);
-                self.note(&format!("{error:#}"), view);
-            }
-        }
-        self.sync_queue_selection(view);
         self.dirty = true;
         Ok(())
     }

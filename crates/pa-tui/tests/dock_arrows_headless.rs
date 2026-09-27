@@ -262,6 +262,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }
@@ -328,7 +329,9 @@ fn run_plan(
 /// heartbeats and shells sections to the goal section, then left back
 /// through them, with the wrap landing on the row's last section. Each
 /// visited section opens its own view, whose existing empty state reads
-/// the pane grammar.
+/// the pane grammar. The panel-exit ruling (2026-09-26) keeps the dock
+/// focused on the closed section's own item, so the walk needs no
+/// re-grab press between the sections.
 #[test]
 fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
     let steps = vec![
@@ -353,8 +356,6 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(100),
         // The next press in order: the empty shells section.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
@@ -366,8 +367,6 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         HeadlessStep::WaitMs(100),
         // The third press in order: the goal section, one press past
         // the empty shells section.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
@@ -379,8 +378,6 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         HeadlessStep::WaitMs(100),
         // Left walks the same sections in reverse: goal -> shells ->
         // heartbeats.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
@@ -394,8 +391,6 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         HeadlessStep::WaitMs(100),
         // Left wraps past the row's first section: two presses from the
         // heartbeats section land on the row's last section (the goal).
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
@@ -439,6 +434,9 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
 /// The same traversal with a section carrying rows: the heartbeats
 /// section lists its heartbeat and the arrows take the identical press
 /// count in the identical order — filling a section never moves another.
+/// The panel-exit ruling (2026-09-26) keeps the dock focused on the
+/// closed section's own item, so the walk needs no re-grab press
+/// between the sections.
 #[test]
 fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
     let steps = vec![
@@ -462,8 +460,6 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
         HeadlessStep::WaitMs(100),
         // The second press: the empty shells section — the row-bearing
         // section never shifts the cycle.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
@@ -474,8 +470,6 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(100),
         // The third press: the goal section.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
@@ -487,8 +481,6 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
         HeadlessStep::WaitMs(100),
         // The identical left-walk: two presses back to the row-bearing
         // heartbeats section.
-        HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(100),
         HeadlessStep::Key(left()),
