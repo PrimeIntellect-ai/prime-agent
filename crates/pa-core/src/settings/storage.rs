@@ -2,10 +2,11 @@
 //! (cwd/<config-dir>/settings.json) files with lock-retry and atomic writes.
 //! Port of `FileSettingsStorage` / `InMemorySettingsStorage`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, Result};
 
@@ -22,6 +23,30 @@ pub enum SettingsScope {
 /// Read/modify/write under a per-file advisory lock. `update` returns the next
 /// document or `None` to leave the file unchanged (TS `withLock`).
 pub trait SettingsStorage: Send + Sync {
+    /// The scope's current content, exactly what [`Self::with_lock`]'s read
+    /// arm would deliver, without a write-back channel. Implementations may
+    /// serve a process-cached copy validated against the file as it stands;
+    /// `FileSettingsStorage` does (the TS product keeps one
+    /// `SettingsManager` per session-services instance and serves its
+    /// in-memory snapshot per call, so its per-turn path takes no lock at
+    /// all, while this port rebuilds the manager per call and would
+    /// otherwise pay the full lock cycle each time). Writers must still go
+    /// through [`Self::with_lock`], whose read-modify-write file protocol is
+    /// untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage fails to lock or read the scope's
+    /// settings file. An absent file is `Ok(None)`, not an error.
+    fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
+        let mut content = None;
+        self.with_lock(scope, &mut |current| {
+            content = current;
+            None
+        })?;
+        Ok(content)
+    }
+
     /// # Errors
     ///
     /// Returns an error when the storage fails to lock, read, or write the
@@ -85,13 +110,157 @@ impl FileSettingsStorage {
     }
 }
 
+/// Same-process serialization for one settings document (the `#2915`
+/// pattern, proven on the auth lock in `crates/pa-core/src/auth/storage.rs`).
+///
+/// The TS product runs its synchronous settings lock on a single thread, so
+/// two `acquireLock`-style calls in one process can never contend there: the
+/// 10x20ms retry only ever fires against another process. The Rust engine is
+/// threaded, and two worker threads racing the same settings document pay the
+/// full TS retry sleep against each other (strace-verified on this lane: two
+/// threads' `mkdir settings.json.lock` attempts 11us apart, the loser
+/// `clock_nanosleep`s the full 20ms — a stall the auth-lock cycles' own
+/// same-process serialization used to pace away by accident, and which the
+/// auth read-through cache unmasks). A process-local mutex keyed by the
+/// document path serializes same-process callers for the microseconds the
+/// small read/modify/write holds; the file protocol and its retry semantics
+/// are untouched, so a foreign holder (another process) still surfaces
+/// `WouldBlock` and still takes the 10x20ms retry.
+///
+/// The mutex is a leaf: the locked section performs only the document's own
+/// filesystem operations and the caller's `update` callback, and no settings
+/// callback re-enters `with_lock` (every callback is a pure JSON transform).
+/// Poisoning cannot wedge later reads: the file protocol is the correctness
+/// mechanism, so a poisoned mutex is recovered instead of propagated.
+fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = {
+        let mut registry = registry.lock().expect("settings process-lock registry");
+        *registry
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+    };
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The stat identity a cached read is validated against: device, inode,
+/// mtime (nanoseconds), and length. Every writer the protocol knows either
+/// replaces the document by atomic rename (a new inode) or rewrites it in
+/// place (a new mtime), so a matching identity means the cached content is
+/// byte-identical to what a locked read would return right now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+    len: u64,
+}
+
+#[cfg(unix)]
+fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mtime_sec: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        len: metadata.len(),
+    })
+}
+
+#[cfg(windows)]
+fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    let modified = metadata.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(FileIdentity {
+        dev: 0,
+        ino: 0,
+        mtime_sec: since.as_secs() as i64,
+        mtime_nsec: since.subsec_nanos() as i64,
+        len: metadata.len(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stat_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
+}
+
+/// One validated document read held in the process-wide read-through cache.
+struct CachedRead {
+    identity: FileIdentity,
+    content: String,
+}
+
+/// Validated content per settings document, process-wide: the read-through
+/// cache for [`FileSettingsStorage::read`]. Entries live for the process (a
+/// handful of small documents per process, mirroring the process-lock
+/// registry's lifetime policy); a stat identity that no longer matches
+/// simply misses and re-reads, so entries never outlive their file.
+static READ_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRead>>> = OnceLock::new();
+
+/// The process-wide read-through cache, created on first use.
+fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
+    READ_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl SettingsStorage for FileSettingsStorage {
+    /// The consolidated read arm: on a cache hit, one `stat` and the cached
+    /// content (no lock protocol at all — the TS session's own per-turn
+    /// reads take no lock either); on a miss, the full locked protocol
+    /// cycle, byte-identical to `with_lock`'s read arm, which also
+    /// populates the cache. The same-process mutex still orders this
+    /// against in-process writers (see [`process_lock`]), and an external
+    /// write changes the stat identity, so the next read misses and
+    /// re-reads fresh.
+    fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
+        let path = self.path(scope);
+        let _process_guard = process_lock(path);
+        let now_identity = fs::metadata(path)
+            .ok()
+            .and_then(|metadata| stat_identity(&metadata));
+        // No file: `with_lock`'s read arm delivers `None` without a lock
+        // protocol, and so does this.
+        let Some(identity) = now_identity else {
+            return Ok(None);
+        };
+        {
+            let cache = read_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = cache.get(path) {
+                if entry.identity == identity {
+                    return Ok(Some(entry.content.clone()));
+                }
+            }
+        }
+        // Miss: the full protocol read — the lock protocol is unchanged.
+        let guard = self.acquire_lock(path)?;
+        let content = fs::read_to_string(path)?;
+        drop(guard);
+        read_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                path.to_path_buf(),
+                CachedRead {
+                    identity,
+                    content: content.clone(),
+                },
+            );
+        Ok(Some(content))
+    }
+
     fn with_lock(
         &self,
         scope: SettingsScope,
         update: &mut dyn FnMut(Option<String>) -> Option<String>,
     ) -> Result<()> {
         let path = self.path(scope);
+        let _process_guard = process_lock(path);
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
@@ -203,6 +372,80 @@ mod tests {
         // Owner-only mode is a Unix guarantee; Windows inherits ACLs.
         #[cfg(unix)]
         assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+    }
+
+    #[test]
+    fn read_arm_serves_content_and_survives_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
+        let global = dir.path().join("agent").join("settings.json");
+        // Absent document: `Ok(None)`, like `with_lock`'s read arm.
+        assert_eq!(storage.read(SettingsScope::Global).unwrap(), None);
+        assert!(!global.exists());
+        // A write through the full protocol; the next read re-reads the new
+        // identity (the atomic rename replaced the inode).
+        storage
+            .with_lock(SettingsScope::Global, &mut |current| {
+                assert_eq!(current, None);
+                Some(r#"{ "theme": "prime" }"#.to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            storage.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(r#"{ "theme": "prime" }"#)
+        );
+        // A second manager over the same paths reads the same content
+        // (per-instance state is untouched; the document is shared).
+        let other = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
+        assert_eq!(
+            other.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(r#"{ "theme": "prime" }"#)
+        );
+        // An external in-place rewrite changes the mtime: the identity no
+        // longer matches and the read re-reads fresh.
+        std::fs::write(&global, r#"{ "theme": "dark" }"#).unwrap();
+        assert_eq!(
+            storage.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(r#"{ "theme": "dark" }"#)
+        );
+        // An external atomic-rename write changes the inode: same re-read.
+        let tmp = global.with_extension("json.tmp-ext");
+        std::fs::write(&tmp, r#"{ "theme": "ink" }"#).unwrap();
+        std::fs::rename(&tmp, &global).unwrap();
+        assert_eq!(
+            storage.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(r#"{ "theme": "ink" }"#)
+        );
+    }
+
+    #[test]
+    fn read_arm_error_matches_with_lock_read() {
+        // A directory at the document path: `with_lock`'s read arm fails
+        // with the raw io error; the read arm surfaces the same class
+        // (not `Ok(None)`).
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        std::fs::create_dir_all(agent.join("settings.json")).unwrap();
+        let storage = FileSettingsStorage::new(dir.path().join("cwd"), &agent);
+        assert!(storage.read(SettingsScope::Global).is_err());
+    }
+
+    #[test]
+    fn read_arm_default_is_with_lock_read() {
+        // The trait default delegates to `with_lock`: the in-memory backend
+        // serves through its own protocol, unchanged.
+        let storage = InMemorySettingsStorage::default();
+        storage
+            .with_lock(SettingsScope::Global, &mut |current| {
+                let _ = current;
+                Some(r#"{ "theme": "prime" }"#.to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            storage.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(r#"{ "theme": "prime" }"#)
+        );
+        assert_eq!(storage.read(SettingsScope::Project).unwrap(), None);
     }
 
     /// A relative agent dir (a relative `PRIME_AGENT_CODING_AGENT_DIR`)

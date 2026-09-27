@@ -183,8 +183,13 @@ fn releases_around_the_handoff_never_become_visible() {
     // arms its meta-wrapper hold for).
     harness.drain_until_quiet(10);
     let mark_exit = harness.mark();
+    // The exit key and the release ride together: the release must land
+    // INSIDE the exit path's own drain window (its short idle phase),
+    // the window this case covers. A quiet-wait between the two writes
+    // lets the restore and the child exit complete first — the release
+    // would arrive on a pty nobody reads, covering nothing and risking
+    // the master write once the slave is gone.
     harness.write(b"\x1b[27u");
-    harness.drain_until_quiet(10);
     harness.write(LEFT_RELEASE);
     harness.wait_from(mark_exit, ALT_SCREEN_LEAVE, "the exit restore ran");
     let exit = harness.wait_child_exit(Duration::from_secs(20));

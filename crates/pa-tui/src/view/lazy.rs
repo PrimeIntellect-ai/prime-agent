@@ -577,18 +577,30 @@ impl AgentView {
             // packed (byte-exact expansion on read) instead of as the
             // renderers' fragment-sized spans — a scroll walk's
             // retention is the per-span chunk overhead, not the text.
-            self.entry_layout[index][detail] = Some(EntryLayout {
-                spacing,
-                rows: std::sync::Arc::new(RowPack::pack(&rows)),
-            });
-            // A huge entry's rendered rows are the transcript's biggest
-            // single transient (the pad row set of a resumed large
-            // session): the pack just replaced them, and the freed
-            // pages only return to the OS if the allocator's trim can
-            // reach them. Gate on the row count so ordinary entries
-            // never pay a trim call — only the rare huge materialization.
-            if rows.len() >= HUGE_PACKED_ROWS {
-                pa_types::memory_release::trim_freed_heap();
+            // `pack` refuses entries its records cannot represent
+            // exactly, so an oversized entry keeps its Fresh rows.
+            if let Some(packed) = RowPack::pack(&rows) {
+                let packed = std::sync::Arc::new(packed);
+                self.entry_layout[index][detail] = Some(EntryLayout {
+                    spacing,
+                    rows: packed.clone(),
+                });
+                // A huge entry's rendered rows are the transcript's
+                // biggest single transient (the pad row set of a
+                // resumed large session): the pack just replaced them,
+                // and the freed pages only return to the OS if the
+                // allocator's trim can reach them — so the expanded
+                // rows drop BEFORE the trim, and the caller reads the
+                // packed form (byte-exact expansion) instead of the
+                // pad it would otherwise hold past the trim. Gate on
+                // the row count so ordinary entries never pay a trim
+                // call — only the rare huge materialization.
+                let huge = rows.len() >= HUGE_PACKED_ROWS;
+                drop(rows);
+                if huge {
+                    pa_types::memory_release::trim_freed_heap();
+                }
+                return EntryRows::Packed(packed);
             }
         }
         EntryRows::Fresh(rows)

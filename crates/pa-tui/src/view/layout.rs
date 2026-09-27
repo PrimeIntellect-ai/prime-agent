@@ -70,15 +70,23 @@ pub(super) struct RowPack {
 
 impl RowPack {
     /// Pack freshly rendered rows (byte-exact: boundaries, styles, and
-    /// content bytes are preserved; empty spans keep their records).
-    pub(super) fn pack(rows: &[Line]) -> Self {
+    /// content bytes are preserved; empty spans keep their records), or
+    /// `None` when the rows cannot be represented: the records store
+    /// `u32` span indices and blob offsets, so a rendered entry whose
+    /// span count or content bytes exceed `u32::MAX` is refused rather
+    /// than narrowed — wrapped offsets would make [`Self::range`] read
+    /// the wrong bytes (or panic slicing the blob off a UTF-8
+    /// boundary). Oversized entries simply stay uncached.
+    pub(super) fn pack(rows: &[Line]) -> Option<Self> {
         let span_count: usize = rows.iter().map(Line::len).sum();
-        debug_assert!(span_count <= u32::MAX as usize, "row pack offsets fit u32");
         let content_bytes: usize = rows
             .iter()
             .flat_map(|line| line.iter())
             .map(|span| span.content.len())
             .sum();
+        if span_count > u32::MAX as usize || content_bytes > u32::MAX as usize {
+            return None;
+        }
         let mut first = Vec::with_capacity(rows.len() + 1);
         let mut spans = Vec::with_capacity(span_count);
         let mut blob = String::with_capacity(content_bytes);
@@ -94,7 +102,7 @@ impl RowPack {
             }
         }
         first.push(spans.len() as u32);
-        Self { first, spans, blob }
+        Some(Self { first, spans, blob })
     }
 
     /// The number of packed rows.
