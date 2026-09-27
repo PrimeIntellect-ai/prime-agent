@@ -287,9 +287,14 @@ mod tests {
     async fn segments_write_the_same_stream_as_the_buffered_frame() {
         let payload: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let mut buffered = Vec::new();
-        write_frame(&mut buffered, &header("outbound"), &payload, DEFAULT_PRIVATE_FRAME_LIMITS)
-            .await
-            .unwrap();
+        write_frame(
+            &mut buffered,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
         let mut segmented = Vec::new();
         write_frame_segments(
             &mut segmented,
