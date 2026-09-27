@@ -212,13 +212,30 @@ async fn apply_wire_config(
             Ok(())
         }
         ("thought_level", Some(value)) => {
-            let state = fetch_connection_state(link, daemon_session_id).await;
-            let levels: Vec<String> = state
-                .as_ref()
-                .and_then(|state| state.get("availableThinkingLevels"))
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default();
+            // A failed state fetch is the request's own internal error,
+            // never a verdict on the client's value (TS's handler
+            // surfaces a failed `getState`; the refresh does the same).
+            let Some(state) = fetch_connection_state(link, daemon_session_id).await else {
+                return Err(WireConfigError::internal(
+                    "the worker's live state could not be read; try again",
+                ));
+            };
+            // The levels list is part of the state's contract (the
+            // worker always answers it); its absence or a malformed
+            // shape is the same unreadable-state error, not an empty
+            // list the gate would blame the selection for.
+            let levels: Vec<String> = match state.get("availableThinkingLevels") {
+                Some(levels) => serde_json::from_value(levels.clone()).map_err(|_| {
+                    WireConfigError::internal(
+                        "the worker's state did not answer the supported levels; try again",
+                    )
+                })?,
+                None => {
+                    return Err(WireConfigError::internal(
+                        "the worker's state did not answer the supported levels; try again",
+                    ))
+                }
+            };
             // The worker's levels are #2858's map-driven capability
             // (`get_supported_thinking_levels` over the resolved model):
             // a route with an addressable thinking-level map advertises

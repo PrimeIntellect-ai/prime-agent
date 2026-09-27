@@ -215,6 +215,28 @@ fn faux_models_fixture() -> serde_json::Value {
                         "maxTokens": 4_096,
                     }
                 ],
+            },
+            // A provider whose models discovery admits (the `authHeader`
+            // config counts as configured request auth) but whose
+            // credential cannot resolve at request time (a set-but-empty
+            // env var is a missing credential): a switch to it must refuse
+            // before anything moves, not install an unauthenticated
+            // target.
+            "locked": {
+                "api": "faux",
+                "baseUrl": "http://localhost:0",
+                "authHeader": true,
+                "apiKey": "PROBE_LOCKED_KEY",
+                "models": [
+                    {
+                        "id": "locked-model",
+                        "name": "Locked Model",
+                        "api": "faux",
+                        "baseUrl": "http://localhost:0",
+                        "contextWindow": 128_000,
+                        "maxTokens": 4_096,
+                    }
+                ],
             }
         }
     })
@@ -234,7 +256,9 @@ fn acp_in_process_config_option_advertises_and_applies() {
         &["--mode", "acp", "--no-session"],
         &script,
         Some(faux_models_fixture()),
-        &[],
+        // The locked provider's credential reference resolves to nothing:
+        // a set-but-empty env var is a missing credential.
+        &[("PROBE_LOCKED_KEY".to_string(), String::new())],
     );
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
@@ -433,6 +457,35 @@ fn acp_in_process_config_option_advertises_and_applies() {
             |update| update["params"]["update"]["configOptions"][1]["currentValue"] == "xhigh"
         ),
         "the mapped level publishes config_option_update: {notifications:?}"
+    );
+
+    // An uncredentialed model discovery admits (the locked provider's
+    // auth cannot resolve): the switch refuses BEFORE anything moves —
+    // the next turn keeps running on the model it still reports.
+    let locked = r#"["locked","locked-model"]"#;
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "model", json!(locked)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(response["error"]["code"], -32603, "{response}");
+    assert!(
+        response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No API key found"),
+        "the refusal names the missing credentials: {response}"
+    );
+    // Nothing moved: the map model is still the live selection (the
+    // no-op re-selection refreshes and reports it).
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "model", json!(map)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(
+        response["result"]["configOptions"][0]["currentValue"], map,
+        "the uncredentialed switch mutated nothing: {response}"
     );
 
     let close = client.request("session/close", json!({ "sessionId": session_id }));

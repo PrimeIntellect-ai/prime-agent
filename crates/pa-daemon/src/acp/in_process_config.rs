@@ -264,6 +264,21 @@ async fn apply_in_process_model_switch(
     .await
     .map_err(|_| anyhow::anyhow!("model registry task failed"))?;
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
+    // An unresolvable selection refuses the switch BEFORE anything
+    // moves (the RPC path's own rule, `apply_model_selection`):
+    // `get_api_key_and_headers` can answer `ok: false` even for a model
+    // discovery admits, and installing it would leave the provider
+    // target without usable authentication — the NEXT turn would fail
+    // instead of this request. TS's `setModel` refuses the same way
+    // ("No API key for ...").
+    if !resolved.ok {
+        anyhow::bail!(resolved.error.unwrap_or_else(|| {
+            format!(
+                "Model is not available: no credentials resolved for {}/{}",
+                model.provider, model.id
+            )
+        }));
+    }
     // The previous live state, for the rollback a failed durable write
     // takes (a failure would otherwise leave the target switched and the
     // session's model identity split).
@@ -383,11 +398,21 @@ async fn apply_in_process_model_switch(
         )
     };
     let effective = pa_ai::models::clamp_thinking_level(&model, requested);
+    // The failed-durable-write fallback for the switched model: the
+    // pre-switch level clamped to the model the switch installed (the
+    // raw pre-switch level can be one it does not support).
+    let restore = pa_core::session_engine::provider_adapter::map_thinking_level(
+        pa_ai::models::clamp_thinking_level(
+            &model,
+            pa_core::session_engine::provider_adapter::model_thinking_level(current_level),
+        ),
+    );
     apply_level_change(
         session,
         mode,
         effective,
         pa_ai::models::supports_thinking(&model),
+        restore,
     )
     .await
     .map_err(|error| anyhow::anyhow!("{error:?}"))?;
@@ -436,29 +461,35 @@ async fn apply_in_process_thinking_level(
     let thinking = current
         .as_ref()
         .is_some_and(pa_ai::models::supports_thinking);
-    apply_level_change(session, mode, parsed, thinking).await
+    // The standalone change's fallback is the level it replaces — the
+    // model did not change, so it is supported.
+    let restore = session.agent().state().await.thinking_level;
+    apply_level_change(session, mode, parsed, thinking, restore).await
 }
 
 /// The shared level application: agent + durable row when the effective
 /// level changed, settings default when the model has a thinking surface
 /// or the level is not `off` (TS `setThinkingLevel`'s persist gate, gated
-/// on #2858's map-driven capability rather than the coarse flag).
+/// on #2858's map-driven capability rather than the coarse flag). A
+/// failed durable `thinking_level_change` write rolls the live agent back
+/// to `restore`: the caller names a level the model the agent now runs
+/// supports — a standalone change returns to the level it replaced; a
+/// model switch returns to the pre-switch level CLAMPED to the switched
+/// model (the raw pre-switch level can be one it does not support).
 async fn apply_level_change(
     session: &Arc<AcpSession>,
     mode: &AcpModeState,
     level: pa_types::ai::ModelThinkingLevel,
     thinking: bool,
+    restore: pa_agent::types::ThinkingLevel,
 ) -> Result<(), ConfigOptionError> {
     let mapped = pa_core::session_engine::provider_adapter::map_thinking_level(level);
     let current = session.agent().state().await.thinking_level;
     if current == mapped {
         return Ok(());
     }
-    // A failed durable `thinking_level_change` write rolls the live agent
-    // back to the previous level: the client sees the refusal, and the
-    // turns keep running on the level the session still reports.
     if let Err(error) = mode.engine.session.set_thinking_level(mapped).await {
-        session.agent().set_thinking_level(current).await;
+        session.agent().set_thinking_level(restore).await;
         return Err(ConfigOptionError::Internal(format!(
             "thinking level switch failed: {error:#}"
         )));
