@@ -409,16 +409,3 @@ export async function computeEditsDiff(
 		return { error: err instanceof Error ? err.message : String(err) };
 	}
 }
-
-/**
- * Compute the diff for a single edit operation without applying it.
- * Kept as a convenience wrapper for single-edit callers.
- */
-export async function computeEditDiff(
-	path: string,
-	oldText: string,
-	newText: string,
-	cwd: string,
-): Promise<EditDiffResult | EditDiffError> {
-	return computeEditsDiff(path, [{ oldText, newText }], cwd);
-}

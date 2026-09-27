@@ -70,30 +70,5 @@ export function parseChangelog(changelogPath: string): ChangelogEntry[] {
 	}
 }
 
-/**
- * Compare versions. Returns: -1 if v1 < v2, 0 if v1 === v2, 1 if v1 > v2
- */
-export function compareVersions(v1: ChangelogEntry, v2: ChangelogEntry): number {
-	if (v1.major !== v2.major) return v1.major - v2.major;
-	if (v1.minor !== v2.minor) return v1.minor - v2.minor;
-	return v1.patch - v2.patch;
-}
-
-/**
- * Get entries newer than lastVersion
- */
-export function getNewEntries(entries: ChangelogEntry[], lastVersion: string): ChangelogEntry[] {
-	// Parse lastVersion
-	const parts = lastVersion.split(".").map(Number);
-	const last: ChangelogEntry = {
-		major: parts[0] || 0,
-		minor: parts[1] || 0,
-		patch: parts[2] || 0,
-		content: "",
-	};
-
-	return entries.filter((entry) => compareVersions(entry, last) > 0);
-}
-
 // Re-export getChangelogPath from paths.ts for convenience
 export { getChangelogPath } from "../config.js";

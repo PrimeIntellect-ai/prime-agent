@@ -17,11 +17,6 @@ function normalizeWhitespaceLower(text: string): string {
 	return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-/** Join arbitrary session fields into the common search corpus. */
-export function createSessionSearchText(parts: readonly (string | undefined | null)[]): string {
-	return parts.filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
-}
-
 export function parseSearchQuery(query: string): ParsedSearchQuery {
 	const trimmed = query.trim();
 	if (!trimmed) {

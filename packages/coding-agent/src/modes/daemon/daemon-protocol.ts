@@ -1,17 +1,10 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
-import type {
-	AgentSessionMessageDeliveryMode,
-	AgentSessionMessageReceipt,
-	AgentSessionMessageSafetyStatus,
-} from "../../core/agent-messages.js";
+import type { AgentSessionMessageDeliveryMode } from "../../core/agent-messages.js";
 import type { SessionActionRecoverySnapshot } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
-import type { AgentAutonomousStatus } from "../../core/autonomous.js";
-import type { BashResult } from "../../core/bash-executor.js";
 import type {
-	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
@@ -25,16 +18,13 @@ import type { DeleteSessionFileResult } from "../../core/session-file-actions.js
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
 	AgentConnectionAgentStatus,
-	AgentConnectionHeartbeat,
 	AgentConnectionQueueMode,
-	AgentConnectionResourceSnapshot,
 	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSavedSessionScope,
 	AgentConnectionSavedSessionState,
 	AgentConnectionScopedModel,
 	AgentConnectionSessionContext,
 	AgentConnectionSessionEvent,
-	AgentConnectionSessionHeader,
 	AgentConnectionSessionTreeNode,
 	AgentConnectionSideQuestionEvent,
 	AgentConnectionSideQuestionTurn,
@@ -99,10 +89,6 @@ export type DaemonClientCapability =
 	| "client_owned_sessions"
 	// Client declaration, not a command gate: attach with it opts into heartbeats_changed pushes.
 	| "heartbeat_catalog";
-export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
-export interface DaemonPromptAdmissionCancellationResult {
-	status: DaemonPromptAdmissionCancellationStatus;
-}
 export type DaemonServerCapability =
 	| DaemonClientCapability
 	| "delete_rlm_subagent"
@@ -289,8 +275,6 @@ export interface DaemonCommandEnvelope<TCommand extends DaemonCommand = DaemonCo
 	clientId?: DaemonClientId;
 	command: TCommand;
 }
-
-export type DaemonCommandWire = DaemonCommand | DaemonCommandEnvelope;
 
 export interface DaemonEventEnvelope<TEvent extends DaemonOutbound = DaemonOutbound> {
 	type: "event";
@@ -1096,16 +1080,6 @@ export interface DaemonSavedSessionInfo {
 }
 
 export type DaemonDeleteSavedSessionResult = DeleteSessionFileResult;
-export type DaemonAutonomousStatus = AgentAutonomousStatus;
-export type DaemonBashResult = BashResult;
-export type DaemonSessionHeader = AgentConnectionSessionHeader;
-
-export type DaemonResourceSnapshot = AgentConnectionResourceSnapshot;
-
-export type DaemonCronJob = AgentCronJob;
-export type DaemonHeartbeat = AgentConnectionHeartbeat;
-export type DaemonAgentSessionMessageReceipt = AgentSessionMessageReceipt;
-export type DaemonAgentSessionMessageSafetyStatus = AgentSessionMessageSafetyStatus;
 
 export type DaemonOutbound =
 	| DaemonResponse
