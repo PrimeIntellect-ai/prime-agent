@@ -1211,7 +1211,8 @@ export type DaemonOutbound =
 			meta?: DaemonEventMeta;
 	  };
 
-export const DAEMON_OUTBOUND_COMPATIBILITY = {
+// Compile-time only: forces every DaemonOutbound type to declare its compatibility.
+const _DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,
@@ -1361,22 +1362,6 @@ export const UPDATE_RESTART_DRAIN_COMMANDS: ReadonlySet<DaemonCommand["type"]> =
 	"abort_compaction",
 	"abort_retry",
 ]);
-
-export function createDaemonEventEnvelope<TEvent extends DaemonOutbound>(
-	event: TEvent,
-	meta: DaemonEventMeta,
-): DaemonEventEnvelope<TEvent> {
-	return {
-		type: "event",
-		id: meta.id,
-		protocol: meta.protocol,
-		...(meta.activeSessionId ? { activeSessionId: meta.activeSessionId } : {}),
-		...(meta.sequence !== undefined ? { sequence: meta.sequence } : {}),
-		...(meta.cursor ? { cursor: meta.cursor } : {}),
-		emittedAt: meta.emittedAt,
-		event,
-	};
-}
 
 export function createDaemonEventMeta(
 	activeSessionId: string,

@@ -718,7 +718,6 @@ describe("ENG-6108 durable account reservations", () => {
 
 		const outcome = await client.removeAccount({
 			connectionId: "acme-2",
-			preserveCompletedRecord: true,
 			authCleanup: () => {
 				// removeVerified throws on an auth-file write failure.
 				throw new Error("simulated auth write failure");
@@ -877,15 +876,13 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 	});
 
-	it("removeAccount with preserveCompletedRecord cancels PENDING attempts but PRESERVES finished accounts", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "preserve-logout-"));
+	it("removeAccount cancels a PENDING attempt and removes a finished account's record", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "remove-account-"));
 		const path = join(tempDir, "mcp-connections.json");
 		const client = McpConnectionStore.open(path);
 		const at = Date.now();
-		// A pending attempt: cancelled by the credential-only logout.
 		const pendingMine = nonce();
 		await client.reserveConnectionId(record("acme-2", at, pendingMine));
-		// A FINISHED account: preserved (honest unbound state after logout).
 		const finishedMine = nonce();
 		await client.reserveConnectionId(record("acme-4", at + 1, finishedMine));
 		const finished = await client.finalizeAttempt({
@@ -895,19 +892,8 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 		expect(finished).toBe("committed");
 
-		const removedCredentialOnly = await client.removeAccount({
-			connectionId: "acme-2",
-			preserveCompletedRecord: true,
-			authCleanup: () => true,
-		});
-		const preservedFinished = await client.removeAccount({
-			connectionId: "acme-4",
-			preserveCompletedRecord: true,
-			authCleanup: () => true,
-		});
-
-		expect(removedCredentialOnly).toBe("removed");
-		expect(preservedFinished).toBe("preserved");
+		const removedPending = await client.removeAccount({ connectionId: "acme-2", authCleanup: () => true });
+		expect(removedPending).toBe("removed");
 		// The stale attempt loses ownership and can NEVER re-activate.
 		const denied = await client.finalizeAttempt({
 			connectionId: "acme-2",
@@ -916,14 +902,8 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 		expect(denied).toBe("denied");
 		expect(McpConnectionStore.open(path).get("acme-2")).toBeUndefined();
-		// The finished account survives with its record (unbound display).
-		expect(McpConnectionStore.open(path).get("acme-4")?.status).toBe("connected");
-		// Without the flag, the same call removes the record entirely.
-		const removed = await client.removeAccount({
-			connectionId: "acme-4",
-			authCleanup: () => false,
-		});
-		expect(removed).toBe("removed");
+		const removedFinished = await client.removeAccount({ connectionId: "acme-4", authCleanup: () => false });
+		expect(removedFinished).toBe("removed");
 		expect(McpConnectionStore.open(path).get("acme-4")).toBeUndefined();
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});

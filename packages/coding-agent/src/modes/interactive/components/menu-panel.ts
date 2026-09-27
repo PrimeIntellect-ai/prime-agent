@@ -85,7 +85,6 @@ interface MenuListLayoutOptions extends MenuViewportProvider {
 	compactItemRows?: number;
 	scrollIndicatorRows?: number;
 	comfortableListPaddingRows?: number;
-	compactListPaddingRows?: number;
 }
 
 export interface MenuListLayout {
@@ -225,13 +224,7 @@ export function getMenuListLayout(options: MenuListLayoutOptions): MenuListLayou
 		return { compact: false, visibleItems: comfortableLayout.visibleItems };
 	}
 
-	const compactLayout = getLayoutCandidate(
-		rows,
-		options,
-		Math.max(1, options.compactItemRows),
-		options.compactListPaddingRows ?? 0,
-		true,
-	);
+	const compactLayout = getLayoutCandidate(rows, options, Math.max(1, options.compactItemRows), 0, true);
 	if (compactLayout.fits && (!comfortableLayout.fits || compactLayout.visibleItems > comfortableLayout.visibleItems)) {
 		return { compact: true, visibleItems: compactLayout.visibleItems };
 	}

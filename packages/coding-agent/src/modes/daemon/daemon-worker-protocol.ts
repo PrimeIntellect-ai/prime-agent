@@ -115,7 +115,6 @@ export type DaemonWorkerCommand =
 			capabilities?: readonly DaemonClientCapability[];
 			supportsExtensionUi?: boolean;
 	  }
-	| { id?: string; type: "worker_unsubscribe"; activeSessionId: string }
 	| { id?: string; type: "worker_register_peer_transport"; grant: DaemonWorkerPeerGrant }
 	| { id?: string; type: "worker_archive_and_shutdown" }
 	| {

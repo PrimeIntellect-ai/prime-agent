@@ -1088,30 +1088,6 @@ function rootRlmDepthFromEnv(): number {
 	return parsed;
 }
 
-function isValidSessionFile(filePath: string): boolean {
-	try {
-		const header = readSessionHeader(filePath);
-		return header?.type === "session" && typeof header.id === "string";
-	} catch {
-		return false;
-	}
-}
-
-export function findMostRecentSession(sessionDir: string): string | null {
-	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
-			.filter(isValidSessionFile)
-			.map((path) => ({ path, mtime: statSync(path).mtime }))
-			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-
-		return files[0]?.path || null;
-	} catch {
-		return null;
-	}
-}
-
 function normalizeCwd(cwd: string): string {
 	return resolve(cwd);
 }

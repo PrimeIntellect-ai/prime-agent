@@ -432,7 +432,7 @@ export class AuthStorage {
 
 	private getStoredAuthCandidate(
 		provider: string,
-		options?: { resolveCommandValue?: boolean; resolvedCommandValue?: string },
+		options?: { resolvedCommandValue?: string },
 	): AuthSourceCandidate | undefined {
 		const credential = this.data[provider];
 		if (!credential) {
@@ -450,9 +450,7 @@ export class AuthStorage {
 			identityMaterial,
 			valueMaterial:
 				commandValueMaterial ??
-				(isCommandApiKey && !options?.resolveCommandValue
-					? undefined
-					: this.getStoredCredentialValueMaterial(provider, credential)),
+				(isCommandApiKey ? undefined : this.getStoredCredentialValueMaterial(provider, credential)),
 			resolveValueMaterial: isCommandApiKey
 				? () => this.getStoredCredentialValueMaterial(provider, credential)
 				: undefined,

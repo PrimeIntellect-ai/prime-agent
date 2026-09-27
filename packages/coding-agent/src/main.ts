@@ -202,18 +202,6 @@ export interface DaemonClientStartupDecision {
 	listModels?: string | true;
 }
 
-export type InteractiveDaemonStartupDecision = DaemonClientStartupDecision;
-
-/** Retained for callers that only classify persistent interactive startup. */
-export function shouldUseDaemonInteractive(options: DaemonClientStartupDecision): boolean {
-	return (
-		options.appMode === "interactive" &&
-		!options.startupBenchmark &&
-		!options.noSession &&
-		options.listModels === undefined
-	);
-}
-
 export function shouldUseDaemonClient(options: DaemonClientStartupDecision): boolean {
 	return (
 		options.appMode !== "daemon" && !options.startupBenchmark && !options.help && options.listModels === undefined

@@ -119,8 +119,6 @@ type PendingOp =
 			 * whether a credential was actually removed.
 			 */
 			authCleanup: (connectionId: string) => boolean;
-			/** The generic logout route keeps completed records (honest unbound). */
-			preserveCompletedRecord?: boolean;
 			resolve: (result: McpRemoveAccountResult) => void;
 	  };
 
@@ -421,9 +419,7 @@ export class McpConnectionStore {
 	 * finalizeAttempt — a concurrent finalize can never re-add an orphan
 	 * credential after a disconnect removed the account.
 	 *
-	 * Outcomes: "removed" (record gone, write committed), "preserved"
-	 * (credential-only logout semantics: the completed record was kept while
-	 * the credential was removed — it shows the honest unbound state),
+	 * Outcomes: "removed" (record gone, write committed),
 	 * "credential-only" (no record existed; a credential-only integration
 	 * logged out), "logged-out" (the logout committed durably but the RECORD
 	 * write failed — the partial state is reported honestly and the logout is
@@ -466,11 +462,6 @@ export class McpConnectionStore {
 		connectionId: string;
 		/** Returns whether a credential was actually removed. */
 		authCleanup: (connectionId: string) => boolean;
-		/**
-		 * Credential-only logout semantics (the generic /logout route): pending
-		 * attempts are cancelled, completed records are PRESERVED.
-		 */
-		preserveCompletedRecord?: boolean;
 	}): Promise<McpRemoveAccountResult> {
 		return new Promise<McpRemoveAccountResult>((resolve) => {
 			let settled = false;
@@ -483,7 +474,6 @@ export class McpConnectionStore {
 				kind: "removeAccount",
 				connectionId: options.connectionId,
 				authCleanup: options.authCleanup,
-				...(options.preserveCompletedRecord ? { preserveCompletedRecord: true } : {}),
 				resolve: settle,
 			});
 			void this.flush().catch(() => settle("failed"));
@@ -806,24 +796,13 @@ export class McpConnectionStore {
 								// SURVIVES a failed logout (nothing was
 								// cancelled or claimed). Cleanup runs even when
 								// no record exists (credential-only logouts).
-								// The generic logout route preserves COMPLETED
-								// records (they show the honest unbound state)
-								// while cancelling PENDING attempts.
 								const credentialRemoved = operation.authCleanup(operation.connectionId);
-								const existing = records.get(operation.connectionId);
-								const existed = existing !== undefined;
-								const removeRecord =
-									existed && (!operation.preserveCompletedRecord || existing.status === "pending");
-								if (removeRecord) {
-									records.delete(operation.connectionId);
-								}
-								const outcome: McpRemoveAccountResult = removeRecord
+								const existed = records.delete(operation.connectionId);
+								const outcome: McpRemoveAccountResult = existed
 									? "removed"
-									: existed
-										? "preserved"
-										: credentialRemoved
-											? "credential-only"
-											: "missing";
+									: credentialRemoved
+										? "credential-only"
+										: "missing";
 								deferred.push((didCommit) =>
 									didCommit
 										? operation.resolve(outcome)

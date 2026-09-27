@@ -5,14 +5,13 @@ import { getModels } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
-import { findSessionModelWithReadinessWait, restoreModelFromSession } from "../../../src/core/model-resolver.js";
+import { findSessionModelWithReadinessWait } from "../../../src/core/model-resolver.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 
 const SAVED_PROVIDER = "prime-inference";
 /** A public Prime Inference model that exists only in the (delayed) live catalog. */
 const CATALOG_ONLY_MODEL_ID = "test/catalog-only-restore-canary";
-const FALLBACK_MODEL_ID = "z-ai/glm-5.3";
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => {
@@ -86,44 +85,6 @@ describe("session model restore waits for catalog readiness", () => {
 		for (const dir of tempDirs.splice(0)) {
 			rmSync(dir, { recursive: true, force: true });
 		}
-	});
-
-	test("restoreModelFromSession restores a saved model once the delayed catalog refresh settles", async () => {
-		stubDelayedCatalogFetch(40);
-		const registry = ModelRegistry.create(primeAuthStorage(), join(tempDirs[0]!, "models.json"));
-
-		const restored = await restoreModelFromSession(
-			SAVED_PROVIDER,
-			CATALOG_ONLY_MODEL_ID,
-			undefined,
-			false,
-			registry,
-			2_000,
-		);
-
-		expect(restored.model).toMatchObject({ provider: SAVED_PROVIDER, id: CATALOG_ONLY_MODEL_ID });
-		expect(restored.fallbackMessage).toBeUndefined();
-	});
-
-	test("restoreModelFromSession falls back to the current model when the bounded wait expires", async () => {
-		stubDelayedCatalogFetch(150);
-		const registry = ModelRegistry.create(primeAuthStorage(), join(tempDirs[0]!, "models.json"));
-		const currentModel = registry.find(SAVED_PROVIDER, FALLBACK_MODEL_ID);
-		expect(currentModel).toBeDefined();
-
-		const restored = await restoreModelFromSession(
-			SAVED_PROVIDER,
-			CATALOG_ONLY_MODEL_ID,
-			currentModel,
-			false,
-			registry,
-			25,
-		);
-
-		expect(restored.model).toMatchObject({ provider: SAVED_PROVIDER, id: FALLBACK_MODEL_ID });
-		expect(restored.fallbackMessage).toBe(
-			`Could not restore model ${SAVED_PROVIDER}/${CATALOG_ONLY_MODEL_ID} (model no longer exists). Using ${SAVED_PROVIDER}/${FALLBACK_MODEL_ID}.`,
-		);
 	});
 
 	test("findSessionModelWithReadinessWait restores a saved model after the delayed refresh settles", async () => {

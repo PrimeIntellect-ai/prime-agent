@@ -97,9 +97,7 @@ function executeCommand(commandConfig: string): string | undefined {
 	return result;
 }
 
-/**
- * Resolve all header values using the same resolution logic as API keys.
- */
+/** Like resolveConfigValue, but always re-runs "!" commands instead of reading the command-result cache. */
 export function resolveConfigValueUncached(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommandUncached(config);

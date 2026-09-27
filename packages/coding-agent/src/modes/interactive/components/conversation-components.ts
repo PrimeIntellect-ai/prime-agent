@@ -50,7 +50,6 @@ export interface ConversationComponentsOptions {
 	getToolDefinition: (name: string) => ToolExecutionDefinition | undefined;
 	markdownTheme?: MarkdownTheme;
 	hideThinkingBlock?: boolean;
-	toolsExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
@@ -161,14 +160,14 @@ export function createShellCompletionComponent(
 	return component;
 }
 
-/** Build conversation components from a message list, matching tool results to their calls. */
+/** Test-only transcript replay; production replays via InteractiveMode.renderSessionContext. */
 export function buildConversationComponents(
 	messages: readonly AgentMessage[],
 	options: ConversationComponentsOptions,
 ): Component[] {
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
-	const expanded = options.toolsExpanded ?? false;
+	const expanded = false;
 	const editDiffsExpanded = options.editDiffsExpanded ?? false;
 
 	for (const message of messages) {

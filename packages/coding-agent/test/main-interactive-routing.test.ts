@@ -5,10 +5,10 @@ import { describe, expect, test } from "vitest";
 import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 import {
+	type DaemonClientStartupDecision,
 	type DaemonInteractiveSessionManagerDecision,
 	daemonServerDefaultSessionConfig,
 	findActiveDaemonSessionSummaryForSessionFile,
-	type InteractiveDaemonStartupDecision,
 	isClientOwnedDaemonSession,
 	parseAgentsViewCommand,
 	resolveActiveSessionLookupFailure,
@@ -20,7 +20,6 @@ import {
 	shouldRejectNonInteractiveBareResume,
 	shouldUseDaemonClient,
 	shouldUseDaemonClientRuntime,
-	shouldUseDaemonInteractive,
 	shouldUseEphemeralSessionManagerForDaemonInteractive,
 } from "../src/main.js";
 import { DaemonSessionRecoveringError } from "../src/modes/daemon/daemon-errors.js";
@@ -46,7 +45,7 @@ describe("interactive startup routing", () => {
 		["startup benchmark", { appMode: "interactive", startupBenchmark: true }, false],
 		["help", { appMode: "interactive", startupBenchmark: false, help: true }, false],
 		["model listing", { appMode: "interactive", startupBenchmark: false, listModels: true }, false],
-	] satisfies Array<[string, InteractiveDaemonStartupDecision, boolean]>)(
+	] satisfies Array<[string, DaemonClientStartupDecision, boolean]>)(
 		"routes %s to the daemon client runtime: %s",
 		(_label, decision, expected) => {
 			expect(shouldUseDaemonClient(decision)).toBe(expected);
@@ -69,23 +68,6 @@ describe("interactive startup routing", () => {
 			}),
 		).toBe(false);
 	});
-
-	test.each([
-		["normal interactive startup", { appMode: "interactive", startupBenchmark: false }, true],
-		["print mode", { appMode: "print", startupBenchmark: false }, false],
-		["json mode", { appMode: "json", startupBenchmark: false }, false],
-		["rpc mode", { appMode: "rpc", startupBenchmark: false }, false],
-		["daemon mode", { appMode: "daemon", startupBenchmark: false }, false],
-		["startup benchmark", { appMode: "interactive", startupBenchmark: true }, false],
-		["--no-session", { appMode: "interactive", startupBenchmark: false, noSession: true }, false],
-		["--list-models", { appMode: "interactive", startupBenchmark: false, listModels: true }, false],
-		["--list-models search", { appMode: "interactive", startupBenchmark: false, listModels: "claude" }, false],
-	] satisfies Array<[string, InteractiveDaemonStartupDecision, boolean]>)(
-		"uses daemon-backed interactive mode for %s: %s",
-		(_label, decision, expected) => {
-			expect(shouldUseDaemonInteractive(decision)).toBe(expected);
-		},
-	);
 
 	test("rejects interactive-only selectors before non-interactive startup", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);

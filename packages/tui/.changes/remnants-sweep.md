@@ -1,0 +1,1 @@
+- Moved `chalk` to devDependencies (only tests use it) and removed the unused `@xterm/xterm` devDependency.

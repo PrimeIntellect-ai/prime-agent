@@ -4139,12 +4139,6 @@ export class AgentDaemon {
 					this.write(client, success(command.id, "attach", summaryForActiveSession(state)));
 					return;
 				}
-				case "worker_unsubscribe": {
-					const state = this.getSessionState(command.activeSessionId);
-					this.detachClientFromSession(client, state);
-					this.write(client, success(command.id, "detach"));
-					return;
-				}
 				case "worker_archive_and_shutdown": {
 					// Close sessions first so direct peers read session_closed "killed", not a daemon shutdown.
 					for (const state of [...this.sessions.values()]) {

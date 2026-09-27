@@ -15,7 +15,6 @@ interface OnboardingPickerOptions {
 	prompt?: string;
 	searchPlaceholder?: string;
 	note?: string;
-	continueLabel?: string;
 	visibleRows?: number;
 	rowWidth?: number;
 	requestRender?: () => void;
@@ -117,16 +116,7 @@ export class OnboardingPickerComponent implements Component, Focusable {
 			truncateToWidth(field, safeWidth, "", true) + " ".repeat(Math.max(0, safeWidth - visibleWidth(field))),
 		);
 		lines.push(this.line(safeWidth, ""));
-		lines.push(
-			this.renderRow(
-				safeWidth,
-				rowWidth,
-				this.config.continueLabel ?? "Continue",
-				false,
-				this.selectedIndex === 0,
-				background,
-			),
-		);
+		lines.push(this.renderRow(safeWidth, rowWidth, "Continue", false, this.selectedIndex === 0, background));
 
 		const end = Math.min(filtered.length, this.scrollTop + visibleRows);
 		for (let index = this.scrollTop; index < end; index++) {
