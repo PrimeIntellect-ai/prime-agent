@@ -154,9 +154,11 @@ struct FauxSharedState {
     received_api_keys: Mutex<Vec<Option<String>>>,
     pending: Mutex<Vec<FauxResponseStep>>,
     prompt_cache: Mutex<HashMap<String, String>>,
-    /// The last served step, held for the repeat-last mode (an exhausted
-    /// queue re-serves it instead of erroring). Verification harness
-    /// only; see [`FauxProviderRegistration::set_repeat_last_response`].
+    /// The last served step, recorded on every serve: an exhausted queue
+    /// re-serves it in repeat-last mode instead of erroring (the record
+    /// is kept regardless of the mode, so repeat-last switched on after
+    /// serving still has a step to re-serve). Verification harness only;
+    /// see [`FauxProviderRegistration::set_repeat_last_response`].
     last_served: Mutex<Option<FauxResponseStep>>,
     /// Repeat-last mode (verification harness only): `false` by default,
     /// so an exhausted queue keeps erroring with "No more faux responses
@@ -168,30 +170,26 @@ struct FauxSharedState {
 impl FauxSharedState {
     /// The next scripted step: the queued front, or — in repeat-last mode
     /// — the last served step again once the queue ran dry, or `None`
-    /// (the caller's exhaustion error).
+    /// (the caller's exhaustion error). The dequeue and the last-served
+    /// publish share one hold of the pending `Mutex`, so overlapping
+    /// stream calls cannot observe an emptied queue with a stale or
+    /// missing last-served step.
     ///
     /// # Panics
     ///
     /// Panics if the pending or last-served `Mutex` is poisoned (a thread
     /// panicked while holding it).
     fn next_step(&self) -> Option<FauxResponseStep> {
-        let step = self.pending.lock().unwrap().pop_front_step();
-        match step {
+        let repeat = self
+            .repeat_last_response
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut pending = self.pending.lock().unwrap();
+        match pending.pop_front_step() {
             Some(step) => {
-                if self
-                    .repeat_last_response
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    *self.last_served.lock().unwrap() = Some(step.clone());
-                }
+                *self.last_served.lock().unwrap() = Some(step.clone());
                 Some(step)
             }
-            None if self
-                .repeat_last_response
-                .load(std::sync::atomic::Ordering::Relaxed) =>
-            {
-                self.last_served.lock().unwrap().clone()
-            }
+            None if repeat => self.last_served.lock().unwrap().clone(),
             None => None,
         }
     }
@@ -270,9 +268,11 @@ impl FauxProviderRegistration {
     /// turn end for as long as an arrival latency keeps a pause in
     /// flight, so a harness that must never run dry opts in
     /// (`register_faux_provider_from_script`, the `repeatLastResponse`
-    /// script key). The default stays `false`: the finite queue and its
-    /// exhaustion error are the response-budget contract the existing
-    /// harnesses script against.
+    /// script key). The last served step is recorded on every serve, so
+    /// switching the mode on after responses have already been served
+    /// still has a step to re-serve. The default stays `false`: the
+    /// finite queue and its exhaustion error are the response-budget
+    /// contract the existing harnesses script against.
     pub fn set_repeat_last_response(&self, repeat: bool) {
         self.state
             .repeat_last_response

@@ -315,6 +315,62 @@ async fn parses_the_repeat_last_response_script_key_into_the_registration() {
 }
 
 #[tokio::test]
+async fn repeat_last_response_switched_on_after_serving_replays_the_last_step() {
+    let registration = register();
+    registration.set_responses(vec![text_msg("first"), text_msg("last")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let first = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let last = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    // The queue is dry and the mode was off while it drained; switching
+    // repeat-last on now still has the last served step recorded.
+    registration.set_repeat_last_response(true);
+    let replay = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+
+    assert_eq!(first.content, vec![faux_text("first")]);
+    assert_eq!(last.content, vec![faux_text("last")]);
+    assert_eq!(replay.content, vec![faux_text("last")]);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn overlapping_streams_in_repeat_last_mode_never_hit_the_exhaustion_error() {
+    let registration = register();
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![text_msg("only")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let calls: Vec<_> = (0..8)
+        .map(|_| {
+            let model = registration.get_model();
+            let context = context.clone();
+            tokio::spawn(async move { complete(&model, &context, None).await })
+        })
+        .collect();
+    for call in calls {
+        let response = call.await.unwrap().expect("the call completes");
+        assert_eq!(response.content, vec![faux_text("only")]);
+        assert_ne!(response.stop_reason, StopReason::Error);
+    }
+    assert_eq!(registration.get_pending_response_count(), 0);
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn can_replace_and_append_queued_responses() {
     let registration = register();
     registration.set_responses(vec![text_msg("first")]);
