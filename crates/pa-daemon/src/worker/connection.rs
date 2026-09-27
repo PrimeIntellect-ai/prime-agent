@@ -424,7 +424,7 @@ impl Worker {
                     if command_type == "worker_register_peer_transport" {
                         let response =
                             self.handle_worker_register_peer_transport(&payload, generation);
-                        self.write_response_frame(&sink, &request_id, &response)
+                        self.write_response_frame(&sink, &request_id, response)
                             .await;
                         continue;
                     }
@@ -435,9 +435,13 @@ impl Worker {
                     // reads from other clients.
                     if command_type == "shutdown" {
                         let response = self.dispatch(&command_type, &payload).await;
-                        self.write_response_frame(&sink, &request_id, &response)
+                        // The reply must precede the exit (the response is
+                        // consumed by the write), so capture the outcome
+                        // before handing the response over.
+                        let success = response.success;
+                        self.write_response_frame(&sink, &request_id, response)
                             .await;
-                        if response.success {
+                        if success {
                             self.exit_after_close();
                         }
                         continue;
@@ -449,7 +453,7 @@ impl Worker {
                     tokio::spawn(async move {
                         let response = worker.dispatch(&command_type, &payload).await;
                         worker
-                            .write_response_frame(&sink, &request_id, &response)
+                            .write_response_frame(&sink, &request_id, response)
                             .await;
                     });
                 }
@@ -463,8 +467,7 @@ impl Worker {
                             PEER_COMMAND_NOT_ALLOWED,
                             None,
                         );
-                        self.write_response_frame(&sink, &request_id, &failure)
-                            .await;
+                        self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
                     // Session-plane commands run concurrently for the same
@@ -476,7 +479,10 @@ impl Worker {
                     let session = Arc::clone(session);
                     tokio::spawn(async move {
                         let response = worker.dispatch(&command_type, &payload).await;
-                        if response.success {
+                        // The attach/detach bookkeeping reads the outcome
+                        // before the write consumes the response.
+                        let success = response.success;
+                        if success {
                             match command_type.as_str() {
                                 "attach" => session.mark_attached(),
                                 "detach" => session.mark_detached(),
@@ -484,7 +490,7 @@ impl Worker {
                             }
                         }
                         worker
-                            .write_response_frame(&sink, &request_id, &response)
+                            .write_response_frame(&sink, &request_id, response)
                             .await;
                     });
                 }
@@ -499,8 +505,7 @@ impl Worker {
                             PEER_COMMAND_NOT_ALLOWED,
                             None,
                         );
-                        self.write_response_frame(&sink, &request_id, &failure)
-                            .await;
+                        self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
                     // Delivery runs concurrently, like the other planes.
@@ -511,7 +516,7 @@ impl Worker {
                     tokio::spawn(async move {
                         let response = worker.dispatch(&command_type, &payload).await;
                         worker
-                            .write_response_frame(&sink, &request_id, &response)
+                            .write_response_frame(&sink, &request_id, response)
                             .await;
                     });
                 }
@@ -541,7 +546,7 @@ impl Worker {
                 "Worker authentication failed",
                 None,
             );
-            self.write_response_frame(sink, request_id, &failure).await;
+            self.write_response_frame(sink, request_id, failure).await;
             return AuthOutcome::Failed;
         }
         match self.authenticate(payload) {
@@ -569,13 +574,13 @@ impl Worker {
                 *role.lock().unwrap() = ConnectionRole::Supervisor { generation };
                 self.supervisor_claims
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                self.write_response_frame(sink, request_id, &success).await;
+                self.write_response_frame(sink, request_id, success).await;
                 AuthOutcome::Authenticated
             }
             Err(error) => {
                 let failure =
                     response_failure(Some(request_id), "worker_auth", &error.to_string(), None);
-                self.write_response_frame(sink, request_id, &failure).await;
+                self.write_response_frame(sink, request_id, failure).await;
                 AuthOutcome::Failed
             }
         }
@@ -636,19 +641,37 @@ impl Worker {
             .context("write private frame")
     }
 
+    /// Write a frame whose payload skips the whole-frame re-buffer (see
+    /// `write_frame_segments`); the response path serializes its payload
+    /// once and hands it straight to the socket.
+    pub(crate) async fn write_frame_segments(
+        &self,
+        writer: &Arc<tokio::sync::Mutex<Box<dyn pa_types::platform::transport::AsyncWriteHalf>>>,
+        header: &Value,
+        payload: &[u8],
+    ) -> Result<()> {
+        let mut guard = writer.lock().await;
+        write_frame_segments(&mut *guard, header, payload, DEFAULT_PRIVATE_FRAME_LIMITS)
+            .await
+            .context("write private frame")
+    }
+
+    /// Write one command response. The response is CONSUMED: its trees and
+    /// the serialized payload drop before the trim, so every transient the
+    /// response path allocated returns to the OS in the phase that peaked
+    /// (before, the response outlived the trim and its freed heap stayed
+    /// in the arenas until the next large phase).
     pub(crate) async fn write_response_frame(
         &self,
         sink: &ConnectionSink,
         request_id: &str,
-        response: &DaemonResponse,
+        response: DaemonResponse,
     ) {
         // Flush barrier: every event frame broadcast before this response
         // reaches the connection's writer first, so a command response
         // never overtakes the events its command emitted (the TS worker
         // gets this ordering for free from synchronous writes).
         sink.wait_flushed(self.events.current_seq()).await;
-        let payload =
-            serde_json::to_vec(&crate::protocol::response_line(response)).unwrap_or_default();
         let mut header = json!({
             "kind": "outbound",
             "requestId": request_id,
@@ -671,14 +694,25 @@ impl Worker {
                 header["activeSessionId"] = json!(active_session_id);
             }
         }
-        if let Err(error) = self.write_frame(&sink.writer, &header, &payload).await {
+        // Serialize the line from the borrowed trees (no per-response
+        // payload clone) and write the frame without re-buffering the
+        // payload; the wire bytes are identical to the tree-built line.
+        let payload = crate::protocol::response_line_bytes(&response);
+        let payload_len = payload.len();
+        if let Err(error) = self
+            .write_frame_segments(&sink.writer, &header, &payload)
+            .await
+        {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
         // A large frame (an attach snapshot, a full-history tree) carried
-        // big transient Value trees; the frame is out, so return their
+        // big transient Value trees; the frame is out and both the payload
+        // bytes and the response's own trees are freed, so return their
         // freed heap to the OS instead of letting the arenas hold the
         // phase's peak for the process lifetime.
-        pa_types::memory_release::trim_freed_heap_if_large(payload.len());
+        drop(payload);
+        drop(response);
+        pa_types::memory_release::trim_freed_heap_if_large(payload_len);
     }
 }
 

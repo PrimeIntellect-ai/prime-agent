@@ -6,8 +6,10 @@
 mod auth;
 mod bash;
 mod heartbeats;
+mod model_picker;
 mod prompt;
 mod queue;
+mod settings;
 mod stream;
 
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
@@ -15,9 +17,13 @@ pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};
 use heartbeats::paused_heartbeat_count;
 pub(crate) use heartbeats::HeartbeatsUpdate;
+pub(crate) use model_picker::picker_viewport_rows;
+pub(crate) use model_picker::ModelCatalogUpdate;
 use prompt::PromptOrder;
 pub(crate) use prompt::PromptSubmitNote;
 pub(crate) use prompt::SubmitBehavior;
+use settings::PendingConfirm;
+pub(crate) use settings::ReloadNote;
 use stream::already_running_warning;
 pub(crate) use stream::resume_hint_from_stats;
 use stream::streaming_tray_hint;
@@ -84,10 +90,6 @@ const SELECTION_AUTO_SCROLL_DELAY: Duration = Duration::from_millis(150);
 /// off the render path).
 const UI_REQUEST_TIMEOUT_MS: u64 = 10_000;
 
-/// How long a fetched model catalog stays fresh (TS
-/// `MODEL_CATALOG_REFRESH_TTL_MS`); a `/model` open past it refreshes
-/// again in the background.
-const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_mins(1);
 /// Cap on the detach request during the exit path: the client must exit
 /// promptly even when the worker socket is wedged.
 const EXIT_DETACH_TIMEOUT_MS: u64 = 600;
@@ -112,10 +114,6 @@ pub(crate) type ShareNote = Result<GistOutcome, String>;
 /// the settled summary (TS `onProgress`'s status row + the arm's awaited
 /// result).
 pub(crate) type TracesUploadNote = crate::traces::TraceUploadAllNote;
-
-/// The `/reload` task's report: the daemon reloaded the session's live
-/// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
-pub(crate) type ReloadNote = Result<(), String>;
 
 /// One backgrounded compaction-abort outcome (the abort supervision's UI
 /// recovery): a failed abort request surfaces as the transcript note and
@@ -147,13 +145,6 @@ pub(crate) struct CommandCatalogUpdate {
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
-/// A landed `get_model_catalog` refresh: the full catalog and the providers
-/// with configured auth (TS `AgentConnectionModelCatalog`).
-pub(crate) struct ModelCatalogUpdate {
-    pub models: Vec<pa_types::ai::Model>,
-    pub configured_providers: std::collections::HashSet<String>,
-}
-
 /// A `/share` upload in flight: the abortable task and the temp export.
 pub(crate) struct ShareRun {
     /// The upload task; aborting it kills `gh` (`kill_on_drop`).
@@ -178,17 +169,6 @@ struct TraceUploadAllRun {
 enum TracesLoginIntent {
     Login,
     Enable,
-}
-
-/// The question a pending confirm answers (TS `showExtensionConfirm`
-/// callers await inline; the TUI loop parks the continuation instead).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PendingConfirm {
-    /// `/import <path>`: replace the current session with the JSONL file.
-    Import { path: String },
-    /// The import's stored session cwd is gone: `Yes` retries with the
-    /// fallback cwd (TS `promptForMissingSessionCwd`).
-    ImportCwdFallback { path: String, fallback_cwd: String },
 }
 
 pub(crate) struct SessionUi {
@@ -1776,26 +1756,100 @@ impl SessionUi {
     }
 
     /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
-    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// slice (`onLoginCompleted`): a COMPLETED Anthropic subscription
     /// login draws the ban-risk warning once per session, gated by the
     /// settings toggle (`warnings.anthropicExtraUsage`, TS default
-    /// true — an absent settings seam keeps the default).
-    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
+    /// true — an absent settings seam keeps the warning ENABLED).
+    /// The warning STACKS — `note_as` would rewrite the just-shown
+    /// login-success row in place — and carries the same `⚠` prefix as
+    /// the credential-detection arm.
+    pub(crate) fn maybe_warn_anthropic_subscription_auth(
+        &mut self,
+        provider: &str,
+        view: &mut AgentView,
+    ) {
         if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
             || self.anthropic_subscription_warning_shown
-            || self
+            || !self
                 .client_settings
                 .as_ref()
-                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+                .is_none_or(|settings| settings.warnings_anthropic_extra_usage())
         {
             return;
         }
         self.anthropic_subscription_warning_shown = true;
-        self.note_as(
-            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
-            StatusKind::Warning,
-            view,
-        );
+        view.push_entry(ChatEntry::Status {
+            text: format!("\u{26a0} {ANTHROPIC_SUBSCRIPTION_AUTH_WARNING}"),
+            kind: StatusKind::Warning,
+        });
+        self.last_status_index = None;
+        self.dirty = true;
+    }
+
+    /// The credential-detection arm of TS
+    /// `maybeWarnAboutAnthropicSubscriptionAuth` (#2645): the startup,
+    /// model-selection, and api-key-save triggers need the ACTIVE
+    /// CREDENTIAL's shape — the composition root's
+    /// [`ProviderAuthCommands::anthropic_subscription_warning`] resolves
+    /// it (a stored `Oauth` credential or an `sk-ant-oat` key is the
+    /// subscription; a plain API key never warns). The login-completed
+    /// slice — where the just-settled subscription OAuth login itself
+    /// proves the shape — lives in
+    /// [`Self::maybe_warn_anthropic_subscription_auth`]. Both share the
+    /// once-per-run gate and the `warnings.anthropicExtraUsage` setting.
+    pub(crate) async fn maybe_warn_anthropic_subscription_auth_if_subscribed(
+        &mut self,
+        provider: Option<&str>,
+        view: &mut AgentView,
+    ) {
+        if self.anthropic_subscription_warning_shown {
+            return;
+        }
+        let warnings_enabled = self
+            .client_settings
+            .as_ref()
+            .is_none_or(|settings| settings.warnings_anthropic_extra_usage());
+        if !warnings_enabled || provider != Some("anthropic") {
+            return;
+        }
+        let Some(auth) = self.provider_auth.clone() else {
+            return;
+        };
+        if let Some(warning) = auth.0.anthropic_subscription_warning().await {
+            self.anthropic_subscription_warning_shown = true;
+            // The warning STACKS, never rewrites: `note_as` would replace
+            // the just-shown `Model: ...` or login-success confirmation
+            // row in place (TS `showStatus`'s back-to-back rewrite); a
+            // plain pushed row keeps both, and clearing the status index
+            // keeps the NEXT status from rewriting the warning either.
+            view.push_entry(ChatEntry::Status {
+                text: format!("\u{26a0} {warning}"),
+                kind: StatusKind::Warning,
+            });
+            self.last_status_index = None;
+            self.dirty = true;
+        }
+    }
+
+    /// The active model's provider from the daemon's state (TS
+    /// `getCurrentModel().provider`); best-effort, silent on failure.
+    pub(crate) async fn current_model_provider(&mut self) -> Option<String> {
+        let state = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::GetState {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+            .ok()?;
+        state
+            .get("model")?
+            .get("provider")?
+            .as_str()
+            .map(str::to_string)
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to
@@ -2735,164 +2789,6 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The shipped CHANGELOG.md path (TS `getChangelogPath`): the package
-    /// directory (`PI_PACKAGE_DIR` wins, else the directory of the running
-    /// executable — the TS bun-binary layout) plus `CHANGELOG.md`.
-    fn changelog_path() -> std::path::PathBuf {
-        let package_dir = match std::env::var("PI_PACKAGE_DIR") {
-            Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-            _ => std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-                .unwrap_or_else(|| PathBuf::from(".")),
-        };
-        package_dir.join("CHANGELOG.md")
-    }
-
-    // ------------------------------------------------------------------
-    // Session import (/import)
-    // ------------------------------------------------------------------
-
-    /// The import confirm (TS `handleImportCommand`'s
-    /// `showExtensionConfirm`): parse the path, park the confirm, and let
-    /// the panel answer it.
-    fn open_import_confirm(&mut self, command_text: &str, view: &mut AgentView) {
-        let Some(input_path) = crate::export_share::path_command_argument(command_text, "/import")
-        else {
-            self.error_row("Usage: /import <path.jsonl>", view);
-            return;
-        };
-        view.editor.set_text("");
-        view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
-            "Import session",
-            &format!("Replace current session with {input_path}?"),
-        ));
-        self.pending_confirm = Some(PendingConfirm::Import { path: input_path });
-        self.dirty = true;
-    }
-
-    /// One key press while the confirm panel owns the frame.
-    async fn handle_confirm_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        let action = {
-            let Some(confirm) = view.confirm.as_mut() else {
-                return Ok(());
-            };
-            let kb = view.editor.keybindings();
-            confirm.handle_key(kb, &id)
-        };
-        match action {
-            crate::confirm::ConfirmAction::None => {}
-            crate::confirm::ConfirmAction::Cancel => {
-                view.confirm = None;
-                self.pending_confirm = None;
-            }
-            crate::confirm::ConfirmAction::Select(option) => {
-                let pending = self.pending_confirm.take();
-                view.confirm = None;
-                if option == "Yes" {
-                    match pending {
-                        Some(PendingConfirm::Import { path }) => {
-                            self.run_import(&path, None, view).await?;
-                        }
-                        Some(PendingConfirm::ImportCwdFallback { path, fallback_cwd }) => {
-                            self.run_import(&path, Some(&fallback_cwd), view).await?;
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// The import request and its outcomes (TS `handleImportCommand`'s
-    /// `importFromJsonl` call: the cancelled note, the typed error
-    /// surfaces, and the successful rebuild + status).
-    async fn run_import(
-        &mut self,
-        input_path: &str,
-        cwd_override: Option<&str>,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let response = self
-            .client
-            .request(DaemonCommand::ImportJsonl {
-                id: None,
-                active_session_id: self.active_session_id.clone(),
-                input_path: input_path.to_string(),
-                cwd_override: cwd_override.map(str::to_string),
-                rest: Map::default(),
-            })
-            .await?;
-        if !response.success {
-            let error = response.error.unwrap_or_default();
-            match response.error_info {
-                Some(pa_types::daemon::DaemonErrorInfo::SessionImportFileNotFound {
-                    file_path,
-                }) => {
-                    self.error_row(
-                        &format!("Failed to import session: File not found: {file_path}"),
-                        view,
-                    );
-                }
-                Some(pa_types::daemon::DaemonErrorInfo::MissingSessionCwd { issue }) => {
-                    // TS `promptForMissingSessionCwd`: the confirm carries
-                    // the issue's text, and `Yes` retries with the fallback
-                    // cwd as the override.
-                    let session_cwd = issue
-                        .get("sessionCwd")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let fallback_cwd = issue
-                        .get("fallbackCwd")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
-                        "Session cwd not found",
-                        &format!(
-                            "cwd from session file does not exist\n{session_cwd}\n\ncontinue in current cwd\n{fallback_cwd}"
-                        ),
-                    ));
-                    self.pending_confirm = Some(PendingConfirm::ImportCwdFallback {
-                        path: input_path.to_string(),
-                        fallback_cwd,
-                    });
-                    self.dirty = true;
-                }
-                _ => {
-                    self.error_row(&format!("Failed to import session: {error}"), view);
-                }
-            }
-            return Ok(());
-        }
-        if response
-            .data
-            .as_ref()
-            .and_then(|data| data.get("cancelled"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            self.note("Import cancelled", view);
-            return Ok(());
-        }
-        // TS `renderCurrentSessionState`: the replacement's fresh branch
-        // renders from scratch, then the status row lands.
-        self.rebuild_transcript(view).await;
-        self.refresh_stats().await;
-        // The transcript rebuild ran before the refresh, so the refreshed
-        // pair rides the chrome through this tray rebuild — without it
-        // the title keeps the pre-import own cost and subagent aggregate
-        // until the next settled turn.
-        self.rebuild_tray(view);
-        self.note(&format!("Session imported from: {input_path}"), view);
-        Ok(())
-    }
-
     // ------------------------------------------------------------------
     // Update (/update)
     // ------------------------------------------------------------------
@@ -3359,678 +3255,6 @@ impl SessionUi {
             Err(message) => self.error_row(&message, view),
         }
         Ok(())
-    }
-
-    // ------------------------------------------------------------------
-    // Settings (/settings)
-    // ------------------------------------------------------------------
-
-    /// `/settings` (TS `showSettingsSelector`): read the daemon state and
-    /// the settings seam, then mount the menu.
-    async fn open_settings_menu(&mut self, view: &mut AgentView) {
-        let Some(state) = self.connection_state(view).await else {
-            // The failure note already rendered.
-            return;
-        };
-        let settings = self.client_settings.clone();
-        let mut values = crate::settings_menu::SettingsCurrentValues {
-            autocompact: state
-                .get("autoCompactionEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            steering_mode: state
-                .get("steeringMode")
-                .and_then(Value::as_str)
-                .unwrap_or("all")
-                .to_string(),
-            follow_up_mode: state
-                .get("followUpMode")
-                .and_then(Value::as_str)
-                .unwrap_or("one-at-a-time")
-                .to_string(),
-            thinking_level: state
-                .get("thinkingLevel")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            available_thinking_levels: state
-                .get("availableThinkingLevels")
-                .and_then(Value::as_array)
-                .map(|levels| {
-                    levels
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            ..Default::default()
-        };
-        // The settings-seam reads (TS `settingsManager` getters; the theme
-        // default matches TS `getTheme() || "prime"`). A missing seam keeps
-        // the TS defaults.
-        if let Some(settings) = &settings {
-            values.show_images = settings.show_images();
-            values.auto_resize_images = settings.image_auto_resize();
-            values.block_images = settings.block_images();
-            values.skill_commands = settings.enable_skill_commands();
-            values.builtin_skills = settings.enable_builtin_skills();
-            values.hardware_cursor = settings.show_hardware_cursor();
-            values.editor_padding = settings.editor_padding_x();
-            values.autocomplete_max_visible = settings.autocomplete_max_visible();
-            values.clear_on_shrink = settings.clear_on_shrink();
-            values.terminal_progress = settings.show_terminal_progress();
-            values.fullscreen = settings.fullscreen();
-            values.idle_eviction_minutes = settings.idle_eviction_minutes();
-            values.mermaid = settings.mermaid_rendering_mode();
-            values.quiet_startup = settings.quiet_startup();
-            values.tree_filter_mode = settings.tree_filter_mode();
-            values.warnings_anthropic_extra_usage = settings.warnings_anthropic_extra_usage();
-            values.theme = settings.theme().unwrap_or_else(|| "prime".to_string());
-        } else {
-            values.show_images = true;
-            values.auto_resize_images = true;
-            values.skill_commands = true;
-            values.builtin_skills = true;
-            values.fullscreen = self.fullscreen_enabled;
-            values.idle_eviction_minutes = "90".to_string();
-            values.mermaid = "streaming".to_string();
-            values.tree_filter_mode = "user-only".to_string();
-            values.warnings_anthropic_extra_usage = true;
-            values.theme = "prime".to_string();
-        }
-        // The registered themes (TS `getAvailableThemes`; this surface
-        // ships the builtins).
-        values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let rows = crate::settings_menu::settings_menu_rows(&values);
-        view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
-        self.track_menu_opened("settings", "command");
-        self.dirty = true;
-    }
-
-    /// One key press while the settings menu is open (TS `SettingsList`
-    /// callbacks reduced to actions the session applies).
-    async fn handle_settings_menu_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        let action = {
-            let Some(menu) = view.settings_menu.as_mut() else {
-                return Ok(());
-            };
-            menu.handle_key(&id, view.editor.keybindings())
-        };
-        match action {
-            crate::settings_menu::SettingsMenuAction::None => {}
-            crate::settings_menu::SettingsMenuAction::Cancel => {
-                view.settings_menu = None;
-            }
-            crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
-                // TS `onThemePreview`: switch live without persisting.
-                view.theme = crate::app::load_theme(&name);
-            }
-            crate::settings_menu::SettingsMenuAction::RestoreTheme { name } => {
-                // TS theme submenu cancel: preview the row's theme back.
-                view.theme = crate::app::load_theme(&name);
-            }
-            crate::settings_menu::SettingsMenuAction::Change { id, value } => {
-                self.apply_settings_change(id, &value, view).await;
-            }
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// One settings row's change (the TS `SettingsSelectorComponent`
-    /// callback switch): daemon commands for session-owned switches, the
-    /// settings seam for persisted preferences.
-    async fn apply_settings_change(&mut self, id: &str, value: &str, view: &mut AgentView) {
-        match id {
-            "autocompact" => {
-                self.daemon_switch(
-                    DaemonCommand::SetAutoCompaction {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        enabled: value == "true",
-                        rest: Map::default(),
-                    },
-                    view,
-                )
-                .await;
-            }
-            "show-images" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_show_images(value == "true") {
-                        self.error_row(&format!("{error:#}"), view);
-                        return;
-                    }
-                }
-                // The live tool-card effect (TS re-flags every tool
-                // component; the flag the view renders reads).
-                self.show_images = value == "true";
-                view.show_images = value == "true";
-            }
-            "auto-resize-images" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_image_auto_resize(enabled),
-                    value,
-                    view,
-                );
-            }
-            "block-images" => {
-                self.persist_bool_setting(
-                    |settings, blocked| settings.set_block_images(blocked),
-                    value,
-                    view,
-                );
-            }
-            "skill-commands" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_enable_skill_commands(enabled),
-                    value,
-                    view,
-                );
-                // TS `onEnableSkillCommandsChange` calls
-                // `setupAutocompleteProvider()` immediately: the cached
-                // skill list re-applies under the new setting value
-                // (no daemon round trip — the list the last refresh
-                // fetched is still the session's inventory).
-                let enabled = self
-                    .client_settings
-                    .as_ref()
-                    .is_some_and(|settings| settings.enable_skill_commands());
-                let skills = if enabled {
-                    self.skill_commands_cache.clone()
-                } else {
-                    Vec::new()
-                };
-                view.editor.set_autocomplete_skill_commands(skills);
-                self.dirty = true;
-            }
-            "builtin-skills" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_enable_builtin_skills(enabled),
-                    value,
-                    view,
-                );
-                // TS fires `handleReloadCommand()` — the toggle takes
-                // effect after a reload.
-                let _ = self.handle_reload_command(view).await;
-            }
-            "show-hardware-cursor" => {
-                // The show-images shape: a failed persist surfaces the
-                // error and changes nothing — the live flag flips only
-                // when the setting actually persisted, so the view and
-                // the on-disk state can never disagree.
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
-                        self.error_row(&format!("{error:#}"), view);
-                        return;
-                    }
-                }
-                // The live TUI effect (TS persists through the settings
-                // manager, then calls `ui.setShowHardwareCursor(enabled)`
-                // in place): the very next frame shows or hides the
-                // hardware cursor at the focused caret.
-                view.show_hardware_cursor = value == "true";
-            }
-            "editor-padding" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Ok(padding) = value.parse::<u64>() {
-                        if let Err(error) = settings.set_editor_padding_x(padding) {
-                            self.error_row(&format!("{error:#}"), view);
-                        }
-                    }
-                }
-            }
-            "autocomplete-max-visible" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Ok(max_visible) = value.parse::<u64>() {
-                        if let Err(error) = settings.set_autocomplete_max_visible(max_visible) {
-                            self.error_row(&format!("{error:#}"), view);
-                        }
-                    }
-                }
-            }
-            "clear-on-shrink" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_clear_on_shrink(enabled),
-                    value,
-                    view,
-                );
-            }
-            "terminal-progress" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_show_terminal_progress(enabled),
-                    value,
-                    view,
-                );
-            }
-            "fullscreen" => {
-                self.set_fullscreen_mode(value == "true", view);
-            }
-            "idle-eviction-minutes" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_idle_eviction_minutes(value) {
-                        self.error_row(&format!("{error:#}"), view);
-                    }
-                }
-            }
-            "steering-mode" => {
-                self.daemon_switch(
-                    DaemonCommand::SetSteeringMode {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        mode: serde_json::Value::String(value.to_string()),
-                        rest: Map::default(),
-                    },
-                    view,
-                )
-                .await;
-                // The queue delivery mode changed (TS `setSteeringMode`
-                // applies live): refresh the cache the queued-input event
-                // reads, so a submission right after the switch reports
-                // the new mode.
-                let _ = self.connection_state(view).await;
-            }
-            "follow-up-mode" => {
-                self.daemon_switch(
-                    DaemonCommand::SetFollowUpMode {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        mode: serde_json::Value::String(value.to_string()),
-                        rest: Map::default(),
-                    },
-                    view,
-                )
-                .await;
-            }
-            "transport" => {
-                let Ok(transport) = serde_json::from_value::<pa_types::ai::Transport>(
-                    serde_json::Value::String(value.to_string()),
-                ) else {
-                    return;
-                };
-                self.daemon_switch(
-                    DaemonCommand::SetTransport {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        transport,
-                        rest: Map::default(),
-                    },
-                    view,
-                )
-                .await;
-            }
-            "mermaid-rendering" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_mermaid_rendering_mode(value) {
-                        self.error_row(&format!("{error:#}"), view);
-                    }
-                }
-            }
-            "quiet-startup" => {
-                self.persist_bool_setting(
-                    |settings, quiet| settings.set_quiet_startup(quiet),
-                    value,
-                    view,
-                );
-            }
-            "tree-filter-mode" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_tree_filter_mode(value) {
-                        self.error_row(&format!("{error:#}"), view);
-                        return;
-                    }
-                }
-                // The `/tree` selector reads the live field.
-                self.tree_filter_mode = crate::tree_list::filter_mode_from_str(value);
-            }
-            "warnings-anthropic-extra-usage" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_warnings_anthropic_extra_usage(enabled),
-                    value,
-                    view,
-                );
-            }
-            "thinking" => {
-                self.apply_thinking_level(value, view).await;
-            }
-            "theme" => {
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_theme(value) {
-                        self.error_row(&format!("{error:#}"), view);
-                        return;
-                    }
-                }
-                view.theme = crate::app::load_theme(value);
-            }
-            other => {
-                self.error_row(&format!("Unknown setting: {other}"), view);
-            }
-        }
-    }
-
-    /// Persist one boolean row through the settings seam, surfacing errors.
-    fn persist_bool_setting(
-        &mut self,
-        set: impl FnOnce(&dyn crate::client_settings::ClientSettings, bool) -> anyhow::Result<()>,
-        value: &str,
-        view: &mut AgentView,
-    ) {
-        if let Some(settings) = &self.client_settings {
-            if let Err(error) = set(settings.as_ref(), value == "true") {
-                self.error_row(&format!("{error:#}"), view);
-            }
-        }
-    }
-
-    /// A session-switch daemon command (TS fire-and-forget with a
-    /// `showError` catch): the result never blocks the menu.
-    async fn daemon_switch(&mut self, command: DaemonCommand, view: &mut AgentView) {
-        if let Err(error) = self
-            .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), command)
-            .await
-        {
-            self.error_row(&format!("{error:#}"), view);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Fast mode, depth, fullscreen, and reload (/fast, /rlm-max-depth,
-    // /fullscreen, /reload)
-    // ------------------------------------------------------------------
-
-    /// The catalog entry for the current model (the `/fast` eligibility
-    /// check needs the provider and api, not just the id).
-    fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
-        let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
-    }
-
-    /// Recompute the `/fast` autocomplete filter (TS
-    /// `getAvailableCommands` drops `/fast` when the current model is not
-    /// fast-mode-eligible): call after every point the model id can move.
-    fn update_fast_filter(&self, view: &mut AgentView) {
-        let eligible = self
-            .current_model_entry(view)
-            .is_some_and(pa_types::ai::supports_fast_mode);
-        let mut hidden = std::collections::HashSet::new();
-        if !eligible {
-            hidden.insert("fast".to_string());
-        }
-        view.editor.set_autocomplete_hidden_commands(hidden);
-    }
-
-    /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
-    /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
-    /// dispatch is the only submission path and awaits to completion, so
-    /// toggles cannot interleave.
-    async fn handle_fast_command(&mut self, view: &mut AgentView) {
-        const UNAVAILABLE: &str = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
-        let eligible = self
-            .current_model_entry(view)
-            .is_some_and(pa_types::ai::supports_fast_mode);
-        if !eligible {
-            self.note(UNAVAILABLE, view);
-            return;
-        }
-        // TS reads `connectionState.serviceTier` (priority = on) and flips
-        // it; the refresh after the switch confirms the daemon's tier.
-        let enabled = self.service_tier.as_deref() == Some("priority");
-        let target = if enabled { "default" } else { "priority" };
-        let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(
-            serde_json::Value::String(target.to_string()),
-        ) {
-            Ok(tier) => tier,
-            Err(error) => {
-                self.error_row(&format!("{error:#}"), view);
-                return;
-            }
-        };
-        let switched = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::SetServiceTier {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    service_tier: Some(tier),
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        if let Err(error) = switched {
-            self.error_row(&format!("{error:#}"), view);
-            return;
-        }
-        // TS re-reads the state after the switch (`connection.getState()`)
-        // and patches the local tier from the response.
-        let state = self.connection_state(view).await;
-        if let Some(state) = state {
-            if let Some(tier) = state.get("serviceTier").and_then(Value::as_str) {
-                self.service_tier = Some(tier.to_string());
-            }
-        }
-        let on = self.service_tier.as_deref() == Some("priority");
-        self.note(
-            &format!("Fast mode: {}", if on { "on" } else { "off" }),
-            view,
-        );
-    }
-
-    /// `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): a missing
-    /// argument reports the depth and its source; `<int> [--global]` sets
-    /// the per-chat depth immediately and optionally the global default.
-    async fn handle_rlm_max_depth_command(&mut self, view: &mut AgentView, args: &str) {
-        let tokens: Vec<&str> = if args.is_empty() {
-            Vec::new()
-        } else {
-            args.split_whitespace().collect()
-        };
-        if tokens.is_empty() {
-            match self
-                .bounded_request(
-                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                    DaemonCommand::GetRlmMaxDepthStatus {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        rest: Map::default(),
-                    },
-                )
-                .await
-            {
-                Ok(data) => {
-                    let depth = data.get("maxDepth").and_then(Value::as_u64).unwrap_or(0);
-                    let source = data
-                        .get("source")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    self.plain_row(&format!("RLM max depth: {depth} ({source})"), view);
-                }
-                Err(error) => self.error_row(&format!("{error:#}"), view),
-            }
-            return;
-        }
-        let global = tokens.get(1) == Some(&"--global");
-        let valid = tokens.len() <= if global { 2 } else { 1 }
-            && tokens[0].chars().all(|c| c.is_ascii_digit());
-        if !valid {
-            self.note_as(
-                "Usage: /rlm-max-depth [<non-negative integer> [--global]]",
-                StatusKind::Warning,
-                view,
-            );
-            return;
-        }
-        let Ok(max_depth) = tokens[0].parse::<u64>() else {
-            self.note_as(
-                "RLM max depth must be a non-negative integer.",
-                StatusKind::Warning,
-                view,
-            );
-            return;
-        };
-        match self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::SetRlmMaxDepth {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    max_depth,
-                    global: Some(global),
-                    rest: Map::default(),
-                },
-            )
-            .await
-        {
-            Ok(data) => {
-                let saved = data
-                    .get("globalSaved")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                self.plain_row(
-                    &format!(
-                        "RLM max depth set: {max_depth}{}",
-                        if saved {
-                            " and saved as global default"
-                        } else {
-                            ""
-                        }
-                    ),
-                    view,
-                );
-                if let Some(error) = data.get("globalError").and_then(Value::as_str) {
-                    self.error_row(
-                        &format!("RLM max depth set for this chat, but the global default was not saved: {error}"),
-                        view,
-                    );
-                }
-            }
-            Err(error) => self.error_row(&format!("{error:#}"), view),
-        }
-    }
-
-    /// `/fullscreen` (TS `setFullscreenMode`): persist the preference and
-    /// report the TS status row. This surface always renders on the
-    /// alternate screen — the Rust TUI has no inline rendering mode yet
-    /// (the main-screen rendering path is flagged for the TUI-polish
-    /// lane) — so the toggle moves the persisted preference and the
-    /// reported state; TS's non-TTY branch cannot trigger here because
-    /// the surface draws its frames headless as well.
-    fn set_fullscreen_mode(&mut self, enabled: bool, view: &mut AgentView) {
-        if let Some(settings) = &self.client_settings {
-            if let Err(error) = settings.set_fullscreen(enabled) {
-                self.error_row(&format!("{error:#}"), view);
-                return;
-            }
-        }
-        self.fullscreen_enabled = enabled;
-        view.fullscreen = enabled;
-        let status = if enabled {
-            let follow = view
-                .editor
-                .keybindings()
-                .first_key("tui.viewport.follow")
-                .map_or_else(
-                    || "ctrl+shift+down".to_string(),
-                    |key| crate::keybindings::format_key_text(&key),
-                );
-            format!("Fullscreen rendering on — wheel/pageUp scroll, {follow} follows output")
-        } else {
-            "Fullscreen rendering off".to_string()
-        };
-        self.note(&status, view);
-    }
-
-    /// TS #2709: the Ctrl+O cycle saves the new level as the global
-    /// `chatDetail` setting (`settingsManager.setChatDetail`), so every
-    /// later chat opens at it. A failed save only lands in the settings
-    /// store's own diagnostics (TS `save` -> `recordError`): the chat
-    /// keeps the applied level either way, so the keybind shows no error.
-    pub(crate) fn save_chat_detail(&self, view: &AgentView) {
-        if let Some(settings) = &self.client_settings {
-            let _ = settings.set_chat_detail(view.detail.wire_name());
-        }
-    }
-
-    /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
-    /// editor (TS swaps the editor container) while the daemon reload
-    /// runs; the run loop folds the outcome in when it lands.
-    async fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
-        view.reload_box =
-            Some("Reloading keybindings, extensions, skills, prompts, themes...".to_string());
-        self.dirty = true;
-        let client = self.client.clone();
-        let active_session_id = self.active_session_id.clone();
-        let notes = self.reload_notes.clone();
-        let task = tokio::spawn(async move {
-            let outcome = client
-                .request_ok(DaemonCommand::Reload {
-                    id: None,
-                    active_session_id,
-                    rest: Map::default(),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|error| format!("{error:#}"));
-            let _ = notes.send(outcome);
-        });
-        self.reload = Some(task);
-        Ok(())
-    }
-
-    /// The `/reload` request settled (TS's post-reload client work): drop
-    /// the box, re-read the user keybindings and theme, refresh the model
-    /// catalog, and surface the TS status row.
-    pub(crate) async fn apply_reload_outcome(&mut self, outcome: ReloadNote, view: &mut AgentView) {
-        self.reload = None;
-        view.reload_box = None;
-        match outcome {
-            Ok(()) => {
-                // TS's reload re-mounts the editor container: client-side
-                // transcript state resets and the view rebuilds from the
-                // durable session store, so client status rows drop
-                // exactly like the TS re-mount.
-                self.rebuild_transcript(view).await;
-                // TS `keybindings.reload()` + the startup editor/theme
-                // re-reads; the Rust editor consumes the keybinding set,
-                // so the reloaded manager replaces it.
-                let mut keybindings = view.editor.keybindings().clone();
-                keybindings.reload();
-                view.editor.set_keybindings(keybindings);
-                // TS re-applies the settings theme (`getTheme` -> `setTheme`);
-                // an unknown name keeps the current theme (the startup
-                // loader's fallback).
-                if let Some(settings) = &self.client_settings {
-                    if let Some(name) = settings.theme() {
-                        view.theme = crate::app::load_theme(&name);
-                    }
-                }
-                // TS `refreshConnectionCatalog`: the daemon's model catalog
-                // re-fetch lands through the run loop's channel.
-                self.spawn_model_catalog_refresh();
-                // The same refresh re-fetches the slash-command catalog
-                // (skills the reload may have changed).
-                self.spawn_command_catalog_refresh();
-                // TS `showStatus`: tracked, so a back-to-back status
-                // (e.g. the `/thinking` unavailable row) rewrites it in
-                // place.
-                self.note(
-                    "Reloaded keybindings, extensions, skills, prompts, themes",
-                    view,
-                );
-            }
-            Err(error) => {
-                self.error_row(&format!("Reload failed: {error}"), view);
-            }
-        }
-        self.dirty = true;
     }
 
     /// Whether a `/reload` is in flight (the run loop must not end before
@@ -4544,37 +3768,6 @@ impl SessionUi {
         self.pending_mcp_auth.is_some()
     }
 
-    /// Open the `/model` picker over the cached catalog, its search
-    /// prefilled with `search` (the Tab-intercepted partial; empty for the
-    /// bare command). A refresh fires in the background when the snapshot
-    /// is stale (forced when a search rides the open) and lands into the
-    /// open picker.
-    async fn open_model_picker(&mut self, view: &mut AgentView, search: &str) -> Result<()> {
-        let current = self.current_model(view);
-        let thinking_level = self
-            .picker_initial_thinking_level(current.as_ref(), view)
-            .await;
-        let options = ModelPickerOptions {
-            models: self.model_catalog.clone(),
-            current,
-            configured_providers: self.model_configured_providers.clone(),
-            recent_models: self.model_recent_models.clone(),
-            thinking_level,
-            viewport_rows: picker_viewport_rows(view.terminal_rows()),
-        };
-        // TS `handleModelCommand` always opens the menu (an empty catalog
-        // renders the empty panel).
-        let crate::model_picker::ModelCommandOutcome::Open(picker) =
-            ModelPicker::open(options, search);
-        view.model_picker = Some(*picker);
-        // TS `refreshModels(initialModelSearch !== undefined)`.
-        let force = !search.trim().is_empty();
-        if self.model_refresh_due(force) {
-            self.spawn_model_catalog_refresh();
-        }
-        Ok(())
-    }
-
     /// Report a menu surface opening (`tui menu opened`, fire-and-forget
     /// like the other adoption seams): `menu` names the surface (`model`,
     /// `mcp`), `source` how it opened (`command`, `tab`).
@@ -4775,99 +3968,6 @@ impl SessionUi {
     pub(crate) fn ctrl_c_hint_expiry(&self) -> Option<std::time::Instant> {
         self.ctrl_c_hint_until
             .filter(|until| std::time::Instant::now() < *until)
-    }
-
-    /// The tray override label (TS `getTrayOverrideLabel`): the Ctrl+C
-    /// exit hint while armed, else — while the agent streams and a draft
-    /// sits in the editor — the streaming follow-up hint
-    /// (`<followUp> to queue message`). The inline pickers never reach
-    /// this from the key path (they own the whole dispatch before the
-    /// editor, TS `isInlinePickerOpen`), and the dock render skips the
-    /// tray while one is mounted.
-    pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
-        if self.ctrl_c_hint_visible() {
-            let key = self.keybindings.first_key("app.clear").map_or_else(
-                || "Ctrl+C".to_string(),
-                |key| crate::keybindings::format_key_text(&key),
-            );
-            return Some(format!("Press {key} again to exit"));
-        }
-        streaming_tray_hint(
-            &self.keybindings,
-            self.turn_active,
-            &view.editor.get_expanded_text(),
-        )
-    }
-
-    /// One key press while the `/model` picker is open: Esc/Ctrl+C close
-    /// it without applying; Enter applies the selection.
-    async fn handle_model_picker_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        // The picker consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let action = view
-            .model_picker
-            .as_mut()
-            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
-        match action {
-            Some(ModelPickerAction::None) | None => {}
-            Some(ModelPickerAction::Cancel) => {
-                view.model_picker = None;
-                self.picker_restored_draft = false;
-                self.dirty = true;
-            }
-            Some(ModelPickerAction::Apply(applied)) => {
-                view.model_picker = None;
-                // The Tab path leaves the typed `/model <partial>` behind in
-                // the editor; the command path's submission already drained
-                // it. Applying fulfills the command either way, so the
-                // editor clears (a Cancel keeps the partial for editing) —
-                // except the browse-restore path, where the editor holds the
-                // user's restored draft, not the partial: the pick fulfills
-                // the command and the draft stays.
-                if self.picker_restored_draft {
-                    self.picker_restored_draft = false;
-                } else {
-                    view.editor.set_text("");
-                }
-                // The daemon is the source of truth (TS
-                // `ensureModelProviderConfigured`'s client gate rides the
-                // connection's own configured set; the local snapshot can
-                // lag an external credential change, so the switch is
-                // sent first and the typed refusal routes the sign-in
-                // flow).
-                match self
-                    .try_set_model(&applied.provider, &applied.model_id, view)
-                    .await
-                {
-                    SetModelOutcome::Switched => {
-                        // A user-edited effort applies after the model
-                        // switch (TS `completeModelSelection`: `setModel`,
-                        // then `applyThinkingLevel` — the level row only
-                        // on success).
-                        if let Some(level) = &applied.effort {
-                            self.apply_thinking_level(level, view).await;
-                        }
-                    }
-                    // The typed refusal: the model resolved but its
-                    // provider is not signed in — the selection routes to
-                    // the provider's sign-in flow and applies after the
-                    // login lands.
-                    SetModelOutcome::NeedsSignIn => {
-                        self.begin_model_sign_in(&applied, view).await;
-                    }
-                    SetModelOutcome::Failed => {}
-                }
-            }
-        }
-        self.update_fast_filter(view);
-        Ok(())
     }
 
     /// A mouse report (TS `handleFullscreenInput`'s mouse branches):
@@ -5393,263 +4493,6 @@ impl SessionUi {
         }
     }
 
-    /// The session's current model, matched against the picker catalog (the
-    /// daemon state reports the id; the catalog entry supplies the
-    /// provider).
-    fn current_model(&self, view: &AgentView) -> Option<CurrentModel> {
-        let model_id = view.chrome.model_id.as_deref()?;
-        let model = self
-            .model_catalog
-            .iter()
-            .find(|model| model.id == model_id)?;
-        Some(CurrentModel {
-            provider: model.provider.clone(),
-            model_id: model.id.clone(),
-        })
-    }
-
-    /// Fire a background `get_model_catalog` refresh (TS
-    /// `getModelSelectorRefreshPromise` + `getConnectionAvailableModels`):
-    /// the response lands through the run loop's channel, and failures
-    /// leave the current snapshot alone.
-    pub(crate) fn spawn_model_catalog_refresh(&self) {
-        let client = self.client.clone();
-        let active_session_id = self.active_session_id.clone();
-        let updates = self.catalog_updates.clone();
-        tokio::spawn(async move {
-            let Ok(value) = client
-                .request_ok(DaemonCommand::GetModelCatalog {
-                    id: None,
-                    active_session_id,
-                    rest: Map::default(),
-                })
-                .await
-            else {
-                // TS startup fetches fail silently (`getModelCandidates`
-                // catches); the menu-open refresh surfaces the error only
-                // while the menu is open, and the picker catalogs stay as
-                // they are.
-                return;
-            };
-            let models: Vec<pa_types::ai::Model> = value
-                .get("models")
-                .cloned()
-                .and_then(|models| serde_json::from_value(models).ok())
-                .unwrap_or_default();
-            let configured_providers: std::collections::HashSet<String> = value
-                .get("configuredProviders")
-                .and_then(Value::as_array)
-                .map(|providers| {
-                    providers
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let _ = updates.send(ModelCatalogUpdate {
-                models,
-                configured_providers,
-            });
-        });
-    }
-
-    /// Whether the catalog refresh is due (TS `getModelSelectorRefreshPromise`:
-    /// forced, never fetched, or older than the TTL).
-    pub(crate) fn model_refresh_due(&self, force: bool) -> bool {
-        force
-            || match self.models_fetched_at {
-                None => true,
-                Some(fetched) => fetched.elapsed() > MODEL_CATALOG_REFRESH_TTL,
-            }
-    }
-
-    /// Fold a landed catalog refresh into the session and any open picker
-    /// (TS `applyConnectionModelCatalog` + the menu's `updateModels`).
-    pub(crate) fn apply_model_catalog(&mut self, update: ModelCatalogUpdate, view: &mut AgentView) {
-        self.model_catalog = update.models;
-        self.model_configured_providers = update.configured_providers;
-        self.models_fetched_at = Some(std::time::Instant::now());
-        let current = self.current_model(view);
-        if let Some(picker) = view.model_picker.as_mut() {
-            picker.update_state(
-                current,
-                self.model_catalog.clone(),
-                self.model_configured_providers.clone(),
-            );
-        }
-        self.update_fast_filter(view);
-        self.dirty = true;
-    }
-
-    /// The picker's effort seed (TS `showConfigurationMenu`'s `thinkingLevel`
-    /// option): the session's live level for a reasoning current model,
-    /// else the settings default (`"medium"` when unset).
-    async fn picker_initial_thinking_level(
-        &mut self,
-        current: Option<&CurrentModel>,
-        view: &mut AgentView,
-    ) -> Option<pa_types::ai::ModelThinkingLevel> {
-        let reasoning = current.and_then(|current| {
-            self.model_catalog
-                .iter()
-                .find(|model| model.provider == current.provider && model.id == current.model_id)
-                .map(|model| model.reasoning)
-        });
-        if reasoning == Some(true) {
-            let level = self
-                .connection_state(view)
-                .await
-                .as_ref()
-                .and_then(|state| state.get("thinkingLevel"))
-                .and_then(Value::as_str)
-                .and_then(pa_types::ai::thinking_level_from_str);
-            return level;
-        }
-        self.default_thinking_level
-            .as_deref()
-            .and_then(pa_types::ai::thinking_level_from_str)
-            .or(Some(pa_types::ai::ModelThinkingLevel::Medium))
-    }
-
-    /// Apply a picked model (TS `applySelectedModel` + the
-    /// `completeModelSelection` status row): the daemon `set_model` command
-    /// switches the live session — the agent, the provider target, and the
-    /// session's settings default follow — then the client refreshes its
-    /// model label and records the `Model: <id>` status row. The typed
-    /// provider-unauthenticated refusal is the sign-in route (`NeedsSignIn`);
-    /// every other failure surfaces as the error note.
-    async fn try_set_model(
-        &mut self,
-        provider: &str,
-        model_id: &str,
-        view: &mut AgentView,
-    ) -> SetModelOutcome {
-        let switched = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::SetModel {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    provider: provider.to_string(),
-                    model_id: model_id.to_string(),
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        match switched {
-            Ok(_) => {
-                // The create path's runtime config carries the picked model,
-                // so `/new` sessions start on it too (TS settings default).
-                self.model_selection.provider = Some(provider.to_string());
-                self.model_selection.model = Some(model_id.to_string());
-                self.refresh_model_label(model_id, view).await;
-                self.note(&format!("Model: {model_id}"), view);
-                SetModelOutcome::Switched
-            }
-            Err(error) => {
-                if crate::daemon_client::rejected_provider_unauthenticated(&error).is_some() {
-                    return SetModelOutcome::NeedsSignIn;
-                }
-                // TS `showError`: the ⚠ Error row with the error tone.
-                view.push_entry(ChatEntry::Status {
-                    text: format!("\u{26a0} Error: {error:#}"),
-                    kind: StatusKind::Error,
-                });
-                self.dirty = true;
-                SetModelOutcome::Failed
-            }
-        }
-    }
-
-    /// The onboarding default-model apply (TS
-    /// `prepareForModelSelectionAfterLogin`): the switch runs through the
-    /// same `try_set_model` path the model picker uses. A refusal after
-    /// the just-completed sign-in keeps the flow moving (TS's post-login
-    /// "still unavailable" row — never a second sign-in route inside the
-    /// onboarding pane), and every other failure already rendered its
-    /// error row, so the caller never branches.
-    pub(crate) async fn apply_model_selection(
-        &mut self,
-        provider: &str,
-        model_id: &str,
-        view: &mut AgentView,
-    ) {
-        match self.try_set_model(provider, model_id, view).await {
-            // The switch recorded its own `Model: <id>` row; every other
-            // failure already rendered the error row.
-            SetModelOutcome::Switched | SetModelOutcome::Failed => {}
-            SetModelOutcome::NeedsSignIn => {
-                self.error_row(
-                    &format!("Authentication completed, but {provider} is still unavailable."),
-                    view,
-                );
-            }
-        }
-    }
-
-    /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
-    /// `set_thinking_level` command switches the session's level (durable
-    /// row and settings default included), then the client records the
-    /// `Thinking level: <level>` status row and the tray's `model:effort`
-    /// label follows the effective level.
-    async fn apply_thinking_level(&mut self, level: &str, view: &mut AgentView) {
-        let switched = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::SetThinkingLevel {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    level: level.to_string(),
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        match switched {
-            Ok(_) => {
-                // The tray's effort suffix follows the level the switch
-                // wrote: the daemon clamps the request (TS `setThinkingLevel`
-                // emits the effective level; the Rust daemon answers no such
-                // event, so the client re-reads the state `/effort` targets).
-                // A failed read falls back to the requested level, never the
-                // previous model's stale suffix.
-                let state = self
-                    .bounded_request(
-                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                        DaemonCommand::GetState {
-                            id: None,
-                            active_session_id: self.active_session_id.clone(),
-                            rest: Map::default(),
-                        },
-                    )
-                    .await;
-                match state {
-                    Ok(data) => {
-                        view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
-                    }
-                    // The switch succeeded; the state read did not. TS
-                    // `applyThinkingLevel` patches the requested level into
-                    // the connection state (the `thinking_level_changed`
-                    // event corrects it later), so render the requested
-                    // level — never the previous model's stale suffix.
-                    Err(_) => {
-                        view.chrome.thinking_suffix = pa_types::ai::thinking_level_from_str(level)
-                            .map(|parsed| parsed.wire_name().to_string());
-                    }
-                }
-                self.note(&format!("Thinking level: {level}"), view);
-            }
-            Err(error) => {
-                // TS `showError`: the ⚠ Error row with the error tone.
-                view.push_entry(ChatEntry::Status {
-                    text: format!("\u{26a0} Error: {error:#}"),
-                    kind: StatusKind::Error,
-                });
-                self.dirty = true;
-            }
-        }
-    }
-
     /// The session's connection state (TS `AgentConnectionState`): the
     /// worker's `get_connection_state` response, which carries the
     /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
@@ -5683,45 +4526,6 @@ impl SessionUi {
                 None
             }
         }
-    }
-
-    /// Refresh the chrome model label after a live switch (TS
-    /// `applySelectedModel` reads the state and patches the footer via
-    /// `applyModelSwitchUiState`): the state's model wins, and a state
-    /// that omits it falls back to the picked model (`state.model ??
-    /// fallbackModel`) — the switch already succeeded, so the label must
-    /// move even when the worker's summary cannot re-resolve the model.
-    /// The tray's effort suffix follows the same read: a switch clamps
-    /// the level (a model without the old level re-resolves it), and a
-    /// model without reasoning renders the bare id.
-    async fn refresh_model_label(&mut self, picked_model_id: &str, view: &mut AgentView) {
-        let state = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetState {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        if let Ok(data) = state {
-            let model_id = data
-                .get("model")
-                .and_then(|model| model.get("id"))
-                .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string);
-            view.chrome.model_id = Some(model_id);
-            view.chrome.thinking_suffix = crate::chrome::tray_thinking_suffix(&data);
-        } else {
-            // The picked model's effort is unknown when the read fails:
-            // a stale suffix would pair the new model with the old
-            // model's level (a combination TS never renders), so the
-            // bare id wins.
-            view.chrome.model_id = Some(picked_model_id.to_string());
-            view.chrome.thinking_suffix = None;
-        }
-        self.dirty = true;
     }
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
@@ -7402,15 +6206,6 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
 /// Send a `create` command and return the new session's active id. A
 /// non-empty selection picks the reopen form: `continueRecent` or an
 /// explicit saved-session path.
-/// The picker's viewport row budget (TS `showConfigurationMenu` passes
-/// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
-/// row for its hint).
-pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
-    let terminal_rows = terminal_rows as usize;
-    let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
-    menu_rows.saturating_sub(1).max(1)
-}
-
 async fn create_session(
     client: &DaemonClient,
     options: &InteractiveOptions,
@@ -7468,9 +6263,9 @@ async fn describe_session_open_failure(
     // through unchanged), and the RAW rejection message is what gets
     // decorated — the typed wrapper's own display adds the framing
     // prefix exactly once.
-    let Some(rejected) = error
+    let Some((rejected, error_info)) = error
         .downcast_ref::<crate::daemon_client::RequestRejected>()
-        .map(|rejected| rejected.message.clone())
+        .map(|rejected| (rejected.message.clone(), rejected.error_info.clone()))
     else {
         return error;
     };
@@ -7516,7 +6311,10 @@ async fn describe_session_open_failure(
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
         message,
-        error_info: None,
+        // The typed refusal info rides the decorated refusal unchanged
+        // (an `update_restarting` create refusal never reaches this
+        // decorator: `owner_from_refusal` passes it through untouched).
+        error_info,
     })
 }
 
