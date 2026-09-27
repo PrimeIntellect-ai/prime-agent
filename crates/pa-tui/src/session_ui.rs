@@ -1103,6 +1103,12 @@ impl SessionUi {
             DockFold::Held => {}
         }
         self.activity_group = crate::chrome::ActivityGroup::Subagents;
+        match dock_fold {
+            DockFold::FirstFrame => self.fetch_bash_activities().await,
+            DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
+        }
+        self.pending_model = Some(reconstructed.model_id);
+        self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -1454,6 +1460,10 @@ impl SessionUi {
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = model;
         }
+        // The tray's effort suffix moves with the same snapshot: an
+        // attach's state either carries the session's level or reports a
+        // model without reasoning, and the bare name wins in both cases.
+        view.chrome.thinking_suffix = self.pending_thinking_suffix.take();
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
         // selection belonged to the previous queue and drops (TS

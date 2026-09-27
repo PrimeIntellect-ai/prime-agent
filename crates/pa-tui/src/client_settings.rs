@@ -157,6 +157,11 @@ pub trait ClientSettings: Send + Sync {
     /// settings row's bound value.
     fn default_service_tier(&self) -> String;
     /// TS `settingsManager.setDefaultServiceTier` — persists the wire name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the tier name is not a known service tier or
+    /// opening or persisting the settings store fails.
     fn set_default_service_tier(&self, tier: &str) -> Result<()>;
     /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
     /// `details`): the conversation-detail level the chat starts at.

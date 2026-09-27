@@ -764,8 +764,8 @@ impl CombinedAutocompleteProvider {
         Self {
             commands,
             skill_commands: Vec::new(),
-            hidden: Default::default(),
-            arguments: Default::default(),
+            hidden: HashSet::default(),
+            arguments: HashMap::default(),
             paths: PathCompletionProvider { base },
         }
     }
