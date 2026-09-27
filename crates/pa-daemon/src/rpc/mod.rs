@@ -147,7 +147,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         session: Arc::clone(&session),
         writer: writer.clone(),
         cwd: options.cwd,
-        agent_dir: options.agent_dir,
+        agent_dir: options.agent_dir.clone(),
         compacting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         autonomous: Arc::new(tokio::sync::Mutex::new(
             pa_core::autonomous::create_autonomous_runtime_state(
@@ -160,6 +160,22 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         model_ops: Arc::new(tokio::sync::Mutex::new(())),
         session_ops: Arc::new(tokio::sync::Mutex::new(())),
+    });
+    // TS session boot resolves the initial model through
+    // `refreshAvailableModels`, which also fetches the live Prime
+    // Inference catalog in the background and caches it on disk; the
+    // daemon worker fires the same refresh from its create path
+    // (worker/create.rs). The RPC mode hosts the session in-process
+    // with no create command, so without this spawn the FIRST
+    // `get_available_models` call would pay the whole awaited refresh
+    // chain (catalog fetches + cache writes) on its response path; with
+    // it, the caches warm during the session's first turn and the
+    // command serves the same snapshot the daemon surface serves.
+    tokio::spawn(async move {
+        let auth = pa_core::auth::AuthStorage::create(&options.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
+        let _ = registry.refresh_available_models().await;
     });
     spawn_signal_handlers(Arc::clone(&session), writer.clone());
     Ok(serve_stdin(state).await)

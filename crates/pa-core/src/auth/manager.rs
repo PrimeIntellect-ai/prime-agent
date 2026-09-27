@@ -318,12 +318,10 @@ impl AuthStorage {
 
     /// Reload credentials from storage.
     pub fn reload(&mut self) {
-        let mut content: Option<String> = None;
-        let result = self.storage.with_lock(&mut |current| {
-            content = current;
-            Ok(((), None))
-        });
-        match result.and_then(|()| parse_storage_data(content.as_deref())) {
+        // The pure-read arm: a locked protocol read on any cache miss, the
+        // process-cached copy on a hit (see `AuthStorageBackend::read`).
+        let result = self.storage.read();
+        match result.and_then(|content| parse_storage_data(content.as_deref())) {
             Ok(data) => {
                 self.data = data;
                 self.load_error = None;

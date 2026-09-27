@@ -380,13 +380,17 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
-        if let Some(api_key) = &self.current_selection().api_key {
-            return (Some(api_key.clone()), model.headers.clone());
-        }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        if let Some(api_key) = &self.current_selection().api_key {
+            // The create-config key override pins the key, never the
+            // headers: the registry's merged headers (the auth storage's
+            // single-owner team header among them) still ship, exactly like
+            // the TS `getApiKeyAndHeaders` override path.
+            return (Some(api_key.clone()), resolved.headers);
+        }
         (resolved.api_key, resolved.headers)
     }
 
@@ -462,4 +466,15 @@ pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessi
         model: context.model,
         thinking,
     })
+}
+
+/// Register the faux provider from a script and return its model. Scripts
+/// carry plain-text responses (strings or `{"text"}` objects) or content-block
+/// arrays (thinking, text, tool calls) so harnesses can script full turns.
+/// Verification harness only; never set by the product.
+fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
+    let script: serde_json::Value = serde_json::from_str(script)?;
+    let parsed = pa_ai::faux::script::parse_faux_script(&script).map_err(anyhow::Error::msg)?;
+    let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+    Ok(registration.get_model())
 }

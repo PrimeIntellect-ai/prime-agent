@@ -2,6 +2,7 @@
 //! the spawn/connect plumbing.
 use super::routing::fail_unsent_request;
 use super::*;
+use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;

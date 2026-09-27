@@ -45,6 +45,21 @@ type ReconnectConnect = tokio::sync::oneshot::Receiver<
 /// exit-within-1s contract.
 const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
+/// The headless exit gate's settle bound: after the plan completes
+/// ([`UiInput::HeadlessDone`]), the run must end within this much wall
+/// clock. The gate has no other bound — a settle member that never drains
+/// (the `interactive_daemon_e2e` exit-gate wedge family: a submit/switch
+/// round-trip race latching `turn_active` with the whole daemon trio
+/// idle) parks the run in `Runtime::block_on` forever and eats a whole
+/// CI job budget with no failure name. The bound converts that into an
+/// attributable error naming the stuck member(s). Terminal runs never
+/// arm it: `HeadlessDone` exists only on the headless harness, and the
+/// gate is unreachable there (a live terminal ends the run on
+/// `exit_requested`). The margin: green settles are milliseconds (the
+/// suite's 32-test green wall is ~15s; the last submit's own ack bound
+/// is 10s), so 60s is a settle that went wrong, never a slow green.
+const HEADLESS_SETTLE_TIMEOUT_MS: u64 = 60_000;
+
 /// Which session the interactive run opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSelection {
@@ -468,6 +483,122 @@ pub enum HeadlessStep {
     /// One raw key event: the verifier's window into the selector/picker
     /// surfaces (arrows, escape), which typed text cannot express.
     Key(crossterm::event::KeyEvent),
+}
+
+/// The headless exit gate's settle, snapshotted: the members the gate
+/// requires before the run may end (every one is work the harness must
+/// not cut short — a live terminal never ends the run on its own; TS
+/// exits the PROCESS at shutdown and lets in-flight work dangle, so the
+/// harness's settle has no TS counterpart). `settled()` is the gate;
+/// `blockers()` is the same members named, so the settle bound's failure
+/// names exactly what stuck (the wedge family's conversion from a
+/// job-budget hang with no failure name into an attributable error).
+#[derive(Debug, Default)]
+struct HeadlessSettle {
+    /// Plan inputs still queued behind a barrier.
+    pending_inputs: usize,
+    /// A turn still streaming (or latched).
+    turn_active: bool,
+    /// Prompt round trips whose ack has not landed.
+    submits_in_flight: usize,
+    /// The queued-message strip's items.
+    queued: usize,
+    /// An armed idle barrier waiting out its deadline.
+    idle_barrier: bool,
+    /// A frame the loop has not painted yet.
+    dirty: bool,
+    /// A `/share` upload whose outcome has not landed.
+    share_pending: bool,
+    /// A `/reload` whose outcome has not landed.
+    reload_pending: bool,
+    /// A `/traces` upload whose outcome has not landed.
+    traces_upload_pending: bool,
+    /// The inline auth panel is mounted.
+    auth_panel_open: bool,
+    /// A `/traces login` flow is pending.
+    traces_login_pending: bool,
+    /// An MCP auth flow is pending.
+    mcp_auth_pending: bool,
+}
+
+impl HeadlessSettle {
+    /// Read the gate's members off the loop state (the gate's exact
+    /// conditions, in the same order the gate historically checked them).
+    fn snapshot(
+        session: &SessionUi,
+        view: &AgentView,
+        pending_inputs: usize,
+        idle_barrier: bool,
+    ) -> Self {
+        Self {
+            pending_inputs,
+            turn_active: session.turn_active,
+            submits_in_flight: session.prompt_submits_in_flight(),
+            queued: view.queued.steering.len() + view.queued.follow_ups.len(),
+            idle_barrier,
+            dirty: session.dirty,
+            share_pending: session.share_pending(),
+            reload_pending: session.reload_pending(),
+            traces_upload_pending: session.traces_upload_pending(),
+            auth_panel_open: view.auth_panel.is_some(),
+            traces_login_pending: session.pending_traces_login(),
+            mcp_auth_pending: session.pending_mcp_auth(),
+        }
+    }
+
+    /// Whether every settle member drained (the exit gate).
+    fn settled(&self) -> bool {
+        self.blockers().is_empty()
+    }
+
+    /// The members that are holding the run open, named for the settle
+    /// bound's failure (empty when settled).
+    fn blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.pending_inputs > 0 {
+            blockers.push(format!(
+                "{} queued plan input(s) behind a barrier",
+                self.pending_inputs
+            ));
+        }
+        if self.turn_active {
+            blockers.push("a turn still active".to_string());
+        }
+        if self.submits_in_flight > 0 {
+            blockers.push(format!(
+                "{} prompt submit(s) without an ack",
+                self.submits_in_flight
+            ));
+        }
+        if self.queued > 0 {
+            blockers.push(format!("{} queued message(s) undelivered", self.queued));
+        }
+        if self.idle_barrier {
+            blockers.push("an idle barrier waiting out its deadline".to_string());
+        }
+        if self.dirty {
+            blockers.push("an unpainted frame".to_string());
+        }
+        if self.share_pending {
+            blockers.push("a share upload in flight".to_string());
+        }
+        if self.reload_pending {
+            blockers.push("a reload in flight".to_string());
+        }
+        if self.traces_upload_pending {
+            blockers.push("a traces upload in flight".to_string());
+        }
+        if self.auth_panel_open {
+            blockers.push("the inline auth panel open".to_string());
+        }
+        if self.traces_login_pending {
+            blockers.push("a pending traces login".to_string());
+        }
+        if self.mcp_auth_pending {
+            blockers.push("a pending MCP auth flow".to_string());
+        }
+        blockers
+    }
 }
 
 /// One typed string as key events: characters become `Char` presses, `\n`
@@ -1480,6 +1611,22 @@ fn arm_shutdown_recovery(
 /// idempotent, so a return after the tail already ran (the startup
 /// refusal path finishes the surface itself) only re-emits the two
 /// unconditional tail bytes.
+/// The open route for one interactive run (TS `runAgentsViewLoop`'s
+/// open versus the CLI's own open): the agents-view open waits through a
+/// daemon update restart (TS #2391) instead of failing the open hard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionOpenRoute {
+    /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single
+    /// attempt, today's behavior — a preparing-restart create refusal
+    /// hands off to the agents view with the refusal as its status line.
+    Cli,
+    /// The agents view's open (TS `runAgentsViewLoop` ->
+    /// `openAgentsViewSession`): the open waits through the
+    /// update-restart window and retries against the successor.
+    AgentsView,
+}
+
+/// Run one interactive session (the CLI open route).
 ///
 /// # Errors
 ///
@@ -1490,6 +1637,32 @@ fn arm_shutdown_recovery(
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::Cli).await
+}
+
+/// Run one interactive session opened from the agents view (TS #2391): the
+/// startup open waits through a daemon update restart instead of failing
+/// (see [`SessionOpenRoute::AgentsView`]).
+///
+/// # Errors
+///
+/// Returns `Err` when the interactive surface fails (the daemon
+/// connection, a transport error in a key handler, a draw failure, a
+/// suspend/resume failure) or the open waits out the update-restart
+/// window; the restore runs first whenever this run owned or adopted
+/// the terminal.
+pub async fn run_interactive_agents_view_open(
+    options: InteractiveOptions,
+    ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::AgentsView).await
+}
+
+async fn run_interactive_route(
+    options: InteractiveOptions,
+    ui: UiMode,
+    route: SessionOpenRoute,
 ) -> Result<InteractiveOutcome> {
     // The headless harness drives the same dispatch on plain pipes: it
     // never owned the terminal, so its error returns must not run a
@@ -1502,7 +1675,7 @@ pub async fn run_interactive(
     // actually mounted.
     let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mounted = std::sync::Arc::clone(&surface_mounted);
-    match run_interactive_surface(options, ui, mounted).await {
+    match run_interactive_surface(options, ui, route, mounted).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             // Restore when THIS run changed the terminal state (the flag
@@ -1527,12 +1700,17 @@ pub async fn run_interactive(
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
+    route: SessionOpenRoute,
     surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
-    let (client, mut events) = DaemonClient::connect_with_retry(&options.socket_path)
+    // The startup open's connection: the first open attempt below uses
+    // this one (a fresh-pane connect failure must stay a pre-mount
+    // failure, so the CLI open keeps its no-restore teardown), while a
+    // wait retry reconnects against the successor daemon.
+    let (client, events) = DaemonClient::connect_with_retry(&options.socket_path)
         .await
         .with_context(|| "the interactive UI could not attach to the daemon")?;
     // Background notes (a failed abort request) fold into the transcript
@@ -1659,31 +1837,69 @@ async fn run_interactive_surface(
             crate::app::draw(renderer, &mut view)?;
         }
     }
-    // The supervisor reader's death watch: the event channel itself stays
-    // open across a supervisor socket loss (the retained sender keeps it
-    // alive for direct reader pumps), so this watch is the observable
-    // signal the loop's reconnect driver arms on.
-    let mut reader_dead = client.reader_dead();
-    let mut session = match SessionUi::open(
-        client,
-        &options,
-        notes_tx,
-        compaction_abort_tx,
-        prompt_tx,
-        share_tx,
-        reload_tx,
-        traces_upload_tx,
-        catalog_tx,
-        auth_panel_tx,
-        crate::session_ui::ActivityUpdates {
-            heartbeats: heartbeats_tx,
-            bash: bash_tx,
-            commands: commands_tx,
+    // The startup open (TS `runAgentsViewLoop` -> `openAgentsViewSession`,
+    // TS #2391): an agents-view open that lands while the daemon prepares an
+    // update restart waits through the restart window (bounded, 500ms retry
+    // cadence, the attached-session reconnect budget) and retries against
+    // the successor instead of failing the open; the CLI route keeps the
+    // single attempt. The first attempt reuses the pre-mount connection; a
+    // retry reconnects fresh. Only the open waits — once the session is up,
+    // the reconnect loop owns the mid-chat restart window.
+    let mut first_connection = Some((client, events));
+    let open_outcome = crate::update_restart_wait::wait_through_update_restart(
+        route == SessionOpenRoute::AgentsView,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
+        || {
+            // The attempt future owns everything it touches (an `async
+            // move` over clones taken here): an `FnMut` closure's captures
+            // may not escape into the returned future, so the synchronous
+            // body moves the pieces out instead.
+            let first = first_connection.take();
+            let options = options.clone();
+            let notes_tx = notes_tx.clone();
+            let compaction_abort_tx = compaction_abort_tx.clone();
+            let prompt_tx = prompt_tx.clone();
+            let share_tx = share_tx.clone();
+            let reload_tx = reload_tx.clone();
+            let traces_upload_tx = traces_upload_tx.clone();
+            let catalog_tx = catalog_tx.clone();
+            let auth_panel_tx = auth_panel_tx.clone();
+            let heartbeats_tx = heartbeats_tx.clone();
+            let bash_tx = bash_tx.clone();
+            let commands_tx = commands_tx.clone();
+            async move {
+                let (client, events) = match first {
+                    Some(first) => first,
+                    None => DaemonClient::connect(&options.socket_path)
+                        .await
+                        .with_context(|| "the interactive UI could not attach to the daemon")?,
+                };
+                let session = SessionUi::open(
+                    client,
+                    &options,
+                    notes_tx,
+                    compaction_abort_tx,
+                    prompt_tx,
+                    share_tx,
+                    reload_tx,
+                    traces_upload_tx,
+                    catalog_tx,
+                    auth_panel_tx,
+                    crate::session_ui::ActivityUpdates {
+                        heartbeats: heartbeats_tx,
+                        bash: bash_tx,
+                        commands: commands_tx,
+                    },
+                )
+                .await?;
+                Ok((events, session))
+            }
         },
     )
-    .await
-    {
-        Ok(session) => session,
+    .await;
+    let ((mut events, mut session), waited_for_update_restart) = match open_outcome {
+        Ok(opened) => opened,
         Err(error) => {
             // A daemon refusal for the startup create/attach/resume (the
             // daemon is alive and refused THIS request — a remembered id
@@ -1754,6 +1970,20 @@ async fn run_interactive_surface(
                     ..Default::default()
                 });
             }
+            // The open wait's deadline failure is the same handoff (TS
+            // `runAgentsViewLoop` catches it as "Failed to open agent:"):
+            // the guidance to retry once the update finishes must land on
+            // the view the user came from — never tear the process down.
+            if crate::update_restart_wait::is_update_restart_deadline_error(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
+            }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
             // teardown contract as the onboarding exit below).
@@ -1765,6 +1995,15 @@ async fn run_interactive_surface(
         }
     };
     session.exit_guard = exit_guard.clone();
+    // The supervisor reader's death watch: the event channel itself stays
+    // open across a supervisor socket loss (the retained sender keeps it
+    // alive for direct reader pumps), so this watch is the observable
+    // signal the loop's reconnect driver arms on. Taken from the LIVE
+    // session client after the open: an update-restart wait may have
+    // retried the open onto a fresh connection (the pre-mount one died
+    // with the old daemon), and the watch must name the connection the
+    // loop actually serves.
+    let mut reader_dead = session.client.reader_dead();
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
@@ -1781,6 +2020,30 @@ async fn run_interactive_surface(
         });
         session.dirty = true;
     }
+    // TS #2391 `startupNotice`/`updateRestartWaitNotice`: an open that
+    // waited through the update restart says so — the session's first
+    // status row (the TS `showWarning(startupNotice)` row) and, when the
+    // chat hands back to the view, the agents-view status line (the
+    // outcome's notice below).
+    if waited_for_update_restart {
+        let notice = crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE;
+        view.push_entry(crate::chat::ChatEntry::Status {
+            text: format!("\u{26a0} {notice}"),
+            kind: crate::chat::StatusKind::Warning,
+        });
+        session.dirty = true;
+    }
+    // TS `maybeWarnAboutAnthropicSubscriptionAuth()` at startup (#2645):
+    // the ban-risk warning when the session opens on an Anthropic
+    // subscription credential.
+    if let Some(provider) = session.current_model_provider().await {
+        session
+            .maybe_warn_anthropic_subscription_auth_if_subscribed(
+                Some(provider.as_str()),
+                &mut view,
+            )
+            .await;
+    }
     // TS `restorePromptStashOnOpen`: a draft stashed on the way out (a
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
@@ -1790,6 +2053,11 @@ async fn run_interactive_surface(
     // declared above the onboarding phase because the pane's drive marks
     // it when the plan completes while the pane owns the input channel.
     let mut headless_done = false;
+    // The settle bound's deadline, armed once the plan completes (the
+    // gate below ends the run on a full settle; the bound ends it with a
+    // named error when a member never drains — see
+    // [`HEADLESS_SETTLE_TIMEOUT_MS`]).
+    let mut headless_settle_deadline: Option<Instant> = None;
     // First-run onboarding owns the pane before the session screen (TS
     // `runStartupOnboarding`): a home whose startup model is ready sees
     // the trace question alone, and a not-ready home runs the full
@@ -2298,27 +2566,35 @@ async fn run_interactive_surface(
                 inputs_pending = false;
             }
         }
-        // A `/share` upload in flight holds the run open like an active
-        // turn: the headless harness must not finish before its outcome
-        // rows land (a live terminal never ends the run on its own).
-        if headless_done
-            && pending.is_empty()
-            && !session.turn_active
-            && session.prompt_submits_in_flight() == 0
-            && view.queued.is_empty()
-            && wait_idle_deadline.is_none()
-            && !session.dirty
-            && !session.share_pending()
-            && !session.reload_pending()
-            && !session.traces_upload_pending()
-            // An inline auth flow is work like an upload: the harness
-            // must not finish before its settled outcome lands (a live
-            // terminal never ends the run on its own).
-            && view.auth_panel.is_none()
-            && !session.pending_traces_login()
-            && !session.pending_mcp_auth()
-        {
-            break;
+        // The headless exit gate: the plan completed, and the run ends
+        // once every settle member drains (a `/share` upload in flight
+        // holds the run open like an active turn — the headless harness
+        // must not finish before its outcome rows land, and an inline
+        // auth flow is work like an upload; a live terminal never ends
+        // the run on its own). The members are snapshotted so the bound
+        // below can name exactly what stuck.
+        let settle = headless_done.then(|| {
+            HeadlessSettle::snapshot(&session, &view, pending.len(), wait_idle_deadline.is_some())
+        });
+        if let Some(settle) = settle {
+            if settle.settled() {
+                break;
+            }
+            // The settle bound: the gate's wait is the harness's only
+            // unbounded one (TS exits the process at shutdown and lets
+            // in-flight work dangle), so a member that never drains
+            // fails the run with its name instead of wedging the test
+            // binary forever (the CI wedge family: a 30-45min job
+            // budget with no failure row).
+            let deadline = headless_settle_deadline
+                .get_or_insert(Instant::now() + Duration::from_millis(HEADLESS_SETTLE_TIMEOUT_MS));
+            if Instant::now() >= *deadline {
+                anyhow::bail!(
+                    "the headless run's settle did not complete within {}ms of the plan's completion: {}",
+                    HEADLESS_SETTLE_TIMEOUT_MS,
+                    settle.blockers().join("; ")
+                );
+            }
         }
 
         let was_active = session.turn_active;
@@ -3184,7 +3460,13 @@ async fn run_interactive_surface(
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
         opened_urls: std::mem::take(&mut session.opened_urls),
-        agents_view_notice: None,
+        // TS #2391: the view's status line keeps the wait notice when the
+        // chat hands back (the `updateRestartWaitNotice` the open armed).
+        agents_view_notice: if waited_for_update_restart && preserve_alt_screen {
+            Some(crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE.to_string())
+        } else {
+            None
+        },
     };
     // The agents-view handoff's background detach owns this connection now
     // (it closes once the daemon answers); every other exit closes it here.
@@ -3945,6 +4227,108 @@ mod tests {
                 "userMessages": 3
             })),
             None
+        );
+    }
+
+    /// The headless settle snapshot: `settled()` is exactly the old exit
+    /// gate (every member clear), and each member that sticks is named in
+    /// the bound's failure — the diagnostic IS the wedge family's
+    /// failure name.
+    #[test]
+    fn the_headless_settle_names_every_stuck_member() {
+        // Everything clear: settled, no blockers.
+        let settled = HeadlessSettle::default();
+        assert!(settled.settled(), "the default snapshot is the open gate");
+        assert!(settled.blockers().is_empty());
+        // One member at a time: each blocker names exactly its member.
+        for stuck in [
+            HeadlessSettle {
+                pending_inputs: 2,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                turn_active: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                submits_in_flight: 1,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                queued: 3,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                idle_barrier: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                dirty: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                share_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                reload_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                traces_upload_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                auth_panel_open: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                traces_login_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                mcp_auth_pending: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!stuck.settled(), "one stuck member holds the gate shut");
+            assert_eq!(
+                stuck.blockers().len(),
+                1,
+                "each stuck member names exactly one blocker"
+            );
+        }
+        // The wedge family's member: a latched turn names the turn.
+        let wedge = HeadlessSettle {
+            turn_active: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            wedge.blockers(),
+            vec!["a turn still active".to_string()],
+            "the exit-gate wedge's failure names its stuck member"
+        );
+        // Everything stuck at once: every member is reported.
+        let all = HeadlessSettle {
+            pending_inputs: 1,
+            turn_active: true,
+            submits_in_flight: 1,
+            queued: 1,
+            idle_barrier: true,
+            dirty: true,
+            share_pending: true,
+            reload_pending: true,
+            traces_upload_pending: true,
+            auth_panel_open: true,
+            traces_login_pending: true,
+            mcp_auth_pending: true,
+        };
+        assert_eq!(all.blockers().len(), 12);
+        assert!(
+            all.blockers()
+                .iter()
+                .any(|blocker| blocker.contains("a turn still active")),
+            "the joined failure keeps the member names readable"
         );
     }
 }

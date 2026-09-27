@@ -21,6 +21,7 @@ impl Worker {
             self.engine.model_metadata(),
             self.engine.model_fallback_message(),
             self.user_bash.is_running(),
+            self.engine.is_quota_parked(),
         );
         // The worker's roster-delta counter at snapshot time, and the
         // process instance that read it — the pair is one snapshot:
@@ -315,6 +316,7 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
             context.engine.model_metadata(),
             context.engine.model_fallback_message(),
             context.user_bash.is_running(),
+            context.engine.is_quota_parked(),
         )
     };
     // The embedded counter is the pre-stamp value read under the order
@@ -355,6 +357,7 @@ pub(crate) fn session_summary(
     model: Option<Value>,
     model_fallback_message: Option<String>,
     bash_running: bool,
+    quota_parked: bool,
 ) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
@@ -415,6 +418,7 @@ pub(crate) fn session_summary(
         thinking_level: Some(thinking_level.to_string()),
         is_streaming: streaming,
         is_compacting: compacting,
+        is_quota_parked: Some(quota_parked),
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         attached_clients: core.attached_client_ids.len() as u32,
