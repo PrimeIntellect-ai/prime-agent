@@ -429,7 +429,7 @@ impl AgentSessionEngine {
 /// moved verbatim into the differential oracle in
 /// `agent_engine/tests.rs` (`persisted_rlm_max_depth_reference`).
 pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?)?;
+    let path = std::path::Path::new(path?);
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
