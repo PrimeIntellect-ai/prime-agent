@@ -2,8 +2,6 @@
 //! channel (`PromptOrder` -> the worker -> `PromptSubmitNote`'s
 //! fold-back), the prompt stash's capture and restore, the side-question
 //! turns, and the pasted-image registry.
-//! Byte-moved from `src/session_ui.rs` (the 11/14 split stage, plan
-//! TU11; the facade's callers and the interactive.rs seams are unchanged).
 
 use super::*;
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
