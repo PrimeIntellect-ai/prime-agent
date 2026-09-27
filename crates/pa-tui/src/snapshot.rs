@@ -399,11 +399,6 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let model_provider = state
-        .and_then(|state| state.get("model"))
-        .and_then(|model| model.get("provider"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
     Reconstructed {
         chat: messages,
         model_id,
