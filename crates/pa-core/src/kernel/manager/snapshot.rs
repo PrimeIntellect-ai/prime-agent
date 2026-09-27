@@ -130,17 +130,16 @@ impl Inner {
         }
         match result {
             Ok(r) if r.result.status == ExecuteStatus::Ok => {
-                let failed = match &r.done_fields {
-                    Some(fields) => as_reason_array(fields, "failed"),
-                    None => {
-                        self.append_diagnostic("state restore failed: no done fields");
-                        {
-                            let mut g = lock(&self.guarded);
-                            g.pending_restore = false;
-                            g.restore_incomplete = true;
-                        }
-                        return None;
+                let failed = if let Some(fields) = &r.done_fields {
+                    as_reason_array(fields, "failed")
+                } else {
+                    self.append_diagnostic("state restore failed: no done fields");
+                    {
+                        let mut g = lock(&self.guarded);
+                        g.pending_restore = false;
+                        g.restore_incomplete = true;
                     }
+                    return None;
                 };
                 // A partial restore (some names failed to revive) still
                 // leaves the on-disk payload the fuller copy: the dispose

@@ -136,6 +136,10 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
 /// Set the private mode on an already-open file (`fchmod`): exact bits despite
 /// the umask, and tightens a pre-existing loose file. Callers decide whether a
 /// failure is fatal.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the permission bits cannot be set.
 #[cfg(unix)]
 pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -150,6 +154,10 @@ pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
 
 /// Create directories recursively with the private dir mode on platforms with
 /// mode bits; existing directories are left untouched (mkdir semantics).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when a directory cannot be created.
 #[cfg(unix)]
 pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;

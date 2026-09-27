@@ -4,7 +4,7 @@
 //!   global redefined after the restore wins, and a name the saved function
 //!   references but the snapshot never saved resolves once defined (the
 //!   live-globals revival; pre-fix the function kept its frozen snapshot
-//!   globals and the late name raised NameError);
+//!   globals and the late name raised `NameError`);
 //! - the debounced auto-snapshot that follows a restore skips while the
 //!   namespace is unchanged (identical rewrite, no churn) and captures again
 //!   after a real cell changes it;
@@ -35,19 +35,22 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live restore test");
+    eprintln!(
+        "kernel python {} not found; skipping live restore test",
+        candidate.display()
+    );
     None
 }
 
@@ -74,6 +77,7 @@ fn test_options(
         }),
         bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
         stderr_log_path: None,
+        on_background_work_settled: None,
     })
 }
 

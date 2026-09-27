@@ -30,7 +30,7 @@ use crate::kernel::state_snapshot::{
 const READY_TIMEOUT_MS: u64 = 30_000;
 const REPAIR_STEP_TIMEOUT_MS: u64 = 30_000;
 /// Largest legit frame is an attachment display event, base64 capped at
-/// MAX_ATTACHMENT_DATA_CHARS; a line that cannot complete within this ceiling
+/// `MAX_ATTACHMENT_DATA_CHARS`; a line that cannot complete within this ceiling
 /// is corruption the protocol repair owns, not output worth buffering until OOM.
 const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
 /// Runtime-minted host-request ids never repeat; the bound only guards a
