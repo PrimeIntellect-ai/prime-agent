@@ -160,7 +160,7 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     );
     // TS semantics on a healthy exit: no forced-quit line ever prints.
     assert!(
-        !find_subsequence(&output, STALL_MSG).is_some(),
+        find_subsequence(&output, STALL_MSG).is_none(),
         "a draining terminal must never read as a stalled shutdown"
     );
     // The whole transcript flushed (the frozen scrollback contract). The

@@ -68,7 +68,7 @@ const WATCHDOG_THREAD_NAME: &str = "tui-exit-watchdog";
 /// When the exit path last proved it is making progress (`None` until the
 /// first proof). Process-global on purpose: the writers that owe the proof
 /// (the exit flush's chunked writes in view.rs, the release tail in
-/// exit_restore.rs, the resume hint in pa-cli) do not own the guard — the
+/// `exit_restore.rs`, the resume hint in `pa-cli`) do not own the guard — the
 /// guard is shared across surfaces and the writers live in other layers —
 /// and a stamp beside the watchdog reads at every poll slice exactly the
 /// same state any guard's watchdog would. One TUI process, one exit.
@@ -337,11 +337,15 @@ mod tests {
         assert!(force_quit_due(deadline, deadline, None));
         // Past the deadline with progress inside the grace window: the
         // exit is draining a slow terminal — hold.
-        let fresh = deadline - Duration::from_millis(EXIT_PROGRESS_GRACE_MS);
+        let fresh = deadline
+            .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS))
+            .expect("the grace window precedes the deadline");
         assert!(!force_quit_due(deadline, deadline, Some(fresh)));
         // Progress one millisecond older than the grace window: nothing
         // has moved for the whole window — stalled, fire.
-        let stale = deadline - Duration::from_millis(EXIT_PROGRESS_GRACE_MS + 1);
+        let stale = deadline
+            .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS + 1))
+            .expect("the stale timestamp precedes the deadline");
         assert!(force_quit_due(deadline, deadline, Some(stale)));
     }
 
