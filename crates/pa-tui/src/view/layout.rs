@@ -125,12 +125,11 @@ impl RowPack {
                 // styles (renderer palette-bounded; see the struct
                 // docs) — the scan cost is bounded by the palette, not
                 // the span count.
-                let style = match styles.iter().position(|style| *style == span.style) {
-                    Some(id) => id,
-                    None => {
-                        styles.push(span.style);
-                        styles.len() - 1
-                    }
+                let style = if let Some(id) = styles.iter().position(|style| *style == span.style) {
+                    id
+                } else {
+                    styles.push(span.style);
+                    styles.len() - 1
                 } as u32;
                 spans.push(PackedSpan {
                     len: span.content.len() as u32,

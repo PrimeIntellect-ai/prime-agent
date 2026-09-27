@@ -70,7 +70,7 @@ fn row_pack_expands_every_range_byte_exact_with_many_styles() {
             },
             crate::Span {
                 style: styles[47],
-                content: multi.clone(),
+                content: multi,
             },
             crate::Span {
                 style: styles[0],
@@ -90,7 +90,7 @@ fn row_pack_expands_every_range_byte_exact_with_many_styles() {
         }],
         vec![crate::Span {
             style: styles[0],
-            content: long.clone(),
+            content: long,
         }],
     ];
     rows.push(Vec::new());
