@@ -282,12 +282,14 @@ async fn apply_in_process_model_switch(
             Some(target) => {
                 target.api_key.clone_from(&resolved.api_key);
                 target.model = model.clone();
+                target.headers.clone_from(&resolved.headers);
             }
             None => {
                 *target = Some(pa_core::session_engine::provider_adapter::ProviderTarget {
                     api_key: resolved.api_key.clone(),
                     model: model.clone(),
                     service_tier: None,
+                    headers: resolved.headers.clone(),
                 });
             }
         }

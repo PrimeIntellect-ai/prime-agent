@@ -274,6 +274,7 @@ async fn tui_export_and_share_surface() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let html_out = dir.path().join("export.html");

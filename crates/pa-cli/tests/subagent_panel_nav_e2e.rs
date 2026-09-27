@@ -212,6 +212,7 @@ fn session_options(
         session_rlm_depth: rlm_depth,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: has_children,
+        restore_dock_focus: false,
     }
 }
 
