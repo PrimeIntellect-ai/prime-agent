@@ -116,7 +116,7 @@ impl Supervisor {
     fn broadcast_heartbeats_changed(&self) {
         let _ = self.events.send((
             crate::supervisor::ClientRouting::Broadcast,
-            json!({ "type": "heartbeats_changed" }),
+            std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
 
