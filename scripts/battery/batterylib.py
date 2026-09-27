@@ -545,13 +545,22 @@ def tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def tmux_launch(
-    session: str, command: list[str], env: dict, cwd: Path, size: tuple[int, int] = TMUX_SIZE
+    session: str,
+    command: list[str],
+    env: dict,
+    cwd: Path,
+    size: tuple[int, int] = TMUX_SIZE,
+    unset_keys: tuple[str, ...] = (),
 ) -> None:
     """Create a detached session of `size` running `command` with `env`.
 
     tmux panes inherit the tmux server's environment, not the client's, so
     the pane command is wrapped in `env KEY=VALUE ...` (and TMUX unset) to
     guarantee isolation from the ambient agent session.
+
+    `unset_keys` names keys the pane must never see even though they
+    inherit from the server (dropping them from `env` is not enough: an
+    inherited key is neither an assignment nor on the scrub list).
 
     The pane runs with `-c cwd` as its working directory, so a relative
     `command[0]` (e.g. `target/release/prime-agent` passed from the repo
@@ -579,6 +588,10 @@ def tmux_launch(
     for key in list(os.environ):
         if key.startswith(SCRUB_ENV_PREFIXES):
             unset += ["-u", key]
+    # The caller's keys ride the same unset (a key that only inherits from
+    # the server reaches the pane unless it is named here).
+    for key in unset_keys:
+        unset += ["-u", key]
     # tmux runs multi-argument pane commands through its default shell, so
     # wrap explicitly: sh -c 'exec env -u ... KEY=V ... <command>'.
     words = (

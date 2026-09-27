@@ -232,6 +232,29 @@ impl AgentView {
         })
     }
 
+    /// Record the mouse's hover position (operator directive
+    /// 2026-09-26: the hovered card row re-styles so clickability is
+    /// discoverable). Only a clickable card row holds the hover —
+    /// anything else clears it — and the state changes only when the
+    /// hover crosses onto or off of that row (the affordance is
+    /// row-level; the tracked cell rides along for the render-side
+    /// revalidation), so a motion burst across one row never schedules
+    /// a render per report.
+    pub(crate) fn note_hover(&mut self, row: usize, col: usize) -> bool {
+        let hover = matches!(
+            self.click_target_at(row, col),
+            Some(ClickAction::ToggleCardExpansion)
+        )
+        .then_some((row, col));
+        let changed = match (self.hover_pos, hover) {
+            (Some((hover_row, _)), Some((row, _))) => hover_row != row,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        self.hover_pos = hover;
+        changed
+    }
+
     /// The click action for one transcript window row: a row inside a
     /// visible activity entry (a condensed run block, a tool card, a
     /// bash card, an agent-message notice, a shell-completion row)
