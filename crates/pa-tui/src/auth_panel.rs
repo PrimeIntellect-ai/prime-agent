@@ -736,6 +736,12 @@ impl AuthPanel {
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(None);
                     }
+                    // TS `cancel()` fires on every mounted input's
+                    // abort, not only the URL screen: the paste's
+                    // Esc must end the browser flow too, or a racing
+                    // success writes credentials into an unmounted
+                    // dialog (#2845 review).
+                    self.mark_flow_cancelled();
                     answered = true;
                 } else if kb.matches(key, "tui.select.confirm") {
                     let value = field.value().trim().to_string();
