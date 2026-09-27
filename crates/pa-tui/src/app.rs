@@ -106,8 +106,11 @@ fn run_app_surface(
         if !stream_ended {
             match stream.poll()? {
                 SessionEvent::Item(item) => {
-                    if let crate::session::TranscriptItem::ModelChange { model_id, .. } = &item {
+                    if let crate::session::TranscriptItem::ModelChange { provider, model_id } =
+                        &item
+                    {
                         view.chrome.model_id = Some(model_id.clone());
+                        view.chrome.model_provider = Some(provider.clone());
                     }
                     view.push(item);
                     if options.replay_delay_ms > 0 {

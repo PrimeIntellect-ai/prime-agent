@@ -49,6 +49,11 @@ pub struct ChromeState {
     pub cwd: String,
     /// Current model id (splash `model` line; `None` hides the line).
     pub model_id: Option<String>,
+    /// The current model's provider (the daemon state's `model.provider`),
+    /// when the session reports one: the picker matches the current-model
+    /// catalog entry by provider plus id — two providers can carry the
+    /// same id, and only the provider disambiguates them.
+    pub model_provider: Option<String>,
     /// Extra metadata lines under the splash (`label value` each; e.g. the
     /// agents view's `agents N running, ...` count row and, in scoped
     /// mode, the `depth N` row). Empty renders none.

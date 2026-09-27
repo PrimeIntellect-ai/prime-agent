@@ -190,7 +190,6 @@ pub(crate) struct SessionUi {
     /// The current model's provider (TS `getCurrentModel()` keeps the full
     /// model): the eligibility lookups over the TUI-side catalog disambiguate
     /// same-id entries across providers with it.
-    current_model_provider: Option<String>,
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
@@ -246,10 +245,12 @@ pub(crate) struct SessionUi {
     /// the first frame's visible-window materialization is its own,
     /// bigger transient — see the draw loop's post-frame trim).
     trim_after_frame: bool,
-    /// Snapshot labels (model) for the next rebuild: `Some(None)` clears
-    /// the label (a session that reports no model), `None` leaves the
-    /// chrome untouched (a rebuild outside the attach flow).
-    pending_model: Option<Option<String>>,
+    /// Snapshot labels (model) for the next rebuild.
+    pending_model: Option<String>,
+    /// Snapshot model provider for the next rebuild (the attach state's
+    /// `model.provider`; `None` when the daemon reports none): the picker
+    /// resolves the current-model catalog entry by provider plus id.
+    pending_model_provider: Option<String>,
     /// Snapshot tray effort suffix for the next rebuild (the attach
     /// state's level; `None` clears it).
     pending_thinking_suffix: Option<String>,
@@ -661,7 +662,6 @@ impl SessionUi {
                 .as_ref()
                 .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
-            current_model_provider: None,
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
@@ -682,6 +682,7 @@ impl SessionUi {
             pending_snapshot: None,
             trim_after_frame: false,
             pending_model: None,
+            pending_model_provider: None,
             pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
@@ -1013,8 +1014,6 @@ impl SessionUi {
         self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
-        self.current_model_provider
-            .clone_from(&reconstructed.model_provider);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -1075,7 +1074,8 @@ impl SessionUi {
             DockFold::FirstFrame => self.fetch_bash_activities().await,
             DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
         }
-        self.pending_model = Some(reconstructed.model_id);
+        self.pending_model = reconstructed.model_id;
+        self.pending_model_provider = reconstructed.model_provider;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
@@ -1229,7 +1229,8 @@ impl SessionUi {
             }
         }
         if let Some(model) = self.pending_model.take() {
-            view.chrome.model_id = model;
+            view.chrome.model_id = Some(model);
+            view.chrome.model_provider = self.pending_model_provider.take();
         }
         // The tray's effort suffix moves with the same snapshot: an
         // attach's state either carries the session's level or reports a
