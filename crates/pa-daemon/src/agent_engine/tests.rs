@@ -5297,6 +5297,42 @@ fn quota_failure_message(
     }
 }
 
+/// The persist-or-decline gate (TS's `appendCustomEntry` throws and
+/// rolls the append back, so the park path never reports success on a
+/// failed durable write): a failed session-file write cancels the
+/// just-armed wake and declines the park. The session file becomes a
+/// directory, so the append fails for every user (EISDIR), root
+/// included.
+#[tokio::test]
+async fn a_failed_park_entry_write_cancels_the_wake_and_declines_the_park() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = park_engine(dir.path());
+    // Break the durable write: the session file becomes a directory.
+    let session_file = dir.path().join("session.jsonl");
+    std::fs::remove_file(&session_file).expect("remove the session file");
+    std::fs::create_dir(&session_file).expect("block the session file path");
+    let message = quota_failure_message(Some("rate_limit"), Some(3_600_000));
+    let outcome = engine
+        .park_for_quota_reset(
+            &message,
+            "Provider requested a 3600s wait before retrying (above retry.provider.maxRetryDelayMs=60000ms)",
+        )
+        .await;
+    assert!(
+        outcome.is_none(),
+        "the park declines when the durable record fails"
+    );
+    assert!(!engine.is_quota_parked(), "no live park remains");
+    // The just-armed wake was cancelled: no active quota job is left.
+    let wiring = engine.config.cron_store.as_ref().expect("wiring").clone();
+    let jobs = wiring.store.list();
+    assert!(
+        jobs.iter()
+            .all(|job| job.status != pa_core::cron::JobStatus::Active),
+        "the armed wake was cancelled: {jobs:?}"
+    );
+}
+
 /// A quota failure whose reported reset exceeds the wait cap parks the
 /// session: the surfaced status names the wake, the state counts the
 /// park, and the durable wake job lands in the session's artifacts.
