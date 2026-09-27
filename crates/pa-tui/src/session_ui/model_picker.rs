@@ -307,6 +307,8 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
+                self.maybe_warn_anthropic_subscription_auth_if_subscribed(Some(provider), view)
+                    .await;
                 SetModelOutcome::Switched
             }
             Err(error) => {
