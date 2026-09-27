@@ -5656,13 +5656,13 @@ fn persisted_rlm_max_depth_reference(path: Option<&str>) -> Option<u64> {
             (entry.get("type").and_then(serde_json::Value::as_str) == Some("custom")
                 && entry.get("customType").and_then(serde_json::Value::as_str)
                     == Some("rlm_max_depth_state"))
-                .then(|| {
-                    entry
-                        .get("data")
-                        .and_then(|data| data.get("maxDepth"))
-                        .and_then(serde_json::Value::as_u64)
-                })
-                .flatten()
+            .then(|| {
+                entry
+                    .get("data")
+                    .and_then(|data| data.get("maxDepth"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .flatten()
         })
 }
 
@@ -5743,7 +5743,13 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ),
         (
             "present_mid",
-            [header(), message(), depth_override_row("d1", json!(5)), message()].join("\n"),
+            [
+                header(),
+                message(),
+                depth_override_row("d1", json!(5)),
+                message(),
+            ]
+            .join("\n"),
         ),
         // A newer row whose bound does not parse as u64 must not stop
         // the scan: the older valid row still wins (the reference's
@@ -5788,17 +5794,20 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ),
         (
             "crlf_lines",
-            [
-                header(),
-                message(),
-                depth_override_row("d1", json!(11)),
-            ]
-            .join("\r\n"),
+            [header(), message(), depth_override_row("d1", json!(11))].join("\r\n"),
         ),
-        ("unicode_content_absent", [header(), unicode_message()].join("\n")),
+        (
+            "unicode_content_absent",
+            [header(), unicode_message()].join("\n"),
+        ),
         (
             "unicode_content_present",
-            [header(), unicode_message(), depth_override_row("d1", json!(3))].join("\n"),
+            [
+                header(),
+                unicode_message(),
+                depth_override_row("d1", json!(3)),
+            ]
+            .join("\n"),
         ),
         ("empty_file", String::new()),
     ]
@@ -5897,7 +5906,11 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
             true,
         ),
-        ("windowed_no_goal", vec![header(), message("m1", "", "user")], true),
+        (
+            "windowed_no_goal",
+            vec![header(), message("m1", "", "user")],
+            true,
+        ),
         (
             "windowed_off_branch_goal",
             vec![
@@ -5914,7 +5927,11 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
             false,
         ),
-        ("fallback_no_goal", vec![header(), message("m1", "", "user")], false),
+        (
+            "fallback_no_goal",
+            vec![header(), message("m1", "", "user")],
+            false,
+        ),
     ]
     .into();
     for (name, rows, terminated) in classes {
@@ -5932,15 +5949,15 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         // The shared open's extraction (adopt_built_session's block):
         // the window's snapshot goal when the window serves, else the
         // loaded store's active-branch scan.
-        let shared = if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(&path)
-        {
-            window.goal_state().cloned()
-        } else {
-            crate::session_store::SessionFile::open(&path)
-                .ok()
-                .as_ref()
-                .and_then(crate::goal_state_persist::goal_state_in_session_file)
-        };
+        let shared =
+            if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(&path) {
+                window.goal_state().cloned()
+            } else {
+                crate::session_store::SessionFile::open(&path)
+                    .ok()
+                    .as_ref()
+                    .and_then(crate::goal_state_persist::goal_state_in_session_file)
+            };
         assert_eq!(
             shared,
             crate::goal_state_persist::persisted_goal_state(Some(&path)),
