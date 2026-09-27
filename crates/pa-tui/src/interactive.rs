@@ -45,6 +45,21 @@ type ReconnectConnect = tokio::sync::oneshot::Receiver<
 /// exit-within-1s contract.
 const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
+/// The headless exit gate's settle bound: after the plan completes
+/// ([`UiInput::HeadlessDone`]), the run must end within this much wall
+/// clock. The gate has no other bound — a settle member that never drains
+/// (the `interactive_daemon_e2e` exit-gate wedge family: a submit/switch
+/// round-trip race latching `turn_active` with the whole daemon trio
+/// idle) parks the run in `Runtime::block_on` forever and eats a whole
+/// CI job budget with no failure name. The bound converts that into an
+/// attributable error naming the stuck member(s). Terminal runs never
+/// arm it: `HeadlessDone` exists only on the headless harness, and the
+/// gate is unreachable there (a live terminal ends the run on
+/// `exit_requested`). The margin: green settles are milliseconds (the
+/// suite's 32-test green wall is ~15s; the last submit's own ack bound
+/// is 10s), so 60s is a settle that went wrong, never a slow green.
+const HEADLESS_SETTLE_TIMEOUT_MS: u64 = 60_000;
+
 /// Which session the interactive run opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSelection {
@@ -468,6 +483,122 @@ pub enum HeadlessStep {
     /// One raw key event: the verifier's window into the selector/picker
     /// surfaces (arrows, escape), which typed text cannot express.
     Key(crossterm::event::KeyEvent),
+}
+
+/// The headless exit gate's settle, snapshotted: the members the gate
+/// requires before the run may end (every one is work the harness must
+/// not cut short — a live terminal never ends the run on its own; TS
+/// exits the PROCESS at shutdown and lets in-flight work dangle, so the
+/// harness's settle has no TS counterpart). `settled()` is the gate;
+/// `blockers()` is the same members named, so the settle bound's failure
+/// names exactly what stuck (the wedge family's conversion from a
+/// job-budget hang with no failure name into an attributable error).
+#[derive(Debug, Default)]
+struct HeadlessSettle {
+    /// Plan inputs still queued behind a barrier.
+    pending_inputs: usize,
+    /// A turn still streaming (or latched).
+    turn_active: bool,
+    /// Prompt round trips whose ack has not landed.
+    submits_in_flight: usize,
+    /// The queued-message strip's items.
+    queued: usize,
+    /// An armed idle barrier waiting out its deadline.
+    idle_barrier: bool,
+    /// A frame the loop has not painted yet.
+    dirty: bool,
+    /// A `/share` upload whose outcome has not landed.
+    share_pending: bool,
+    /// A `/reload` whose outcome has not landed.
+    reload_pending: bool,
+    /// A `/traces` upload whose outcome has not landed.
+    traces_upload_pending: bool,
+    /// The inline auth panel is mounted.
+    auth_panel_open: bool,
+    /// A `/traces login` flow is pending.
+    traces_login_pending: bool,
+    /// An MCP auth flow is pending.
+    mcp_auth_pending: bool,
+}
+
+impl HeadlessSettle {
+    /// Read the gate's members off the loop state (the gate's exact
+    /// conditions, in the same order the gate historically checked them).
+    fn snapshot(
+        session: &SessionUi,
+        view: &AgentView,
+        pending_inputs: usize,
+        idle_barrier: bool,
+    ) -> Self {
+        Self {
+            pending_inputs,
+            turn_active: session.turn_active,
+            submits_in_flight: session.prompt_submits_in_flight(),
+            queued: view.queued.steering.len() + view.queued.follow_ups.len(),
+            idle_barrier,
+            dirty: session.dirty,
+            share_pending: session.share_pending(),
+            reload_pending: session.reload_pending(),
+            traces_upload_pending: session.traces_upload_pending(),
+            auth_panel_open: view.auth_panel.is_some(),
+            traces_login_pending: session.pending_traces_login(),
+            mcp_auth_pending: session.pending_mcp_auth(),
+        }
+    }
+
+    /// Whether every settle member drained (the exit gate).
+    fn settled(&self) -> bool {
+        self.blockers().is_empty()
+    }
+
+    /// The members that are holding the run open, named for the settle
+    /// bound's failure (empty when settled).
+    fn blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.pending_inputs > 0 {
+            blockers.push(format!(
+                "{} queued plan input(s) behind a barrier",
+                self.pending_inputs
+            ));
+        }
+        if self.turn_active {
+            blockers.push("a turn still active".to_string());
+        }
+        if self.submits_in_flight > 0 {
+            blockers.push(format!(
+                "{} prompt submit(s) without an ack",
+                self.submits_in_flight
+            ));
+        }
+        if self.queued > 0 {
+            blockers.push(format!("{} queued message(s) undelivered", self.queued));
+        }
+        if self.idle_barrier {
+            blockers.push("an idle barrier waiting out its deadline".to_string());
+        }
+        if self.dirty {
+            blockers.push("an unpainted frame".to_string());
+        }
+        if self.share_pending {
+            blockers.push("a share upload in flight".to_string());
+        }
+        if self.reload_pending {
+            blockers.push("a reload in flight".to_string());
+        }
+        if self.traces_upload_pending {
+            blockers.push("a traces upload in flight".to_string());
+        }
+        if self.auth_panel_open {
+            blockers.push("the inline auth panel open".to_string());
+        }
+        if self.traces_login_pending {
+            blockers.push("a pending traces login".to_string());
+        }
+        if self.mcp_auth_pending {
+            blockers.push("a pending MCP auth flow".to_string());
+        }
+        blockers
+    }
 }
 
 /// One typed string as key events: characters become `Char` presses, `\n`
@@ -1922,6 +2053,11 @@ async fn run_interactive_surface(
     // declared above the onboarding phase because the pane's drive marks
     // it when the plan completes while the pane owns the input channel.
     let mut headless_done = false;
+    // The settle bound's deadline, armed once the plan completes (the
+    // gate below ends the run on a full settle; the bound ends it with a
+    // named error when a member never drains — see
+    // [`HEADLESS_SETTLE_TIMEOUT_MS`]).
+    let mut headless_settle_deadline: Option<Instant> = None;
     // First-run onboarding owns the pane before the session screen (TS
     // `runStartupOnboarding`): a home whose startup model is ready sees
     // the trace question alone, and a not-ready home runs the full
@@ -2430,27 +2566,35 @@ async fn run_interactive_surface(
                 inputs_pending = false;
             }
         }
-        // A `/share` upload in flight holds the run open like an active
-        // turn: the headless harness must not finish before its outcome
-        // rows land (a live terminal never ends the run on its own).
-        if headless_done
-            && pending.is_empty()
-            && !session.turn_active
-            && session.prompt_submits_in_flight() == 0
-            && view.queued.is_empty()
-            && wait_idle_deadline.is_none()
-            && !session.dirty
-            && !session.share_pending()
-            && !session.reload_pending()
-            && !session.traces_upload_pending()
-            // An inline auth flow is work like an upload: the harness
-            // must not finish before its settled outcome lands (a live
-            // terminal never ends the run on its own).
-            && view.auth_panel.is_none()
-            && !session.pending_traces_login()
-            && !session.pending_mcp_auth()
-        {
-            break;
+        // The headless exit gate: the plan completed, and the run ends
+        // once every settle member drains (a `/share` upload in flight
+        // holds the run open like an active turn — the headless harness
+        // must not finish before its outcome rows land, and an inline
+        // auth flow is work like an upload; a live terminal never ends
+        // the run on its own). The members are snapshotted so the bound
+        // below can name exactly what stuck.
+        let settle = headless_done.then(|| {
+            HeadlessSettle::snapshot(&session, &view, pending.len(), wait_idle_deadline.is_some())
+        });
+        if let Some(settle) = settle {
+            if settle.settled() {
+                break;
+            }
+            // The settle bound: the gate's wait is the harness's only
+            // unbounded one (TS exits the process at shutdown and lets
+            // in-flight work dangle), so a member that never drains
+            // fails the run with its name instead of wedging the test
+            // binary forever (the CI wedge family: a 30-45min job
+            // budget with no failure row).
+            let deadline = headless_settle_deadline
+                .get_or_insert(Instant::now() + Duration::from_millis(HEADLESS_SETTLE_TIMEOUT_MS));
+            if Instant::now() >= *deadline {
+                anyhow::bail!(
+                    "the headless run's settle did not complete within {}ms of the plan's completion: {}",
+                    HEADLESS_SETTLE_TIMEOUT_MS,
+                    settle.blockers().join("; ")
+                );
+            }
         }
 
         let was_active = session.turn_active;
@@ -4083,6 +4227,108 @@ mod tests {
                 "userMessages": 3
             })),
             None
+        );
+    }
+
+    /// The headless settle snapshot: `settled()` is exactly the old exit
+    /// gate (every member clear), and each member that sticks is named in
+    /// the bound's failure — the diagnostic IS the wedge family's
+    /// failure name.
+    #[test]
+    fn the_headless_settle_names_every_stuck_member() {
+        // Everything clear: settled, no blockers.
+        let settled = HeadlessSettle::default();
+        assert!(settled.settled(), "the default snapshot is the open gate");
+        assert!(settled.blockers().is_empty());
+        // One member at a time: each blocker names exactly its member.
+        for stuck in [
+            HeadlessSettle {
+                pending_inputs: 2,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                turn_active: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                submits_in_flight: 1,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                queued: 3,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                idle_barrier: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                dirty: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                share_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                reload_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                traces_upload_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                auth_panel_open: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                traces_login_pending: true,
+                ..Default::default()
+            },
+            HeadlessSettle {
+                mcp_auth_pending: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!stuck.settled(), "one stuck member holds the gate shut");
+            assert_eq!(
+                stuck.blockers().len(),
+                1,
+                "each stuck member names exactly one blocker"
+            );
+        }
+        // The wedge family's member: a latched turn names the turn.
+        let wedge = HeadlessSettle {
+            turn_active: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            wedge.blockers(),
+            vec!["a turn still active".to_string()],
+            "the exit-gate wedge's failure names its stuck member"
+        );
+        // Everything stuck at once: every member is reported.
+        let all = HeadlessSettle {
+            pending_inputs: 1,
+            turn_active: true,
+            submits_in_flight: 1,
+            queued: 1,
+            idle_barrier: true,
+            dirty: true,
+            share_pending: true,
+            reload_pending: true,
+            traces_upload_pending: true,
+            auth_panel_open: true,
+            traces_login_pending: true,
+            mcp_auth_pending: true,
+        };
+        assert_eq!(all.blockers().len(), 12);
+        assert!(
+            all.blockers()
+                .iter()
+                .any(|blocker| blocker.contains("a turn still active")),
+            "the joined failure keeps the member names readable"
         );
     }
 }
