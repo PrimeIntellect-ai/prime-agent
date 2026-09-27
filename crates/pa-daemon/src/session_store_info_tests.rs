@@ -892,6 +892,9 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
 /// folds the accepted rows end to end against the legacy full-parse
 /// reference.
 #[test]
+#[allow(clippy::used_underscore_binding)] // the envelope scalars the fold
+                                          // keeps only for acceptance (`_timestamp`, `_parent_id`) are READ here to
+                                          // pin that acceptance, which is exactly the matrix's point
 fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
     // Rows are written from raw JSON so the escapes ride the bytes both
     // extraction paths walk.
@@ -962,7 +965,10 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
         match (typed, full) {
             (Some(entry), Some(full)) => {
                 let full_str = |field: &str| full.fields.get(field).and_then(Value::as_str);
-                let message = full.fields.get("message").filter(|message| message.is_object());
+                let message = full
+                    .fields
+                    .get("message")
+                    .filter(|message| message.is_object());
                 let message_str = |field: &str| {
                     message
                         .and_then(|message| message.get(field))
@@ -975,9 +981,21 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
                 };
                 assert_eq!(entry.type_.as_ref(), full.type_.as_str(), "type: {row}");
                 assert_eq!(entry.id.as_ref(), full.id.as_str(), "id: {row}");
-                assert_eq!(entry._timestamp.as_ref(), full.timestamp.as_str(), "timestamp: {row}");
-                assert_eq!(entry._parent_id.as_deref(), full.parent_id.as_deref(), "parentId: {row}");
-                assert_eq!(raw_string(entry.name).as_deref(), full_str("name"), "name: {row}");
+                assert_eq!(
+                    entry._timestamp.as_ref(),
+                    full.timestamp.as_str(),
+                    "timestamp: {row}"
+                );
+                assert_eq!(
+                    entry._parent_id.as_deref(),
+                    full.parent_id.as_deref(),
+                    "parentId: {row}"
+                );
+                assert_eq!(
+                    raw_string(entry.name).as_deref(),
+                    full_str("name"),
+                    "name: {row}"
+                );
                 assert_eq!(
                     entry
                         .state
@@ -990,15 +1008,27 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
                     full_str("provider"),
                     "provider: {row}"
                 );
-                assert_eq!(raw_string(entry.model_id).as_deref(), full_str("modelId"), "modelId: {row}");
+                assert_eq!(
+                    raw_string(entry.model_id).as_deref(),
+                    full_str("modelId"),
+                    "modelId: {row}"
+                );
                 assert_eq!(
                     raw_string(entry.thinking_level).as_deref(),
                     full_str("thinkingLevel"),
                     "thinkingLevel: {row}"
                 );
-                assert_eq!(entry.target_id.as_deref(), full_str("targetId"), "targetId: {row}");
+                assert_eq!(
+                    entry.target_id.as_deref(),
+                    full_str("targetId"),
+                    "targetId: {row}"
+                );
                 if let Some(message) = &entry.message {
-                    assert_eq!(raw_string(message.role).as_deref(), message_str("role"), "role: {row}");
+                    assert_eq!(
+                        raw_string(message.role).as_deref(),
+                        message_str("role"),
+                        "role: {row}"
+                    );
                     assert_eq!(
                         raw_string(message.provider).as_deref(),
                         message_str("provider"),
@@ -1009,7 +1039,11 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
                         message_str("model"),
                         "m.model: {row}"
                     );
-                    assert_eq!(raw_u64(message.timestamp), message_u64("timestamp"), "m.timestamp: {row}");
+                    assert_eq!(
+                        raw_u64(message.timestamp),
+                        message_u64("timestamp"),
+                        "m.timestamp: {row}"
+                    );
                 }
             }
             // Both envelopes reject a non-string envelope scalar.
@@ -1023,12 +1057,14 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
                 let rejected = ["targetId"].iter().any(|field| {
                     matches!(
                         full.fields.get(field),
-                        Some(Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_))
+                        Some(
+                            Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_)
+                        )
                     )
                 }) || full
                     .fields
                     .get("message")
-                    .map_or(false, |message| !message.is_object() && !message.is_null());
+                    .is_some_and(|message| !message.is_object() && !message.is_null());
                 assert!(rejected, "unexpected rejection: {row}");
             }
             (Some(_), None) => panic!("borrowed parse accepted what the envelope rejects: {row}"),
@@ -1062,7 +1098,10 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
     assert_eq!(info.name.as_deref(), Some("trimmed"));
     assert_eq!(info.state.as_deref(), Some("archived"));
     assert_eq!(info.thinking_level.as_deref(), Some("high"));
-    assert_eq!(info.model.as_ref(), Some(&("p".to_string(), "m".to_string())));
+    assert_eq!(
+        info.model.as_ref(),
+        Some(&("p".to_string(), "m".to_string()))
+    );
     // every accepted message row counts, including the null-message and
     // the missing-message rows; both paths count exactly the typed-parse
     // accepted rows.
@@ -1075,7 +1114,13 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
     for aborting in [rows[15], rows[16], rows[17]] {
         let abort_dir = test_dir();
         let abort_path = abort_dir.join("session.jsonl");
-        append_rows(&abort_path, &[header.clone(), serde_json::from_str::<Value>(aborting).unwrap()]);
+        append_rows(
+            &abort_path,
+            &[
+                header.clone(),
+                serde_json::from_str::<Value>(aborting).unwrap(),
+            ],
+        );
         assert_eq!(read_session_info(&abort_path), None);
         assert_fold_matches(&abort_path);
         fs::remove_dir_all(abort_dir).unwrap();

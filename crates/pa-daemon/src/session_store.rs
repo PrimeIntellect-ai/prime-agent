@@ -1775,8 +1775,7 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
         return None;
     }
     let torn_tail = {
-        let mut reader =
-            std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut *file);
+        let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut *file);
         state.scan_from_cursor(&mut reader, generation.len)?
     };
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
@@ -2035,10 +2034,9 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                 acc.usage_scan
                     .fold_message(&entry.id, role, message.usage.map(Usage::from));
                 if role == Some("assistant") {
-                    if let (Some(provider), Some(model_id)) = (
-                        raw_string(message.provider),
-                        raw_string(message.model),
-                    ) {
+                    if let (Some(provider), Some(model_id)) =
+                        (raw_string(message.provider), raw_string(message.model))
+                    {
                         acc.model = Some((provider.to_string(), model_id.to_string()));
                     }
                 }
@@ -3180,58 +3178,59 @@ mod tests {
         );
     }
 
-
-/// The in-place tail window matches the rolling `Vec` reference (the
-/// previous implementation) byte for byte across line-length regimes: the
-/// keep cut at the window edge, the short-line roll, the empty line, and
-/// multibyte bytes that never decode mid-window.
-#[test]
-fn resume_tail_window_matches_the_rolling_reference() {
-    let mut state = SessionScanState::fresh(SessionInfoGeneration {
-        len: 0,
-        dev: 0,
-        ino: 0,
-        mtime: 0,
-        mtime_ns: 0,
-        ctime: 0,
-        ctime_ns: 0,
-    });
-    let mut reference = [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES];
-    let mut rolling_reference = |tail: &mut [u8; SESSION_SCAN_RESUME_TAIL_BYTES], line: &[u8]| {
-        let keep = SESSION_SCAN_RESUME_TAIL_BYTES - 1;
-        let mut combined = Vec::with_capacity(SESSION_SCAN_RESUME_TAIL_BYTES + line.len() + 1);
-        if line.len() >= keep {
-            combined.extend_from_slice(&line[line.len() - keep..]);
-        } else {
-            combined.extend_from_slice(tail);
-            combined.extend_from_slice(line);
+    /// The in-place tail window matches the rolling `Vec` reference (the
+    /// previous implementation) byte for byte across line-length regimes: the
+    /// keep cut at the window edge, the short-line roll, the empty line, and
+    /// multibyte bytes that never decode mid-window.
+    #[test]
+    fn resume_tail_window_matches_the_rolling_reference() {
+        let mut state = SessionScanState::fresh(SessionInfoGeneration {
+            len: 0,
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        });
+        let mut reference = [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES];
+        let rolling_reference = |tail: &mut [u8; SESSION_SCAN_RESUME_TAIL_BYTES], line: &[u8]| {
+            let keep = SESSION_SCAN_RESUME_TAIL_BYTES - 1;
+            let mut combined = Vec::with_capacity(SESSION_SCAN_RESUME_TAIL_BYTES + line.len() + 1);
+            if line.len() >= keep {
+                combined.extend_from_slice(&line[line.len() - keep..]);
+            } else {
+                combined.extend_from_slice(tail);
+                combined.extend_from_slice(line);
+            }
+            combined.push(b'\n');
+            let start = combined
+                .len()
+                .saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES);
+            tail.copy_from_slice(&combined[start..]);
+        };
+        let lines: Vec<Vec<u8>> = [
+            &b""[..],
+            b"x",
+            b"fourteen xx",
+            &b"exactly fifteen"[..],
+            b"sixteen bytes..",
+            &b"a much longer line than the window will ever keep"[..],
+            b"",
+            "multibyte 世界未詠 line".as_bytes(),
+            &b"final"[..],
+        ]
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+        for line in &lines {
+            state.advance_tail(line);
+            rolling_reference(&mut reference, line);
+            assert_eq!(state.tail, reference, "line {line:?}");
         }
-        combined.push(b'\n');
-        let start = combined.len().saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES);
-        tail.copy_from_slice(&combined[start..]);
-    };
-    let lines: Vec<Vec<u8>> = [
-        &b""[..],
-        b"x",
-        b"fourteen xx",
-        &b"exactly fifteen"[..],
-        b"sixteen bytes..",
-        &b"a much longer line than the window will ever keep"[..],
-        b"",
-        &"multibyte 世界未詠 line".as_bytes()[..],
-        &b"final"[..],
-    ]
-    .into_iter()
-    .map(|l| l.to_vec())
-    .collect();
-    for line in &lines {
-        state.advance_tail(line);
-        rolling_reference(&mut reference, line);
-        assert_eq!(state.tail, reference, "line {line:?}");
+        // The prefix-intact read keeps proving resumes from the same bytes.
+        assert_eq!(state.tail, reference);
     }
-    // The prefix-intact read keeps proving resumes from the same bytes.
-    assert_eq!(state.tail, reference);
-}
 
     /// The session header line leads with the `type` tag, exactly like the
     /// TS session file's first line (`{"type":"session","version":...}`).

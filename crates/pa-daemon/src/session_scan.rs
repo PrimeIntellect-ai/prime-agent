@@ -13,8 +13,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::session_store::{
-    parse_session_header_line, read_first_line_bounded_from, read_session_info, read_session_info_from,
-    SessionInfo, SESSION_LIST_HEADER_READ_MAX_BYTES,
+    parse_session_header_line, read_first_line_bounded_from, read_session_info_from, SessionInfo,
+    SESSION_LIST_HEADER_READ_MAX_BYTES,
 };
 
 /// The bounded header read's verdict for one roster file.
@@ -142,7 +142,7 @@ pub fn list_sessions_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::{session_file_name, SessionFile};
+    use crate::session_store::{read_session_info, session_file_name, SessionFile};
     use serde_json::json;
     use std::path::PathBuf;
 
