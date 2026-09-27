@@ -137,13 +137,13 @@ impl MockSupervisor {
                         }),
                     );
                 }
-                "get_state" => {
+                "get_connection_state" => {
                     write_json(
                         &mut writer,
                         &json!({
                             "type": "response",
                             "id": id,
-                            "command": "get_state",
+                            "command": "get_connection_state",
                             "success": true,
                             "data": {
                                 "activeSessionId": "s1",
