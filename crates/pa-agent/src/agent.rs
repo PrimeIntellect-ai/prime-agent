@@ -196,6 +196,34 @@ impl PendingMessageQueue {
     }
 }
 
+/// One queued batch's text preview: the text of the batch's user
+/// messages (text parts concatenated), the TS action-preview shape.
+fn batch_preview(batch: &[AgentMessage]) -> String {
+    batch
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Standard(crate::types::Message::User(user)) => {
+                let text = match &user.content {
+                    crate::types::UserContent::Text(text) => Some(text.clone()),
+                    crate::types::UserContent::Parts(parts) => {
+                        let text: Vec<&str> = parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                crate::types::UserPart::Text(text) => Some(text.text.as_str()),
+                                crate::types::UserPart::Image(_) => None,
+                            })
+                            .collect();
+                        (!text.is_empty()).then(|| text.join(" "))
+                    }
+                };
+                text
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// One or a batch of messages queued through `steer`/`followUp`.
 // The `Single` variant mirrors the TS union member shape; boxing both arms
 // would complicate every call site for no memory benefit in queue paths.
@@ -539,8 +567,7 @@ impl AgentInner {
         if let Err(error) = &result {
             let aborted = self
                 .current_signal()
-                .map(|signal| signal.is_aborted())
-                .unwrap_or(false);
+                .is_some_and(|signal| signal.is_aborted());
             self.handle_run_failure(error, aborted).await;
         }
 
@@ -565,8 +592,24 @@ impl AgentInner {
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
     ) -> anyhow::Result<()> {
+        self.run_prompt_messages_with_start_signal(messages, skip_initial_steering_poll, None)
+            .await
+    }
+
+    /// The same run, firing `started` once the run registers (the
+    /// [`Agent::prompt_until_accepted`] admission seam: the caller returns
+    /// while this run settles on its own).
+    async fn run_prompt_messages_with_start_signal(
+        self: &Arc<Self>,
+        messages: Vec<AgentMessage>,
+        skip_initial_steering_poll: bool,
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
         self.run_with_lifecycle(|signal| async move {
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
@@ -794,14 +837,32 @@ impl Agent {
         self.inner.shared.lock().await.state.messages = messages;
     }
 
+    /// The steering queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn steering_mode(&self) -> QueueMode {
         self.inner.steering_queue.lock().unwrap().mode
     }
 
+    /// Set the steering queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn set_steering_mode(&self, mode: QueueMode) {
         self.inner.steering_queue.lock().unwrap().mode = mode;
     }
 
+    /// The follow-up queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn follow_up_mode(&self) -> QueueMode {
         self.inner.follow_up_queue.lock().unwrap().mode
     }
@@ -810,16 +871,32 @@ impl Agent {
     /// `_installAgentContinuationHook`'s seam: the embedding that owns the
     /// goal/autonomous continuation policy wires it after the agent exists).
     /// `None` uninstalls the hook; the loop's natural stop returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `get_continuation_messages` mutex is poisoned (another
+    /// thread panicked while holding it).
     pub fn set_continuation_hook(&self, hook: Option<GetContinuationMessagesFn>) {
         *self.inner.get_continuation_messages.lock().unwrap() = hook;
     }
 
+    /// Set the follow-up queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn set_follow_up_mode(&self, mode: QueueMode) {
         self.inner.follow_up_queue.lock().unwrap().mode = mode;
     }
 
     /// Queue a message batch to be injected after the current assistant turn
     /// finishes (TS `steer`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn steer(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .steering_queue
@@ -830,6 +907,11 @@ impl Agent {
 
     /// Queue a message batch to run only after the agent would otherwise stop
     /// (TS `followUp`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn follow_up(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .follow_up_queue
@@ -838,10 +920,22 @@ impl Agent {
             .enqueue(message.into());
     }
 
+    /// Clear the steering queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn clear_steering_queue(&self) {
         self.inner.steering_queue.lock().unwrap().clear();
     }
 
+    /// Clear the follow-up queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn clear_follow_up_queue(&self) {
         self.inner.follow_up_queue.lock().unwrap().clear();
     }
@@ -851,7 +945,50 @@ impl Agent {
         self.clear_follow_up_queue();
     }
 
+    /// Previews of the queued steering batches (TS
+    /// `getSteeringMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn steering_previews(&self) -> Vec<String> {
+        self.inner
+            .steering_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
+    }
+
+    /// Previews of the queued follow-up batches (TS
+    /// `getFollowUpMessagePreviews`): one text preview per queued batch,
+    /// in queue order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
+    pub fn follow_up_previews(&self) -> Vec<String> {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .unwrap()
+            .batches
+            .iter()
+            .map(|batch| batch_preview(batch))
+            .collect()
+    }
+
     /// Remove queued messages matching a predicate (TS `removeQueuedMessages`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
+    /// (another thread panicked while holding one of them).
     pub fn remove_queued_messages(
         &self,
         predicate: impl Fn(&AgentMessage) -> bool,
@@ -868,6 +1005,12 @@ impl Agent {
         removed
     }
 
+    /// Whether any steering or follow-up messages are queued.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
+    /// (another thread panicked while holding one of them).
     pub fn has_queued_messages(&self) -> bool {
         self.inner.steering_queue.lock().unwrap().has_items()
             || self.inner.follow_up_queue.lock().unwrap().has_items()
@@ -885,6 +1028,11 @@ impl Agent {
     }
 
     /// Abort the active run (TS `abort`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub fn abort(&self) {
         if let Some(run) = self.inner.run.lock().unwrap().as_ref() {
             run.controller.abort();
@@ -893,6 +1041,11 @@ impl Agent {
 
     /// Resolve when the current run and all awaited event listeners have
     /// finished - after `agent_end` listeners settle (TS `waitForIdle`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn wait_for_idle(&self) {
         let idle_rx = {
             let run = self.inner.run.lock().unwrap();
@@ -931,8 +1084,17 @@ impl Agent {
 
     /// Run the loop with a new prompt (TS `prompt`).
     ///
+    /// # Errors
+    ///
     /// Errors with the TS message when a run is already active; use `steer()`
-    /// or `follow_up()` to queue messages instead.
+    /// or `follow_up()` to queue messages instead. Otherwise the result of the
+    /// run started by this prompt is propagated, so it errors if that run
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn prompt(&self, input: impl Into<AgentPromptInput>) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             anyhow::bail!(
@@ -943,10 +1105,76 @@ impl Agent {
         self.inner.run_prompt_messages(messages, false).await
     }
 
+    /// Port of `promptUntilAccepted` (TS `_prompt` with
+    /// `returnAfterAccepted: true`): admit the prompt, return once its
+    /// run registers, and let the run settle on its own — the turn's
+    /// events follow through the subscriptions and later run failures
+    /// ride them (the admission has already returned).
+    ///
+    /// # Errors
+    ///
+    /// Errors with the TS message when a run is already active (use
+    /// `steer()` or `follow_up()` to queue messages instead), or when the
+    /// run refuses to start after admission; a failure AFTER the run
+    /// registers rides the events, not this result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another task panicked while
+    /// holding it).
+    pub async fn prompt_until_accepted(
+        &self,
+        input: impl Into<AgentPromptInput>,
+    ) -> anyhow::Result<()> {
+        if self.inner.run.lock().unwrap().is_some() {
+            anyhow::bail!(
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            );
+        }
+        let messages = AgentInner::normalize_prompt_input(input.into());
+        let inner = Arc::clone(&self.inner);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (failed_tx, failed_rx) = tokio::sync::oneshot::channel::<anyhow::Error>();
+        tokio::spawn(async move {
+            let result = inner
+                .run_prompt_messages_with_start_signal(messages, false, Some(started_tx))
+                .await;
+            if let Err(error) = result {
+                // After the start signal this is a post-admission failure
+                // (it rides the events); before it, it is the refusal the
+                // waiting admission returns.
+                let _ = failed_tx.send(error);
+            }
+        });
+        // The start signal fires inside the run's executor (after the run
+        // registers); a dropped signal means the run refused to start
+        // before its executor ran, and the failure channel carries the
+        // refusal. A failure AFTER the start signal is post-admission
+        // (it rides the events); the started outcome wins.
+        if started_rx.await.is_ok() {
+            return Ok(());
+        }
+        Err(failed_rx
+            .await
+            .expect("a dropped start signal answers with the refusal"))
+    }
+
     /// Continue from the current context (TS `continue`).
     ///
     /// Returns typed [`AgentContinueError`] failures inside `anyhow::Error`;
     /// downcast with `error.downcast_ref::<AgentContinueError>()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AgentContinueError`] wrapped in `anyhow::Error`: code
+    /// `Busy` when a run is already active, or code `NothingToContinue` when
+    /// there is nothing to continue from. Errors from running queued messages
+    /// and the result of the continuation run are propagated as well.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn continue_run(&self) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             return Err(anyhow::Error::new(AgentContinueError::new(

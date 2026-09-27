@@ -1,6 +1,6 @@
 //! `/heartbeat` job management: create/pause/resume/clear lifecycle plus
 //! the heartbeat management actions (pause/resume/stop).
-//! Section of the port of the AgentCronJobStore half of core/cron-jobs.ts.
+//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -36,6 +36,13 @@ impl AgentCronJobStore {
             .max_by_key(|job| parse_iso_millis(&job.updated_at).unwrap_or(0))
     }
 
+    /// Create the heartbeat job for a session, cancelling its existing
+    /// active/paused heartbeat first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schedule text cannot be parsed, when the
+    /// schedule is not recurring, or when the heartbeat instruction is empty.
     pub fn create_heartbeat(
         &self,
         input: &CreateAgentCronJobInput,
@@ -125,6 +132,13 @@ impl AgentCronJobStore {
         paused
     }
 
+    /// Resume the heartbeat for a session, recomputing its next run time.
+    /// Returns `Ok(None)` when the session has no heartbeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored schedule is invalid or not
+    /// recurring.
     pub fn resume_heartbeat(
         &self,
         active_session_id: &str,
@@ -184,6 +198,14 @@ impl AgentCronJobStore {
         cleared
     }
 
+    /// Apply a pause, stop, or resume management action to a heartbeat job.
+    /// Returns `Ok(None)` when no matching heartbeat job was found (cancelled
+    /// and completed jobs are left untouched).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when resuming a job whose stored schedule is invalid
+    /// or not recurring.
     pub fn manage_heartbeat(
         &self,
         active_session_id: &str,

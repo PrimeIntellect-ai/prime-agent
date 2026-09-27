@@ -6,7 +6,9 @@
 //! the sibling `refinement` module, `compaction-outcome-message.ts` renders
 //! through the chat status rows).
 
-use super::{AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow};
+use super::{
+    AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow, AGENT_MESSAGE_LABEL,
+};
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::{pad_line, str_width, truncate_line, wrap_line, wrap_text};
@@ -57,90 +59,49 @@ pub(crate) fn markdown_rows(
         .collect()
 }
 
-/// TS `agentMessageSummaryLine` (`◆ <label> · <participant>[ · <preview>]`)
-/// with a SANCTIONED DIVERGENCE (Kevin directive 2026-09-24): the row's
-/// icon is the `✉` mail envelope — the a2a rows read as agent mail — where
-/// the TS binary still renders the `◆` diamond (in the accent color; the
-/// TS side is expected to adopt the same glyph). The icon renders green
+/// TS `agentMessageSummaryLine` (`◆ <label> · <participant>`) with the
+/// operator's sanctioned divergences: the row's icon is the `✉` mail
+/// envelope (Kevin directive 2026-09-24 — the a2a rows read as agent
+/// mail; the TS side is expected to adopt the same glyph) rendered green
 /// (the operator's 2026-09-24 directive: "mail envelope glyph GREEN not
-/// purple") — the Success color, the palette's green. The muted label,
-/// then the participant (and the preview when present) joined by the dim
-/// `·` separators. The participant renders its DIRECTIONAL GLYPH (the
-/// operator's 2026-09-24 arrow directive: "instead of saying to child xyz
-/// make use an arrow or smt. and when receiving messages, left arrow or
-/// smt?"): the parse layer's TS-shaped `to <role> <name>` /
-/// `from <role> <name>` becomes `→ <role> <name>` on sent rows and
-/// `← <role> <name>` on received ones — a render-side transform only, the
-/// role and name stay visible, and the wire/store forms never change.
+/// purple") — the Success color, the palette's green. The label is the
+/// shared `Agent message` and the participant renders the viewer-relative
+/// arrow plus the counterpart agent's name (the operator's 2026-09-25
+/// arrow directive: "↓ for received and ↑ for sent/queued ... Display
+/// only `Agent message` + arrow + counterpart agent name"): the arrow
+/// comes from the row's actual direction — `↑` on sent and queued rows
+/// (this chat's outgoing mail), `↓` on received ones (incoming) — never
+/// parsed out of a participant or body string, and the direction word,
+/// the relationship word, and the body preview never render (the TS
+/// header carries no preview either).
 pub(crate) fn agent_message_summary_line(
     direction: AgentMessageDirection,
-    participant: &str,
-    preview: Option<&str>,
+    counterpart: &str,
     theme: &Theme,
 ) -> Line {
-    let mut line: Line = vec![
+    let arrow = match direction {
+        AgentMessageDirection::Received => "\u{2193}",
+        AgentMessageDirection::Sent | AgentMessageDirection::Queued => "\u{2191}",
+    };
+    vec![
         Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Success)),
         Span::raw(" "),
         Span::styled(
-            direction.label().to_string(),
+            AGENT_MESSAGE_LABEL.to_string(),
             theme.fg_style(ThemeColor::Muted),
         ),
         Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
         Span::styled(
-            directional_participant(participant),
+            format!("{arrow} {counterpart}"),
             theme.fg_style(ThemeColor::Dim),
         ),
-    ];
-    if let Some(preview) = preview {
-        line.push(Span::styled(
-            " \u{b7} ".to_string(),
-            theme.fg_style(ThemeColor::Dim),
-        ));
-        line.push(Span::styled(
-            preview.to_string(),
-            theme.fg_style(ThemeColor::Dim),
-        ));
-    }
-    line
-}
-
-/// The participant's directional form (the operator's 2026-09-24 arrow
-/// directive, render-side only): `to <role> <name>` renders
-/// `→ <role> <name>` and `from <role> <name>` renders `← <role> <name>`;
-/// anything else (an already-glyphed or malformed participant) passes
-/// through unchanged.
-fn directional_participant(participant: &str) -> String {
-    participant
-        .strip_prefix("to ")
-        .map(|rest| format!("\u{2192} {rest}"))
-        .or_else(|| {
-            participant
-                .strip_prefix("from ")
-                .map(|rest| format!("\u{2190} {rest}"))
-        })
-        .unwrap_or_else(|| participant.to_string())
-}
-
-/// The collapsed one-line preview of the message body: every source line
-/// flattened onto one line (trimmed, empty lines dropped), `None` when the
-/// body carries no text.
-pub(crate) fn agent_message_preview(message: &str) -> Option<String> {
-    let flat = message
-        .split('\n')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if flat.is_empty() {
-        None
-    } else {
-        Some(flat)
-    }
+    ]
 }
 
 /// The received agent-message rows (TS `AgentMessageComponent`): a leading
-/// blank (spacing-driven), the summary header with the collapsed preview of
-/// the body, and the `╰─`-guttered body when expanded.
+/// blank (spacing-driven), the summary header (no body preview — the
+/// collapsed row is the summary alone), and the `╰─`-guttered body when
+/// expanded.
 pub(crate) fn render_agent_message(
     row: &AgentMessageRow,
     detail: Detail,
@@ -152,42 +113,12 @@ pub(crate) fn render_agent_message(
     if leading {
         out.push(spacer());
     }
-    let header = agent_message_header(row, theme, width);
+    let header = agent_message_summary_line(row.direction, &row.counterpart, theme);
     out.extend(text_rows(header, width));
     if detail.tool_output_expanded() {
         out.extend(agent_message_body(&row.message, theme, width));
     }
     out
-}
-
-/// The summary header with the preview truncated to fit the line: the
-/// label and participant keep TS geometry, the preview gets the remaining
-/// width with the `…` ellipsis so the header stays one row.
-pub(super) fn agent_message_header(row: &AgentMessageRow, theme: &Theme, width: usize) -> Line {
-    let content_width = width.saturating_sub(2).max(1);
-    let base = agent_message_summary_line(row.direction, &row.participant, None, theme);
-    let Some(preview) = agent_message_preview(&row.message) else {
-        return base;
-    };
-    let base_width: usize = str_width(&base.iter().map(|s| s.content.as_str()).collect::<String>());
-    let separator = " \u{b7} ";
-    // `text_rows` renders the header with a one-column margin, so the
-    // preview gets the content width minus the margin, the label, and
-    // the participant with its separator.
-    let available = content_width
-        .saturating_sub(1 + base_width + str_width(separator))
-        .max(1);
-    let preview = truncate_text(&preview, available, "\u{2026}");
-    if preview.is_empty() {
-        return base;
-    }
-    let mut header = base;
-    header.push(Span::styled(
-        separator.to_string(),
-        theme.fg_style(ThemeColor::Dim),
-    ));
-    header.push(Span::styled(preview, theme.fg_style(ThemeColor::Dim)));
-    header
 }
 
 /// TS `agentMessageBodyLines`: each source line wraps at `width - 4`, the
@@ -351,139 +282,81 @@ mod tests {
     fn agent_message_header_shape() {
         let row = AgentMessageRow {
             direction: AgentMessageDirection::Received,
-            participant: "from child model-probe".to_string(),
+            counterpart: "model-probe".to_string(),
             message: "ready".to_string(),
         };
         let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, true);
-        // Leading blank + the envelope summary line with the preview.
+        // Leading blank + the envelope summary line, no body preview.
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[0].is_empty());
         let header = flat(&rows[1]);
         assert_eq!(
             header.trim_end(),
-            " \u{2709} Agent message received \u{b7} \u{2190} child model-probe \u{b7} ready"
+            " \u{2709} Agent message \u{b7} \u{2193} model-probe"
         );
+        // The collapsed row never carries the body text.
+        assert!(!header.contains("ready"), "no preview: {header:?}");
         // Colors: green envelope (the operator's 2026-09-24 directive),
-        // muted label, dim participant, preview, and the separators.
+        // muted label, dim viewer-relative arrow plus name, and the
+        // separator.
         let green = theme().fg_style(ThemeColor::Success);
         let muted = theme().fg_style(ThemeColor::Muted);
         let dim = theme().fg_style(ThemeColor::Dim);
         assert_eq!(rows[1][0], Span::styled(" ".to_string(), Style::default()));
         assert_eq!(rows[1][1], Span::styled("\u{2709}".to_string(), green));
-        assert_eq!(
-            rows[1][3],
-            Span::styled("Agent message received".to_string(), muted)
-        );
+        assert_eq!(rows[1][3], Span::styled("Agent message".to_string(), muted));
         assert_eq!(rows[1][4], Span::styled(" \u{b7} ".to_string(), dim));
         assert_eq!(
             rows[1][5],
-            Span::styled("\u{2190} child model-probe".to_string(), dim)
-        );
-        assert_eq!(rows[1][6], Span::styled(" \u{b7} ".to_string(), dim));
-        assert_eq!(rows[1][7], Span::styled("ready".to_string(), dim));
-    }
-
-    #[test]
-    fn agent_message_header_without_preview() {
-        // No text in the body: the header keeps the TS two-part shape
-        // without the trailing separator.
-        let row = AgentMessageRow {
-            direction: AgentMessageDirection::Received,
-            participant: "from parent root".to_string(),
-            message: "  \n  ".to_string(),
-        };
-        let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, false);
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(
-            flat(&rows[0]).trim_end(),
-            " \u{2709} Agent message received \u{b7} \u{2190} parent root"
+            Span::styled("\u{2193} model-probe".to_string(), dim)
         );
     }
 
     #[test]
-    fn agent_message_preview_flattens_and_truncates() {
-        // The preview flattens every body line onto one row.
-        assert_eq!(
-            agent_message_preview("first\nsecond\n\nthird"),
-            Some("first second third".to_string())
-        );
-        assert_eq!(agent_message_preview("  \n\n "), None);
-        // Truncation: a long body keeps the label and participant intact
-        // and clips the preview to the line with the \u{2026} ellipsis.
-        let row = AgentMessageRow {
-            direction: AgentMessageDirection::Received,
-            participant: "from child lane".to_string(),
-            message: format!("{} end", "word ".repeat(20)),
-        };
-        let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, false);
-        assert_eq!(rows.len(), 1, "one header row: {rows:?}");
-        let header = flat(&rows[0]).trim_end().to_string();
-        assert!(header.contains("word"), "preview kept: {header:?}");
-        assert!(header.ends_with("\u{2026}"), "ellipsis: {header:?}");
-        assert!(str_width(&header) <= 58, "fits the line: {header:?}");
+    fn agent_message_header_never_carries_the_body() {
+        // An empty body and a long body render the SAME collapsed header:
+        // no preview, no ellipsis (the operator's 2026-09-25 directive).
+        for message in ["  \n  ".to_string(), format!("{} end", "word ".repeat(20))] {
+            let row = AgentMessageRow {
+                direction: AgentMessageDirection::Received,
+                counterpart: "root".to_string(),
+                message,
+            };
+            let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, false);
+            assert_eq!(rows.len(), 1, "one header row: {rows:?}");
+            let header = flat(&rows[0]).trim_end().to_string();
+            assert_eq!(header, " \u{2709} Agent message \u{b7} \u{2193} root");
+            assert!(!header.contains("word"), "no preview: {header:?}");
+            assert!(!header.contains("\u{2026}"), "no ellipsis: {header:?}");
+        }
     }
 
-    /// The participant renders its directional glyph (the operator's
-    /// 2026-09-24 arrow directive): sent rows point `→` toward the
-    /// recipient, received rows carry `←` from the sender, the role and
-    /// name stay visible, and the word forms never render.
+    /// The arrow is viewer-relative (the operator's 2026-09-25 directive):
+    /// `↑` on sent and queued rows (this chat's outgoing mail), `↓` on
+    /// received ones (incoming). The arrow comes from the row's actual
+    /// direction and the collapsed row carries the shared `Agent message`
+    /// label plus the arrow and counterpart name only.
     #[test]
-    fn agent_message_participants_render_directional_glyphs() {
-        assert_eq!(
-            directional_participant("to child xyz"),
-            "\u{2192} child xyz"
-        );
-        assert_eq!(
-            directional_participant("from child model-probe"),
-            "\u{2190} child model-probe"
-        );
-        // A malformed or already-glyphed participant passes through.
-        assert_eq!(directional_participant("root"), "root");
-        let row = AgentMessageRow {
-            direction: AgentMessageDirection::Sent,
-            participant: "to parent fleet-main-governance".to_string(),
-            message: "report".to_string(),
-        };
-        let rows = render_agent_message(&row, Detail::Overview, &theme(), 80, false);
-        let header = flat(&rows[0]);
-        assert!(
-            header.contains("\u{2192} parent fleet-main-governance"),
-            "the sent row points at the recipient: {header}"
-        );
-        assert!(
-            !header.contains("to parent"),
-            "the word form never renders: {header}"
-        );
-    }
-
-    #[test]
-    fn agent_message_direction_labels() {
-        // TS labels: received (transcript rows), sent and queued (the
-        // ipython cell receipts).
-        assert_eq!(
-            AgentMessageDirection::Received.label(),
-            "Agent message received"
-        );
-        assert_eq!(AgentMessageDirection::Sent.label(), "Agent message sent");
-        assert_eq!(
-            AgentMessageDirection::Queued.label(),
-            "Agent message queued"
-        );
-        for direction in [
-            AgentMessageDirection::Received,
-            AgentMessageDirection::Sent,
-            AgentMessageDirection::Queued,
+    fn agent_message_arrows_follow_the_row_direction() {
+        for (direction, arrow) in [
+            (AgentMessageDirection::Received, "\u{2193}"),
+            (AgentMessageDirection::Sent, "\u{2191}"),
+            (AgentMessageDirection::Queued, "\u{2191}"),
         ] {
             let row = AgentMessageRow {
                 direction,
-                participant: "to parent worker".to_string(),
+                counterpart: "worker".to_string(),
                 message: "ping".to_string(),
             };
             let rows = render_agent_message(&row, Detail::Overview, &theme(), 80, false);
+            let header = flat(&rows[0]);
             assert!(
-                flat(&rows[0]).contains(&format!("\u{2709} {}", direction.label())),
-                "{direction:?} header: {}",
-                flat(&rows[0])
+                header.contains(&format!("\u{2709} Agent message \u{b7} {arrow} worker")),
+                "{direction:?} header: {header}"
+            );
+            assert!(
+                !header.contains("ping"),
+                "the body never leaks into the collapsed row: {header}"
             );
         }
     }
@@ -492,7 +365,7 @@ mod tests {
     fn agent_message_body_gutter_when_expanded() {
         let row = AgentMessageRow {
             direction: AgentMessageDirection::Received,
-            participant: "from parent root".to_string(),
+            counterpart: "root".to_string(),
             message: "line one\nline two".to_string(),
         };
         let rows = render_agent_message(&row, Detail::All, &theme(), 60, false);

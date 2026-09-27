@@ -71,7 +71,7 @@ struct DiffEngine<'a> {
     components: Vec<Component>,
 }
 
-impl<'a> DiffEngine<'a> {
+impl DiffEngine<'_> {
     fn equals(&self, left: &str, right: &str) -> bool {
         left == right
     }
@@ -158,14 +158,11 @@ impl<'a> DiffEngine<'a> {
         let mut old_pos = 0usize;
         for idx in component_indices {
             let component = self.components[idx];
-            if !component.removed {
+            if component.removed {
                 let slice: Vec<String> =
-                    self.new_tokens[new_pos..(new_pos + component.count)].to_vec();
+                    self.old_tokens[old_pos..(old_pos + component.count)].to_vec();
                 let value = slice.join("");
-                new_pos += component.count;
-                if !component.added {
-                    old_pos += component.count;
-                }
+                old_pos += component.count;
                 parts.push(DiffPart {
                     value,
                     added: component.added,
@@ -174,9 +171,12 @@ impl<'a> DiffEngine<'a> {
                 });
             } else {
                 let slice: Vec<String> =
-                    self.old_tokens[old_pos..(old_pos + component.count)].to_vec();
+                    self.new_tokens[new_pos..(new_pos + component.count)].to_vec();
                 let value = slice.join("");
-                old_pos += component.count;
+                new_pos += component.count;
+                if !component.added {
+                    old_pos += component.count;
+                }
                 parts.push(DiffPart {
                     value,
                     added: component.added,
@@ -258,14 +258,13 @@ impl<'a> DiffEngine<'a> {
                     // If we have hit the end of both strings, then we are done.
                     done = Some(self.build_values(base_path.last_component));
                     break;
-                } else {
-                    best_path.insert(diagonal_path, base_path);
-                    if base_path.old_pos + 1 >= old_len {
-                        max_diagonal_to_consider = max_diagonal_to_consider.min(diagonal_path - 1);
-                    }
-                    if new_pos + 1 >= new_len {
-                        min_diagonal_to_consider = min_diagonal_to_consider.max(diagonal_path + 1);
-                    }
+                }
+                best_path.insert(diagonal_path, base_path);
+                if base_path.old_pos + 1 >= old_len {
+                    max_diagonal_to_consider = max_diagonal_to_consider.min(diagonal_path - 1);
+                }
+                if new_pos + 1 >= new_len {
+                    min_diagonal_to_consider = min_diagonal_to_consider.max(diagonal_path + 1);
                 }
                 diagonal_path += 2;
             }

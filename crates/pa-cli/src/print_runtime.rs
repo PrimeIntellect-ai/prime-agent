@@ -13,8 +13,9 @@ use pa_types::ai::Model;
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, real_stream_fn,
+    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
 };
+use pa_core::session_engine::session_events::agent_event_json;
 
 /// The runtime: implements the print (text) mode against the merged session
 /// engine. Modes not wired here still report their typed missing subsystem.
@@ -37,14 +38,7 @@ impl crate::mode::Runtime for PrintRuntime {
         match options.app_mode {
             // Runtime failures print themselves and exit non-zero; the typed
             // MissingSubsystem channel stays reserved for unwired subsystems.
-            AppMode::Print => match run_print_mode(options) {
-                Ok(code) => Ok(code),
-                Err(message) => {
-                    eprintln!("Error: {message}");
-                    Ok(1)
-                }
-            },
-            AppMode::Json => match run_print_mode(options) {
+            AppMode::Print | AppMode::Json => match run_print_mode(options) {
                 Ok(code) => Ok(code),
                 Err(message) => {
                     eprintln!("Error: {message}");
@@ -80,7 +74,16 @@ impl crate::mode::Runtime for PrintRuntime {
                     Ok(1)
                 }
             },
-            AppMode::Rpc => Err(MissingSubsystem::SessionEngine),
+            // RPC mode: the TS `modes/rpc` JSONL command surface over the
+            // same in-process session engine the print mode uses
+            // (daemon-attached transport: the follow-up lane).
+            AppMode::Rpc => match run_rpc_mode(options) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    Ok(1)
+                }
+            },
         }
     }
 }
@@ -104,7 +107,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
         return Ok(exit_code);
     }
     let config = &options.config;
-    let engine = build_headless_engine_parts(options).await?;
+    let engine = build_headless_engine_parts(options, "print").await?;
     let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
         engine: std::sync::Arc::new(engine.engine),
         actual_cwd: config.cwd.clone(),
@@ -171,6 +174,179 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
     }
 }
 
+/// The RPC headless mode: build the in-process session engine the print
+/// mode does, then serve the TS `modes/rpc` JSONL command surface over
+/// stdio until the client closes stdin.
+fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(rpc_mode_main(options))
+}
+
+async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
+    let config = &options.config;
+    let (parts, initial_lease) = build_headless_engine_parts_with_lease(options, "rpc").await?;
+    // The CLI `--goal` seed rides the first session like the print mode.
+    if let Some(goal) = &config.initial_goal {
+        parts
+            .engine
+            .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    let factory = rpc_engine_factory(options);
+    let mut engine_handle = pa_daemon::rpc::session::RpcEngineHandle::from(parts);
+    // The initial (possibly resumed) session's runtime lease rides the
+    // handle: a later whole-session replacement releases it exactly when
+    // the initial engine stops writing (instead of holding the file
+    // until the process exits).
+    engine_handle.session_lease = initial_lease;
+    let exit_code = pa_daemon::rpc::run_rpc_mode(pa_daemon::rpc::RpcOptions {
+        engine: engine_handle,
+        engine_factory: Some(factory),
+        cwd: config.cwd.clone(),
+        agent_dir: config.agent_dir.clone(),
+        autonomous_config: options
+            .config
+            .autonomous
+            .as_ref()
+            .map(autonomous_runtime_config),
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(exit_code)
+}
+
+/// The engine-replacement seam the RPC mode's `new_session` /
+/// `switch_session` / `fork` commands drive (TS `runtimeHost`
+/// replacement flows): pa-cli owns the assembly, the mode owns the swap.
+fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngineFactory {
+    let options = options.clone();
+    std::sync::Arc::new(move |request| {
+        let mut options = options.clone();
+        // The replacement sessions ignore the CLI's session-selection
+        // flags (TS replacement flows build their own manager).
+        options.session.resume = None;
+        options.session.resume_bare = false;
+        options.session.continue_recent = false;
+        options.session.fork = None;
+        Box::pin(async move {
+            // The runtime lease the replacement acquired for its target
+            // file: it rides the handle (dropping with the engine on the
+            // next replacement, exactly when the old session stops
+            // writing).
+            let (manager, opened_lease) = match &request {
+                pa_daemon::rpc::session::RpcEngineRequest::New {
+                    parent_session,
+                    cwd,
+                } => {
+                    let session_dir = replacement_session_dir(&options);
+                    // The active session's cwd when the command passed
+                    // one (TS `runtimeHost.newSession` over `this.cwd`),
+                    // else the CLI startup directory.
+                    let cwd = cwd.clone().unwrap_or_else(|| options.config.cwd.clone());
+                    let manager = match parent_session {
+                        Some(parent) => {
+                            let mut manager = pa_core::session::manager::SessionManager::persisted(
+                                &cwd,
+                                &session_dir,
+                            );
+                            manager.new_session(&pa_core::session::manager::NewSessionOptions {
+                                parent_session: Some(parent.clone()),
+                                ..Default::default()
+                            });
+                            manager
+                        }
+                        None => {
+                            pa_core::session::manager::SessionManager::persisted(&cwd, &session_dir)
+                        }
+                    };
+                    // TS `acquireReplacementLease(sessionManager.getSessionFile())`:
+                    // the fresh session's file is leased BEFORE the
+                    // replacement can write it — the runtime lease is the
+                    // cross-process ownership record, and the handle's
+                    // lease slot releases exactly when the engine that
+                    // owned it goes away.
+                    let lease = pa_daemon::lease::acquire_runtime_session_lease(
+                        manager
+                            .get_session_file()
+                            .expect("a fresh session knows its file"),
+                        &options.config.agent_dir,
+                    )
+                    .map_err(|error| format!("{error:#}"))?;
+                    (manager, Some(lease))
+                }
+                pa_daemon::rpc::session::RpcEngineRequest::Open {
+                    session_path,
+                    reuse_lease,
+                } => {
+                    let session_dir = replacement_session_dir(&options);
+                    let cwd = options.config.cwd.clone();
+                    // The ownership guard every in-process open applies:
+                    // refuse a file a live daemon worker or another
+                    // process already hosts (a second writer over a
+                    // persisted history), and hold its runtime lease for
+                    // the opened session. A same-path reopen skips the
+                    // guard (TS `acquireReplacementLease` reuses the
+                    // current lease; the session layer adopted it).
+                    let lease = if *reuse_lease {
+                        None
+                    } else {
+                        Some(session_open_guard(
+                            options.daemon_socket.as_deref(),
+                            session_path,
+                        )?)
+                    };
+                    // A failed open's early return drops the lease
+                    // (released), so errors never leave an orphaned hold.
+                    let manager = open_session_file(session_path, &session_dir, &cwd, None)?;
+                    // The replacement ADOPTS the opened session's own
+                    // cwd (TS createRuntime builds the runtime over the
+                    // session's project, not the CLI startup
+                    // directory): tools, settings, and file work run
+                    // against the session's repository.
+                    options.config.cwd = manager.get_cwd().to_path_buf();
+                    (manager, lease)
+                }
+            };
+            let engine = if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
+                build_faux_engine_with(&options, &script, Some(manager), "rpc").await?
+            } else {
+                build_headless_engine_with(&options, Some(manager), "rpc").await?
+            };
+            let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
+            handle.session_lease = opened_lease;
+            Ok(handle)
+        })
+    })
+}
+
+/// The replacement builds' session dir (the resolved one, else the
+/// default under the agent dir).
+fn replacement_session_dir(options: &RunOptions) -> std::path::PathBuf {
+    options
+        .session
+        .session_dir
+        .clone()
+        .unwrap_or_else(|| options.config.agent_dir.join("sessions"))
+}
+
+/// The RPC mode's engine-handle conversion (the composition root's
+/// `HeadlessEngine` into the mode's handle).
+impl From<HeadlessEngine> for pa_daemon::rpc::session::RpcEngineHandle {
+    fn from(parts: HeadlessEngine) -> Self {
+        Self {
+            engine: std::sync::Arc::new(parts.engine),
+            model: parts.model,
+            api_key: parts.api_key,
+            provider_target: parts.provider_target,
+            session_lease: None,
+        }
+    }
+}
+
 fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -180,7 +356,7 @@ fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
-    let headless = build_headless_engine(options).await?;
+    let headless = build_headless_engine(options, "print").await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed (TS constructor seeding): a fresh root branch
     // starts the goal and queues its continuation context as the first
@@ -207,13 +383,66 @@ struct HeadlessEngine {
     engine: pa_core::session_engine::engine::SessionEngine,
     model: Model,
     api_key: Option<String>,
+    /// The live provider target the engine's stream reads per call
+    /// (`set_model` swaps it without rebuilding the session).
+    provider_target: std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>,
 }
 
-async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEngine, String> {
-    let config = &options.config;
+async fn build_headless_engine_parts(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<HeadlessEngine, String> {
+    let (engine, lease) = build_headless_engine_parts_with_lease(options, execution_mode).await?;
+    std::mem::forget(lease);
+    Ok(engine)
+}
+
+/// The same assembly, returning the opened session's runtime lease
+/// alongside (a long-lived connection holds it on the engine handle so a
+/// replacement releases it with the engine it guarded; the one-shot
+/// modes forget it for the process lifetime).
+async fn build_headless_engine_parts_with_lease(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
+    let (session_manager, lease) = select_session_manager_with_lease(options)?;
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        return build_faux_engine_parts(options, &script).await;
+        let engine =
+            build_faux_engine_with(options, &script, session_manager, execution_mode).await?;
+        return Ok((engine, lease));
     }
+    let engine = build_headless_engine_with(options, session_manager, execution_mode).await?;
+    Ok((engine, lease))
+}
+
+/// The session-manager selection every engine build shares
+/// (`--no-session` keeps the engine in-memory; anything else resolves
+/// through the flag order), returning the opened session's runtime
+/// lease.
+fn select_session_manager_with_lease(
+    options: &RunOptions,
+) -> Result<
+    (
+        Option<pa_core::session::manager::SessionManager>,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
+    if options.session.no_session {
+        return Ok((None, None));
+    }
+    let (manager, lease) = build_session_manager_with_lease(options)?;
+    Ok((Some(manager), lease))
+}
+
+/// The real-provider engine assembly over one session-manager selection
+/// (the print/json path and the RPC mode's replacement builds).
+async fn build_headless_engine_with(
+    options: &RunOptions,
+    session_manager: Option<pa_core::session::manager::SessionManager>,
+    execution_mode: &str,
+) -> Result<HeadlessEngine, String> {
+    let config = &options.config;
 
     // Model registry: composed catalog + models.json with real auth.
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
@@ -229,14 +458,14 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // Resolve request auth once (single-shot mode).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
-    let stream_fn = real_stream_fn(resolved.api_key.clone(), model.clone());
+    let provider_target = std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+        api_key: resolved.api_key.clone(),
+        model: model.clone(),
+        service_tier: None,
+        headers: resolved.headers.clone(),
+    })));
+    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
-
-    let session_manager = if options.session.no_session {
-        None
-    } else {
-        Some(build_session_manager(options)?)
-    };
 
     // Telemetry (TS `installAgentTelemetry` parity for headless sessions):
     // the CLI's env/settings opt-out decides; enabled sessions resolve the
@@ -245,7 +474,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
         pa_core::session_engine::telemetry::TelemetryWiring {
             client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
-            execution_mode: Some("print".to_string()),
+            execution_mode: Some(execution_mode.to_string()),
             now: None,
         }
     });
@@ -325,6 +554,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             // true), so the kernel boots in the background at creation;
             // the engine's depth-0 gate matches the TS session's.
             prewarm_ipython_kernel: Some(true),
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
@@ -335,12 +565,16 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         engine,
         model,
         api_key: resolved.api_key,
+        provider_target,
     })
 }
 
 /// The engine alone (callers that do not drive session commands).
-async fn build_headless_engine(options: &RunOptions) -> Result<HeadlessEngine, String> {
-    build_headless_engine_parts(options).await
+async fn build_headless_engine(
+    options: &RunOptions,
+    execution_mode: &str,
+) -> Result<HeadlessEngine, String> {
+    build_headless_engine_parts(options, execution_mode).await
 }
 
 /// The session header line: the session file's `type: "session"` entry in
@@ -399,197 +633,6 @@ async fn session_header_json(
     Some(serde_json::Value::Object(object).to_string())
 }
 
-/// The wire shape of one streaming delta (the TS `AssistantMessageEvent`
-/// as the daemon wire carries it: `partial` dropped — the partial
-/// assistant message rides the event's `message` field already). Terminal
-/// `start`/`done`/`error` events never ride a `message_update` (the loop
-/// emits `message_start`/`message_end` for those), so they map to `None`.
-fn assistant_message_event_json(
-    event: &pa_agent::stream::AssistantMessageEvent,
-) -> Option<serde_json::Value> {
-    use pa_agent::stream::AssistantMessageEvent as StreamEvent;
-    Some(match event {
-        StreamEvent::TextStart { content_index, .. } => serde_json::json!({
-            "type": "text_start",
-            "contentIndex": content_index,
-        }),
-        StreamEvent::TextDelta {
-            content_index,
-            delta,
-            ..
-        } => serde_json::json!({
-            "type": "text_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-        }),
-        StreamEvent::TextEnd {
-            content_index,
-            content,
-            ..
-        } => serde_json::json!({
-            "type": "text_end",
-            "contentIndex": content_index,
-            "content": content,
-        }),
-        StreamEvent::ThinkingStart { content_index, .. } => serde_json::json!({
-            "type": "thinking_start",
-            "contentIndex": content_index,
-        }),
-        StreamEvent::ThinkingDelta {
-            content_index,
-            delta,
-            ..
-        } => serde_json::json!({
-            "type": "thinking_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-        }),
-        StreamEvent::ThinkingEnd {
-            content_index,
-            partial,
-            ..
-        } => serde_json::json!({
-            "type": "thinking_end",
-            "contentIndex": content_index,
-            "content": thinking_block_text(partial, *content_index),
-        }),
-        StreamEvent::ToolCallStart { content_index, .. } => serde_json::json!({
-            "type": "toolcall_start",
-            "contentIndex": content_index,
-        }),
-        StreamEvent::ToolCallDelta {
-            content_index,
-            delta,
-            ..
-        } => serde_json::json!({
-            "type": "toolcall_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-        }),
-        StreamEvent::ToolCallEnd {
-            content_index,
-            tool_call,
-            ..
-        } => {
-            // The TS tool-call block carries its `type: "toolCall"` tag in
-            // the event payload.
-            let mut value = serde_json::json!({
-                "type": "toolCall",
-                "id": tool_call.id,
-                "name": tool_call.name,
-                "arguments": tool_call.arguments,
-            });
-            if let Some(signature) = &tool_call.thought_signature {
-                value["thoughtSignature"] = serde_json::json!(signature);
-            }
-            serde_json::json!({
-                "type": "toolcall_end",
-                "contentIndex": content_index,
-                "toolCall": value,
-            })
-        }
-        StreamEvent::Start { .. } | StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
-            return None;
-        }
-    })
-}
-
-/// The thinking text of one partial message block (the loop's thinking-end
-/// event drops the content when the pa-ai event crosses the crate
-/// boundary; the partial still carries the accumulated text).
-fn thinking_block_text(
-    partial: &pa_agent::types::AssistantMessage,
-    content_index: usize,
-) -> String {
-    partial
-        .content
-        .get(content_index)
-        .map(|block| match block {
-            pa_agent::types::AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
-            _ => String::new(),
-        })
-        .unwrap_or_default()
-}
-
-/// Serialize one loop event to the TS session_event wire shape.
-fn agent_event_json(event: &pa_agent::types::AgentEvent) -> Option<String> {
-    use pa_agent::types::AgentEvent;
-    fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {
-        json_round_trip(value).unwrap_or(serde_json::Value::Null)
-    }
-    let value = match event {
-        AgentEvent::AgentStart => serde_json::json!({ "type": "agent_start" }),
-        AgentEvent::AgentEnd { messages } => serde_json::json!({
-            "type": "agent_end",
-            "messages": messages.iter().map(message_value).collect::<Vec<_>>(),
-        }),
-        AgentEvent::TurnStart => serde_json::json!({ "type": "turn_start" }),
-        AgentEvent::TurnEnd {
-            message,
-            tool_results,
-        } => serde_json::json!({
-            "type": "turn_end",
-            "message": message_value(message),
-            "toolResults": tool_results.iter().map(|r| json_round_trip(r).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
-        }),
-        AgentEvent::MessageStart { message: m } => serde_json::json!({
-            "type": "message_start",
-            "message": message_value(m),
-        }),
-        AgentEvent::MessageUpdate {
-            message,
-            assistant_message_event,
-        } => {
-            // The TS wire carries the slimmed delta event (the daemon drops
-            // the nested `partial` copy; `message` already carries it).
-            let delta = assistant_message_event_json(assistant_message_event)?;
-            serde_json::json!({
-                "type": "message_update",
-                "message": message_value(message),
-                "assistantMessageEvent": delta,
-            })
-        }
-        AgentEvent::MessageEnd { message: m } => serde_json::json!({
-            "type": "message_end",
-            "message": message_value(m),
-        }),
-        AgentEvent::ToolExecutionStart {
-            tool_call_id,
-            tool_name,
-            args,
-        } => serde_json::json!({
-            "type": "tool_execution_start",
-            "toolCallId": tool_call_id,
-            "toolName": tool_name,
-            "args": args,
-        }),
-        AgentEvent::ToolExecutionUpdate {
-            tool_call_id,
-            tool_name,
-            args,
-            partial_result,
-        } => serde_json::json!({
-            "type": "tool_execution_update",
-            "toolCallId": tool_call_id,
-            "toolName": tool_name,
-            "args": args,
-            "partialResult": json_round_trip(partial_result).unwrap_or(serde_json::Value::Null),
-        }),
-        AgentEvent::ToolExecutionEnd {
-            tool_call_id,
-            tool_name,
-            result,
-            ..
-        } => serde_json::json!({
-            "type": "tool_execution_end",
-            "toolCallId": tool_call_id,
-            "toolName": tool_name,
-            "result": json_round_trip(result).unwrap_or(serde_json::Value::Null),
-        }),
-    };
-    Some(value.to_string())
-}
-
 fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
     provider: Option<&str>,
@@ -637,13 +680,22 @@ fn resolve_thinking_level(
     map_thinking_level(clamped)
 }
 
-/// Build the session manager for a headless run, mirroring the flag order of
+/// The headless session-manager resolution, mirroring the flag order of
 /// TS `createSessionManager` (noSession -> fork -> resume -> continue ->
 /// create). `--no-session` never reaches here: the caller passes `None` to
-/// the engine, which builds the in-memory manager itself.
-fn build_session_manager(
+/// the engine, which builds the in-memory manager itself. The opened
+/// session's runtime lease returns alongside (a long-lived connection
+/// holds it on the engine handle; the one-shot modes forget it for the
+/// process lifetime).
+fn build_session_manager_with_lease(
     options: &RunOptions,
-) -> Result<pa_core::session::manager::SessionManager, String> {
+) -> Result<
+    (
+        pa_core::session::manager::SessionManager,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
     use pa_core::session::manager::SessionManager;
     let cwd = options.config.cwd.clone();
     let session_dir = options
@@ -656,13 +708,23 @@ fn build_session_manager(
     // project's session copied into this cwd) — with no daemon-active
     // guard: the copy writes a fresh file, never the hosted source.
     if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
         let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
-            ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
-            ResolvedSession::Global { path, .. } => path,
+            ResolvedSession::Path(path)
+            | ResolvedSession::Local(path)
+            | ResolvedSession::Global { path, .. } => path,
         };
-        return SessionManager::fork_from(&source, &cwd, &session_dir);
+        let manager = SessionManager::fork_from(&source, &cwd, &session_dir)?;
+        // The materialized fork leases its own file before the engine
+        // writes it (the fresh-session rule): another process resuming
+        // the new file can never become a second writer while this
+        // engine appends — the source was only read, never leased.
+        return Ok(lease_fresh_manager(manager));
     }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.
@@ -672,8 +734,11 @@ fn build_session_manager(
             resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
         return match resolved {
             ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
-                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
-                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
+                // A failed open's early return drops the lease (released),
+                // never leaving an orphaned hold behind.
+                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
+                Ok((manager, Some(lease)))
             }
             ResolvedSession::Global {
                 path: _,
@@ -691,28 +756,78 @@ fn build_session_manager(
         let most_recent = find_most_recent_session_for_cwd(&session_dir, &cwd);
         return match most_recent {
             Some(path) => {
-                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
-                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
+                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
+                Ok((manager, Some(lease)))
             }
-            None => Ok(SessionManager::persisted(&cwd, &session_dir)),
+            None => Ok(fresh_session_with_lease(&cwd, &session_dir)),
         };
     }
-    Ok(SessionManager::persisted(&cwd, &session_dir))
+    Ok(fresh_session_with_lease(&cwd, &session_dir))
+}
+
+/// Build a FRESH persisted manager and lease its eagerly selected file
+/// before the engine can write it (the replacement `New` path's rule —
+/// TS leases the freshly created session too, `acquireReplacementLease`):
+/// another process can never claim the first lease while this one writes.
+fn fresh_session_with_lease(
+    cwd: &std::path::Path,
+    session_dir: &std::path::Path,
+) -> (
+    pa_core::session::manager::SessionManager,
+    Option<pa_daemon::lease::SessionLease>,
+) {
+    let manager = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
+    lease_fresh_manager(manager)
+}
+
+/// Lease a freshly materialized session file before the engine can write
+/// it (the fresh `create`/`continue` paths and the `--fork` copy): the
+/// UNGATED runtime acquire the resume path and the daemon's replacement
+/// `New` arm share — `acquire_session_lease` answers `Ok(None)` whenever
+/// the env gate is unset, so it would leave production fresh sessions
+/// unleased. A fresh file's lease cannot be contended (its uuid is new);
+/// an acquire failure here is environmental (the lease directory), so
+/// the session proceeds with a warning instead of failing startup.
+fn lease_fresh_manager(
+    manager: pa_core::session::manager::SessionManager,
+) -> (
+    pa_core::session::manager::SessionManager,
+    Option<pa_daemon::lease::SessionLease>,
+) {
+    let lease = match manager.get_session_file() {
+        Some(path) => {
+            match pa_daemon::lease::acquire_runtime_session_lease(
+                path,
+                &crate::config::get_agent_dir(),
+            ) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    eprintln!("prime-agent: could not lease the fresh session file: {error:#}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    (manager, lease)
 }
 
 /// Open a session file with the TS `SessionManager.open` cwd semantics: an
 /// explicit `--cwd` override wins, else the header's cwd, falling back to the
 /// process cwd for unreadable or new files. Resumed sessions keep the
 /// missing-cwd guard from main.ts.
-/// Guard the TS print path: `-c`/`-r` refuse to open a session file that a
-/// live daemon worker already hosts (`SessionAlreadyActiveError`, raised by
-/// the TS supervisor's create ownership check). The Rust print path runs
-/// in-process, so the guard probes the daemon's live roster first; when no
-/// daemon answers, the open proceeds like a TS run without a daemon.
-fn assert_session_not_active_in_daemon(
+/// Guard an in-process open of a persisted session file: probe the
+/// daemon's live roster (`-c`/`-r` refuse a file a live daemon worker
+/// already hosts, `SessionAlreadyActiveError`), then acquire the runtime
+/// lease. Returns the HELD lease — the caller owns its lifetime (the
+/// one-shot print paths forget it for the process lifetime; a
+/// long-lived connection holds it per session and drops it with the
+/// engine it guards).
+fn session_open_guard(
     socket_path: Option<&str>,
     session_path: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<pa_daemon::lease::SessionLease, String> {
     let socket = crate::interactive_mode::resolve_socket_path(socket_path);
     if let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) {
         let list = client
@@ -722,7 +837,7 @@ fn assert_session_not_active_in_daemon(
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
         if list.success {
@@ -777,14 +892,12 @@ fn assert_session_not_active_in_daemon(
     // (or another CLI) acquires the file's runtime lease after the check
     // and before this in-process open - two writers on one file. The
     // acquire is atomic against the shared lease table: a live foreign
-    // holder answers with the session-hold refusal, and a successful
-    // acquire is held for the process lifetime (the one-shot print run
-    // IS the writer; `forget` keeps the lease armed until the process
-    // exits, whose dead pid the liveness probes treat as released).
+    // holder answers with the session-hold refusal, and the returned
+    // lease is the caller's to hold (the one-shot print run IS the
+    // writer and forgets it for the process lifetime, whose dead pid
+    // the liveness probes treat as released).
     match pa_daemon::lease::acquire_runtime_session_lease(session_path, &agent_dir) {
-        Ok(lease) => {
-            std::mem::forget(lease);
-        }
+        Ok(lease) => Ok(lease),
         Err(error) => {
             let Some(active) = error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
             else {
@@ -794,16 +907,15 @@ fn assert_session_not_active_in_daemon(
                     "could not verify the session file is not held: {error:#}"
                 ));
             };
-            return Err(pa_daemon::hold_refusal::refusal_message(
+            Err(pa_daemon::hold_refusal::refusal_message(
                 &pa_daemon::hold_refusal::HoldIdentity {
                     pid: active.holder_pid,
                     active_session_id: active.active_session_id.clone(),
                 },
                 Some(session_path),
-            ));
+            ))
         }
     }
-    Ok(())
 }
 
 fn open_session_file(
@@ -812,15 +924,16 @@ fn open_session_file(
     fallback_cwd: &std::path::Path,
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
-    let session_cwd = explicit_cwd_override
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| {
+    let session_cwd = explicit_cwd_override.map_or_else(
+        || {
             let header = pa_core::session::manager::read_session_header(path);
-            header
-                .filter(|header| !header.cwd.is_empty())
-                .map(|header| std::path::PathBuf::from(&header.cwd))
-                .unwrap_or_else(|| fallback_cwd.to_path_buf())
-        });
+            header.filter(|header| !header.cwd.is_empty()).map_or_else(
+                || fallback_cwd.to_path_buf(),
+                |header| std::path::PathBuf::from(&header.cwd),
+            )
+        },
+        std::path::Path::to_path_buf,
+    );
     let manager = pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path);
     // main.ts getMissingSessionCwdIssue: a session stored against a deleted
     // directory must not silently continue somewhere else.
@@ -840,7 +953,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),
@@ -1001,7 +1114,11 @@ async fn run_prompts_and_emit(
             .await?;
         engine
             .session
-            .prompt_with_images(prompt, images, Default::default())
+            .prompt_with_images(
+                prompt,
+                images,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
@@ -1118,9 +1235,15 @@ async fn run_prompts_and_emit(
 }
 
 /// The faux-script engine: identical session assembly, scripted provider.
-async fn build_faux_engine_parts(
+/// The faux assembly over one session-manager selection (the RPC mode's
+/// replacement builds share it under the same script).
+async fn build_faux_engine_with(
     options: &RunOptions,
     script: &str,
+    session_manager: Option<pa_core::session::manager::SessionManager>,
+    // The faux harness installs no product telemetry, so the execution
+    // mode label carries through the real path only.
+    _execution_mode: &str,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
     let script: serde_json::Value = serde_json::from_str(script)
@@ -1211,15 +1334,16 @@ async fn build_faux_engine_parts(
     registration.set_responses(response_steps);
     let model = registration.get_model();
     let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
-    let stream_fn = real_stream_fn(None, model.clone());
+    let provider_target = std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+        api_key: None,
+        model: model.clone(),
+        service_tier: None,
+        headers: None,
+    })));
+    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring (persist / --no-session
     // / --resume / --continue) with the real provider path so binary-level
     // tests can verify persistence without the network.
-    let session_manager = if options.session.no_session {
-        None
-    } else {
-        Some(build_session_manager(options)?)
-    };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
@@ -1256,6 +1380,7 @@ async fn build_faux_engine_parts(
             // The faux engine is a Rust-only verification harness, not a
             // product surface: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         },
@@ -1266,207 +1391,12 @@ async fn build_faux_engine_parts(
         engine,
         model,
         api_key: None,
+        provider_target,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pa_agent::stream::AssistantMessageEvent;
-    use pa_agent::types::{
-        AgentEvent, AssistantContent, AssistantMessage, TextContent, ToolCall, Usage,
-    };
-
-    /// A minimal partial assistant message (the faux wire fields).
-    fn partial(content: Vec<AssistantContent>) -> AssistantMessage {
-        AssistantMessage {
-            content,
-            api: "faux".to_string(),
-            provider: "faux".to_string(),
-            model: "faux-1".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: Usage::zero(),
-            stop_reason: pa_agent::types::StopReason::Stop,
-            error_message: None,
-            stop_reason_raw: None,
-            timestamp: 0,
-        }
-    }
-
-    /// The wire shapes of the streaming deltas (TS `AssistantMessageEvent`
-    /// as the daemon wire carries it — no nested `partial` copy).
-    #[test]
-    fn assistant_message_event_wire_shapes_match_ts() {
-        let message = partial(Vec::new());
-        let cases: Vec<(AssistantMessageEvent, serde_json::Value)> = vec![
-            (
-                AssistantMessageEvent::TextStart {
-                    content_index: 0,
-                    partial: message.clone(),
-                },
-                serde_json::json!({"type": "text_start", "contentIndex": 0}),
-            ),
-            (
-                AssistantMessageEvent::TextDelta {
-                    content_index: 0,
-                    delta: "first reply".to_string(),
-                    partial: message.clone(),
-                },
-                serde_json::json!({
-                    "type": "text_delta",
-                    "contentIndex": 0,
-                    "delta": "first reply",
-                }),
-            ),
-            (
-                AssistantMessageEvent::TextEnd {
-                    content_index: 0,
-                    content: "first reply".to_string(),
-                    partial: message.clone(),
-                },
-                serde_json::json!({
-                    "type": "text_end",
-                    "contentIndex": 0,
-                    "content": "first reply",
-                }),
-            ),
-            (
-                AssistantMessageEvent::ThinkingStart {
-                    content_index: 1,
-                    partial: message.clone(),
-                },
-                serde_json::json!({"type": "thinking_start", "contentIndex": 1}),
-            ),
-            (
-                AssistantMessageEvent::ThinkingDelta {
-                    content_index: 1,
-                    delta: "think".to_string(),
-                    partial: message.clone(),
-                },
-                serde_json::json!({
-                    "type": "thinking_delta",
-                    "contentIndex": 1,
-                    "delta": "think",
-                }),
-            ),
-            (
-                AssistantMessageEvent::ThinkingEnd {
-                    content_index: 1,
-                    partial: partial(vec![
-                        AssistantContent::Text(TextContent {
-                            text: "answer".to_string(),
-                            text_signature: None,
-                        }),
-                        AssistantContent::Thinking(pa_agent::types::ThinkingContent {
-                            thinking: "the reasoning".to_string(),
-                            thinking_signature: None,
-                            redacted: None,
-                        }),
-                    ]),
-                },
-                serde_json::json!({
-                    "type": "thinking_end",
-                    "contentIndex": 1,
-                    "content": "the reasoning",
-                }),
-            ),
-            (
-                AssistantMessageEvent::ToolCallStart {
-                    content_index: 0,
-                    partial: message.clone(),
-                },
-                serde_json::json!({"type": "toolcall_start", "contentIndex": 0}),
-            ),
-            (
-                AssistantMessageEvent::ToolCallDelta {
-                    content_index: 0,
-                    delta: r#"{"code""#.to_string(),
-                    partial: message.clone(),
-                },
-                serde_json::json!({
-                    "type": "toolcall_delta",
-                    "contentIndex": 0,
-                    "delta": "{\"code\"",
-                }),
-            ),
-            (
-                AssistantMessageEvent::ToolCallEnd {
-                    content_index: 0,
-                    tool_call: ToolCall {
-                        id: "call-1".to_string(),
-                        name: "ipython".to_string(),
-                        arguments: serde_json::json!({"code": "1 + 1"}),
-                        thought_signature: None,
-                    },
-                    partial: message.clone(),
-                },
-                serde_json::json!({
-                    "type": "toolcall_end",
-                    "contentIndex": 0,
-                    "toolCall": {
-                        "type": "toolCall",
-                        "id": "call-1",
-                        "name": "ipython",
-                        "arguments": {"code": "1 + 1"},
-                    },
-                }),
-            ),
-        ];
-        for (event, expected) in cases {
-            assert_eq!(
-                assistant_message_event_json(&event).as_ref(),
-                Some(&expected),
-                "wire shape of {event:?}"
-            );
-        }
-        // Terminal events never ride a message_update.
-        assert!(assistant_message_event_json(&AssistantMessageEvent::Start {
-            partial: message.clone(),
-        })
-        .is_none());
-        assert!(assistant_message_event_json(&AssistantMessageEvent::Done {
-            reason: pa_agent::types::StopReason::Stop,
-            message: message.clone(),
-        })
-        .is_none());
-        assert!(assistant_message_event_json(&AssistantMessageEvent::Error {
-            reason: pa_agent::types::StopReason::Error,
-            error: message,
-        })
-        .is_none());
-    }
-
-    /// The `message_update` event wraps the partial message plus the slim
-    /// delta, in the TS field order.
-    #[test]
-    fn message_update_event_json_wraps_the_partial_and_delta() {
-        let message = partial(vec![AssistantContent::Text(TextContent {
-            text: "first reply".to_string(),
-            text_signature: None,
-        })]);
-        let event = AgentEvent::MessageUpdate {
-            message: pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
-                message.clone(),
-            )),
-            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
-                content_index: 0,
-                delta: "first reply".to_string(),
-                partial: message,
-            }),
-        };
-        let json = agent_event_json(&event).expect("a message_update json line");
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["type"], "message_update");
-        assert_eq!(value["message"]["role"], "assistant");
-        assert_eq!(value["message"]["content"][0]["text"], "first reply");
-        assert_eq!(
-            value["assistantMessageEvent"],
-            serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
-        );
-    }
-
     // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
 
     /// The print session's MCP manager serves a settings-declared server

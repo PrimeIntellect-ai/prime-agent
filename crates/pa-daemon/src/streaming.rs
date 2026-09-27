@@ -6,7 +6,7 @@
 //! of deltas per second, so the turn's emit path parks those frames in a
 //! single-slot coalescer instead of broadcasting every one: a flusher task
 //! emits at most one parked update per interval, while every other frame
-//! (message_start, message_end, tool events, turn_end) flushes the parked
+//! (`message_start`, `message_end`, tool events, `turn_end`) flushes the parked
 //! update first and then goes out immediately, so wire order and
 //! event-sequence order stay identical to uncoalesced streaming.
 //!
@@ -30,7 +30,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::protocol::{create_daemon_event_meta, DaemonOutbound};
 use crate::worker::OutboundFrame;
@@ -187,7 +187,7 @@ impl TurnStreamCoalescer {
             active_session_id: self.session.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound).unwrap_or_default();
         events.send(OutboundFrame::session_event(payload));

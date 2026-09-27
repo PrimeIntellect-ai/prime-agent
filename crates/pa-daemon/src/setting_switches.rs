@@ -64,8 +64,7 @@ fn engine_fast_mode(engine: &dyn crate::engine::SessionEngine) -> bool {
         .as_ref()
         .and_then(|model| model.get("id"))
         .and_then(Value::as_str)
-        .map(supports_fast_mode)
-        .unwrap_or(false)
+        .is_some_and(supports_fast_mode)
 }
 
 impl Worker {
@@ -826,14 +825,13 @@ mod tests {
                 .unwrap()
                 .store
                 .as_ref()
-                .map(|store| {
+                .map_or(0, |store| {
                     store
                         .entries()
                         .iter()
                         .filter(|entry| entry.type_ == "service_tier_change")
                         .count()
                 })
-                .unwrap_or(0)
         };
         let baseline = tier_rows(&worker);
         let response = worker
@@ -853,16 +851,13 @@ mod tests {
         assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
         let rows = {
             let core = worker.core.lock().unwrap();
-            core.store
-                .as_ref()
-                .map(|store| {
-                    store
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
-                })
-                .unwrap_or(0)
+            core.store.as_ref().map_or(0, |store| {
+                store
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.type_ == "service_tier_change")
+                    .count()
+            })
         };
         assert_eq!(rows, baseline + 1, "one new preference row");
         // An unchanged request is a no-op success (no new row).
@@ -875,16 +870,13 @@ mod tests {
         assert!(response.success);
         let rows = {
             let core = worker.core.lock().unwrap();
-            core.store
-                .as_ref()
-                .map(|store| {
-                    store
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
-                })
-                .unwrap_or(0)
+            core.store.as_ref().map_or(0, |store| {
+                store
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.type_ == "service_tier_change")
+                    .count()
+            })
         };
         assert_eq!(rows, baseline + 1);
         let response = worker

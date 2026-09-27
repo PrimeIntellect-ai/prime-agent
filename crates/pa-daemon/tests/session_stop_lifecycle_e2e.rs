@@ -105,7 +105,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -225,7 +225,7 @@ impl Session {
             .join("scheduled-jobs.json")
     }
 
-    /// The latest session_state status of the session file.
+    /// The latest `session_state` status of the session file.
     fn session_state(&self) -> String {
         let mut state = String::new();
         for line in std::fs::read_to_string(self.session_file())
@@ -328,8 +328,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
             .find(|path| {
                 path.extension().and_then(|extension| extension.to_str()) == Some("json")
                     && std::fs::read_to_string(path)
-                        .map(|content| content.contains(&a.session_id))
-                        .unwrap_or(false)
+                        .is_ok_and(|content| content.contains(&a.session_id))
             })
             .expect("A's pre-kill worker descriptor");
         let content = std::fs::read_to_string(&found).expect("descriptor readable");

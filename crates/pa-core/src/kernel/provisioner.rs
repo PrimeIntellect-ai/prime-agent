@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::anyhow;
 
 use crate::kernel::bootstrap::{
-    build_rlm_bootstrap_code, KernelBootstrapProgressHandler, KernelPythonSkill,
+    build_rlm_bootstrap_code, parse_unavailable_python_skills, KernelBootstrapProgressHandler,
+    KernelPythonSkill, UnavailablePythonSkills,
 };
 use crate::kernel::cancellation::AbortSignal;
 use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
@@ -34,9 +35,7 @@ use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 /// Above core count because boots are IO-bound, capped so a fan-out can't
 /// thrash the FS past the ready-handshake window.
 fn default_kernel_boot_concurrency() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     16.min((cores * 2).max(4))
 }
 
@@ -84,6 +83,10 @@ where
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
+/// Publishes the skills that failed to import into a freshly started
+/// kernel (import name -> import error), once the kernel is usable.
+pub type UnavailableSkillsCallback = Arc<dyn Fn(&UnavailablePythonSkills) + Send + Sync>;
+
 /// Outcome of one full kernel bootstrap (spawn + handshake + namespace
 /// restore + runtime bootstrap), reported once per actual boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +116,9 @@ pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
     pub env: HashMap<String, String>,
-    /// Command prefix prepended to every kernel bash() invocation.
+    /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
-    /// Trusted shell path injected for kernel bash(); `None` on platforms
+    /// Trusted shell path injected for kernel `bash()`; `None` on platforms
     /// without one, where the runtime's teaching error fires instead.
     pub shell_path: Option<PathBuf>,
     pub session_id: Option<String>,
@@ -128,6 +131,15 @@ pub struct IpythonKernelProvisionerOptions {
     pub ready_gate: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
+    /// Fires when the kernel's last live background `bash()` handle
+    /// settles, so owed continuations can resume (TS
+    /// `IpythonToolOptions.onBackgroundWorkSettled`).
+    pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
+    /// Fires once per kernel start when installed Python skills failed to
+    /// import into the kernel (skill import name -> import error), so the
+    /// session can tell the model before it wastes turns calling them
+    /// (TS `IpythonToolOptions.onUnavailableSkills`).
+    pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
     /// Publishes the per-boot result for `kernel bootstrap` telemetry.
     /// Telemetry only; kernel behavior never depends on it.
     pub on_bootstrap_result: Option<KernelBootstrapResultHandler>,
@@ -216,7 +228,7 @@ impl IpythonKernelProvisioner {
 
     /// Whether a kernel has finished starting and is currently running.
     pub fn has_running_kernel(&self) -> bool {
-        self.manager().map(|m| m.is_running()).unwrap_or(false)
+        self.manager().is_some_and(|m| m.is_running())
     }
 
     /// Start the kernel in the background. Failures are swallowed here and
@@ -231,6 +243,12 @@ impl IpythonKernelProvisioner {
     /// The kernel manager, starting it first when necessary. Concurrent
     /// callers join one startup; the current startup stage is replayed to
     /// listeners that attach mid-flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the abort signal is already cancelled or fires
+    /// during the wait, when the provisioner was disposed, or when the kernel
+    /// startup fails (all joined callers see the same failure).
     pub async fn ensure(
         &self,
         on_progress: Option<KernelBootstrapProgressHandler>,
@@ -333,7 +351,7 @@ impl IpythonKernelProvisioner {
     /// Dispose the kernel owned by this provisioner, including one still
     /// starting up. A still-queued boot drops out of the boot gate.
     pub async fn dispose(&self, options: Option<KernelShutdownOptions>) {
-        let snapshot = options.map(|o| o.snapshot).unwrap_or(true);
+        let snapshot = options.is_none_or(|o| o.snapshot);
         {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
@@ -393,8 +411,7 @@ fn resolve_startup_retries() -> u32 {
         Ok(raw) => raw
             .trim()
             .parse::<u32>()
-            .map(|n| n.min(5))
-            .unwrap_or(DEFAULT_STARTUP_RETRIES),
+            .map_or(DEFAULT_STARTUP_RETRIES, |n| n.min(5)),
         Err(_) => DEFAULT_STARTUP_RETRIES,
     }
 }
@@ -527,7 +544,7 @@ async fn race_startup(
         Some(signal) => {
             tokio::select! {
                 _ = task => Ok(()),
-                _ = signal.cancelled() => Err(anyhow!("Kernel startup aborted")),
+                () = signal.cancelled() => Err(anyhow!("Kernel startup aborted")),
             }
         }
     }
@@ -609,6 +626,7 @@ async fn start_kernel_impl(
         session_id: options.session_id.clone(),
         host_handlers: options.host_handlers.clone(),
         python_skills: options.python_skills.clone(),
+        on_background_work_settled: options.on_background_work_settled.clone(),
         snapshot,
         bootstrap_code: Some(bootstrap_code.clone()),
         stderr_log_path,
@@ -724,8 +742,21 @@ async fn start_kernel_impl(
                 // on-disk payload with a skills-only namespace.
                 manager.mark_restored_namespace_fresh();
             }
+            // Broken skill imports stay importable-looking placeholders;
+            // report them so the model learns before its first call, not
+            // from the placeholder's error (TS startKernel).
+            let unavailable = parse_unavailable_python_skills(&bootstrap.stdout);
+            if let (Some(on_unavailable_skills), Some(errors)) =
+                (&inner.options.on_unavailable_skills, unavailable)
+            {
+                on_unavailable_skills(&errors);
+            }
         }
         Ok(bootstrap) => {
+            // The kernel booted but its runtime did not initialize: the venv
+            // is the prime suspect, so drop the memoized runtime-ready result
+            // and let the next start re-probe (and rebuild when broken).
+            crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             let details = [bootstrap.stderr.clone()]
                 .into_iter()
                 .chain(bootstrap.error.iter().map(|e| e.traceback.join("\n")))

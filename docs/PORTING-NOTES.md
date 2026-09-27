@@ -1,3 +1,158 @@
+## Bounded backpressure on the supervisor's request path (Codex finding 4, lane daemon-backpressure, 2026-09-26)
+
+**The Codex comparison and the finding.** The Codex daemon-comparison
+report (handoffs/codex-daemon-comparison.md, finding 4) maps Codex's
+`app-server-transport` against `pa-daemon`: Codex bounds its inbound
+queue (`CHANNEL_CAPACITY = 128`, `transport/mod.rs:21-24`) and answers
+a request that finds it full with the explicit JSON-RPC error
+`-32001 "Server overloaded; retry later."` (`mod.rs:228-259`) instead of
+blocking or dropping (non-request traffic awaits, `:265`); each
+connection drains a bounded 32K-message outbound queue with a
+compile-time headroom assert (`websocket.rs:46-49`). Our supervisor
+instead held unbounded queues at both hops of the request path — the
+worker command pump (`mpsc::unbounded_channel::<WorkerRequest>`, now
+`supervisor/supervision.rs`) and the per-connection dispatch channel
+(`unbounded_channel::<(Vec<Value>, bool)>`, now `supervisor.rs`) — and
+the 4096-slot client event broadcast (`broadcast::channel(4096)`)
+silently dropped lagged frames (`RecvError::Lagged(_) => {}`): a slow
+or wedged consumer produced ambiguous timeouts and invisible event
+loss, never a "slow down" signal.
+
+**The Rust mapping.** The bounds live in the new
+`pa-daemon/src/backpressure.rs` (supervisor.rs stays at its size
+budget; the ownership rule keeps new daemon seams in their own module):
+
+- `WORKER_INFLIGHT_CAPACITY = 128` — Codex's single-process bound,
+  adapted per unit: this daemon fronts N one-session worker processes,
+  so the bound applies per worker (the aggregate is 128*N, and a
+  flooding client exhausts only the session it floods). One constant
+  bounds both the in-flight set (a `tokio::sync::Semaphore` on
+  `ResidentWorker`, one permit per admitted request, held until its
+  reply resolves) and the worker command channel (admission precedes
+  enqueue, so the queue and the in-flight set share the bound — a
+  wedged writer parks at most 128 frames).
+- `CLIENT_OUTBOUND_CAPACITY = 32 * 1024` — the per-connection dispatch
+  channel's bound (the `WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY` mirror),
+  with the same compile-time assert that it exceeds the internal
+  bound. A client that reads nothing stalls only its own dispatch
+  tasks at this bound; the saved-session scan paces itself to its
+  reader via `blocking_send` (a dead connection stops the scan exactly
+  as before, via the send error).
+- `RouteAdmission` splits what a saturated route does, Codex's
+  request/notification split: `ClientRequest` (the generic client route
+  and the prompt-admission route) answers the explicit refusal the
+  moment the worker saturates — at the semaphore or at a full queue;
+  `SupervisorInternal` (stop/kill, create replay, detach cleanup,
+  polls) waits for a slot inside the route's own budget and never
+  refuses (a saturated worker surfaces the existing
+  `Session worker timed out` budget error). The whole route —
+  admission, enqueue, and reply waits — never exceeds the caller's
+  budget.
+- The wire shape: the refusal is a normal failed response carrying
+  `errorInfo: { "code": "worker_overloaded" }` (the `-32001` analog on
+  our wire — a new `DaemonErrorInfo::WorkerOverloaded` variant, the
+  same additive-error-code pattern as `CommandResultUncertain` and
+  `UpdatePrepareRefused`) with `error: "Session worker <id> is
+  overloaded; retry later"`. The refused request provably never left
+  the supervisor (nothing queued, nothing held), so a retry cannot
+  duplicate it — the unambiguous counterpart of the wedged-worker
+  timeout. Each refusal emits the `daemon event` kind
+  `worker_overloaded` (telemetry-events.md, schema v1).
+- The lagged event arm logs the client id and the dropped count to the
+  daemon log: the ring's drop stays defined behavior (a 4096-slot
+  broadcast must not block the supervisor on one slow reader), but it
+  is never invisible anymore.
+
+**Parity position.** TS has no overload surface at all — its daemon
+queue commands without bound and its clients ride ambiguous timeouts;
+the typed refusal is an additive Rust-only reliability surface, not a
+divergence from a TS behavior (unknown `errorInfo` codes render through
+the existing generic refusal paths in every client: the TUI shows the
+refusal inline — the submit path restores the draft for retry, the
+attach/create paths fall back to the agents view with the refusal as
+the status line — and the daemon log + `worker_overloaded` telemetry
+carry the field evidence for tuning the bounds).
+
+**Not ported (documented non-ports).** Codex's write-completion
+oneshots (`QueuedOutgoingMessage.write_complete_tx`) exist so a
+producer can await its frame reaching the wire; this daemon's
+per-connection outbound is a single-writer queue whose blocking
+`send().await` already provides that flow control (the queue drains
+only as the loop writes), and no current producer needs per-frame
+flush confirmation — speculative surface per BUGBOT. The worker-side
+direct-transport fan-out's own silent lag arm (`worker.rs`, the
+`broadcast::channel(4096)` event pump) is the same disease on a
+different surface and stays with the worker-split lanes.
+
+**Verifiers.** `a_saturated_worker_answers_client_requests_with_the_typed_overload_refusal`
+and `a_full_queue_answers_client_requests_with_the_same_refusal`
+(pa-daemon unit, `backpressure.rs`: at-capacity client requests get the
+explicit typed refusal and never enter the in-flight set — internal
+traffic only ever waits; the freed-slot arm admits again),
+`a_saturated_internal_route_admits_once_a_slot_frees` (the wait is for
+a slot, and a freed slot admits the waiter),
+`a_lagged_client_event_stream_is_logged` (pa-daemon unit,
+`supervisor.rs`: a real connection loop over a socket pair, a flooded
+ring, and the lag line in the daemon log).
+
+## Goal/autonomous continuations wait for background bash (TS #2465 port, lane goal-bash-race-fix, 2026-09-25)
+
+**The TS fix.** TS PR #2465 (`b08f08efad` merged 2026-09-21): a
+goal-active or autonomous session that ends its turn while a background
+`bash()` handle still runs was immediately re-prompted by the
+timer-driven continuation — the existing hold
+(`_goalContinuationAwaitsRlmWork` /
+`_autonomousContinuationAwaitsRlmWork`) only paused for unsettled RLM
+descendant work. The fix extends the same hold to live background bash
+handles without spending continuation budget: the kernel's
+bash-activity tracking (`hasBackgroundWork`, the state behind the
+bash-done completion follow-ups) is the liveness query, and the kernel
+manager notifies the session (`onBackgroundWorkSettled`) when the last
+live handle settles (its completion notice is admitted first — the
+runtime awaits the `bash.completed` host reply before emitting the
+activity release) or when the kernel tears down; the session then runs
+the same resume pair the RLM child settlement sites fire, so the held
+continuation resumes behind the notice exactly like child-exit notices.
+
+**The Rust mapping.** The manager seam
+(`KernelManagerOptions.on_background_work_settled`, fired at the
+activity-map-empty release and at teardown with live handles, panic
+guarded into the diagnostics tail like the TS try/catch) threads
+`SessionEngineConfig` -> `runtime_wiring::kernel_provisioner` ->
+`IpythonKernelProvisionerOptions` -> the manager; the daemon engine
+builds it from its registered weak arc and retries both owed
+continuations. The liveness probe
+(`AgentSessionEngine::has_live_background_bash_handles`, TS
+`_hasLiveBackgroundBashHandles`) reads the built session's provisioner
+weakly — the in-run consult can run inside a compaction turn, which
+holds the session mutex — and gates all five continuation mint/resume
+sites: the goal turn-end mint, the goal settle retry, the post-compaction
+goal resume mint (TS `resumeQueuedWork()`'s arm), the autonomous in-run
+hold, and the autonomous settle retry. User prompts and explicit
+commands are never gated (a user prompt always wakes the session).
+
+**Deliberate non-ports.** The TS keep-alive-valve hunks
+(`_fireAutonomousSubagentKeepAlive` re-poll) have no Rust counterpart:
+the subagent keep-alive valve is not ported to the daemon surface. The
+pa-cli headless/print surfaces pass no settlement callback: their
+continuation loops are separate ported surfaces without the RLM-work
+hold either (pre-existing divergence, unchanged by this port). The TS
+`.changes` changelog file has no Rust equivalent. A background handle
+that never exits holds the pause indefinitely by design — the handle
+settling, not a timer, is the wake-up (TS parity), and a user prompt
+always wakes the session immediately.
+
+**Regression pins.** Manager-level rows (malformed releases never
+settle, the matching release fires exactly once, teardown with live
+handles fires once, a panicking callback neither breaks the event path
+nor aborts teardown) over injected activity events; live-kernel rows
+(settlement at handle completion, teardown-with-live-handles once) over
+a real `python -m rlm.repl`; daemon rows (the goal and autonomous
+continuations hold behind a live handle with budget unspent, keep the
+deferral on the settlement retry while the handle still runs, and
+deliver/admit exactly once when it settles; the post-compaction mint
+defers the same way).
+
 ## Deleted-subagent spend: the durable capture ahead of TS (lane deleted-child-spend, 2026-09-23)
 
 **The ahead-of-TS exception (Kevin's directive, 2026-09-23).** TS PR
@@ -497,6 +652,49 @@ string — which is not build recency.
   `update_flow` (plan anchor + guards, the Direct plan arm) and
   `public_command` (flag parse; the TUI `/update` surface stays TS parity).
 
+## Package update self target = the real update flow (2026-09-25)
+
+Reference: TS `package-manager-cli.ts` (`handlePackageCommand`'s update case)
+over the update flow above. The gap: `prime-agent package update
+--rollback|--nightly|--stable` — the dispatcher lets exactly these through,
+matching TS — reached a leftover stub (`self-update is not available in this
+build yet`), misleading once the staged-activation flow was linked in, and
+the parse dropped `--force`/`--nightly`/`--stable` values after validating
+them.
+
+- The update case now ports TS's order: the persisted channel is read once,
+  an explicit nightly switch warns and confirms BEFORE any update work (an
+  unconfirmed non-tty switch aborts with the TS exit codes — 75 for the
+  interactive update child, else 1 — so declining changes nothing, not even
+  extensions), the extensions half runs first, and the self target runs the
+  same native flow `prime-agent update` runs.
+- One shared command core (`pa-cli`'s `self_update` module): the parsed
+  invocation options (the old `public_command::UpdateInvocation` moved there
+  as `SelfUpdateOptions`), the nightly confirmation, and the run +
+  `commitChannel` persist. `prime-agent update` and the package self target
+  call the same body, so the two entries cannot diverge.
+- Installations the Prime Agent installer does not own (a cargo build, a
+  copied binary, a future package-manager channel) keep the flow's verbatim,
+  install-method-specific message ("This compiled application is not owned
+  by the Prime Agent installer. Update it using its original installer.")
+  through the update case's `Error:` line — the TS bun-binary behavior; no
+  stub, no renamed error, no hidden surface.
+- Divergence (recorded): TS treats an unresolvable manifest on the self-only
+  npm path as an aborted run (exit 1/75) after extensions succeeded; the
+  Rust flow resolves the same event as a completed `Skipped` run (exit 0/75,
+  the merged flow's semantics) — unchanged by this slice.
+- Tests: the parse stores force/channel (previously dropped), and the update
+  case's confirm-before-work ordering, target routing, flag propagation, and
+  exit-code composition run against a recording self-update runner (no real
+  update effects in tests). The release fetch chain gained fake local
+  endpoint coverage (127.0.0.1:0, no fixed ports): `latest_release` over
+  HTTP (the manifest path, the updater User-Agent, a 500 is `None`) and
+  `download_archive` (the streamed digest verify, a mismatch installs
+  nothing).
+- Ownership: pa-cli `self_update` (new), `package_command` (the update case
+  + its tests), `public_command` (the shared-core call); pa-core `update`
+  (`release.rs`/`download.rs` endpoint tests only).
+
 ## Update graceful stop + roster (slice 3, 2026-09-19)
 
 The TS-era worker prepare/commit/cancel frames (`worker_prepare_update`/
@@ -632,7 +830,10 @@ ignored. Daemon restart was required. Relevance to the pa-daemon redesign:
 
 The f6 attach cross-side fingerprint (battery `run_battery.py`) locks the projected
 event sequence: agent_start/turn_start, the user message_start+message_end pair,
-assistant start/updates/end ordering, turn_end/agent_end presence, session_status.
+assistant start/updates/end ordering, turn_end/agent_end presence, session_status
+(the Rust side stopped emitting `session_status` on 2026-09-25 with the
+status-line recap removal, operator directive; the row's `session_status` term
+is TS-side evidence only now).
 Two TS wire behaviors are deliberately out of that row's scope and still open:
 
 - The per-turn harness digest rides TS turns as a `custom` message pair
@@ -744,7 +945,11 @@ model-surface row still compares against the TS binary:
   `package.json` post-build via `setBinaryVersion`), `SHA256SUMS` +
   `binaries.json` (`{platform, file, sha256, executableSha256}`), and a
   flat tarball `prime-agent-<version>-<platform>.tar.gz`. `make package` is
-  the entry point; `--root` re-anchors assets for the e2e's synthetic tree.
+  the entry point; direct invocation is supported. Native Linux calls the same
+  split-debug helper as CI and packages only the stripped shipped ELF; the
+  decoder stays separate from this tarball and `binaries.json`. Explicit Linux
+  `--binary` requires a matching `--decoder`. `--root` re-anchors assets
+  for the e2e's synthetic tree (using a tiny split-debug ELF fixture).
 - `--version` reads the packaged `package.json` at runtime (TS `VERSION`
   is `getPackageJsonPath()`-based) with the compiled-in version as the
   fallback (dev checkouts). `--prime-agent-bootstrap` is the TS
@@ -1094,12 +1299,14 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   providers selector directly — the full `ConfigurationMenuComponent`
   (the tabbed settings menu around it) is not ported, so post-login model
   selection refresh happens on the next `/model` open; (2) the provider
-  subscription OAuth flows (Anthropic/Copilot/Codex/xAI) and the Prime
-  browser logins are not ported — their rows render (TS names, TS order,
-  prime-inference first) and their flows report the unavailability; the
+  subscription OAuth flows (Anthropic/Copilot/Codex/xAI) are not ported —
+  their rows render (TS names, TS order, prime-inference first) and their
+  flows report the unavailability; the Prime browser login races its
+  challenge URL against the paste prompt (the core login over the shared
+  `auth_challenge` protocol, the fallback on a failed browser); the
   MCP device flow runs like `/mcp login` (through the inline auth panel;
-  the Prime Inference login renders its paste prompt, progress lines, and
-  the team picker there — TS `LoginDialogComponent` +
+  the Prime Inference login renders its auth URL, paste prompt, progress
+  lines, and the team picker there — TS `LoginDialogComponent` +
   `PrimeTeamSelectorComponent`, no terminal takeover); (3) the
   post-logout `/reload` for removed `mcp:` credentials stays unported
   (the TS rule), reported with the removal status instead.
@@ -1681,3 +1888,112 @@ retry re-arm, TS `rearmSavedSearchFetch`), and the e2e
 kill the supervisor, lose the descriptor, boot the new daemon, open the
 session — it must open) plus `pa-tui/tests/agents_view_saved_catalog_failure.rs`
 (the failure settles the anchor and the view stays openable).
+
+# The abort keeps a queued follow-up flowing (lane abort-queued-followup, 2026-09-25)
+
+Operator bug report (2026-09-25, the reported shape): "while agent turn
+is running, queue a follow-up (NO steers), Ctrl+C abort current turn ->
+follow-up remains visibly queued forever; steers auto-send on abort
+today."
+
+- **Root cause**: the `abort_and_send_queued` funnel (TS
+  `abortAndSendQueued`, schema 29, the Ctrl+C interrupt's wire command)
+  armed the forced steering batch, ran `requestAbort()` (which parks the
+  queue behind `queued_input_suspended` — TS `_sessionInputPumpSuspended`
+  — and cancels only queue-INVISIBLE admissions), then resumed the
+  pump ONLY when steering had armed. With a follow-up-only queue nothing
+  armed, the resume never fired, and the parked follow-up sat behind
+  the suspension's drain gate with no resume site on the interrupt's
+  own path: the queue strip kept showing it while a plain prompt was
+  rejected with "Cannot admit a session action while queued session
+  input is suspended."
+- **The fix — the deliberate divergence** (operator ruling 2026-09-25):
+  the funnel now resumes whenever the abort leaves queue-visible work
+  in either lane, so the abort ENDS the current turn cleanly and then
+  the queue keeps flowing: the armed plain-user steers co-deliver in
+  enqueue order as ONE batched turn (next-turn guidance), then the
+  OLDEST queued follow-up starts the next turn right after the aborted
+  turn settles; later follow-ups stay queued and drain one turn per
+  completed turn (the follow-up lane's `one-at-a-time` default). The
+  abort's acknowledgment still answers the command immediately — the
+  resumed pump, not the funnel, owns the delivery at the settled
+  boundary, so the ack never races dispatch. TS main parks the
+  follow-up-only arm exactly as the port did (`queuedSteering.length ===
+  0 || !canResume` -> `requestAbort()` only, un-wedged by the next
+  submit's `resumeIfIdle` admission); the divergence is deliberate and
+  documented in `docs/FEATURE_PARITY.md`'s interrupt bullet.
+- **Unchanged invariants**: the bare `abort` command and
+  `abort_and_clear_queue` still park the queue behind the suspension
+  (the API abort is a stop; the queue stays until a resume site —
+  `resume_queue`, a steer/follow-up admission, a queue mutation, or a
+  streamingBehavior prompt — fires); `abort_and_send_queued` still
+  runs abort-only when the abort leaves nothing queued or a held
+  admission pause / pending shutdown parks the scheduler (TS
+  `canResume`); `requestAbort`'s cancel sweep still resolves only the
+  queue-invisible admissions ("Prompt aborted before delivery.") and
+  never touches a queue-visible row; the recovery journal is untouched
+  (the suspension is process-local — a replaced worker revives with the
+  lanes restored and drains them); no message drops, duplicates, or
+  reorders — the turn runner pops each item exactly once, steering lane
+  before follow-up lane, each lane FIFO.
+- Verifiers (deterministic faux-engine dispatch tests in
+  `crates/pa-daemon/src/worker.rs`):
+  `abort_and_send_queued_with_only_follow_ups_starts_the_oldest`
+  (follow-up-only: the suspension clears at the abort, the oldest
+  follow-up's turn starts only after the aborted turn's aborted row
+  settles, the second stays queued while the first runs, both deliver
+  exactly once in enqueue order, one `agent_start` per follow-up turn,
+  the lane fully drains) and
+  `abort_and_send_queued_acks_before_the_follow_up_delivery`
+  (everything downstream held: the abort ack still answers inside a
+  bound, the follow-up starts promptly behind it, and a second bare
+  `abort` ends ITS turn cleanly — no duplicate row, the emptied queue
+  parks like the plain abort). The armed-arm orderings were already
+  pinned by `abort_and_send_queued_delivers_the_parked_queue_at_the_boundary`
+  and `abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups`;
+  `abort_and_send_queued_with_an_empty_queue_is_a_plain_abort` keeps
+  the abort-only park.
+
+## Agents-view search maps the SESSION column (operator-directed divergence, 2026-09-26)
+
+Operator bug report (2026-09-26, the reported shape): "Agents View
+search does not accurately match against the SESSION column — a session
+named (or whose first-prompt-derived name is) 'hey' is not surfaced by
+searching 'hey', while other searches over-match, returning unrelated
+sessions because they match against the entire first prompt (long,
+truncated in agents view, containing lots of text)."
+
+- **Root cause**: the SESSION column renders `session_title`'s ladder
+  (`sessionName` → `firstMessage` → cwd basename → `sessionId` → `id`),
+  but the #2656 picker corpus indexed only `sessionName` (saved `name`)
+  plus the id and cwd: an unnamed session displayed its first prompt
+  ("hey") while its corpus name sat empty — a query for the displayed
+  title could not match. The TS corpus (agents-view-state.ts
+  `createUnifiedSearchableText`) joins the first message AND the 64 KiB
+  capped transcript (`allMessagesText`, session-manager.ts
+  `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`), which is the over-match side:
+  queries match prompt and transcript text the clipped column never
+  shows.
+- **The fix — the operator-directed divergence**: the picker's name
+  target is the SESSION column's own title — `session_title` over the
+  SAME merged summary the row renders, clipped by the column's own
+  truncation rule (`truncate_text`, display-width, no ellipsis) at the
+  column's own cap (`SESSION_NAME_COLUMN_MAX_CELLS` = 28, TS
+  `buildCompactAgentsViewLayout`'s `Math.min(28, ...)`, minus the two
+  cells the row icon takes). The id and cwd targets and the ranked
+  tiers (identity paste > name exact > prefix > substring > fuzzy > id
+  > cwd) are unchanged; the transcript corpus stays excluded, and the
+  full first prompt never enters — only the visible head.
+- **Unchanged invariants**: named sessions keep their explicit name as
+  the corpus name (the ladder's first rung — the first prompt stays
+  out); the daemon-wins/saved-fills merge for the id and cwd; ancestor
+  retention under a query; the regex corpus; the e2e picker contract
+  (names/ids/cwd match, transcripts never).
+- Verifiers (corpus tests in `crates/pa-tui/src/agents_view_state.rs`):
+  `an_unnamed_sessions_prompt_derived_title_matches` (the "hey" case
+  plus case variants), `long_first_prompts_enter_only_the_visible_title_head`
+  (deep prompt text never matches, the visible head does),
+  `the_corpus_name_is_the_sessions_column_title` (the corpus equals the
+  displayed title across named, prompt-derived, cwd-basename, and
+  archived rows), and `a_named_sessions_first_message_stays_out_of_the_corpus`
+  (the over-match guard).

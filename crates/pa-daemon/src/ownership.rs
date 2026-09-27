@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use pa_types::daemon::{DaemonCommand, DaemonWorkerLifecycle};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::persist_worker;
 use crate::protocol::{response_failure, response_line, response_success};
 use crate::registry::ResidentWorker;
@@ -74,8 +75,17 @@ impl Supervisor {
         }
         // TS `stopWorker`: the owned stop tears the worker down; the
         // ephemeral schedule cancel (`cancelEphemeralWorkerScheduledJobs`)
-        // rides `stop_worker` itself, keyed on the descriptor's owner.
-        self.stop_worker(&resident).await;
+        // rides `stop_worker` itself, keyed on the descriptor's owner. The
+        // stop's durable intent persists before the worker is told, and a
+        // persist failure fails the owned stop (TS throws) instead of
+        // stopping an untombstoned worker.
+        if let Err(error) = self.stop_worker(&resident).await {
+            return self.owned_failure(
+                command_id,
+                type_name,
+                &format!("Failed to persist the session stop: {error:#}"),
+            );
+        }
         (
             vec![response_line(&response_success(
                 Some(command_id),
@@ -250,7 +260,13 @@ impl Supervisor {
     /// worker cannot answer - the TS arm answers `data: null` then).
     async fn retry_summary(&self, resident: &Arc<ResidentWorker>) -> Option<Value> {
         match self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command_typed(
+                resident,
+                "get_state",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) if response.success => response.data,

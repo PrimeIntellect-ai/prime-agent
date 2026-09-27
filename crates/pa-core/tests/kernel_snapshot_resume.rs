@@ -49,19 +49,22 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live snapshot test");
+    eprintln!(
+        "kernel python {} not found; skipping live snapshot test",
+        candidate.display()
+    );
     None
 }
 
@@ -92,7 +95,7 @@ fn faux_session(responses: Vec<FauxResponseStep>) -> FauxSession {
 }
 
 /// One assistant turn that calls the `ipython` tool with `code` (the
-/// loop's tool-call shape: `StopReason::ToolUse` + a ToolCall block).
+/// loop's tool-call shape: `StopReason::ToolUse` + a `ToolCall` block).
 fn ipython_tool_call_step(call_id: &str, code: &str) -> FauxResponseStep {
     let message = faux_assistant_message(
         vec![pa_types::ai::AssistantContentBlock::ToolCall(
@@ -104,7 +107,7 @@ fn ipython_tool_call_step(call_id: &str, code: &str) -> FauxResponseStep {
                     .cloned()
                     .expect("object"),
                 thought_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         )],
         FauxAssistantMessageOptions {
@@ -190,7 +193,7 @@ async fn tool_result_texts(engine: &pa_core::session_engine::engine::SessionEngi
                     .iter()
                     .filter_map(|block| match block {
                         pa_agent::types::ToolResultContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
+                        pa_agent::types::ToolResultContent::Image(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

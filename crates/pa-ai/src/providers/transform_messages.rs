@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Map;
+
 use crate::types::{
     AssistantContent, AssistantMessage, Message, Model, ModelExt, StopReason, TextContent,
     ToolCall, ToolResultMessage, UserMessage, UserMessageContent, UserOrToolContent,
@@ -24,7 +26,7 @@ fn replace_images_with_placeholder(
                 result.push(UserOrToolContent::Text(TextContent {
                     text: placeholder.to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }));
             }
             previous_was_placeholder = true;
@@ -63,7 +65,7 @@ fn downgrade_unsupported_images(messages: &[Message], model: &Model) -> Vec<Mess
                 ),
                 ..tool_result.clone()
             }),
-            other => other.clone(),
+            other @ Message::Assistant(_) => other.clone(),
         })
         .collect()
 }
@@ -126,7 +128,7 @@ pub fn transform_messages_with_normalizer(
                             vec![AssistantContent::Text(TextContent {
                                 text: thinking.thinking.clone(),
                                 text_signature: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             })]
                         }
                         AssistantContent::Text(_) => vec![block.clone()],
@@ -165,8 +167,7 @@ pub fn transform_messages_with_normalizer(
     let mut existing_tool_result_ids: HashSet<String> = HashSet::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let insert_synthetic_tool_results =
         |result: &mut Vec<Message>, pending: &mut Vec<ToolCall>, existing: &mut HashSet<String>| {
@@ -178,12 +179,12 @@ pub fn transform_messages_with_normalizer(
                         content: vec![UserOrToolContent::Text(TextContent {
                             text: "No result provided".to_string(),
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         })],
                         details: None,
                         is_error: true,
                         timestamp: now,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                 }
             }
@@ -261,7 +262,7 @@ mod tests {
         Message::User(UserMessage {
             content: UserMessageContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -270,9 +271,9 @@ mod tests {
             content: vec![AssistantContent::ToolCall(ToolCall {
                 id: id.to_string(),
                 name: "echo".to_string(),
-                arguments: Default::default(),
+                arguments: Map::default(),
                 thought_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             api: "openai-completions".into(),
             provider: "test".into(),
@@ -285,7 +286,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         })
     }
 
@@ -333,9 +334,8 @@ mod tests {
 
     #[test]
     fn drops_errored_assistant_turns() {
-        let mut assistant = match assistant_with_tool_call("call-1") {
-            Message::Assistant(assistant) => assistant,
-            _ => unreachable!(),
+        let Message::Assistant(mut assistant) = assistant_with_tool_call("call-1") else {
+            unreachable!()
         };
         assistant.stop_reason = StopReason::Error;
         let messages = vec![user("hi"), Message::Assistant(assistant)];
@@ -355,7 +355,7 @@ mod tests {
                 details: None,
                 is_error: false,
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "orphan".into(),
@@ -364,7 +364,7 @@ mod tests {
                 details: None,
                 is_error: false,
                 timestamp: 2,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
         ];
         let transformed =

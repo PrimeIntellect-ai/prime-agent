@@ -62,8 +62,7 @@ pub trait McpLoginUi: Send + Sync {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(i64::MAX)
+        .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64)
 }
 
 /// Build the credential the flow persists. A missing `expires_in` defaults
@@ -86,14 +85,15 @@ fn to_credentials(
         expires: now_ms()
             + token
                 .expires_in
-                .map(|seconds| seconds * 1000)
-                .unwrap_or(3600 * 1000)
+                .map_or(3600 * 1000, |seconds| seconds * 1000)
             - TOKEN_EXPIRY_BUFFER_MS,
+        account_id: None,
         endpoint: endpoint.map(str::to_string),
         token_endpoint: Some(token_endpoint.to_string()),
         client_id: (!client_id.is_empty()).then(|| client_id.to_string()),
         resource: resource.map(str::to_string),
         issuer: issuer.map(str::to_string),
+        enterprise_url: None,
     }
 }
 
@@ -119,6 +119,14 @@ enum ManualOutcome {
 
 /// Run one interactive login for a server; the returned credential is
 /// ready to persist under `mcp:<server>`.
+///
+/// # Errors
+///
+/// Returns an error when the discovery document cannot be fetched, the
+/// server supports neither dynamic client registration nor a configured
+/// client id, client registration fails, the callback server cannot start,
+/// the authorization URL cannot be built, the pasted redirect is invalid or
+/// its state mismatches, or the token exchange fails.
 pub async fn mcp_login(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -133,19 +141,18 @@ pub async fn mcp_login(
             .unwrap_or(discovery.metadata.issuer.as_str())
     ));
 
-    let client_id = match &config.client_id {
-        Some(client_id) => client_id.clone(),
-        None => {
-            let Some(registration_endpoint) = &discovery.metadata.registration_endpoint else {
-                bail!(
-                    "{} does not support dynamic client registration and no clientId was \
+    let client_id = if let Some(client_id) = &config.client_id {
+        client_id.clone()
+    } else {
+        let Some(registration_endpoint) = &discovery.metadata.registration_endpoint else {
+            bail!(
+                "{} does not support dynamic client registration and no clientId was \
                      configured. Set a pre-registered client id for this server.",
-                    config.label
-                );
-            };
-            ui.on_progress("Registering OAuth client…");
-            register_client(http, registration_endpoint, &config.label).await?
-        }
+                config.label
+            );
+        };
+        ui.on_progress("Registering OAuth client…");
+        register_client(http, registration_endpoint, &config.label).await?
     };
 
     let (verifier, challenge) = generate_pkce();
@@ -195,13 +202,10 @@ pub async fn mcp_login(
         let callback = Arc::clone(&callback);
         let state = state.clone();
         tokio::spawn(async move {
-            let input = match manual.await {
-                Some(input) => input,
-                None => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    callback.cancel().await;
-                    return ManualOutcome::Cancelled;
-                }
+            let Some(input) = manual.await else {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                callback.cancel().await;
+                return ManualOutcome::Cancelled;
             };
             match parse_redirect_input(&input, &state) {
                 Ok((code, state)) => {
@@ -235,7 +239,7 @@ pub async fn mcp_login(
                 Ok(ManualOutcome::Cancelled) => {}
                 Ok(ManualOutcome::Failed(error)) => manual_error = Some(error),
                 Err(join_error) => {
-                    manual_error = Some(anyhow!("Manual login input failed: {join_error}"))
+                    manual_error = Some(anyhow!("Manual login input failed: {join_error}"));
                 }
             }
         } else {
@@ -286,6 +290,18 @@ pub async fn mcp_login(
 
 /// Refresh stored credentials. Every binding the login established must
 /// still hold; anything drifted requires a fresh login.
+///
+/// # Errors
+///
+/// Returns an error when the stored credential is not OAuth, is no longer
+/// bound to the same endpoint, resource, issuer, or token endpoint, carries
+/// no refresh token, when discovery fails or changed modes, or when the
+/// token exchange fails.
+///
+/// # Panics
+///
+/// The `expect` on the discovery resource is unreachable: the discovery-mode
+/// check above it already rejects a mode mismatch.
 pub async fn mcp_refresh_token(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -943,11 +959,13 @@ mod tests {
             access: "a".to_string(),
             refresh: Some("r".to_string()),
             expires: 0,
+            account_id: None,
             endpoint: Some(ORIGIN_URL.to_string()),
             token_endpoint: Some(ORIGIN_TOKEN.to_string()),
             client_id: Some("c".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let origin_prm = "https://srv.test/.well-known/oauth-protected-resource/mcp";
         let http = ScriptedHttp::new(vec![
@@ -971,11 +989,13 @@ mod tests {
             access: "access-1".to_string(),
             refresh: Some("old-refresh".to_string()),
             expires: 0,
+            account_id: None,
             endpoint: Some(RESOURCE.to_string()),
             token_endpoint: Some(PLANE_TOKEN.to_string()),
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
             (RESOURCE, 401, None, ""),
@@ -1042,11 +1062,13 @@ mod tests {
             access: "a".to_string(),
             refresh: Some("r".to_string()),
             expires: 0,
+            account_id: None,
             endpoint: Some("https://other.test/mcp".to_string()),
             token_endpoint: None,
             client_id: None,
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &retargeted)
             .await
@@ -1060,11 +1082,13 @@ mod tests {
             access: "a".to_string(),
             refresh: Some("r".to_string()),
             expires: 0,
+            account_id: None,
             endpoint: Some(RESOURCE.to_string()),
             token_endpoint: Some("https://attacker.example/token".to_string()),
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &drifted)
             .await
@@ -1089,11 +1113,13 @@ mod tests {
             access: "origin-access".to_string(),
             refresh: Some("origin-refresh".to_string()),
             expires: 0,
+            account_id: None,
             endpoint: Some(RESOURCE.to_string()),
             token_endpoint: Some(PLANE_TOKEN.to_string()),
             client_id: Some("origin-client".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
             (RESOURCE, 401, None, ""),

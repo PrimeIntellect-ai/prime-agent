@@ -153,10 +153,10 @@ pub fn load_local_service_catalog(
 /// most `max_bytes` + one chunk is ever read before an oversized file is
 /// refused from the read itself.
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
     let file = std::fs::File::open(path)
         .map_err(|_| format!("Local service source {} could not be read", path.display()))?;
     let mut reader = std::io::BufReader::new(file);
-    use std::io::Read;
     let mut chunks: Vec<u8> = Vec::new();
     let mut total: u64 = 0;
     loop {

@@ -7,12 +7,12 @@
 //! registry bound to the parent (the same registry `rlm.list_subagents`
 //! and the worker's own controller read). The parent-side sends go through
 //! the real kernel host handler (`agent_message.send` with
-//! receiver_role/receiver_name), resolving through the controller's
+//! `receiver_role/receiver_name`), resolving through the controller's
 //! family view and delivering over the supervisor route; the child is a
 //! real worker with a scripted engine whose kernel answers each delivered
 //! prompt with a real `agent_message.send` addressed to its parent.
 //!
-//! Linux-only e2e (AF_UNIX sockets), like the other pa-daemon verifiers.
+//! Linux-only e2e (`AF_UNIX` sockets), like the other pa-daemon verifiers.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -155,7 +155,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -209,19 +209,22 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live family e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live family e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -283,19 +286,49 @@ fn receipt_listing(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// A recorded JSON file, waiting for the turn that writes it.
+/// The supervisor-under-test's stderr tail for a timeout message: the
+/// daemon log sits beside the receipts dir (both e2e layouts root it at
+/// `<tempdir>/daemon.sock`), and worker or spawn failures surface there.
+fn daemon_log_tail(receipts_dir: &Path) -> String {
+    let root = receipts_dir.parent().unwrap_or(receipts_dir);
+    std::fs::read_to_string(root.join("daemon.sock").with_extension("daemon.log"))
+        .unwrap_or_else(|_| "<no daemon log>".to_string())
+        .chars()
+        .rev()
+        .take(4000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+/// A recorded JSON file, waiting for the turn that writes it. The
+/// recording cell writes the receipt non-atomically (`open(w).write`),
+/// so the file can exist while its content is still empty or partial:
+/// readiness is a successful parse, not file existence — a read that
+/// does not parse yet polls on like a missing one until the deadline.
+/// The deadline panic carries what the next diagnosis needs: the
+/// receipts recorded so far, the cell's error record when one exists (a
+/// failed kernel cell writes its traceback there), and the daemon log
+/// tail.
 fn read_recorded(dir: &Path, name: &str) -> Value {
     let path = dir.join(name);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&content).expect("recorded json");
+            if let Ok(value) = serde_json::from_str(&content) {
+                return value;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "record {name} never appeared in {}: existing: {}",
+            "record {name} never appeared or never parsed in {}: existing: {}; \
+kernel error record: {}; daemon log tail: {}",
             dir.display(),
-            receipt_listing(dir)
+            receipt_listing(dir),
+            std::fs::read_to_string(dir.join(format!("{name}.error")))
+                .unwrap_or_else(|_| "<none>".to_string()),
+            daemon_log_tail(dir)
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -428,7 +461,9 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     // Wait for the spawn prompt's turn to settle before delivering: the
     // child must run its spawn turn ("kid spawned") before the reply
     // script begins, or the first delivered message would consume the
-    // spawn response and lose its own reply cell.
+    // spawn response and lose its own reply cell. Bounded: a child that
+    // never settles fails loudly instead of hanging the suite.
+    let settle_deadline = Instant::now() + Duration::from_secs(60);
     let spawn_row = loop {
         let roster = children.list_subagents().await.expect("child roster");
         let row = roster.first().expect("one child row");
@@ -437,6 +472,11 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         if row.status == "completed" || row.status == "error" {
             break row.clone();
         }
+        assert!(
+            Instant::now() < settle_deadline,
+            "kid spawn turn never settled: {row:?}; daemon log tail: {}",
+            daemon_log_tail(&receipts_dir)
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
     assert_eq!(spawn_row.status, "completed", "spawn turn: {spawn_row:?}");
@@ -793,7 +833,10 @@ async fn family_edges_never_cross_families_end_to_end() {
             .expect("spawn the child");
         assert_eq!(handle.name, kid_name);
         children.notify_turn_done();
-        // The spawn turn settles once the child goes idle with an answer.
+        // The spawn turn settles once the child goes idle with an answer
+        // (bounded: a kid that never settles fails loudly with its last
+        // roster row and the daemon log instead of hanging the suite).
+        let settle_deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let roster = children.list_subagents().await.expect("child roster");
             let row = roster.first().expect("one child row");
@@ -801,6 +844,11 @@ async fn family_edges_never_cross_families_end_to_end() {
                 assert_eq!(row.status, "completed", "spawn turn: {row:?}");
                 break;
             }
+            assert!(
+                Instant::now() < settle_deadline,
+                "kid {kid_name} spawn turn never settled: {row:?}; daemon log tail: {}",
+                daemon_log_tail(&receipts_dir)
+            );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let roster = children.list_subagents().await.expect("child roster");
@@ -848,6 +896,38 @@ async fn family_edges_never_cross_families_end_to_end() {
     }
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
     let kid_b_active = &kids[1].0;
+
+    // Parent-a's first turn runs the cell that sends the broadcast, and
+    // the kid's script accounts for that broadcast draining into its
+    // steering queue as the spawn turn's follow-up (the filler turn).
+    // That first turn is driven explicitly: this harness owns the
+    // children registry in the TEST process (the parent is a scripted
+    // worker), so the registry's own settle notice mints its reserved-kind
+    // nonce here while the parent worker's queue admission consumes it
+    // there — the notice is (correctly) refused, and waiting for it
+    // leaves the receipts dir empty forever (the empty-dir red). The
+    // drive is the same agentOrigin delivery shape as every other drive
+    // below, and the receipt gate stays: once the broadcast receipt
+    // exists, the broadcast is already ahead of every drive in the FIFO
+    // steering lane, and each scripted cell lands on its driven turn no
+    // matter when the drain fires.
+    client.send_command(
+        "to-parent-a-cells",
+        json!({
+            "type": "send_message",
+            "targetActiveSessionId": parent_a_active,
+            "message": "drive the parent cell turn",
+            "fromActiveSessionId": parent_b_active,
+            "agentOrigin": true,
+        }),
+    );
+    let response = client.read_response("to-parent-a-cells");
+    assert_eq!(
+        response["success"], true,
+        "send to-parent-a-cells failed: {response}"
+    );
+    client.wait_idle("w-parent-a-cells", parent_a_active);
+    let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
 
     // Drive kid-a's kernel turns: the cross-family sibling probe, the
     // parent reply, and its own broadcast.
@@ -910,6 +990,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         .expect("spawn the grandchild");
     assert_eq!(grandkid_handle.name, "grandkid");
     kid_children.notify_turn_done();
+    let grandkid_settle_deadline = Instant::now() + Duration::from_secs(60);
     let grandkid_active = loop {
         let roster = kid_children.list_subagents().await.expect("roster");
         let row = roster.first().expect("one grandchild row");
@@ -917,6 +998,11 @@ async fn family_edges_never_cross_families_end_to_end() {
             assert_eq!(row.status, "completed", "grandchild spawn turn: {row:?}");
             break row.active_session_id.clone().expect("grandchild active id");
         }
+        assert!(
+            Instant::now() < grandkid_settle_deadline,
+            "grandkid spawn turn never settled: {row:?}; daemon log tail: {}",
+            daemon_log_tail(&receipts_dir)
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
@@ -927,30 +1013,18 @@ async fn family_edges_never_cross_families_end_to_end() {
     // host error, and the recorded traceback carries the TS error text
     // (the send resolves no sibling — the other family's session is not
     // addressable by name from this family).
-    let crossed = match std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) {
-        Ok(content) => content,
-        Err(_) => {
-            let transcript = client.messages("gm-kid-debug", kid_a_active);
-            eprintln!("KEEP-DIR {}", dir.path().display());
-            if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
-                std::mem::forget(dir);
-            }
-            let daemon_log = std::fs::read_to_string(socket.with_extension("daemon.log"))
-                .unwrap_or_else(|_| "<no daemon log>".to_string());
-            panic!(
-                "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
-                std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
-                transcript,
-                daemon_log
-                    .chars()
-                    .rev()
-                    .take(4000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
+    let Ok(crossed) = std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) else {
+        let transcript = client.messages("gm-kid-debug", kid_a_active);
+        eprintln!("KEEP-DIR {}", dir.path().display());
+        if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
+            std::mem::forget(dir);
         }
+        panic!(
+            "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
+            std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
+            transcript,
+            daemon_log_tail(&receipts_dir)
+        );
     };
     assert!(
         crossed.contains("No sibling matches"),
@@ -1045,24 +1119,8 @@ async fn family_edges_never_cross_families_end_to_end() {
         "the other family never enters kid-a's roster: {kid_roster:?}"
     );
 
-    // Drive parent-a's one kernel turn: its observe roster and its own
-    // broadcast.
-    client.send_command(
-        "to-parent-a",
-        json!({
-            "type": "send_message",
-            "targetActiveSessionId": parent_a_active,
-            "message": "drive the parent turn",
-            "fromActiveSessionId": parent_b_active,
-            "agentOrigin": true,
-        }),
-    );
-    let response = client.read_response("to-parent-a");
-    assert_eq!(
-        response["success"], true,
-        "send to-parent-a failed: {response}"
-    );
-    client.wait_idle("to-parent-a", parent_a_active);
+    // The parent's kernel cells ran on the gate drive above; read their
+    // receipts.
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("parent-observe.error")) {
         panic!("parent kernel cell failed: {error}");
     }
@@ -1128,9 +1186,9 @@ async fn family_edges_never_cross_families_end_to_end() {
                 .expect("receipt target")
         })
         .collect();
-    parent_targets.sort();
+    parent_targets.sort_unstable();
     let mut expected = vec![parent_b_active.as_str(), kid_a_active.as_str()];
-    expected.sort();
+    expected.sort_unstable();
     assert_eq!(
         parent_targets, expected,
         "the parent's broadcast stays inside its nuclear family: {parent_broadcast}"

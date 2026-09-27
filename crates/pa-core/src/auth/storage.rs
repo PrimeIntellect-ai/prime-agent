@@ -1,9 +1,10 @@
 //! Auth storage backends: locked JSON file (0o600, atomic writes) and
 //! in-memory (tests, embedded hosts). Port of the auth-storage backends.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 
@@ -12,6 +13,12 @@ use super::types::AuthStorageData;
 /// Locked read/modify/write over the auth document. `update` returns
 /// `(result, next)`; `next: Some` writes it back atomically.
 pub trait AuthStorageBackend: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error when the backend fails to acquire its lock, when
+    /// the `update` callback fails, or when preparing or writing the auth
+    /// document fails. Reading the current document is best-effort: an
+    /// unreadable file reaches the callback as `None`, not an error.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
@@ -81,11 +88,42 @@ impl FileAuthStorageBackend {
         }
         Err(anyhow::anyhow!(
             "Failed to acquire auth storage lock: {}",
-            last_error
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "busy".into())
+            last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
     }
+}
+
+/// Same-process serialization for one auth document.
+///
+/// The TS product runs its synchronous auth lock on a single thread, so two
+/// `acquireLockSyncWithRetry` calls in one process can never contend: the
+/// 10x20ms retry only ever fires against another process. The Rust engine
+/// is threaded, and two threads racing the same document pay the full TS
+/// retry sleep against each other (a fresh session's first turn resolves
+/// its model while a concurrent read holds the lock). A process-local
+/// mutex keyed by the document path serializes same-process callers for
+/// the microseconds the small read/modify/write holds; the file protocol
+/// and its retry semantics are untouched, so a foreign holder (another
+/// process) still surfaces `WouldBlock` and still takes the 10x20ms
+/// retry. Each path's mutex is created once and lives for the process
+/// (a handful of documents per process, a `Mutex<()>` each).
+///
+/// The mutex is a leaf: the locked section performs only the document's
+/// own filesystem operations and the caller's `update` callback, and no
+/// callback re-enters `with_lock`. Poisoning cannot wedge later reads: the
+/// file protocol is the correctness mechanism, so a poisoned mutex is
+/// recovered instead of propagated.
+fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = {
+        let mut registry = registry.lock().expect("auth process-lock registry");
+        *registry
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+    };
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl AuthStorageBackend for FileAuthStorageBackend {
@@ -93,11 +131,12 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()> {
+        let _process_guard = process_lock(&self.auth_path);
         self.ensure_parent_dir()?;
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
         let current = fs::read_to_string(&self.auth_path).ok();
-        let (_, next) = update(current)?;
+        let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write(&self.auth_path, &next)?;
         }
@@ -117,7 +156,7 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()> {
         let mut guard = self.value.lock().unwrap();
-        let (_, next) = update(guard.clone())?;
+        let ((), next) = update(guard.clone())?;
         if let Some(next) = next {
             *guard = Some(next);
         }
@@ -127,6 +166,11 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
 
 /// Parse an auth document; invalid JSON or a non-object root is a load error
 /// (the TS throws too).
+///
+/// # Errors
+///
+/// Returns an error when the content is not valid JSON or its root is not a
+/// JSON object. Empty content parses as the default, empty document.
 pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
     let content = content.filter(|content| !content.is_empty());
     let Some(content) = content else {
