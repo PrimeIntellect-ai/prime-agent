@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.js";
-import type { Context } from "../src/types.js";
+import type { Context, StreamOptions } from "../src/types.js";
 import { getFixtureModel } from "./fixture-models.js";
 
 interface CapturedAzureClientOptions {
@@ -13,12 +13,14 @@ interface CapturedAzureClientOptions {
 
 const azureMock = vi.hoisted(() => ({
 	constructorCalls: [] as CapturedAzureClientOptions[],
+	createCalls: [] as unknown[],
 }));
 
 vi.mock("openai", () => {
 	class AzureOpenAI {
 		responses = {
-			create: () => {
+			create: (params: unknown) => {
+				azureMock.createCalls.push(params);
 				throw new Error("mock create");
 			},
 		};
@@ -45,6 +47,7 @@ const originalEnv = Object.fromEntries(azureEnvVars.map((name) => [name, process
 
 beforeEach(() => {
 	azureMock.constructorCalls.length = 0;
+	azureMock.createCalls.length = 0;
 	for (const name of azureEnvVars) delete process.env[name];
 });
 
@@ -56,9 +59,10 @@ afterEach(() => {
 	}
 });
 
-async function streamOnce() {
+async function streamOnce(options: StreamOptions = {}) {
 	return streamAzureOpenAIResponses(getFixtureModel("azure-openai-responses", "gpt-4o-mini"), context, {
 		apiKey: "test-api-key",
+		...options,
 	}).result();
 }
 
@@ -116,4 +120,13 @@ describe("azure-openai-responses base URL normalization", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Invalid Azure OpenAI base URL");
 	});
+});
+
+it.each([
+	[undefined, "session-1"],
+	["none", undefined],
+] as const)("sends store: false and honors cacheRetention=%s", async (cacheRetention, key) => {
+	process.env.AZURE_OPENAI_RESOURCE_NAME = "res";
+	await streamOnce({ sessionId: "session-1", cacheRetention });
+	expect(azureMock.createCalls).toMatchObject([{ store: false, prompt_cache_key: key }]);
 });
