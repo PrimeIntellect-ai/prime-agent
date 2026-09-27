@@ -1944,7 +1944,8 @@ impl AgentView {
         sink.feed(out, &layout.splash)?;
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
-            let rows = self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
+            let rows =
+                self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
             sink.feed(out, &rows)?;
             preceded_by_tool_activity = self.is_compact_neighbor(entry);
         }
