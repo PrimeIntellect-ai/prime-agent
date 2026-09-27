@@ -868,7 +868,7 @@ const EAGER_PARSE_LENGTH: usize = 8 * 1024;
 /// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
 /// buffer grew by 1/16 since the last parse, keeping total parse work linear.
 /// Callers still parse `text` with [`parse_streaming_json`] when the call ends.
-pub struct StreamingJsonAccumulator {
+struct StreamingJsonAccumulator {
     text: String,
     /// Buffer length in UTF-16 code units, the metric of the TS reference
     /// (`String::length`); maintained incrementally so `append` stays O(delta).
@@ -877,7 +877,7 @@ pub struct StreamingJsonAccumulator {
 }
 
 impl StreamingJsonAccumulator {
-    pub fn new(text: impl Into<String>) -> Self {
+    fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let len_utf16 = text.chars().map(char::len_utf16).sum();
         Self {
@@ -887,13 +887,9 @@ impl StreamingJsonAccumulator {
         }
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
     /// Appends a delta and returns a fresh partial parse, or `None` while the
     /// refresh is throttled (the caller keeps the previous preview).
-    pub fn append(&mut self, delta: &str) -> Option<serde_json::Value> {
+    fn append(&mut self, delta: &str) -> Option<serde_json::Value> {
         self.text.push_str(delta);
         self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
         let length = self.len_utf16;
@@ -907,7 +903,7 @@ impl StreamingJsonAccumulator {
 
     /// Parses text not covered by the last returned parse; `None` when the
     /// preview is already current.
-    pub fn flush(&mut self) -> Option<serde_json::Value> {
+    fn flush(&mut self) -> Option<serde_json::Value> {
         (self.parsed_length != self.len_utf16).then(|| self.parse())
     }
 
