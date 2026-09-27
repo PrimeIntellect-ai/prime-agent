@@ -463,7 +463,10 @@ async fn build_headless_engine_with(
         config.model.as_deref(),
     )?;
 
-    // Resolve request auth once (single-shot mode).
+    // Resolve request auth once (single-shot mode): the merged headers
+    // ship on the request (the TS `getApiKeyAndHeaders` single-owner path;
+    // TS #2497 removed the provider-side team-header fallback, so the
+    // stored team / `PRIME_TEAM_ID` reach the wire through these headers).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
     // The stream reads the provider target per call (the switchable seam

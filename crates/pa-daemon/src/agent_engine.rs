@@ -92,6 +92,36 @@ use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel};
 // one impl block per trait+type is a rustc constraint (E0119).
 mod session_engine_impl;
 
+/// The live quota park (TS `AgentSession._quotaPark`): the session ended
+/// a turn because a provider-reported usage reset exceeded the bounded
+/// wait, and a durable one-shot wake (a `quota-resume` cron job whose
+/// prompt is the resume marker) resumes it. While parked the session
+/// itself makes no model calls; the wake's marker turn probes the quota.
+#[derive(Debug, Clone)]
+pub(crate) struct QuotaParkState {
+    /// Parks consumed in this quota episode; bounded by the park
+    /// policy's `max_parks` (a successful model call while parked
+    /// clears the state and starts the next episode fresh).
+    pub(crate) park_count: u32,
+    /// Wall-clock wake time for the current park (epoch ms).
+    pub(crate) resume_at_ms: u64,
+    /// Id of the durable one-shot wake job.
+    pub(crate) job_id: Option<String>,
+    /// Wake re-arms consumed without a resume (the wake fired but its
+    /// probe could not run or settle); bounded by
+    /// [`QUOTA_WAKE_MAX_RETRIES`].
+    pub(crate) wake_retries: u32,
+}
+
+/// Retry delay for a wake that was consumed without resuming (the wake
+/// fired, but its marker turn never settled into a probe) — TS
+/// `QUOTA_WAKE_RETRY_DELAY_MS`.
+pub(crate) const QUOTA_WAKE_RETRY_DELAY_MS: u64 = 60_000;
+
+/// Cap on those retries: a park that can never wake is dropped instead of
+/// parked forever — TS `QUOTA_WAKE_MAX_RETRIES`.
+pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -142,6 +172,14 @@ pub struct AgentSessionEngine {
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
     turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    /// The live quota park (TS `AgentSession._quotaPark`): shared with the
+    /// park callback the retry chain consults (an owned, `'static` future
+    /// over `&self` state), so it lives in an `Arc` the callback clones.
+    pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
+    /// Whether the settled turn parked (the park callback fired): the
+    /// turn-settle arms read it to keep an active goal alive — a parked
+    /// turn is the park's pause, not the goal's death.
+    pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The session's queue delivery modes (TS `agent.steeringMode` /
     /// `agent.followUpMode`): seeded from the start config, applied to the
     /// built session's agent at build time, and switched live by the
@@ -521,6 +559,8 @@ impl AgentSessionEngine {
             link,
             children,
             usage_producer: std::sync::Mutex::new(None),
+            quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             autonomous_driver,
             autonomous_driver_default: std::sync::atomic::AtomicBool::new(true),
             held_autonomous_continuation: std::sync::Mutex::new(None),
@@ -760,6 +800,10 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
+            // A moved branch restores its own park (the early return
+            // would otherwise skip the build-tail restore and leave the
+            // previous branch's park — or none — armed).
+            self.restore_quota_park(built).await;
             return Ok(());
         }
         // Restore the retained context and certified metadata without loading
@@ -801,11 +845,88 @@ impl AgentSessionEngine {
                 built.session.rebuild_branch_context(entries).await?;
             }
         }
+        // Restore the quota park this branch ended on (TS
+        // `_restoreQuotaPark`, at construction): the newest
+        // `provider_quota_park` entry not followed by a
+        // `provider_quota_resume` entry. A wake still ahead re-arms the
+        // live state (a missing wake is rebuilt; a user-cancelled one is
+        // honored by leaving the session unparked); a wake that already
+        // passed is left to the durable job — a later failure re-parks
+        // from a fresh count, like the TS.
+        self.restore_quota_park(built).await;
         // The window walk and the retained-context replay allocated
         // transient entry trees several times the retained size; both are
         // consumed here, so release their freed heap to the OS.
         pa_types::memory_release::trim_freed_heap();
         Ok(())
+    }
+
+    /// Scan the built session's branch entries for the park this branch
+    /// ended on and re-arm the live park state (TS `_restoreQuotaPark`).
+    /// A rebuild starts from the branch's own records: any park carried
+    /// by the previous build (a replaced session or a moved branch) is
+    /// cleared first, so the state never survives onto a branch that did
+    /// not park.
+    async fn restore_quota_park(&self, built: &CoreSessionEngine) {
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let persistence = built.session.shared_persistence();
+        let manager = persistence.lock().await;
+        let Some(persisted) = manager.latest_quota_park() else {
+            return;
+        };
+        drop(manager);
+        let now_ms = crate::util::now_ms();
+        if persisted.resume_at_ms <= now_ms {
+            // The wake time passed: the durable wake job owns the resume
+            // (a failed probe re-parks from a fresh count, like the TS).
+            return;
+        }
+        // A wake job that still exists keeps its id; a missing one is
+        // rebuilt and the replacement is recorded so the next restart
+        // reuses it instead of arming another beside it; a user-cancelled
+        // one is honored (the user owns the wake) by leaving the session
+        // unparked.
+        let job_id = match &persisted.job_id {
+            Some(job_id) if self.quota_wake_job_active(job_id) => persisted.job_id.clone(),
+            Some(job_id)
+                if self.cron_wiring().is_some_and(|wiring| {
+                    wiring.store.list().iter().any(|job| &job.id == job_id)
+                }) =>
+            {
+                return;
+            }
+            Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
+        };
+        if job_id != persisted.job_id {
+            // Write through the BUILT session: the installed slot is
+            // still empty while the build runs. A failed write surfaces
+            // as a log: the wake exists (rebuilt above), so the restart's
+            // stale-park arms still own the recovery.
+            if let Err(write_error) = self
+                .append_quota_park_entry(
+                    Some(built.session.shared_persistence()),
+                    persisted.resume_at_ms,
+                    persisted.park_count,
+                    job_id.as_deref(),
+                    None,
+                )
+                .await
+            {
+                eprintln!("pa-daemon: restored quota park entry write failed: {write_error}");
+            }
+        }
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QuotaParkState {
+            park_count: persisted.park_count,
+            resume_at_ms: persisted.resume_at_ms,
+            job_id,
+            wake_retries: 0,
+        });
     }
 
     /// The TS replacement teardown (`teardownForReplacement` ->
@@ -824,6 +945,13 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) {
         let _build = self.session_build.lock().await;
         let built = self.session.lock().await.take();
+        // The retired session's quota park ends with it (the wake's owner
+        // is gone); the replacement build restores whatever the new
+        // branch's own entries say.
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self.goal_runtime.lock().expect("goal runtime lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
         *self
@@ -1066,8 +1194,8 @@ impl AgentSessionEngine {
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
-            let mut target = self.provider_target.write().expect("provider target lock");
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
+            let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key,
@@ -1273,6 +1401,13 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> TurnResult {
+        #[derive(Clone)]
+        struct FailoverPrimary {
+            model: pa_types::ai::Model,
+            thinking_level: pa_agent::types::ThinkingLevel,
+            api_key: Option<String>,
+            headers: Option<std::collections::BTreeMap<String, String>>,
+        }
         // Model resolution and session construction are hard failures: they
         // never reach the provider, so the retry loop does not apply (the
         // TS loop only classifies provider stream failures).
@@ -1363,13 +1498,36 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
-        let primary_state: std::cell::RefCell<
-            Option<(
-                pa_types::ai::Model,
-                pa_agent::types::ThinkingLevel,
-                Option<String>,
-            )>,
-        > = std::cell::RefCell::new(None);
+        // The failover-captured primary target state (TS `_backupModel`):
+        // the model, its thinking level, and its resolved request auth,
+        // restored when the turn settles back onto the primary.
+        let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
+            std::cell::RefCell::new(None);
+        // The quota-park seam (TS #2375): the retry chain consults the
+        // engine at its give-up; a quota failure whose provider-reported
+        // reset exceeds the wait cap parks the session (the weak self
+        // keeps the callback `'static` — the engine outlives the turn it
+        // runs, and a parked give-up surfaces the parked status).
+        let quota_parked_flag = std::sync::Arc::clone(&self.quota_parked_this_run);
+        let engine_weak = self
+            .self_weak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let park: Option<pa_core::session_engine::provider_park::ParkDecisionCallback> =
+            Some(&mut move |message, abort| {
+                let engine_weak = engine_weak.clone();
+                let abort = abort.to_string();
+                let quota_parked_flag = std::sync::Arc::clone(&quota_parked_flag);
+                Box::pin(async move {
+                    let engine = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)?;
+                    let outcome = engine.park_for_quota_reset(&message, &abort).await;
+                    if outcome.is_some() {
+                        quota_parked_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    outcome
+                })
+            });
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -1461,11 +1619,14 @@ impl AgentSessionEngine {
                         // session was built with, restored when the turn
                         // settles.
                         if primary.is_none() {
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                self.resolve_request_api_key(&model),
-                            ));
+                            let (api_key, headers) =
+                                self.resolve_request_key_and_headers(&model);
+                            *primary = Some(FailoverPrimary {
+                                model: model.clone(),
+                                thinking_level: map_thinking_level(self.effective_thinking()),
+                                api_key,
+                                headers,
+                            });
                         }
                     }
                     let next = next.clone();
@@ -1483,13 +1644,15 @@ impl AgentSessionEngine {
                         // request hits the switched-to provider with its
                         // resolved key.
                         {
+                            let (api_key, headers) =
+                                self.resolve_request_key_and_headers(&next);
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
                                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: self.resolve_request_api_key(&next),
+                                api_key,
                                 model: next.clone(),
-                                headers: None,
+                                headers,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -1508,7 +1671,12 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((primary_model, thinking_level, primary_api_key)) = primary
+                        let Some(FailoverPrimary {
+                            model: primary_model,
+                            thinking_level,
+                            api_key: primary_api_key,
+                            headers: primary_headers,
+                        }) = primary
                         else {
                             return Ok(None);
                         };
@@ -1523,7 +1691,7 @@ impl AgentSessionEngine {
                                 service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
-                                headers: None,
+                                headers: primary_headers,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -1541,6 +1709,7 @@ impl AgentSessionEngine {
                         )))
                     }
                 },
+                park,
             ),
         );
         match result {
@@ -1829,6 +1998,10 @@ impl AgentSessionEngine {
         // TS resets `_overflowRecovery` when a message that starts an agent
         // run enters the loop: the admitted prompt here.
         self.reset_overflow_recovery();
+        // The quota-park flag is per-run: only this run's turns can park
+        // it (the settle arms read and clear it).
+        self.quota_parked_this_run
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         loop {
             // TS `_runPreTurnCompaction` (`beforeModelSelection` for queued
             // prompts): a stale overflow error from the previous run gets
@@ -1864,6 +2037,21 @@ impl AgentSessionEngine {
                     // increment).
                     self.reset_overflow_recovery();
                     self.note_settled_turn_since_auto_refine_review();
+                    // A parked session that completes a model call has its
+                    // quota back: clear the park (cancelling any pending
+                    // wake) and resume (TS `_completeQuotaParkResume`).
+                    // The wake probe's own success needs no second marker;
+                    // an early success queues one so the interrupted task
+                    // continues right away.
+                    if self.is_quota_parked() {
+                        let marker =
+                            pa_core::session_engine::provider_park::QUOTA_RESUME_MARKER_TEXT;
+                        let wake_probe = match &prompt {
+                            TurnPrompt::User { text, .. } => text == marker,
+                            TurnPrompt::Injected(row) => row.content.text() == marker,
+                        };
+                        self.runtime.block_on(self.resume_quota_park(wake_probe));
+                    }
                 }
                 // An aborted turn never services boundary requests (TS
                 // `_checkCompaction` abort arm): drop any pending ones so
@@ -1888,6 +2076,48 @@ impl AgentSessionEngine {
                         }
                         OverflowArmRun::NotApplicable | OverflowArmRun::Finished => {}
                         OverflowArmRun::Cancelled => return,
+                    }
+                    // A live quota park owns the resume: the parked turn
+                    // is the park's pause, not the goal's death, so the
+                    // goal survives until the wake (or a spent park
+                    // budget, which declines the park first) ends it (TS
+                    // `_stopGoalContinuationForTerminalMessage`'s
+                    // `_quotaPark` guard — a restored park guards too,
+                    // not only this run's park decision).
+                    let parked_this_run = self
+                        .quota_parked_this_run
+                        .swap(false, std::sync::atomic::Ordering::SeqCst);
+                    let live_park = self
+                        .quota_park
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if parked_this_run {
+                        emit(EngineEvent::Done(Err(error)));
+                        return;
+                    }
+                    if let Some(park) = live_park {
+                        if park.resume_at_ms > crate::util::now_ms() {
+                            // A future wake still owns the resume: the
+                            // goal survives this failed turn (TS's
+                            // `_quotaPark` guard).
+                            emit(EngineEvent::Done(Err(error)));
+                            return;
+                        }
+                        // The wake was consumed and this give-up did not
+                        // re-park (a non-quota failure): the episode ends
+                        // here (the give-up it replaced stands), so the
+                        // stale park must not linger without a wake (TS
+                        // abort arm's stale-park clear).
+                        if let Some(job_id) = &park.job_id {
+                            self.cancel_quota_resume_job(job_id);
+                        }
+                        self.runtime
+                            .block_on(self.append_quota_resume_entry("wake-error"));
+                        *self
+                            .quota_park
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     }
                     // TS `_stopGoalContinuationForTerminalMessage`: an
                     // error assistant message fails an active goal (the
@@ -2026,6 +2256,475 @@ impl AgentSessionEngine {
     ) -> pa_core::session_engine::provider_failover::ProviderFailoverPolicy {
         pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir)
             .get_provider_failover_policy()
+    }
+
+    /// The quota-park policy from settings
+    /// (`retry.provider.waitForUsage`; TS #2375).
+    fn park_policy(&self) -> pa_core::session_engine::provider_park::ProviderParkPolicy {
+        pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir)
+            .get_provider_park_policy()
+    }
+
+    /// True while the session is parked waiting out a provider-reported
+    /// usage reset (TS `session.isQuotaParked`).
+    pub fn is_quota_parked(&self) -> bool {
+        self.quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Create the durable one-shot wake that resumes a parked session: a
+    /// `quota-resume` cron job in the session's own artifacts whose
+    /// prompt is the resume marker (TS `_createQuotaResumeJob`). The
+    /// scheduler fires it into the session's follow-up lane, so the wake
+    /// survives worker restarts and passivated sessions. Best effort:
+    /// `None` when no wake can be armed (outside a daemon worker there is
+    /// no scheduler — the park then declines and the give-up stands).
+    async fn create_quota_resume_job(&self, resume_at_ms: u64) -> Option<String> {
+        let wiring = self.cron_wiring()?;
+        let binding = self.kernel_cron_binding()?;
+        let schedule_text = format!(
+            "at {}",
+            pa_core::session::manager::format_iso(resume_at_ms as i64)
+        );
+        let job = wiring
+            .store
+            .create(&pa_core::cron::store::CreateAgentCronJobInput {
+                active_session_id: binding.active_session_id.clone(),
+                session_id: binding.session_id.clone(),
+                session_file: binding.session_file.clone(),
+                cwd: binding.cwd.clone(),
+                source: Some("quota_resume".to_string()),
+                label: Some(
+                    pa_core::session_engine::provider_park::QUOTA_RESUME_CRON_LABEL.to_string(),
+                ),
+                prompt: pa_core::session_engine::provider_park::QUOTA_RESUME_MARKER_TEXT
+                    .to_string(),
+                schedule_text,
+                now: Some(crate::util::now_ms()),
+                ..Default::default()
+            })
+            .ok()?;
+        // Re-arm the scheduler so the armed job gets a live timer (the
+        // same post-mutation seam the kernel heartbeat controllers use;
+        // `drop_queued: false` keeps the queued-fire withdrawal a no-op).
+        if let Some(hook) = &wiring.mutation_hook {
+            let mutation = pa_core::session_engine::host_requests::RlmHeartbeatMutation {
+                job: job.clone(),
+                drop_queued: false,
+            };
+            hook(mutation).await;
+        }
+        Some(job.id)
+    }
+
+    /// Cancel a park's pending wake job (TS `_resolveQuotaResumeJob`'s
+    /// cancel arm): a completed (fired) job stays — rewriting it would
+    /// hide that the wake landed.
+    fn cancel_quota_resume_job(&self, job_id: &str) {
+        let Some(wiring) = self.cron_wiring() else {
+            return;
+        };
+        let matches_job = wiring
+            .store
+            .list()
+            .iter()
+            .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active);
+        if matches_job {
+            let _ = wiring.store.cancel(job_id, crate::util::now_ms());
+        }
+    }
+
+    /// The park callback the retry chain consults at its give-up (the
+    /// quota-park seam, TS #2375): a quota-classified failure with a
+    /// provider-reported reset beyond the quick-retry wait cap parks the
+    /// session until the reset and auto-resumes there. Returns the
+    /// parked status for the chain's `final_error`, or `None` to keep
+    /// the give-up (not quota-classified, no reset, park disabled,
+    /// park budget spent, or no wake can be armed).
+    async fn park_for_quota_reset(
+        &self,
+        message: &pa_agent::types::AssistantMessage,
+        abort: &str,
+    ) -> Option<pa_core::session_engine::provider_park::ProviderParkOutcome> {
+        use pa_core::session_engine::provider_park::{
+            is_quota_block_failure, provider_park_decision, quota_failure_reset_ms,
+            quota_parked_final_error, NoParkReason, ProviderParkDecision, ProviderParkOutcome,
+        };
+        let error = message
+            .error_message
+            .as_deref()
+            .unwrap_or("unknown error")
+            .to_string();
+        // Only a quota failure can park; a non-quota give-up keeps the
+        // immediate abort (TS parks only from the wait path's `usage`
+        // arm).
+        if !is_quota_block_failure(message) {
+            return None;
+        }
+        let reset_ms = quota_failure_reset_ms(message);
+        let policy = self.park_policy();
+        let existing = self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let now_ms = crate::util::now_ms();
+        if let Some(park) = &existing {
+            let wake_armed = park
+                .job_id
+                .as_deref()
+                .is_some_and(|job_id| self.quota_wake_job_active(job_id));
+            if park.resume_at_ms > now_ms {
+                // A live park whose wake is still armed owns the resume:
+                // this turn ends without consuming a park or rescheduling
+                // (TS `_parkForQuotaReset`'s already-parked arm). A
+                // vanished wake (a user cancel in `/cron`) is rebuilt so
+                // the park still wakes.
+                let (resume_at_ms, job_id) = if wake_armed {
+                    (park.resume_at_ms, park.job_id.clone())
+                } else {
+                    let rebuilt = self.create_quota_resume_job(park.resume_at_ms).await?;
+                    (park.resume_at_ms, Some(rebuilt))
+                };
+                if park.job_id != job_id {
+                    // A vanished wake is rebuilt without consuming a park
+                    // (TS `_restoreQuotaWakeJob`'s rebuild arm — the
+                    // replacement entry records the new job so the next
+                    // restore reuses it).
+                    *self
+                        .quota_park
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(QuotaParkState {
+                            park_count: park.park_count,
+                            resume_at_ms,
+                            job_id: job_id.clone(),
+                            wake_retries: park.wake_retries,
+                        });
+                    // A failed replacement write surfaces as a log:
+                    // the rebuilt wake exists, so the restart's stale-park
+                    // arms still own the recovery.
+                    if let Err(write_error) = self
+                        .append_quota_park_entry(
+                            self.installed_persistence().await,
+                            resume_at_ms,
+                            park.park_count,
+                            job_id.as_deref(),
+                            Some(message.provider.as_str()),
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "pa-daemon: quota park wake-rebuild entry write failed: {write_error}"
+                        );
+                    }
+                }
+                let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
+                return Some(ProviderParkOutcome {
+                    status_message: format!(
+                        "Session is parked until {resume_at_iso} waiting for the provider usage reset; this turn ended without a retry: {error}",
+                    ),
+                });
+            }
+            // The wake already fired (its probe failed or never settled):
+            // the decision below re-parks at the newly reported reset, or
+            // — with no reset — re-arms a short bounded probe (TS
+            // `_recoverQuotaParkWake`); a spent budget or a disabled park
+            // ends the episode's stale park exactly like the TS abort
+            // arm (the give-up it replaced stands).
+        }
+        // The park decision (pure): disabled / budget spent decline, a
+        // reset parks until it (plus grace), capped at the policy bound.
+        let parks_used = existing.as_ref().map_or(0, |park| park.park_count);
+        let resume_after_ms = match provider_park_decision(parks_used, reset_ms, &policy) {
+            ProviderParkDecision::Park { resume_after_ms } => resume_after_ms,
+            ProviderParkDecision::None {
+                reason: NoParkReason::NoReset,
+            } => {
+                let park = existing.filter(|park| park.resume_at_ms <= now_ms)?;
+                // The wake fired but its probe could not re-park (no
+                // reported reset): re-arm one short probe, bounded so a
+                // park that can never wake ends instead of parking
+                // forever (TS `_recoverQuotaParkWake`).
+                return self.recover_quota_park_wake(park, &error).await;
+            }
+            ProviderParkDecision::None {
+                reason: NoParkReason::Disabled | NoParkReason::ParkBudget,
+            } => {
+                let park = existing.filter(|park| park.resume_at_ms <= now_ms)?;
+                // A stale park whose episode ended here: its wake
+                // already fired, so nothing else would resume it (TS
+                // abort arm's stale-park clear).
+                if let Some(job_id) = &park.job_id {
+                    self.cancel_quota_resume_job(job_id);
+                }
+                *self
+                    .quota_park
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                return None;
+            }
+        };
+        let resume_at_ms = now_ms.saturating_add(resume_after_ms);
+        // TS always cancels the existing wake before arming the
+        // replacement (`_cancelQuotaParkWake(existing)` runs for a stale
+        // park AND for one whose scheduled job has not fired yet), so an
+        // expired park's lagging job can never race the replacement into
+        // a second marker turn.
+        if let Some(job_id) = existing.as_ref().and_then(|park| park.job_id.as_deref()) {
+            self.cancel_quota_resume_job(job_id);
+        }
+        // Arm the durable wake first: without a wake the park would be a
+        // silent death, so a failed job creation declines the park.
+        let job_id = self.create_quota_resume_job(resume_at_ms).await?;
+        let park_count = parks_used + 1;
+        // The durable park record gates the park exactly like the wake:
+        // TS's appendCustomEntry throws on a failed persist (the append
+        // rolls back and the park path never reports success), so a
+        // failed session-file write cancels the wake and declines the
+        // park — the give-up stands instead of a live park a restart
+        // would silently lose.
+        if let Err(write_error) = self
+            .append_quota_park_entry(
+                self.installed_persistence().await,
+                resume_at_ms,
+                park_count,
+                Some(job_id.as_str()),
+                Some(message.provider.as_str()),
+            )
+            .await
+        {
+            self.cancel_quota_resume_job(&job_id);
+            eprintln!(
+                "pa-daemon: quota park entry write failed, the park is declined: {write_error}"
+            );
+            return None;
+        }
+        let state = QuotaParkState {
+            park_count,
+            resume_at_ms,
+            job_id: Some(job_id.clone()),
+            wake_retries: existing.as_ref().map_or(0, |park| park.wake_retries),
+        };
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+        Some(ProviderParkOutcome {
+            status_message: quota_parked_final_error(abort, resume_at_ms, &error),
+        })
+    }
+
+    /// Wake re-arm for a park whose wake was consumed without resuming
+    /// and whose failure reported no reset (TS `_recoverQuotaParkWake`):
+    /// one short retry at `QUOTA_WAKE_RETRY_DELAY_MS`, bounded by
+    /// [`QUOTA_WAKE_MAX_RETRIES`]; a park that can never wake is dropped
+    /// (its resume entry records the drop) and the give-up stands.
+    async fn recover_quota_park_wake(
+        &self,
+        park: QuotaParkState,
+        error: &str,
+    ) -> Option<pa_core::session_engine::provider_park::ProviderParkOutcome> {
+        let retries = park.wake_retries + 1;
+        if retries > QUOTA_WAKE_MAX_RETRIES {
+            if let Some(job_id) = &park.job_id {
+                self.cancel_quota_resume_job(job_id);
+            }
+            self.append_quota_resume_entry("wake-error").await;
+            *self
+                .quota_park
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return None;
+        }
+        let resume_at_ms = crate::util::now_ms().saturating_add(QUOTA_WAKE_RETRY_DELAY_MS);
+        let job_id = self.create_quota_resume_job(resume_at_ms).await?;
+        // The re-armed wake needs a replacement entry (TS
+        // `_recoverQuotaParkWake` appends one so a restart reads the
+        // replacement wake instead of the spent one; it carries no
+        // provider field, like the TS). TS's appendCustomEntry throws on
+        // a failed persist, so a failed write cancels the re-armed wake
+        // and drops the park — the give-up stands.
+        if let Err(write_error) = self
+            .append_quota_park_entry(
+                self.installed_persistence().await,
+                resume_at_ms,
+                park.park_count,
+                Some(job_id.as_str()),
+                None,
+            )
+            .await
+        {
+            self.cancel_quota_resume_job(&job_id);
+            eprintln!(
+                "pa-daemon: quota park entry write failed, the re-armed wake is dropped: {write_error}"
+            );
+            // The spent park cannot stay live without a wake (nothing
+            // would ever resume it): the episode ends here and the
+            // give-up stands.
+            *self
+                .quota_park
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return None;
+        }
+        let state = QuotaParkState {
+            park_count: park.park_count,
+            resume_at_ms,
+            job_id: Some(job_id.clone()),
+            wake_retries: retries,
+        };
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+        let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
+        Some(pa_core::session_engine::provider_park::ProviderParkOutcome {
+            status_message: format!(
+                "Session is parked until {resume_at_iso} waiting for the provider usage reset; this turn ended without a retry: {error}"
+            ),
+        })
+    }
+
+    /// Record a park's resume (or drop) transition (TS
+    /// `QUOTA_RESUME_CUSTOM_ENTRY_TYPE`'s outcome field).
+    async fn append_quota_resume_entry(&self, outcome: &str) {
+        let persistence = self
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .map(|engine| engine.session.shared_persistence());
+        let Some(persistence) = persistence else {
+            return;
+        };
+        let mut session = persistence.lock().await;
+        // TS's appendCustomEntry throws on a failed persist; the resume
+        // path's live clear still stands (the quota IS back — keeping the
+        // park armed after a successful model call would be wrong), so
+        // the failure surfaces as a log and the restart's stale-park arms
+        // own the recovery (the spent park entry cannot restore a live
+        // park without a wake).
+        if let Err(write_error) = session.append_custom_entry(
+            pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
+            Some(serde_json::json!({ "outcome": outcome })),
+        ) {
+            eprintln!(
+                "pa-daemon: quota resume entry write failed (outcome {outcome}): {write_error}"
+            );
+        }
+    }
+
+    /// Whether the park's wake job is still scheduled (Active) in the
+    /// session's artifacts.
+    fn quota_wake_job_active(&self, job_id: &str) -> bool {
+        let Some(wiring) = self.cron_wiring() else {
+            return false;
+        };
+        wiring
+            .store
+            .list()
+            .iter()
+            .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active)
+    }
+
+    /// Record the parked transition in the session log (TS
+    /// `QUOTA_PARK_CUSTOM_ENTRY_TYPE`), so a restart restores the park
+    /// count and the wake. Async (the park callback runs inside the
+    /// retry chain's `block_on`, where a nested `block_on` would panic).
+    /// The persistence handle is a parameter: the park callback writes
+    /// through the installed session, the build-time restore through the
+    /// built one (the installed slot is still empty while it runs).
+    async fn append_quota_park_entry(
+        &self,
+        persistence: Option<
+            std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>,
+        >,
+        resume_at_ms: u64,
+        park_count: u32,
+        job_id: Option<&str>,
+        provider: Option<&str>,
+    ) -> std::io::Result<()> {
+        let data = serde_json::json!({
+            "resumeAt": pa_core::session::manager::format_iso(resume_at_ms as i64),
+            "parkCount": park_count,
+            "jobId": job_id,
+            "provider": provider,
+        });
+        let Some(persistence) = persistence else {
+            return Ok(());
+        };
+        let mut session = persistence.lock().await;
+        session
+            .append_custom_entry(
+                pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
+                Some(data),
+            )
+            .map(|_| ())
+    }
+
+    /// The installed session's persistence handle (the park callback's
+    /// write path).
+    async fn installed_persistence(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|engine| engine.session.shared_persistence())
+    }
+
+    /// A parked session completed a model call: the quota is back. Clear
+    /// the park (cancelling any pending wake), record the resumed
+    /// transition, and — unless this success WAS the wake probe — queue
+    /// the resume marker so the interrupted task continues right away
+    /// (TS `_completeQuotaParkResume`).
+    async fn resume_quota_park(&self, wake_probe: bool) {
+        let park = self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(park) = park else {
+            return;
+        };
+        if let Some(job_id) = &park.job_id {
+            self.cancel_quota_resume_job(job_id);
+        }
+        let outcome = if wake_probe { "wake" } else { "early" };
+        self.append_quota_resume_entry(outcome).await;
+        if wake_probe {
+            return;
+        }
+        // Early resume: the quota returned before the wake, so the
+        // interrupted task continues now (TS queues the marker through
+        // `_queuePreparedPrompt`; this port admits it through the
+        // worker's goal-admission lane, the existing follow-up
+        // admission seam).
+        if let Some(sink) = self
+            .goal_admission_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            sink(crate::engine::GoalTurnEndWork::Continuation(
+                crate::engine::GoalContinuation {
+                    request: crate::engine::PromptRequest {
+                        message: pa_core::session_engine::provider_park::QUOTA_RESUME_MARKER_TEXT
+                            .to_string(),
+                        images: Vec::new(),
+                        source: "user".to_string(),
+                        agent_message_id: None,
+                        custom_message: None,
+                        batch: Vec::new(),
+                    },
+                    goal_update: None,
+                },
+            ));
+        }
     }
 
     /// The failover chain for `model`: the other auth-configured providers

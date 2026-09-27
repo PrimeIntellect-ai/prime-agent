@@ -27,6 +27,7 @@ pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
 pub mod provider_failover;
+pub mod provider_park;
 pub mod provider_retry;
 pub mod refine;
 pub mod request_timing;

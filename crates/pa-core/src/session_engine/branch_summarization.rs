@@ -380,14 +380,16 @@ pub async fn generate_branch_summary(
             };
             // A JoinError (the closure panicked) degrades to the session
             // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning.
-            let routed =
-                join.await
-                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
-                        model: model.clone(),
-                        api_key: api_key.clone(),
-                        headers: None,
-                    });
+            // selector resolves to the fallback with the warning. The
+            // fallback keeps the merged headers (the registry's single
+            // owner of the team header).
+            let routed = join.await.unwrap_or_else(|_| {
+                super::auxiliary_model::session_fallback_with_headers(
+                    context,
+                    model,
+                    api_key.clone(),
+                )
+            });
             (routed.model, routed.api_key, routed.headers)
         }
         None => (model.clone(), api_key.clone(), None),

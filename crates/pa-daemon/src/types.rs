@@ -71,6 +71,11 @@ pub struct SessionSummary {
     pub thinking_level: Option<String>,
     pub is_streaming: bool,
     pub is_compacting: bool,
+    /// True while the session is parked waiting out a provider-reported
+    /// usage reset (TS `session.isQuotaParked`); the parked banner names
+    /// the wake time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_quota_parked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_bash_running: Option<bool>,
     /// A streaming turn with tool calls in flight (TS `isRunningTools`:

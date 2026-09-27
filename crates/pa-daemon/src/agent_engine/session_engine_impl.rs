@@ -343,12 +343,13 @@ impl SessionEngine for AgentSessionEngine {
         // agent's model (loop context) and the provider stream's target
         // swap in place (TS `agent.state.model = model`).
         {
+            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(&model),
+                api_key,
                 model: model.clone(),
-                headers: None,
+                headers,
             });
         }
         let session = self.session.blocking_lock();
@@ -456,6 +457,12 @@ impl SessionEngine for AgentSessionEngine {
             "provider": model.provider,
             "reasoning": model.reasoning,
         }))
+    }
+
+    /// True while the session is parked waiting out a provider-reported
+    /// usage reset (TS `session.isQuotaParked`).
+    fn is_quota_parked(&self) -> bool {
+        AgentSessionEngine::is_quota_parked(self)
     }
 
     /// `compact` over the hosted pa-core session: the session summarizes
