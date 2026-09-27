@@ -21,6 +21,7 @@ use pa_types::daemon::{
     DaemonPeerTransportTicket, DaemonWorkerCommand, DaemonWorkerLifecycle, DaemonWorkerPeerGrant,
 };
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
@@ -180,11 +181,12 @@ impl Supervisor {
         };
         let payload = serde_json::to_value(&registration)?;
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "worker_register_peer_transport",
                 payload,
                 GRANT_REGISTRATION_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
             )
             .await?;
         if !response.success {

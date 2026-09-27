@@ -20,6 +20,7 @@ use pa_core::cron::store::{AgentCronJobStore, HeartbeatManagementAction};
 use pa_core::cron::{is_heartbeat_cron_job, AgentCronJob, JobStatus};
 use pa_types::daemon::DaemonCommand;
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{
     command_type_name, response_failure, response_line, response_success, DaemonResponse,
 };
@@ -115,7 +116,7 @@ impl Supervisor {
     fn broadcast_heartbeats_changed(&self) {
         let _ = self.events.send((
             crate::supervisor::ClientRouting::Broadcast,
-            json!({ "type": "heartbeats_changed" }),
+            std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
 
@@ -130,7 +131,13 @@ impl Supervisor {
         match client_command_payload(command, client_id) {
             Ok((command_type, payload)) => {
                 match self
-                    .route_command(resident, command_type, payload, CATALOG_FORWARD_TIMEOUT_MS)
+                    .route_command_typed(
+                        resident,
+                        command_type,
+                        payload,
+                        CATALOG_FORWARD_TIMEOUT_MS,
+                        RouteAdmission::ClientRequest,
+                    )
                     .await
                 {
                     Ok(response) => response,
@@ -401,6 +408,7 @@ impl Supervisor {
             attached,
             command_id.to_string(),
             type_name.to_string(),
+            None,
         )
         .await
     }
@@ -462,6 +470,7 @@ impl Supervisor {
                 attached,
                 command_id.to_string(),
                 type_name.to_string(),
+                None,
             )
             .await;
         if !promote {

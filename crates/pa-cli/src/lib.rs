@@ -21,6 +21,7 @@ pub(crate) mod daemon_session_list;
 pub(crate) mod file_processor;
 pub(crate) mod global_flags;
 pub(crate) mod headless_autonomous;
+pub(crate) mod incident;
 pub(crate) mod initial_message;
 pub(crate) mod interactive_mode;
 pub(crate) mod list_models;

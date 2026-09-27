@@ -209,6 +209,16 @@ pub struct WindowedSessionStore {
     full: bool,
     snapshot: Snapshot,
     reads: WindowReadStats,
+    /// The retained typed rows and raw lines were handed to the owning
+    /// [`super::manager::SessionManager`] ([`Self::take_retained`]): the
+    /// window still folds appends into its snapshot stats and serves its
+    /// settings/metadata lookups, but its transcript context is the
+    /// manager's `file_entries` — keeping a second resident copy of the
+    /// retained bodies here measured as ~29.5MiB of wire-equivalent
+    /// duplication on the 10MiB canonical fixture (worker-rss census,
+    /// 2026-09-26), and every retained row is re-derivable from the
+    /// JSONL file itself.
+    detached: bool,
 }
 
 impl WindowedSessionStore {
@@ -649,6 +659,7 @@ impl WindowedSessionStore {
             full: false,
             snapshot,
             reads: reader.reads,
+            detached: false,
         }))
     }
 
@@ -724,8 +735,52 @@ impl WindowedSessionStore {
             full: false,
             snapshot,
             reads,
+            detached: false,
         }))
     }
+    /// Move the retained raw JSONL rows out (the daemon's `SessionFile`
+    /// build consumes them once; holding both the raw lines and the parsed
+    /// store doubles the load's resident peak).
+    pub fn take_raw_entries(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.raw_entries)
+    }
+
+    /// Move the retained metadata rows out (same single-consumer contract).
+    pub fn take_metadata_entries(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.metadata_entries)
+    }
+
+    /// Move the retained typed rows AND raw JSONL lines out for a one-copy
+    /// adoption ([`super::manager::SessionManager::adopt_window`]): the
+    /// manager owns the parsed trees from here on, and the raw lines drop
+    /// (the JSONL file itself is the durable raw copy). The window keeps
+    /// its snapshot/settings/metadata state, so lookups and append-time
+    /// stats stay exact; a detached window's transcript context comes from
+    /// the owning manager's entries ([`Self::context`] asserts this).
+    pub fn take_retained(&mut self) -> (Vec<FileEntry>, Vec<String>) {
+        self.detached = true;
+        (
+            std::mem::take(&mut self.entries),
+            std::mem::take(&mut self.raw_entries),
+        )
+    }
+
+    /// Whether [`Self::take_retained`] handed the bodies to the manager.
+    pub fn retained_detached(&self) -> bool {
+        self.detached
+    }
+
+    /// Whether [`Self::ensure_full_history`] rehydrated the whole file.
+    pub fn full_history(&self) -> bool {
+        self.full
+    }
+
+    /// The walk-resolved settings (the owning manager's context overlay
+    /// source while this window is attached).
+    pub fn settings(&self) -> &SessionContext {
+        &self.settings
+    }
+
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.snapshot.non_bootstrap
     }
@@ -746,20 +801,25 @@ impl WindowedSessionStore {
     }
     /// Fold a newly persisted linear entry without hydrating historical bodies.
     pub fn append_entry(&mut self, entry: FileEntry) {
-        if let FileEntry::ChildUsageAttributed { payload, .. } = &entry {
-            // The full reader folds attributions at parse time; a live append
-            // must fold into the retained assistant copy too, or `context()`
-            // serves stale usage until reopen.
-            for retained in self.entries.iter_mut().rev() {
-                if retained.id() == Some(payload.target_id.as_str()) {
-                    if let FileEntry::Message {
-                        message: pa_types::session::AgentMessage::Assistant(assistant),
-                        ..
-                    } = retained
-                    {
-                        assistant.usage = payload.aggregate_usage;
+        if !self.detached {
+            if let FileEntry::ChildUsageAttributed { payload, .. } = &entry {
+                // The full reader folds attributions at parse time; a live
+                // append must fold into the retained assistant copy too, or
+                // `context()` serves stale usage until reopen. A detached
+                // window holds no bodies: the owning manager's own append
+                // folds its copy (the manager is the one-copy authority
+                // after `take_retained`).
+                for retained in self.entries.iter_mut().rev() {
+                    if retained.id() == Some(payload.target_id.as_str()) {
+                        if let FileEntry::Message {
+                            message: pa_types::session::AgentMessage::Assistant(assistant),
+                            ..
+                        } = retained
+                        {
+                            assistant.usage = payload.aggregate_usage;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -772,7 +832,9 @@ impl WindowedSessionStore {
         if let Some(id) = entry.id() {
             id.clone_into(&mut self.leaf_id);
         }
-        self.entries.push(entry);
+        if !self.detached {
+            self.entries.push(entry);
+        }
     }
 
     /// Retained file-order entries, including the original header.
@@ -827,7 +889,20 @@ impl WindowedSessionStore {
     }
 
     /// Model context with settings resolved across the entire active ancestry.
+    ///
+    /// # Panics
+    ///
+    /// Panics when this window handed its bodies to the owning manager
+    /// ([`Self::take_retained`]): a detached window serves lookups and
+    /// append-time stats only — its transcript context is the manager's
+    /// `file_entries` (the one-copy authority), never a re-walk of the
+    /// (absent) retained rows. `ensure_full_history` re-arms the bodies
+    /// and with them this constructor.
     pub fn context(&self) -> SessionContext {
+        assert!(
+            !self.detached,
+            "a detached window's transcript context comes from the owning manager"
+        );
         let mut context = build_session_context(&self.entries, Some(&self.leaf_id));
         if !self.full {
             context
@@ -860,6 +935,9 @@ impl WindowedSessionStore {
         .await??;
         self.entries = entries;
         self.full = true;
+        // Re-hydrated bodies re-arm the retained copies this constructor
+        // reloaded (and with them `context()`), exactly like a fresh walk.
+        self.detached = false;
         Ok(())
     }
 }

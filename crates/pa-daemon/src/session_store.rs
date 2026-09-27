@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 #[path = "session_store_info_tests.rs"]
 mod info_tests;
 #[cfg(test)]
+#[path = "session_store_stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
@@ -70,6 +74,21 @@ pub struct SessionEntry {
     pub timestamp: String,
     #[serde(flatten)]
     pub fields: Value,
+}
+
+/// The windowed message sequence's summary scalars (TS
+/// `summaryForActiveSession`): the newest message timestamp, the summed
+/// assistant usage, and the window's message count. Produced by
+/// [`SessionFile::scan_message_scalars`] without materializing the fold.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MessageWindowScalars {
+    /// The timestamp of the last windowed message that carries one (the
+    /// fold's reverse `find_map`, preserved in walk order).
+    pub last_timestamp_ms: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+    pub message_count: usize,
 }
 
 impl SessionEntry {
@@ -297,12 +316,23 @@ impl SessionFile {
     /// header is missing or invalid; malformed entry lines are skipped,
     /// matching the TS loader.
     pub fn open(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
+        // Streamed line-by-line load: one line is resident at a time, so a
+        // grown session never holds the raw file bytes alongside the parsed
+        // entries (the whole-body String read was a transient copy the
+        // allocator kept resident long after `open` returned).
+        let file = fs::File::open(path)
             .with_context(|| format!("read session file {}", path.display()))?;
-        let mut lines = content.lines().filter(|l| !l.trim().is_empty());
-        let first = lines
-            .next()
-            .ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
+        let mut lines = std::io::BufReader::new(file).lines();
+        let read_context = || format!("read session file {}", path.display());
+        let mut first = None;
+        for line in lines.by_ref() {
+            let line = line.with_context(read_context)?;
+            if !line.trim().is_empty() {
+                first = Some(line);
+                break;
+            }
+        }
+        let first = first.ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
         let header_value: Value = serde_json::from_str(first.trim())
             .with_context(|| format!("invalid session header in {}", path.display()))?;
         if header_value.get("type").and_then(Value::as_str) != Some("session") {
@@ -320,6 +350,7 @@ impl SessionFile {
             lease: None,
         };
         for line in lines {
+            let line = line.with_context(read_context)?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -341,7 +372,7 @@ impl SessionFile {
     /// no session header; a malformed retained row falls back to the
     /// full [`SessionFile::open`] load, so its errors surface here too.
     pub fn open_windowed(path: &Path) -> Result<Self> {
-        let Some(window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
+        let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
             return Self::open(path);
         };
         let header = window
@@ -361,8 +392,16 @@ impl SessionFile {
             window: None,
             lease: None,
         };
-        for line in window.metadata_entries().iter().chain(window.raw_entries()) {
-            let Ok(entry) = serde_json::from_str(line) else {
+        // The raw rows are consumed in place: each line String drops as
+        // soon as its parsed entry joins the store, instead of keeping the
+        // raw copy resident for the whole build.
+        let raw_count = window.raw_entries().len();
+        for line in window
+            .take_metadata_entries()
+            .into_iter()
+            .chain(window.take_raw_entries())
+        {
+            let Ok(entry) = serde_json::from_str(&line) else {
                 return Self::open(path);
             };
             file.push_index(entry);
@@ -388,14 +427,13 @@ impl SessionFile {
             boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
-            retained_ids: window
-                .raw_entries()
+            // The retained rows joined the store verbatim above (any
+            // unparsable row fell back to the full reader), so their ids are
+            // exactly the trailing `raw_count` store ids — no third parse
+            // pass over the retained body.
+            retained_ids: file.entries[file.entries.len() - raw_count..]
                 .iter()
-                .filter_map(|raw| {
-                    serde_json::from_str::<SessionEntry>(raw)
-                        .ok()
-                        .map(|entry| entry.id)
-                })
+                .map(|entry| entry.id.clone())
                 .collect(),
             older_path_stats: window.older_path_stats().clone(),
         });
@@ -767,13 +805,67 @@ impl SessionFile {
     /// after the compaction. Without a compaction this is the plain
     /// message list.
     pub fn messages(&self) -> Vec<Value> {
-        // The transcript form of one entry: `message` rows contribute their
-        // persisted message; custom rows rejoin as their wire message form
-        // (`role: "custom"`), the shape TS sessions keep in
-        // `agent.state.messages`.
-        let entry_message = |entry: &SessionEntry| -> Option<Value> {
+        let mut messages = Vec::new();
+        self.walk_message_values(|message| messages.push(message.into_owned()));
+        messages
+    }
+
+    /// The summary scalars the TS `summaryForActiveSession` fold derives
+    /// from the windowed message sequence — the newest message timestamp
+    /// (the last message in fold order that carries one, matching the
+    /// fold's reverse scan), the summed assistant usage, and the window's
+    /// message count — without materializing the transcript. One borrowed
+    /// walk of the same sequence [`Self::messages`] folds, so the scan can
+    /// never disagree with the materialized fold.
+    pub fn scan_message_scalars(&self) -> MessageWindowScalars {
+        let mut scalars = MessageWindowScalars::default();
+        self.walk_message_values(|message| {
+            scalars.message_count += 1;
+            if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
+                scalars.last_timestamp_ms = Some(timestamp);
+            }
+            if crate::types::message_role(&message) == Some("assistant") {
+                if let Some(usage) = message.get("usage") {
+                    scalars.input_tokens += usage
+                        .get("input")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheRead")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.input_tokens += usage
+                        .get("cacheWrite")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.output_tokens += usage
+                        .get("output")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    scalars.cost += usage
+                        .get("cost")
+                        .and_then(|cost| cost.get("total"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or_default();
+                }
+            }
+        });
+        scalars
+    }
+
+    /// The windowed message sequence behind [`Self::messages`]: `message`
+    /// rows borrow their persisted message; `custom_message` rows rejoin as
+    /// their wire message form (`role: "custom"`), the shape TS sessions
+    /// keep in `agent.state.messages`; a compaction window prepends its
+    /// summary message and keeps `firstKeptEntryId` onward (the id is only
+    /// recognized on a message-bearing row, matching the fold), then
+    /// everything appended after the compaction. Every consumer — the
+    /// materialized fold and the scalar scan — derives from this one walk,
+    /// so the two can never disagree on the sequence.
+    fn walk_message_values<'a>(&'a self, mut visit: impl FnMut(std::borrow::Cow<'a, Value>)) {
+        let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
             match entry.type_.as_str() {
-                "message" => entry.fields.get("message").cloned(),
+                "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
                 "custom_message" => {
                     let mut message = entry.fields.clone();
                     if let Some(object) = message.as_object_mut() {
@@ -783,7 +875,7 @@ impl SessionFile {
                             Value::String(entry.timestamp.clone()),
                         );
                     }
-                    Some(message)
+                    Some(std::borrow::Cow::Owned(message))
                 }
                 _ => None,
             }
@@ -792,10 +884,12 @@ impl SessionFile {
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
-            return branch
-                .iter()
-                .filter_map(|entry| entry_message(entry))
-                .collect();
+            for entry in &branch {
+                if let Some(message) = entry_message(entry) {
+                    visit(message);
+                }
+            }
+            return;
         };
         let compaction = branch[compaction_position];
         let first_kept_entry_id = compaction
@@ -803,10 +897,29 @@ impl SessionFile {
             .get("firstKeptEntryId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mut retained: Vec<Value> = Vec::new();
+        // Counting pass: the compaction summary message carries the retained
+        // count, so the kept prefix is counted before anything is visited.
+        // The bearing check borrows only — no message is materialized here.
+        let mut keeping = false;
+        let mut retained_count = 0usize;
+        for entry in &branch[..compaction_position] {
+            if !entry_bears_message(entry) {
+                continue;
+            }
+            if !keeping && entry.id == first_kept_entry_id {
+                keeping = true;
+            }
+            if keeping {
+                retained_count += 1;
+            }
+        }
+        visit(std::borrow::Cow::Owned(compaction_summary_message(
+            compaction,
+            retained_count,
+        )));
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
-            if entry_message(entry).is_none() {
+            if !entry_bears_message(entry) {
                 continue;
             }
             if !keeping && entry.id == first_kept_entry_id {
@@ -814,18 +927,15 @@ impl SessionFile {
             }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    retained.push(message);
+                    visit(message);
                 }
             }
         }
-        let mut messages = vec![compaction_summary_message(compaction, retained.len())];
-        messages.extend(retained);
-        messages.extend(
-            branch[compaction_position + 1..]
-                .iter()
-                .filter_map(|entry| entry_message(entry)),
-        );
-        messages
+        for entry in &branch[compaction_position + 1..] {
+            if let Some(message) = entry_message(entry) {
+                visit(message);
+            }
+        }
     }
 
     /// The durable entry id the compaction cut keeps: the same
@@ -1138,6 +1248,18 @@ fn message_role(message: &Value) -> Option<&str> {
 
 /// The `compactionSummary` message a compaction fold starts with (TS
 /// `createCompactionSummaryMessage`).
+/// Whether one entry contributes a message to the windowed fold: `message`
+/// rows need their persisted message; `custom_message` rows always rejoin as
+/// their wire form. The borrowing twin of the `entry_message` Some-ness, so
+/// counting and keeping walks never materialize what they only classify.
+fn entry_bears_message(entry: &SessionEntry) -> bool {
+    match entry.type_.as_str() {
+        "message" => entry.fields.get("message").is_some(),
+        "custom_message" => true,
+        _ => false,
+    }
+}
+
 fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
     // TS `createCompactionSummaryMessage` key order: role, summary,
@@ -1213,21 +1335,35 @@ pub struct SessionInfo {
 /// TS `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`: the transcript search-text cap.
 pub const SESSION_LIST_SEARCH_TEXT_MAX_CHARS: usize = 64 * 1024;
 
+/// The roster fold's read-buffer size: the default 8 KiB chunks a grown
+/// session file into one read syscall per 8 KiB (a 1,000-file cold scan
+/// paid thousands of extra reads); one 64 KiB fill reads the typical
+/// session in a single syscall. Line semantics are `BufRead::read_line`'s
+/// either way - only the syscall chunking changes, never the folded
+/// bytes or the resume cursor.
+const SESSION_SCAN_READ_BUF_BYTES: usize = 64 * 1024;
+
 /// TS `appendCappedSearchText`: space-join the texts, cut the final
-/// addition so the corpus never grows past the cap.
-fn append_capped_search_text(current: &mut String, text: &str) {
+/// addition so the corpus never grows past the cap. `used` is the corpus's
+/// char count before this append; the returned count is the corpus's char
+/// count after it, so the fold keeps an O(1) running counter instead of
+/// re-counting the capped string for every message.
+fn append_capped_search_text(current: &mut String, text: &str, used: usize) -> usize {
     if text.is_empty() {
-        return;
+        return used;
     }
-    let used = current.chars().count();
     if used >= SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
-        return;
+        return used;
     }
-    if used > 0 {
+    let mut count = used;
+    if count > 0 {
         current.push(' ');
+        count += 1;
     }
-    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - current.chars().count();
-    current.extend(text.chars().take(remaining));
+    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - count;
+    let mut taken = 0;
+    current.extend(text.chars().take(remaining).inspect(|_| taken += 1));
+    count + taken
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1293,8 +1429,11 @@ const SESSION_SCAN_MAX_CACHED_STATES: usize = 4096;
 #[derive(Default)]
 struct SessionInfoScanCache {
     states: HashMap<PathBuf, SessionScanState>,
-    /// Insertion order; a re-store moves a path to the back (LRU recency).
-    order: Vec<PathBuf>,
+    /// Oldest first. One ordinal per live state keeps the recency index
+    /// bounded even when the same roster is refreshed indefinitely.
+    order: std::collections::BTreeMap<u64, PathBuf>,
+    ordinal_by_path: HashMap<PathBuf, u64>,
+    next_ordinal: u64,
     retained_usage_entries: usize,
 }
 
@@ -1304,17 +1443,40 @@ impl SessionInfoScanCache {
         if let Some(state) = self.states.remove(path) {
             self.retained_usage_entries -= state.accounted_usage_entries;
         }
-        self.order.retain(|p| p != path);
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+    }
+
+    fn mark_recent(&mut self, path: &Path) {
+        if let Some(ordinal) = self.ordinal_by_path.remove(path) {
+            self.order.remove(&ordinal);
+        }
+        // Rollover is unreachable in practice, but rebuilding the tiny
+        // (at most 4096 entries) recency index preserves exact LRU order.
+        if self.next_ordinal == u64::MAX {
+            let ordered: Vec<PathBuf> = self.order.values().cloned().collect();
+            self.order.clear();
+            self.ordinal_by_path.clear();
+            for (ordinal, old_path) in ordered.into_iter().enumerate() {
+                let ordinal = ordinal as u64;
+                self.ordinal_by_path.insert(old_path.clone(), ordinal);
+                self.order.insert(ordinal, old_path);
+            }
+            self.next_ordinal = self.order.len() as u64;
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        self.ordinal_by_path.insert(path.to_path_buf(), ordinal);
+        self.order.insert(ordinal, path.to_path_buf());
     }
 
     /// The unchanged-file hit re-stores in TS (`storeSessionScanState
     /// (filePath, previous)`) — LRU recency without re-accounting.
     fn touch(&mut self, path: &Path) {
-        if !self.states.contains_key(path) {
-            return;
+        if self.states.contains_key(path) {
+            self.mark_recent(path);
         }
-        self.order.retain(|p| p.as_path() != path);
-        self.order.push(path.to_path_buf());
     }
 
     /// TS `storeSessionScanState`: (re-)store with fresh accounting, then
@@ -1324,14 +1486,15 @@ impl SessionInfoScanCache {
         let mut state = state;
         state.accounted_usage_entries = state.acc.usage_scan.retained_entries();
         self.retained_usage_entries += state.accounted_usage_entries;
-        self.order.push(path.to_path_buf());
         self.states.insert(path.to_path_buf(), state);
+        self.mark_recent(path);
         while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
             || self.states.len() > SESSION_SCAN_MAX_CACHED_STATES
         {
-            let Some(front) = self.order.first().cloned() else {
+            let Some((_, front)) = self.order.first_key_value() else {
                 break;
             };
+            let front = front.clone();
             self.drop_state(&front);
         }
     }
@@ -1363,6 +1526,11 @@ struct SessionScanAccumulator {
     message_count: usize,
     first_message: String,
     all_messages_text: String,
+    /// [`SessionScanAccumulator::all_messages_text`]'s char count, kept in
+    /// lockstep by the only writer (`append_capped_search_text`): the cap
+    /// guard and the append read this O(1) counter instead of re-counting
+    /// the capped string per message (an O(messages x cap) fold tax).
+    search_text_chars: usize,
     last_activity_ms: Option<u64>,
     usage_scan: crate::session_usage::UsageScan,
 }
@@ -1409,6 +1577,7 @@ impl SessionScanState {
                 message_count: self.acc.message_count,
                 first_message: self.acc.first_message.clone(),
                 all_messages_text: self.acc.all_messages_text.clone(),
+                search_text_chars: self.acc.search_text_chars,
                 last_activity_ms: self.acc.last_activity_ms,
                 usage_scan: self.acc.usage_scan.clone(),
             },
@@ -1483,11 +1652,13 @@ impl SessionScanState {
     }
 }
 
-/// The listing fold only needs message metadata after the search corpus is full.
-/// Unknown fields (especially large assistant content) are skipped by serde.
+/// The listing fold only needs message metadata after the search corpus is
+/// full. Unknown fields are skipped by serde; the one field the text fold
+/// still needs — `content` — rides as a borrowed raw span, so a guarded row
+/// re-parses its content alone instead of the whole entry.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoMessage {
+struct SessionInfoMessage<'a> {
     #[serde(default)]
     role: Option<Value>,
     #[serde(default)]
@@ -1500,11 +1671,16 @@ struct SessionInfoMessage {
     /// a partial persisted block must not reject the row.
     #[serde(default)]
     usage: Option<crate::session_usage::ScanUsage>,
+    /// The message's `content`, borrowed from the scanned line (zero
+    /// copy, no materialization): the corpus and first-message text read
+    /// it only when the fold's guard passes.
+    #[serde(default, borrow)]
+    content: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionInfoEntry {
+struct SessionInfoEntry<'a> {
     #[serde(rename = "type")]
     type_: String,
     #[serde(rename = "id")]
@@ -1523,8 +1699,8 @@ struct SessionInfoEntry {
     model_id: Option<Value>,
     #[serde(default)]
     thinking_level: Option<Value>,
-    #[serde(default)]
-    message: Option<SessionInfoMessage>,
+    #[serde(default, borrow)]
+    message: Option<SessionInfoMessage<'a>>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
     #[serde(default)]
     target_id: Option<String>,
@@ -1574,7 +1750,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
         return None;
     }
-    let mut reader = std::io::BufReader::new(&mut file);
+    let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut file);
     let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
     // `modified`, captured from the open file like TS captures it at
@@ -1716,6 +1892,22 @@ impl SessionScanState {
     }
 }
 
+/// The text fold of one message's `content`, from the raw span the typed
+/// parse borrowed: parsing the span back yields the identical `Value`
+/// [`message_text`] read from a fully re-parsed entry, without walking the
+/// whole line a second time. `None` content and an unparsable span both
+/// read as empty text — exactly what [`message_text`] returns for a
+/// message without content.
+fn message_content_text(content: Option<&serde_json::value::RawValue>) -> String {
+    content
+        .map(|raw| {
+            crate::types::content_to_text(
+                &serde_json::from_str::<Value>(raw.get()).unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Fold one complete line into the scan state (the old scan-loop body).
 /// `None` = the abort arm (a `model_change` without its model identity).
 fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
@@ -1800,24 +1992,22 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                 }
                 if (role == Some("user") && acc.first_message.is_empty())
                     || (matches!(role, Some("user" | "assistant"))
-                        && acc.all_messages_text.chars().count()
-                            < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
+                        && acc.search_text_chars < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
                 {
-                    if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
-                        if let Some(message) = full.fields.get("message") {
-                            if role == Some("user") && acc.first_message.is_empty() {
-                                let text = message_text(message);
-                                if !text.is_empty() {
-                                    acc.first_message = text;
-                                }
-                            }
-                            if matches!(role, Some("user" | "assistant")) {
-                                append_capped_search_text(
-                                    &mut acc.all_messages_text,
-                                    &message_text(message),
-                                );
-                            }
-                        }
+                    // The text reads the `content` span the typed parse
+                    // borrowed; re-parsing the whole entry (a second full
+                    // `Value` walk plus every string it materializes) paid
+                    // for one field the fold never otherwise touches.
+                    let text = message_content_text(message.content);
+                    if role == Some("user") && acc.first_message.is_empty() && !text.is_empty() {
+                        acc.first_message.clone_from(&text);
+                    }
+                    if matches!(role, Some("user" | "assistant")) {
+                        acc.search_text_chars = append_capped_search_text(
+                            &mut acc.all_messages_text,
+                            &text,
+                            acc.search_text_chars,
+                        );
                     }
                 }
             }
@@ -2549,6 +2739,214 @@ mod tests {
         assert!(info.all_messages_text.starts_with("0 xxx"));
         assert!(info.all_messages_text.contains("1 xxx"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_text_char_counter_stays_in_lockstep_with_the_corpus() {
+        // The O(1) running counter must equal `chars().count()` of the
+        // corpus at every fold step - including multibyte text, the cap
+        // cut mid-message, and post-cap appends - or the cap guard drifts
+        // from the TS corpus it bounds.
+        let mut acc = SessionScanAccumulator::default();
+        let texts = [
+            "fix the login bug".to_string(),
+            "ünïcödé — multibyte ✓ chars".to_string(),
+            "x".repeat(66 * 1024),
+            "post-cap tail that must not move the corpus".to_string(),
+            "y".repeat(10),
+        ];
+        for (index, text) in texts.iter().enumerate() {
+            let entry = json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": format!("{}", index + 1),
+                "message": {"role": "user", "content": text}
+            });
+            fold_scan_entry(&mut acc, &entry.to_string()).unwrap();
+            assert_eq!(
+                acc.search_text_chars,
+                acc.all_messages_text.chars().count(),
+                "counter drift after fold {index}"
+            );
+            assert!(acc.all_messages_text.chars().count() <= SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+        }
+        assert_eq!(acc.first_message, "fix the login bug");
+        assert_eq!(acc.message_count, 5);
+        // The cap cut mid-message: the corpus holds exactly the limit.
+        assert_eq!(acc.search_text_chars, SESSION_LIST_SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn search_text_char_counter_matches_the_legacy_append() {
+        // The reference append (the pre-counter shape: count, then extend)
+        // must produce the same corpus for the same sequence of texts.
+        let mut corpus = String::new();
+        let mut count = 0usize;
+        let texts = [
+            String::new(),
+            "one".to_string(),
+            "twö with multibyte".to_string(),
+            "z".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS + 10),
+            "post-cap".to_string(),
+        ];
+        for text in &texts {
+            let mut legacy = corpus.clone();
+            if !text.is_empty() {
+                let used = legacy.chars().count();
+                if used < SESSION_LIST_SEARCH_TEXT_MAX_CHARS {
+                    if used > 0 {
+                        legacy.push(' ');
+                    }
+                    let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - legacy.chars().count();
+                    legacy.extend(text.chars().take(remaining));
+                }
+            }
+            count = append_capped_search_text(&mut corpus, text, count);
+            assert_eq!(corpus, legacy);
+            assert_eq!(count, legacy.chars().count());
+        }
+    }
+
+    #[test]
+    fn search_text_counter_lockstep_names_every_corpus_mutation_path() {
+        // Every path that can mutate the capped corpus, at the accumulator
+        // level. Any other path is read-only (build_info derives, the wire
+        // serializes); eviction drops the whole state (counter and corpus
+        // together, so it cannot desync) and store_state keeps it whole.
+        // The paths: (1) a fresh fold's appends, (2) the resume copy a
+        // grown file folds into (clone_for_resume travels the counter),
+        // (3) the torn-tail SNAPSHOT fold (build_info folds the tail into
+        // a clone, the durable accumulator untouched), and (4) a rewritten
+        // file (generation mismatch re-folds from a fresh accumulator).
+        let header_line = session_header_line(&SessionHeader {
+            version: None,
+            id: "s1".to_string(),
+            timestamp: "2026-09-26T00:00:00.000Z".to_string(),
+            cwd: "/repo".to_string(),
+            parent_session: None,
+            rlm_depth: None,
+            git: None,
+            rest: serde_json::Map::default(),
+        })
+        .to_string();
+        let message = |text: &str, index: u64| {
+            json!({
+                "type": "message",
+                "id": format!("m{index}"),
+                "timestamp": index.to_string(),
+                "message": {"role": "user", "content": text}
+            })
+            .to_string()
+        };
+
+        // (1) fresh fold, past the cap.
+        let generation = SessionInfoGeneration {
+            len: 4096,
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        };
+        let mut state = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut state.acc, &header_line).unwrap();
+        fold_scan_entry(&mut state.acc, &message("first user turn", 1)).unwrap();
+        fold_scan_entry(
+            &mut state.acc,
+            &message(&"x".repeat(SESSION_LIST_SEARCH_TEXT_MAX_CHARS), 2),
+        )
+        .unwrap();
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            state.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (2) the resume copy: the grown file's next appends fold into
+        // clone_for_resume's accumulator - the counter travels with the
+        // corpus and stays in lockstep for post-cap appends.
+        let mut resumed = state.clone_for_resume();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        fold_scan_entry(&mut resumed.acc, &message("appended after cap", 3)).unwrap();
+        assert_eq!(
+            resumed.acc.search_text_chars,
+            resumed.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            resumed.acc.all_messages_text.chars().count(),
+            SESSION_LIST_SEARCH_TEXT_MAX_CHARS
+        );
+
+        // (3) the torn-tail snapshot: build_info folds the torn final
+        // line into a CLONE, so the durable accumulator's counter stays
+        // untouched; an uncapped snapshot's row gains the tail's text,
+        // the capped one cannot (the tail arm is under the same cap).
+        let durable_before = state.acc.clone();
+        let capped_info = state
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            capped_info.all_messages_text, durable_before.all_messages_text,
+            "the cap bounds the snapshot fold too - a torn tail past it changes no corpus byte"
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            durable_before.search_text_chars
+        );
+        assert_eq!(
+            state.acc.search_text_chars,
+            state.acc.all_messages_text.chars().count()
+        );
+        let mut uncapped = SessionScanState::fresh(generation);
+        fold_scan_entry(&mut uncapped.acc, &header_line).unwrap();
+        fold_scan_entry(&mut uncapped.acc, &message("user turn one", 1)).unwrap();
+        let uncapped_durable = uncapped.acc.clone();
+        let uncapped_info = uncapped
+            .build_info(
+                Path::new("/repo/s1.jsonl"),
+                None,
+                Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            uncapped_info.all_messages_text,
+            "user turn one user turn two"
+        );
+        assert_eq!(
+            uncapped.acc.all_messages_text,
+            uncapped_durable.all_messages_text
+        );
+        assert_eq!(
+            uncapped.acc.search_text_chars,
+            uncapped_durable.search_text_chars
+        );
+
+        // (4) a rewritten file re-folds from a fresh accumulator: both
+        // corpus and counter restart at zero together.
+        let mut rewritten = SessionScanState::fresh(generation);
+        assert_eq!(rewritten.acc.search_text_chars, 0);
+        assert!(rewritten.acc.all_messages_text.is_empty());
+        fold_scan_entry(&mut rewritten.acc, &header_line).unwrap();
+        fold_scan_entry(&mut rewritten.acc, &message("rewrite from zero", 1)).unwrap();
+        assert_eq!(
+            rewritten.acc.search_text_chars,
+            rewritten.acc.all_messages_text.chars().count()
+        );
+        assert_eq!(
+            rewritten.acc.all_messages_text, "rewrite from zero",
+            "a rewritten file's corpus is the fresh fold's, not the old session's"
+        );
     }
 
     #[test]

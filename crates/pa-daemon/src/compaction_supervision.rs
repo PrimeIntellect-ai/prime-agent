@@ -30,6 +30,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
+use crate::backpressure::RouteAdmission;
+
 /// How long the supervisor waits for the worker's own `compaction_end`
 /// after an abort before declaring the run terminal. A healthy worker
 /// lands the abort race in well under a second; the grace only bounds the
@@ -505,11 +507,12 @@ impl crate::supervisor::Supervisor {
             let payload = payload?;
             Some(
                 supervisor
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "abort_compaction",
                         payload,
                         ABORT_FORWARD_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                     .and_then(|response| {
@@ -614,7 +617,7 @@ impl crate::supervisor::Supervisor {
             crate::supervisor::ClientRouting::AttachedSession {
                 active_session_id: terminal.active_session_id.clone(),
             },
-            frame,
+            std::sync::Arc::new(frame),
         ));
         self.log_line(&format!(
             "declared terminal aborted compaction for {} (reason {}, declared {declared})",

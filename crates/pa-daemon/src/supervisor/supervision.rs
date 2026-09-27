@@ -1,6 +1,8 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
+use super::routing::fail_unsent_request;
 use super::*;
+use crate::registry::WorkerRelay;
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// A crash-path child that lived at least this long proved health: its death
@@ -252,7 +254,13 @@ impl Supervisor {
             }
         };
         let response = match self
-            .route_command(resident, "create", payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command_typed(
+                resident,
+                "create",
+                payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -270,7 +278,13 @@ impl Supervisor {
             // A shutdown raced the relaunch: stop the freshly spawned worker
             // instead of leaving it running with nobody supervising it.
             let _ = self
-                .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command_typed(
+                    resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
             let mut child = child;
             let _ = child.kill().await;
@@ -466,7 +480,12 @@ impl Supervisor {
             .await
             .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
         let (reader, mut writer) = stream.split();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<WorkerRequest>();
+        // Bounded at the in-flight capacity (the admission seam in
+        // `route_command` refuses or waits before enqueueing): no
+        // unbounded channel remains on the request path, and a wedged
+        // writer can park at most this many frames.
+        let (cmd_tx, mut cmd_rx) =
+            mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
         resident.pending.lock().await.clear();
         let events = self.events.clone();
         // The connection epoch ties both pumps to this connection: only they
@@ -550,25 +569,36 @@ impl Supervisor {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    let Ok(payload) = serde_json::from_slice::<Value>(&frame.payload) else {
-                        continue;
-                    };
                     if outbound_type == "response" {
+                        // The response rides as bytes: the supervisor's
+                        // client-facing route splices the client's command
+                        // id in front of the worker's own line instead of
+                        // parsing, deep-cloning and re-serializing the
+                        // whole tree; the small scalars the route's
+                        // bookkeeping reads (success, the attach's active
+                        // session) travel in the frame's routing header.
+                        // Callers that read the response parse it back
+                        // through `WorkerReply::typed`.
                         if let Some(reply) =
                             reader_resident.pending.lock().await.remove(&request_id)
                         {
-                            let response: DaemonResponse = serde_json::from_value(payload)
-                                .unwrap_or_else(|_| {
-                                    response_failure(
-                                        Some(&request_id),
-                                        "parse",
-                                        "invalid worker response",
-                                        None,
-                                    )
-                                });
-                            let _ = reply.send(response);
+                            let relay = WorkerRelay {
+                                success: frame.header.get("ok").and_then(Value::as_bool),
+                                active_session_id: frame
+                                    .header
+                                    .get("activeSessionId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                payload: frame.payload,
+                            };
+                            let _ = reply.send(WorkerReply::Relayed(relay));
                         }
-                    } else if outbound_type == "session_event" {
+                        continue;
+                    }
+                    let Ok(payload) = serde_json::from_slice::<Value>(&frame.payload) else {
+                        continue;
+                    };
+                    if outbound_type == "session_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
                             .and_then(Value::as_str)
@@ -648,7 +678,7 @@ impl Supervisor {
                                 active_session_id,
                             },
                         );
-                        let _ = events.send((routing, payload));
+                        let _ = events.send((routing, std::sync::Arc::new(payload)));
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
@@ -660,7 +690,7 @@ impl Supervisor {
                                 active_session_id,
                             },
                         );
-                        let _ = events.send((routing, payload));
+                        let _ = events.send((routing, std::sync::Arc::new(payload)));
                     } else if outbound_type == "heartbeats_changed" {
                         // The worker's own catalog changed: its last-good
                         // snapshot can no longer be trusted as fresh (TS
@@ -674,7 +704,8 @@ impl Supervisor {
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
                         // A worker's background catalog refresh changed
                         // the served snapshot: every client re-fetches
@@ -684,7 +715,8 @@ impl Supervisor {
                         // refresh returns the validated snapshot instantly
                         // and lands the fresh catalog through this
                         // broadcast.
-                        let _ = events.send((ClientRouting::Broadcast, payload));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);
@@ -721,7 +753,7 @@ impl Supervisor {
             .as_millis()
             .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "worker_auth",
                 json!({
@@ -733,6 +765,7 @@ impl Supervisor {
                     "workerInstanceId": None::<String>,
                 }),
                 auth_budget_ms,
+                RouteAdmission::SupervisorInternal,
             )
             .await
             .map_err(|error| {

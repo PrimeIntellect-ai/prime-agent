@@ -361,6 +361,9 @@ pub struct Settings {
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
     pub session_dir: Option<String>,
+    /// Log per-request provider timing phases to the diagnostic log (TS
+    /// `requestTiming`; unset means OFF, exactly the TS default).
+    pub request_timing: Option<bool>,
     /// Unknown keys survive load/save round-trips (forward compatibility).
     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,

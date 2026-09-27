@@ -32,6 +32,65 @@ pub(crate) struct WorkerRequest {
     pub(crate) payload: Value,
 }
 
+/// The worker's reply to one routed request: the typed response tree, or
+/// the worker's own serialized response payload relayed untouched (the
+/// zero-copy route: a client line is the worker payload with the client's
+/// command id spliced in front, so the supervisor need not parse, re-clone
+/// and re-serialize every routed response).
+pub(crate) enum WorkerReply {
+    Typed(DaemonResponse),
+    Relayed(WorkerRelay),
+}
+
+/// A response the supervisor relays by bytes, with the small scalars the
+/// response frame's routing header carries (the worker emits them for
+/// attach-family responses; `None` means the header said nothing).
+pub(crate) struct WorkerRelay {
+    pub(crate) success: Option<bool>,
+    pub(crate) active_session_id: Option<String>,
+    /// The worker's serialized response payload: `response_line` bytes with
+    /// the id field absent, so the object opens with `"type":"response"`.
+    pub(crate) payload: Vec<u8>,
+}
+
+impl WorkerReply {
+    /// The typed response, parsing the relayed bytes when this reply came
+    /// back by the byte path.
+    pub(crate) fn typed(self) -> anyhow::Result<DaemonResponse> {
+        match self {
+            WorkerReply::Typed(response) => Ok(response),
+            WorkerReply::Relayed(relay) => serde_json::from_slice::<DaemonResponse>(&relay.payload)
+                .map_err(|error| anyhow!("invalid worker response: {error}")),
+        }
+    }
+
+    /// The relayed payload bytes when this reply carries them.
+    pub(crate) fn relayed_payload(&self) -> Option<&[u8]> {
+        match self {
+            WorkerReply::Relayed(relay) => Some(&relay.payload),
+            WorkerReply::Typed(_) => None,
+        }
+    }
+
+    /// The header hint for whether the worker's command succeeded, when the
+    /// relay frame carried it.
+    pub(crate) fn relayed_success(&self) -> Option<bool> {
+        match self {
+            WorkerReply::Relayed(relay) => relay.success,
+            WorkerReply::Typed(_) => None,
+        }
+    }
+
+    /// The header hint for the session the worker reports as active, when
+    /// the relay frame carried it.
+    pub(crate) fn relayed_active_session_id(&self) -> Option<&str> {
+        match self {
+            WorkerReply::Relayed(relay) => relay.active_session_id.as_deref(),
+            WorkerReply::Typed(_) => None,
+        }
+    }
+}
+
 /// Command-route liveness for one resident worker, watched by the
 /// supervisor's replacement-aware route (`route_command_ready`):
 /// `connected` tracks the live worker socket (both supervisor-side pumps
@@ -63,9 +122,19 @@ pub(crate) struct ResidentWorker {
     pub(crate) worker_id: String,
     pub(crate) descriptor: Mutex<DaemonWorkerDescriptor>,
     pub(crate) descriptor_path: PathBuf,
-    pub(crate) cmd_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerRequest>>>,
+    /// The worker's command pump channel. Bounded at
+    /// [`crate::backpressure::WORKER_INFLIGHT_CAPACITY`]: admission (the
+    /// in-flight permits below) precedes enqueue, so the queue and the
+    /// in-flight set share one bound.
+    pub(crate) cmd_tx: Mutex<Option<tokio::sync::mpsc::Sender<WorkerRequest>>>,
+    /// The worker's in-flight permits (one per admitted request, held
+    /// until its reply resolves): the bounded-admission seam of
+    /// [`crate::backpressure`]. A client command that finds this empty is
+    /// refused with the typed overload error; supervisor-internal routes
+    /// wait.
+    pub(crate) inflight: Arc<tokio::sync::Semaphore>,
     /// Pending replies for in-flight requests on the current connection.
-    pub(crate) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<DaemonResponse>>>,
+    pub(crate) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<WorkerReply>>>,
     pub(crate) intentional_stop: AtomicBool,
     pub(crate) consecutive_failures: AtomicU32,
     /// Unix-millis timestamp of the current child's spawn (0 for an adopted
@@ -127,6 +196,9 @@ impl ResidentWorker {
             descriptor: Mutex::new(descriptor),
             descriptor_path,
             cmd_tx: Mutex::new(None),
+            inflight: Arc::new(tokio::sync::Semaphore::new(
+                crate::backpressure::WORKER_INFLIGHT_CAPACITY,
+            )),
             pending: Mutex::new(HashMap::new()),
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),

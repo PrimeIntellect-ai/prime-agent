@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success, DaemonResponse};
 use crate::supervisor::{
     client_command_payload, Supervisor, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
@@ -255,7 +256,7 @@ impl Supervisor {
             // An admission that vanished before the route: the prompt
             // routes through the generic path (TS `admission undefined`).
             return self
-                .route_client_command(command, client_id, attached, command_id, type_name)
+                .route_client_command(command, client_id, attached, command_id, type_name, None)
                 .await;
         };
         // Resolve the session (the generic route's wake-aware resolution).
@@ -338,7 +339,13 @@ impl Supervisor {
         // prompt still lands exactly once (the generic client route's
         // contract).
         let response = self
-            .route_command_ready(&resident, command_type, payload, timeout)
+            .route_command_ready_typed(
+                &resident,
+                command_type,
+                payload,
+                timeout,
+                RouteAdmission::ClientRequest,
+            )
             .await;
         let mut response = match response {
             Ok(response) => response,
@@ -455,11 +462,12 @@ impl Supervisor {
                     payload["cancelOwned"] = json!(true);
                 }
                 let mut response = match self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "cancel_prompt_admission",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
                 {

@@ -69,7 +69,7 @@ fn dim(text: impl Into<String>) -> crate::info_commands::ClientSpan {
 
 /// The status block (TS "status" arm): the flag, the credential, the
 /// endpoint, and the session file — one structured line per source line
-/// (the `ClientText` entry renders them like every other info display).
+/// (the info panel renders them like every other info display).
 pub fn status_block(
     enabled: bool,
     credential: Option<&str>,
@@ -128,7 +128,7 @@ pub enum TracePreviewOutcome {
 }
 
 /// TS `formatTracePreview`: the preview block's structured rows (the
-/// `ClientText` entry renders them like the status block).
+/// info panel renders them like the status block).
 pub fn preview_block(info: &TracePreviewInfo) -> Vec<crate::info_commands::ClientLine> {
     let mut rows: Vec<crate::info_commands::ClientLine> = vec![
         vec![plain("Trace Preview")],

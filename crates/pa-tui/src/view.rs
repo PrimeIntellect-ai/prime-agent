@@ -22,12 +22,17 @@ use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
 use ratatui::style::{Modifier, Style};
 
+pub(crate) mod click;
 mod geometry;
 mod layout;
 pub(crate) mod lazy;
 mod restyle;
 mod runs;
 
+use click::{
+    EditorClickSurface, PickerClickSurface, PickerKind, EFFORT_PICKER_CHROME_ROWS,
+    MODEL_PICKER_CHROME_ROWS,
+};
 use layout::EntryLayout;
 
 /// Minimum transcript rows when the dock would crowd them out
@@ -169,10 +174,11 @@ pub struct AgentView {
     /// The `/settings` inline menu (TS `SettingsSelectorComponent`):
     /// mounted in the editor dock like the tree and fork selectors.
     pub settings_menu: Option<crate::settings_menu::SettingsMenu>,
-    /// The `?` quick-shortcut guide (TS `shortcutGuideContainer`): while
-    /// set, its markdown renders at the transcript tail, above the dock;
-    /// the next submission clears it (TS `clearShortcutGuide`).
-    pub shortcut_guide: Option<String>,
+    /// The read-only info panel (the operator's 2026-09-26 directive:
+    /// the `/context`-family client info displays render as the docked
+    /// popup panel instead of flooding the transcript): while set, it
+    /// owns the editor dock like the `/model` and `/effort` pickers.
+    pub info_panel: Option<crate::info_panel::InfoPanel>,
     /// The `terminal.showImages` setting (TS `getShowImages`, default
     /// true): image blocks render their metadata rows when set, their
     /// `[Image: ...]` text placeholders otherwise.
@@ -282,6 +288,12 @@ pub struct AgentView {
     /// frame; the window re-styles only the rows the selection change
     /// touched): walked base rows, their styled copies, and the spans.
     pub(crate) selection_restyle: restyle::SelectionRestyle,
+    /// The last composed frame's clickable geometry (view/click.rs):
+    /// the transcript window's visible entry spans, the dock's screen
+    /// origin, the editor content rows, and the picker panes' item rows.
+    /// Recorded during the fullscreen frame composition that already
+    /// computes the geometry; cleared by the inline compose.
+    pub(crate) click: click::ClickSurface,
     /// The ephemeral action toasts (the top-right auto-dismiss overlay;
     /// a sanctioned divergence from TS — see `toast`).
     pub toasts: crate::toast::Toasts,
@@ -372,7 +384,7 @@ impl AgentView {
             reload_box: None,
             side_pane: None,
             settings_menu: None,
-            shortcut_guide: None,
+            info_panel: None,
             show_images: true,
             fullscreen: true,
             show_hardware_cursor: false,
@@ -402,6 +414,7 @@ impl AgentView {
             runs_prepare: None,
             runs_shape: None,
             run_map: crate::tool_runs::ToolRuns::default(),
+            click: click::ClickSurface::default(),
         }
     }
 
@@ -1131,18 +1144,39 @@ impl AgentView {
             ChatEntry::Assistant(message) => {
                 // The per-entry block cache (TS's per-component
                 // `blockCache`): settled blocks of the streaming message
-                // replay instead of re-rendering on every frame.
-                let mut caches = self.md_caches.borrow_mut();
-                let cache = caches.entry(index).or_default();
-                render_assistant(
-                    message,
-                    detail,
-                    &self.theme,
-                    &self.code_block_indent,
-                    width,
-                    preceded_by_tool_activity,
-                    cache,
-                )
+                // replay instead of re-rendering on every frame — the
+                // cache exists for the streaming case. A settled
+                // message's blocks are final, so its rendered rows live
+                // once in the entry layout and the block-cache copy is
+                // dropped (a resumed large session's duplicate copy was
+                // the TUI's biggest single retained allocation in the
+                // tui-memory census); any later re-render rebuilds the
+                // same rows from the message's own text.
+                if message.streaming {
+                    let mut caches = self.md_caches.borrow_mut();
+                    let cache = caches.entry(index).or_default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        cache,
+                    )
+                } else {
+                    self.md_caches.borrow_mut().remove(&index);
+                    let mut settled = crate::markdown::MarkdownBlockCache::default();
+                    render_assistant(
+                        message,
+                        detail,
+                        &self.theme,
+                        &self.code_block_indent,
+                        width,
+                        preceded_by_tool_activity,
+                        &mut settled,
+                    )
+                }
             }
             ChatEntry::Tool(card) => {
                 // TS `ToolExecutionComponent`: the leading spacer rides on
@@ -1232,39 +1266,6 @@ impl AgentView {
             ChatEntry::CustomPanel(row) => {
                 crate::custom_message::render::render_custom_panel(row, &self.theme, width)
             }
-            // TS `/hotkeys`: `Spacer(1)` then `new Markdown(guide, 1, 1)`
-            // — the markdown component's `paddingY=1` renders one blank row
-            // above and below the content (one margin column each side,
-            // rows padded to the full width, like the assistant blocks).
-            ChatEntry::ClientMarkdown { text } => {
-                let mut rows: Vec<Line> = Vec::new();
-                rows.push(Vec::new());
-                rows.push(Vec::new());
-                let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                md.code_block_indent.clone_from(&self.code_block_indent);
-                rows.extend(crate::chat::render_markdown_block(
-                    text,
-                    &md,
-                    width,
-                    &mut crate::markdown::MarkdownBlockCache::default(),
-                ));
-                rows.push(Vec::new());
-                rows
-            }
-            // TS `Spacer(1)` + `Text(info, 1, 0)` blocks: one blank row,
-            // then the styled source lines wrapped with a one-column
-            // margin on each side (the info displays).
-            ChatEntry::ClientText { rows } => {
-                crate::info_commands::render_client_text(rows, &self.theme, width)
-            }
-            // The `/changelog` panel: border, the accent `What's New`
-            // title, and the entries markdown between the closing border.
-            ChatEntry::ChangelogPanel { markdown } => crate::info_commands::render_changelog_panel(
-                markdown,
-                &self.theme,
-                &self.code_block_indent,
-                width,
-            ),
         }
     }
 
@@ -1297,8 +1298,8 @@ impl AgentView {
         let context_rows = lines.len();
         let overlay_rows = self.render_autocomplete_overlay(width);
         lines.extend(overlay_rows);
-        let (editor_rows, cursor) = self.render_editor_surface(width);
         let overlay_count = lines.len() - context_rows;
+        let (editor_rows, cursor) = self.render_editor_surface(width, context_rows + overlay_count);
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
         lines.extend(editor_rows);
         lines.push(render_tray(&self.chrome, &self.theme, width));
@@ -1381,7 +1382,11 @@ impl AgentView {
     /// The editor surface (TS `Editor.render` with a background): a blank
     /// bg row, content rows with the `> ` prompt and a reverse-video cursor,
     /// and a trailing bg row. Scroll indicators replace the blank rows.
-    fn render_editor_surface(&mut self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
+    fn render_editor_surface(
+        &mut self,
+        width: usize,
+        dock_row: usize,
+    ) -> (Vec<Line>, Option<(usize, usize)>) {
         let bg = crate::chrome::editor_background(&self.theme);
         let border = self.theme.fg_style(ThemeColor::BorderMuted);
         let padding_x = 2usize;
@@ -1397,6 +1402,16 @@ impl AgentView {
         let layout_width = input_width;
         let (visible, scroll_offset, _hidden_above, hidden_below) =
             self.editor.visible_window(layout_width, self.terminal_rows);
+        // The content rows' click surface (view/click.rs): the TS editor
+        // registers one region over its visible content rows, shifted by
+        // the queue-selection header's rows (TS `getContentLineOffset`).
+        self.click.record_editor(EditorClickSurface {
+            dock_row,
+            rows: visible.len(),
+            queue_header_rows: usize::from(self.queue_selected.is_some()) * 2,
+            prompt_width,
+            content_width: layout_width,
+        });
         let mut rows: Vec<Line> = Vec::new();
         if scroll_offset > 0 {
             let indicator = format!(" \u{2191} {scroll_offset} more");
@@ -1541,6 +1556,10 @@ impl AgentView {
     }
 
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
+        // The click surface records this frame's clickable geometry as
+        // the compose computes it (the onboarding pane that returns early
+        // leaves none of it).
+        self.click.clear();
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
         // no top bar, transcript, or prompt dock behind it. The pane is a
         // frame surface like the TS overlay (its rows select; TS's
@@ -1558,13 +1577,32 @@ impl AgentView {
         // tree and fork selectors: the prompt context (the detail hint)
         // stays above the pane and the transcript stays mounted above it.
         let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
+        // The read-only info panel's CURRENT row budget (a terminal resize
+        // re-budgets an open panel every frame, never a stale open-time
+        // value): read before the panel borrow below.
+        let info_viewport_rows = crate::session_ui::picker_viewport_rows(self.terminal_rows());
+        let pane_row = prompt_context.len();
         let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
+            // The pane's item rows are clickable (view/click.rs): the
+            // recorded span covers the filtered window the render drew.
+            self.click.record_picker(PickerClickSurface {
+                dock_row: pane_row,
+                chrome_rows: MODEL_PICKER_CHROME_ROWS,
+                items: picker.filtered_window(),
+                kind: PickerKind::Model,
+            });
             Some(dock)
         } else if let Some(picker) = &self.effort_picker {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
+            self.click.record_picker(PickerClickSurface {
+                dock_row: pane_row,
+                chrome_rows: EFFORT_PICKER_CHROME_ROWS,
+                items: picker.visible_window(),
+                kind: PickerKind::Effort,
+            });
             Some(dock)
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
             let mut dock = prompt_context;
@@ -1586,6 +1624,16 @@ impl AgentView {
         } else if let Some(view) = self.bash_view.as_ref() {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
+            Some(dock)
+        } else if let Some(panel) = self.info_panel.as_mut() {
+            let mut dock = prompt_context;
+            dock.extend(panel.render(
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+                &self.code_block_indent,
+                info_viewport_rows,
+            ));
             Some(dock)
         } else {
             None
@@ -1683,6 +1731,10 @@ impl AgentView {
         while frame.len() < height.saturating_sub(dock.len()) {
             frame.push(vec![Span::raw(" ".repeat(width))]);
         }
+        // The click surface's frame scalars: the window starts at the
+        // top bar's rows, the dock starts at the frame's next row, and a
+        // click's dock row indexes the un-cropped dock.
+        self.click.note_frame(top_rows, frame.len(), cropped);
         for line in dock {
             frame.push(pad_row(line, width));
         }
@@ -1697,6 +1749,8 @@ impl AgentView {
                     .unwrap_or_else(|| "ctrl+shift+down".to_string());
                 let label = format!(" {key} to follow ");
                 *row = composite_follow_hint(row, &label, width);
+                // The hint's row never reads as the content beneath it.
+                self.click.mask_rows(window_height, window_height + 1);
             }
         }
         self.frame_rows = frame.len();
@@ -1738,6 +1792,11 @@ impl AgentView {
                 width,
                 style,
             );
+            // The covered rows no longer read as the transcript content
+            // beneath them: a click on the transient pill must not fire
+            // the hidden row's target.
+            let covered = toasts.len().min(window_height);
+            self.click.mask_rows(top_rows, top_rows + covered);
         }
         frame
     }
@@ -1803,6 +1862,7 @@ impl AgentView {
             || self.heartbeats_picker.is_some()
             || self.goal_panel.is_some()
             || self.bash_view.is_some()
+            || self.info_panel.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()
@@ -1827,6 +1887,9 @@ impl AgentView {
     pub fn render_inline_frame(&mut self, width: usize) -> Vec<Line> {
         let mut rows = self.render_transcript(width);
         rows.extend(self.render_dock(width));
+        // The inline layout has no fullscreen window on screen: a click
+        // must never resolve against a dock the terminal does not show.
+        self.click.clear();
         rows
     }
 
@@ -2675,6 +2738,46 @@ mod tests {
         assert!(after.contains("part one part two"));
     }
 
+    /// A settled assistant message keeps no markdown block cache (its
+    /// rendered rows live once, in the entry layout; the cache exists for
+    /// the streaming message's per-frame replays), while a streaming
+    /// message keeps its settled blocks cached for the next frame's
+    /// replay. The cache-drop must never change the rendered rows.
+    #[test]
+    fn settled_messages_render_once_streaming_keeps_block_cache() {
+        let settled_rows = {
+            let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text("settled body".to_string())],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            }))]);
+            let text = transcript_text(&mut view, 80);
+            assert!(
+                view.md_caches.borrow().is_empty(),
+                "a settled message keeps no duplicate block-cache copy"
+            );
+            text
+        };
+        let mut view = view_with(vec![ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Text("streaming body".to_string())],
+            has_tool_calls: false,
+            streaming: true,
+            error: None,
+            aborted: false,
+        }))]);
+        let streaming_text = transcript_text(&mut view, 80);
+        assert!(
+            !view.md_caches.borrow().is_empty(),
+            "a streaming message keeps its block cache for per-frame replays"
+        );
+        assert!(
+            settled_rows.contains("settled body") && streaming_text.contains("streaming body"),
+            "both render their bodies identically through their own paths"
+        );
+    }
+
     /// A running tool card animates: its rows must not be cached (the
     /// spinner frame advances), while a settled card's rows ignore the
     /// pulse frame.
@@ -3121,16 +3224,14 @@ mod tests {
         // A transcript taller than the window puts real content on the
         // window's top row (the tail-aligned window), so the pill lands
         // over a covered row that has content to keep.
-        let mut view = view_with(vec![ChatEntry::ClientText {
-            rows: (0..40)
-                .map(|index| {
-                    vec![crate::info_commands::ClientSpan {
-                        text: format!("covered line {index}"),
-                        color: None,
-                    }]
+        let mut view = view_with(
+            (0..40)
+                .map(|index| ChatEntry::Status {
+                    text: format!("covered line {index}"),
+                    kind: crate::chat::StatusKind::Info,
                 })
                 .collect(),
-        }]);
+        );
         view.toasts.push("Copied to clipboard");
         let frame = view.render_frame(60, 24);
         let rows: Vec<String> = frame
