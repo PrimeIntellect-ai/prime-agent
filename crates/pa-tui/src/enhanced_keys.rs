@@ -357,7 +357,10 @@ pub(crate) fn drain_for_handoff(out: &mut Stdout) {
         }
     }
     if observed_input {
-        drain_until_idle(DRAIN_MAX);
+        // The hard cap spans the whole handoff drain: the zero-timeout loop
+        // may have consumed most of DRAIN_MAX under continuous input, so
+        // the bounded phase runs on what remains, never a fresh budget.
+        drain_until_idle(DRAIN_MAX.saturating_sub(start.elapsed()));
     }
 }
 
