@@ -5297,39 +5297,73 @@ fn quota_failure_message(
     }
 }
 
-/// The persist-or-decline gate (TS's `appendCustomEntry` throws and
-/// rolls the append back, so the park path never reports success on a
-/// failed durable write): a failed session-file write cancels the
-/// just-armed wake and declines the park. The session file becomes a
-/// directory, so the append fails for every user (EISDIR), root
-/// included.
+/// The park entry appender's write-failure propagation (the
+/// persist-or-decline plumbing the park-arming arms guard with): a
+/// PERSISTING session manager whose file becomes a directory fails the
+/// append at the write stage (EISDIR, root included — a mode-based
+/// injection would not stop root), and the `io::Result` reaches the
+/// caller — the arming arms' decline gate consumes exactly this Err.
+///
+/// The daemon worker's INSTALLED engine session stays non-persisted
+/// (`in_memory_in_session_dir`: the worker owns the durable file and
+/// mirrors the entries), so its appends answer `Ok` and the park
+/// proceeds unchanged; this `Err` path is the persisted-manager
+/// contract the gate exists for.
 #[tokio::test]
-async fn a_failed_park_entry_write_cancels_the_wake_and_declines_the_park() {
+async fn a_failed_park_entry_write_propagates_to_the_caller() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = park_engine(dir.path());
-    // Break the durable write: the session file becomes a directory.
     let session_file = dir.path().join("session.jsonl");
+    // A persisting manager over the session file (open repairs + pins
+    // the durable path).
+    let handle = std::sync::Arc::new(tokio::sync::Mutex::new(
+        pa_core::session::manager::SessionManager::open(dir.path(), dir.path(), &session_file),
+    ));
+    // Seed the first assistant entry: custom appends before it defer
+    // (the pre-first-assistant buffer, TS parity), so the park entry
+    // must land after one to flush at all.
+    handle
+        .lock()
+        .await
+        .append_message(pa_types::session::AgentMessage::Assistant(
+            pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "seed".to_string(),
+                        text_signature: None,
+                        rest: Map::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "faux-1".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 2,
+                rest: Map::default(),
+            },
+        ))
+        .expect("the assistant seed persists");
+    // Break the durable write: the session file becomes a directory.
     std::fs::remove_file(&session_file).expect("remove the session file");
     std::fs::create_dir(&session_file).expect("block the session file path");
-    let message = quota_failure_message(Some("rate_limit"), Some(3_600_000));
-    let outcome = engine
-        .park_for_quota_reset(
-            &message,
-            "Provider requested a 3600s wait before retrying (above retry.provider.maxRetryDelayMs=60000ms)",
+    let result = engine
+        .append_quota_park_entry(
+            Some(handle),
+            crate::util::now_ms() + 30_000,
+            1,
+            Some("job-1"),
+            Some("battery"),
         )
         .await;
     assert!(
-        outcome.is_none(),
-        "the park declines when the durable record fails"
-    );
-    assert!(!engine.is_quota_parked(), "no live park remains");
-    // The just-armed wake was cancelled: no active quota job is left.
-    let wiring = engine.config.cron_store.as_ref().expect("wiring").clone();
-    let jobs = wiring.store.list();
-    assert!(
-        jobs.iter()
-            .all(|job| job.status != pa_core::cron::JobStatus::Active),
-        "the armed wake was cancelled: {jobs:?}"
+        result.is_err(),
+        "a failed durable write must propagate to the park-arming gate"
     );
 }
 
@@ -5341,6 +5375,11 @@ async fn quota_failure_beyond_cap_parks_with_a_durable_wake() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = park_engine(dir.path());
     let message = quota_failure_message(Some("rate_limit"), Some(3_600_000));
+    // Captured BEFORE the park call: the slack assertion measures against
+    // the pre-park clock, so test-process delay can only widen the slack
+    // (the park's own resume_at already includes the grace from its
+    // later now_ms), never shrink it under the window's lower bound.
+    let before_park_ms = crate::util::now_ms();
     let outcome = engine
             .park_for_quota_reset(
                 &message,
@@ -5383,7 +5422,7 @@ async fn quota_failure_beyond_cap_parks_with_a_durable_wake() {
     assert_eq!(job.active_session_id, "active-park");
     assert_eq!(job.session_id, "park-session");
     // The wake sits ~30s past the reported reset (the grace).
-    let resume_slack = park.resume_at_ms as i64 - (crate::util::now_ms() as i64 + 3_600_000);
+    let resume_slack = park.resume_at_ms as i64 - (before_park_ms as i64 + 3_600_000);
     assert!(
         (25_000..=40_000).contains(&resume_slack),
         "resume slack {resume_slack}"
