@@ -46,9 +46,10 @@ pub struct SessionConfigOption {
 }
 
 /// The current model as the pickers present it (the TS `state.model`):
-/// identity plus the reasoning flag that gates the effort picker. The
-/// daemon-attached transport parses the same shape off the
-/// `get_connection_state` wire.
+/// identity plus the coarse `reasoning` flag (the no-registry-entry
+/// ladder's only capability signal on the agent-model shape, which
+/// carries no thinking-level map). The daemon-attached transport parses
+/// the same shape off the `get_connection_state` wire.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
     pub id: String,
@@ -106,9 +107,9 @@ pub fn model_value(provider: &str, model_id: &str) -> String {
 
 /// Build the session's configuration options (TS `sessionConfigOptions`):
 /// a `model` select over the discovered models (the current model always
-/// selectable), plus a `thought_level` select when the current model
-/// supports reasoning and has available levels. No model resolves to no
-/// options, exactly like the TS builder.
+/// selectable), plus a `thought_level` select when the model has
+/// selectable levels (#2858's map-driven capability — see the gate below).
+/// No model resolves to no options, exactly like the TS builder.
 pub fn session_config_options(
     model: Option<PickerModel>,
     thinking_level: &str,
@@ -151,7 +152,14 @@ pub fn session_config_options(
             })
             .collect(),
     }];
-    if model.reasoning && !available_levels.is_empty() {
+    // #2858's map-driven capability: the levels list is the capability on
+    // both transports (the in-process side computes
+    // `get_supported_thinking_levels`, the daemon side carries the
+    // worker's #2858-computed `availableThinkingLevels`), so a model with
+    // an addressable thinking-level map shows its effort picker even when
+    // the coarse `reasoning` flag is false. A list without a non-`off`
+    // entry (the `["off"]`-only or empty shape) is no selectable surface.
+    if available_levels.iter().any(|level| level != "off") {
         options.push(SessionConfigOption {
             id: "thought_level".to_string(),
             name: "Reasoning effort".to_string(),
@@ -277,6 +285,34 @@ mod tests {
     #[test]
     fn no_model_yields_no_options() {
         assert!(session_config_options(None, "medium", &levels(&["off"]), &[]).is_empty());
+    }
+
+    /// #2858's map-driven capability: the effort picker follows the
+    /// model's addressable levels, not the coarse `reasoning` flag — a
+    /// `reasoning: false` model whose map addresses levels serves the
+    /// picker, and a list without a non-`off` entry (the `["off"]`-only
+    /// or empty shape) hides it.
+    #[test]
+    fn the_effort_picker_follows_the_map_driven_capability() {
+        let flagged_false =
+            PickerModel::from_model(&model("faux", "map-model", "Map Model", false));
+        let mapped = levels(&["minimal", "low", "medium", "high", "xhigh"]);
+        let options = session_config_options(Some(flagged_false.clone()), "high", &mapped, &[]);
+        assert_eq!(
+            options.len(),
+            2,
+            "the addressable map serves the picker: {options:?}"
+        );
+        assert_eq!(options[1].id, "thought_level");
+        assert_eq!(options[1].options.len(), 5, "{options:?}");
+        // A model with no selectable surface (`off` only) hides the
+        // picker even when the list is non-empty.
+        let off_only =
+            session_config_options(Some(flagged_false.clone()), "off", &levels(&["off"]), &[]);
+        assert_eq!(off_only.len(), 1, "no surface, no picker: {off_only:?}");
+        // An empty levels list hides it too.
+        let none = session_config_options(Some(flagged_false), "off", &[], &[]);
+        assert_eq!(none.len(), 1, "no levels, no picker: {none:?}");
     }
 
     #[test]

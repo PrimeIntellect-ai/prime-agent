@@ -24,7 +24,7 @@ struct AcpChild {
     lines: Receiver<String>,
     next_id: u64,
     /// Held so the child's cwd outlives the process.
-    _home: tempfile::TempDir,
+    home: tempfile::TempDir,
 }
 
 impl AcpChild {
@@ -84,7 +84,7 @@ impl AcpChild {
             stdin,
             lines,
             next_id: 0,
-            _home: home,
+            home,
         }
     }
 
@@ -107,9 +107,10 @@ impl AcpChild {
         let mut notifications = Vec::new();
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for response {id}");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for response {id}"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
@@ -144,7 +145,7 @@ fn initialize_params() -> Value {
     })
 }
 
-/// The config_option_update notifications seen among a frame batch.
+/// The `config_option_update` notifications seen among a frame batch.
 fn config_updates(notifications: &[Value]) -> Vec<Value> {
     notifications
         .iter()
@@ -197,6 +198,19 @@ fn faux_models_fixture() -> serde_json::Value {
                         "name": "Plain Model",
                         "api": "faux",
                         "baseUrl": "http://localhost:0",
+                        "contextWindow": 128_000,
+                        "maxTokens": 4_096,
+                    },
+                    {
+                        // #2858's `gpt-5.3-chat-latest` shape: the coarse
+                        // `reasoning` flag is false, but the map addresses
+                        // `xhigh` — the map is the capability signal.
+                        "id": "map-model",
+                        "name": "Map Model",
+                        "api": "faux",
+                        "baseUrl": "http://localhost:0",
+                        "reasoning": false,
+                        "thinkingLevelMap": { "off": null, "xhigh": "xhigh" },
                         "contextWindow": 128_000,
                         "maxTokens": 4_096,
                     }
@@ -380,6 +394,142 @@ fn acp_in_process_config_option_advertises_and_applies() {
         reasoner
     );
 
+    // #2858's map-driven capability: the map model (`reasoning: false`
+    // with an addressable `xhigh`) serves its effort picker and accepts
+    // the mapped level — the coarse flag must not veto what the map
+    // addresses.
+    let map = r#"["faux","map-model"]"#;
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "model", json!(map)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    let options = &response["result"]["configOptions"];
+    assert_eq!(options.as_array().map(Vec::len), Some(2), "{options}");
+    assert_eq!(options[0]["currentValue"], map);
+    assert_eq!(
+        options[1]["currentValue"], "high",
+        "the level clamped: {options}"
+    );
+    let levels: Vec<String> = options[1]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["value"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(levels, vec!["minimal", "low", "medium", "high", "xhigh"]);
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "thought_level", json!("xhigh")),
+    );
+    let (response, notifications) = client.wait_response(select, TIMEOUT);
+    assert_eq!(
+        response["result"]["configOptions"][1]["currentValue"], "xhigh",
+        "the mapped level applies: {response}"
+    );
+    let updates = config_updates(&notifications);
+    assert!(
+        updates.iter().any(
+            |update| update["params"]["update"]["configOptions"][1]["currentValue"] == "xhigh"
+        ),
+        "the mapped level publishes config_option_update: {notifications:?}"
+    );
+
+    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let (close_response, _) = client.wait_response(close, TIMEOUT);
+    assert_eq!(close_response["result"], json!({}));
+}
+
+/// The in-process transport's failed settings persist: the switch's live
+/// state is applied COHERENTLY (TS `setModel` rejects after the model
+/// assignment and the durable row, with the switched session applied),
+/// never split — `current_model()` and the agent agree on the switched
+/// model even when the settings write fails, so the effort gate answers
+/// for the model the turns run on. The settings write fails because the
+/// global settings file is a directory (the lock step cannot read it).
+#[test]
+fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
+    let script = json!({
+        "reasoning": true,
+        "responses": ["one answer", "still streaming on the switched model"],
+    });
+    let mut client = AcpChild::spawn_with_models(
+        &["--mode", "acp", "--no-session"],
+        &script,
+        Some(faux_models_fixture()),
+        &[],
+    );
+    // The global settings file as a directory: every settings write
+    // fails at its read step, deterministically.
+    std::fs::create_dir_all(client.home.path().join("agent").join("settings.json")).unwrap();
+    let init = client.request("initialize", initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let result = &new_response["result"];
+    let session_id = result["sessionId"].as_str().unwrap().to_string();
+    assert_eq!(
+        result["configOptions"].as_array().map(Vec::len),
+        Some(2),
+        "the admission is unaffected: {result}"
+    );
+
+    // The switch fails at the settings persist (the live switch and the
+    // durable row already ran): the RPC reports the failure...
+    let plain = r#"["faux","plain-model"]"#;
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "model", json!(plain)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(response["error"]["code"], -32603, "{response}");
+    assert!(
+        response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("model switch failed"),
+        "the refusal names the switch: {response}"
+    );
+
+    // ...but the session is NOT split: the effort gate answers for the
+    // model the turns run on (the switched plain model), so `high` is
+    // unsupported — a stale pre-switch slot would have accepted it.
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "thought_level", json!("high")),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"],
+        "Unsupported reasoning effort: high"
+    );
+
+    // The live session runs the switched model (TS's reject-with-state-
+    // applied): the no-op re-selection refreshes and reports it...
+    let select = client.request(
+        "session/set_config_option",
+        select_params(&session_id, "model", json!(plain)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(
+        response["result"]["configOptions"][0]["currentValue"], plain,
+        "the switched model is live and reported: {response}"
+    );
+    assert_eq!(
+        response["result"]["configOptions"].as_array().map(Vec::len),
+        Some(1),
+        "the plain model serves no effort picker: {response}"
+    );
+
+    // ...and the next turn still streams on it.
+    let prompt = client.request(
+        "session/prompt",
+        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
+
     let close = client.request("session/close", json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
@@ -449,7 +599,7 @@ fn acp_daemon_attached_config_option_pickers() {
             stdin,
             lines: rx,
             next_id: 0,
-            _home: home,
+            home,
         }
     };
     let init = client.request("initialize", initialize_params());

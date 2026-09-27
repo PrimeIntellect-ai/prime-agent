@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use super::config_options::{
@@ -99,13 +99,22 @@ pub(super) async fn handle_set_config_option(
         let _ = tx.send(error.response(id));
         return;
     }
-    let options = refresh_wire_config(link, &daemon_session_id, &config, &producer).await;
+    // TS's `refreshConfig` rethrows a failed `getState`, so the enqueued
+    // config task — and this response — reject: an applied selection must
+    // not be acknowledged with the stale pre-change pickers.
+    let options = match refresh_wire_config(link, &daemon_session_id, &config, &producer).await {
+        Ok(options) => options,
+        Err(error) => {
+            let _ = tx.send(error.response(id));
+            return;
+        }
+    };
     let _ = tx.send(jsonrpc::response(id, config_options_value(&options)));
 }
 
 /// One failed wire config operation: the TS handler's `RequestError`
 /// shapes.
-enum WireConfigError {
+pub(super) enum WireConfigError {
     InvalidParams(String),
     Internal(String),
 }
@@ -186,7 +195,7 @@ async fn apply_wire_config(
                         active_session_id: daemon_session_id.to_string(),
                         provider: model.provider.clone(),
                         model_id: model.id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     TURN_TIMEOUT_MS,
                 )
@@ -204,16 +213,19 @@ async fn apply_wire_config(
         }
         ("thought_level", Some(value)) => {
             let state = fetch_connection_state(link, daemon_session_id).await;
-            let model = state
-                .as_ref()
-                .and_then(|state| PickerModel::from_connection_state(&state["model"]));
             let levels: Vec<String> = state
                 .as_ref()
                 .and_then(|state| state.get("availableThinkingLevels"))
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default();
-            let supported = model.as_ref().is_some_and(|model| model.reasoning)
+            // The worker's levels are #2858's map-driven capability
+            // (`get_supported_thinking_levels` over the resolved model):
+            // a route with an addressable thinking-level map advertises
+            // its levels even when the coarse `reasoning` flag is false,
+            // so the flag must not veto a selection the map offers. A
+            // `["off"]`-only (or empty) list is the no-surface shape.
+            let supported = levels.iter().any(|level| level != "off")
                 && levels.iter().any(|level| level == value);
             if !supported {
                 return Err(WireConfigError::invalid_params(format!(
@@ -226,7 +238,7 @@ async fn apply_wire_config(
                         id: None,
                         active_session_id: daemon_session_id.to_string(),
                         level: value.to_string(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     TURN_TIMEOUT_MS,
                 )
@@ -258,7 +270,7 @@ pub(super) async fn fetch_connection_state(
             DaemonCommand::GetConnectionState {
                 id: None,
                 active_session_id: active_session_id.to_string(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -280,7 +292,7 @@ pub(super) async fn fetch_available_models(
             DaemonCommand::GetAvailableModels {
                 id: None,
                 active_session_id: active_session_id.to_string(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -321,20 +333,23 @@ pub(super) fn picker_options_from_state(
 }
 
 /// Recompute the options from the worker's live state and publish the
-/// change (TS `refreshConfig`).
+/// change (TS `refreshConfig`). A failed state fetch rejects (TS's
+/// refresh rethrows `getState`'s failure): the published set stays
+/// untouched — never clobbered with an empty list — and the caller
+/// decides whether the error answers the request or is dropped like the
+/// TS trigger site's `.catch(() => undefined)`.
 pub(super) async fn refresh_wire_config(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,
     config: &Arc<HostedConfig>,
     producer: &Arc<UpdateProducer>,
-) -> Vec<SessionConfigOption> {
-    // A failed state fetch preserves the last published options (TS's
-    // refresh rejects on a failed `getState`, never clobbering the
-    // client's pickers with an empty list).
+) -> Result<Vec<SessionConfigOption>, WireConfigError> {
     let Some(state) = fetch_connection_state(link, daemon_session_id).await else {
-        return config.published.lock().await.clone();
+        return Err(WireConfigError::internal(
+            "the post-apply refresh failed: the worker's live state could not be read",
+        ));
     };
     let options = picker_options_from_state(&Some(state), &config.models.lock().await);
     publish_config_options(producer, &config.published, options.clone()).await;
-    options
+    Ok(options)
 }

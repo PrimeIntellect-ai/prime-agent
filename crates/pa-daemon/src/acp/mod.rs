@@ -126,6 +126,19 @@ impl AcpModeState {
     pub(super) async fn current_api_key(&self) -> Option<String> {
         self.api_key.lock().await.clone()
     }
+
+    /// The session's model and request key read as ONE pair through the
+    /// serialized config queue: a picker model switch holds the same
+    /// queue while it swaps the slots, so a boundary arm or a
+    /// session-command executor cannot authenticate with the pre-switch
+    /// model and the switched provider's key (a torn pair).
+    pub(super) async fn model_and_api_key(&self) -> (Option<pa_types::ai::Model>, Option<String>) {
+        let _guard = self.config_queue.lock().await;
+        (
+            self.model.lock().await.clone(),
+            self.api_key.lock().await.clone(),
+        )
+    }
 }
 
 /// One hosted session and its in-flight prompt turn, if any.
@@ -387,21 +400,42 @@ async fn handle_session_new(
     }
 
     let result = session_new(&id, params, &mode, tx.clone()).await;
-
-    let mut state = state.lock().await;
-    state.session_new_in_flight = false;
-    if let Ok(entry) = result {
-        state.session = Some(entry);
+    match result {
+        // An admission failure has already queued its own error response;
+        // only the in-flight flag is left to clear.
+        Err(()) => {
+            let mut state = state.lock().await;
+            state.session_new_in_flight = false;
+        }
+        Ok((entry, result)) => {
+            // Install the session before the admission response leaves: a
+            // client that immediately sends `session/set_config_option`
+            // must resolve against the installed session, not "Unknown
+            // ACP session" (TS assigns `session = entry` before returning
+            // the response). The producer gate opens only after the
+            // response is queued on the sink, so no held update can
+            // precede the admission response.
+            let producer = Arc::clone(entry.session.producer());
+            let mut state = state.lock().await;
+            state.session_new_in_flight = false;
+            state.session = Some(entry);
+            drop(state);
+            let _ = tx.send(jsonrpc::response(id, result));
+            producer.commit_session_new_response().await;
+        }
     }
 }
 
-/// Admit one session. On failure the error response has already been queued.
+/// Admit one session. On failure the error response has already been
+/// queued; on success the admission response is returned UNSENT: the
+/// caller installs the entry, queues the response, then opens the
+/// producer gate, in that order.
 async fn session_new(
     id: &Value,
     params: Value,
     mode: &AcpModeState,
     tx: producer::FrameSink,
-) -> std::result::Result<SessionEntry, ()> {
+) -> std::result::Result<(SessionEntry, Value), ()> {
     let params = NewSessionParams::parse(&params);
     // MCP admission precedes everything else in the session identity: a
     // rejected server list fails the request with the raw error payload.
@@ -471,16 +505,15 @@ async fn session_new(
             ..Default::default()
         });
     }
-    // Queue the admission response before opening the producer gate, so no
-    // held update can precede it.
-    let _ = tx.send(jsonrpc::response(id.clone(), result));
-    session.producer().commit_session_new_response().await;
-    Ok(SessionEntry {
-        session,
-        prompt_task: None,
-        config,
-        config_refresh: Some(config_refresh),
-    })
+    Ok((
+        SessionEntry {
+            session,
+            prompt_task: None,
+            config,
+            config_refresh: Some(config_refresh),
+        },
+        result,
+    ))
 }
 
 async fn handle_session_close(

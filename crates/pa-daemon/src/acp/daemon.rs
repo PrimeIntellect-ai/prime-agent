@@ -350,8 +350,16 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                                 // Serialized like every config operation
                                 // (TS `enqueueConfig`).
                                 let _guard = config.queue.lock().await;
-                                refresh_wire_config(&link, &daemon_session_id, &config, &producer)
-                                    .await;
+                                // The background trigger drops refresh
+                                // failures (TS's `.catch(() => undefined)`
+                                // on the enqueue site).
+                                let _ = refresh_wire_config(
+                                    &link,
+                                    &daemon_session_id,
+                                    &config,
+                                    &producer,
+                                )
+                                .await;
                             });
                         }
                     }
@@ -672,7 +680,8 @@ async fn handle_session_new(
         .map(str::to_string)
         .collect();
 
-    // Queue the admission response before opening the producer gate.
+    // The admission response is queued below, after the session takes its
+    // slot and before the producer gate opens.
     let mut result = json!({
         "sessionId": acp_session_id,
         "configOptions": *hosted.config.published.lock().await,
@@ -689,11 +698,20 @@ async fn handle_session_new(
             });
         }
     }
+    // Install the hosted session before the admission response leaves: a
+    // client that immediately sends `session/set_config_option` resolves
+    // against the installed session, not "Unknown ACP session" (TS
+    // assigns `session = entry` before returning the response). The
+    // producer gate opens only after the response is queued on the
+    // sink, so no held update can precede the admission response.
+    let producer = Arc::clone(&hosted.producer);
+    {
+        let mut guard = state.lock().await;
+        guard.session_new_in_flight = false;
+        guard.session = Some(hosted);
+    }
     let _ = tx.send(jsonrpc::response(id, result));
-    hosted.producer.commit_session_new_response().await;
-    let mut guard = state.lock().await;
-    guard.session_new_in_flight = false;
-    guard.session = Some(hosted);
+    producer.commit_session_new_response().await;
 }
 
 /// Send the MCP replacement for one hosted session (the wire form of the

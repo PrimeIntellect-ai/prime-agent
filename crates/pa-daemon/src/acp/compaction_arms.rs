@@ -179,23 +179,35 @@ impl AcpSession {
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> (CompactionCheckRun, Option<pa_types::session::CustomMessage>) {
-        let Some(model) = mode.current_model().await else {
+        // The boundary reads the model and its request key as ONE pair
+        // through the config queue: a concurrent picker switch holds the
+        // same queue while it swaps the slots, so no arm can pair the
+        // pre-switch model with the switched provider's key.
+        let (model, api_key) = mode.model_and_api_key().await;
+        let Some(model) = model else {
             // TS reads `this.model?.contextWindow ?? 0`: a session
             // without a resolvable model never crosses a threshold.
             return (CompactionCheckRun::Proceed, None);
         };
-        match self.overflow_attempt(mode, assistant).await {
+        match self
+            .overflow_attempt(mode, assistant, &model, api_key.clone())
+            .await
+        {
             OverflowAttempt::Retry => return (CompactionCheckRun::OverflowRetry, None),
             // A matched case is done (TS `return false`): the requested
             // and threshold arms never fire after it.
             OverflowAttempt::Done => return (CompactionCheckRun::Proceed, None),
             OverflowAttempt::Continue => {}
         }
-        if self.requested_arm(mode, &model).await.was_consumed() {
+        if self
+            .requested_arm(mode, &model, api_key.clone())
+            .await
+            .was_consumed()
+        {
             return (CompactionCheckRun::RequestedStop, None);
         }
         let held = self
-            .threshold_arm(mode, &model, assistant, goal_queue)
+            .threshold_arm(mode, &model, api_key, assistant, goal_queue)
             .await;
         (CompactionCheckRun::Proceed, held)
     }
@@ -296,6 +308,7 @@ impl AcpSession {
         &self,
         mode: &AcpModeState,
         model: &Model,
+        api_key: Option<String>,
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> Option<pa_types::session::CustomMessage> {
@@ -315,7 +328,7 @@ impl AcpSession {
             }
             _ => None,
         };
-        let outcome = run_compaction(self, engine, model, mode.current_api_key().await, None).await;
+        let outcome = run_compaction(self, engine, model, api_key, None).await;
         let cancelled = outcome
             .as_ref()
             .err()
@@ -334,7 +347,12 @@ impl AcpSession {
     /// The TS `_checkCompaction` requested arm: a pending `compact.run`
     /// request consumed at the boundary (any outcome consumed it; the
     /// run stops the turn loop on purpose).
-    async fn requested_arm(&self, mode: &AcpModeState, model: &Model) -> RequestedArmRun {
+    async fn requested_arm(
+        &self,
+        mode: &AcpModeState,
+        model: &Model,
+        api_key: Option<String>,
+    ) -> RequestedArmRun {
         let engine = &mode.engine;
         if !engine.turn_boundary.compaction_scheduled().await {
             return RequestedArmRun::None;
@@ -344,14 +362,7 @@ impl AcpSession {
             .take_compaction()
             .await
             .and_then(|pending| pending.instructions);
-        let outcome = run_compaction(
-            self,
-            engine,
-            model,
-            mode.current_api_key().await,
-            instructions.as_deref(),
-        )
-        .await;
+        let outcome = run_compaction(self, engine, model, api_key, instructions.as_deref()).await;
         self.finish_compaction(engine, CompactionOutcomeReason::Requested, outcome)
             .await;
         RequestedArmRun::Consumed
@@ -438,11 +449,10 @@ impl AcpSession {
         &self,
         mode: &AcpModeState,
         assistant: &AssistantMessage,
+        model: &Model,
+        api_key: Option<String>,
     ) -> OverflowAttempt {
         let engine = &mode.engine;
-        let Some(model) = mode.current_model().await else {
-            return OverflowAttempt::Continue;
-        };
         // TS `sameModel`: a model switch must not compact for the old
         // model's overflow.
         if assistant.provider != model.provider || assistant.model != model.id {
@@ -514,14 +524,7 @@ impl AcpSession {
             .take_compaction()
             .await
             .and_then(|pending| pending.instructions);
-        let outcome = run_compaction(
-            self,
-            engine,
-            &model,
-            mode.current_api_key().await,
-            instructions.as_deref(),
-        )
-        .await;
+        let outcome = run_compaction(self, engine, model, api_key, instructions.as_deref()).await;
         match outcome {
             Ok(CompactOutcome::Ran(run)) => {
                 if let Some(telemetry) = &engine.telemetry {

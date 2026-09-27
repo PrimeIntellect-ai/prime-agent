@@ -420,7 +420,12 @@ async fn run_session_command_segment(
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     turn_failure: &mut Option<String>,
 ) -> anyhow::Result<bool> {
-    let Some(model) = mode.current_model().await else {
+    // The command executor runs on one model/key pair read through the
+    // config queue: a concurrent picker switch cannot hand `/compact`
+    // or `/refine` the pre-switch model with the switched provider's
+    // key.
+    let (model, api_key) = mode.model_and_api_key().await;
+    let Some(model) = model else {
         // Unreachable in practice (the engine assembly requires a model);
         // fail as a request error instead of a turn failure.
         anyhow::bail!("No model available to run the session command");
@@ -433,7 +438,7 @@ async fn run_session_command_segment(
         let mut autonomous = session.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
-            api_key: mode.current_api_key().await,
+            api_key,
             global_harness_dir: mode.agent_dir.as_path().to_path_buf(),
             autonomous: &mut autonomous,
         };

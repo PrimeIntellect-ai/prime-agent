@@ -211,7 +211,13 @@ async fn apply_in_process_config(
         ("thought_level", Some(value)) => {
             let current = mode.current_model().await;
             let levels = supported_levels(current.as_ref());
-            let supported = current.as_ref().is_some_and(|model| model.reasoning)
+            // #2858's map-driven capability: an addressable
+            // thinking-level map marks the model thinking-capable even
+            // when the coarse `reasoning` flag is false, so the flag
+            // must not veto a level the map advertises.
+            let supported = current
+                .as_ref()
+                .is_some_and(pa_ai::models::supports_thinking)
                 && levels.iter().any(|level| level == value);
             if !supported {
                 return Err(ConfigOptionError::invalid_params(&format!(
@@ -310,46 +316,79 @@ async fn apply_in_process_model_switch(
     // session-command executors authenticate against the switched
     // model's provider).
     *mode.api_key.lock().await = resolved.api_key.clone();
+    // The live model slot follows with the same step, so the switch's
+    // live trio (provider target, request key, model) never splits:
+    // `current_model()` — picker validation, `/compact`, `/refine` —
+    // always answers the model the turns stream on, before OR after a
+    // later step fails (TS's `setModel` assigns the session model before
+    // it persists, so a failed write rejects with the switched session
+    // applied, never a split one).
+    *mode.model.lock().await = Some(model.clone());
     // TS `session.setModel` persists the default provider/model so the
-    // next session starts on the switched model. A failed write rejects
-    // the switch with the live state applied (TS's call chain rejects
-    // after the model assignment and the durable row).
-    {
-        let mut settings = pa_core::settings::SettingsManager::create(
-            mode.actual_cwd.as_path(),
-            mode.agent_dir.as_path(),
-        );
-        if let Err(error) =
-            settings.set_default_model_and_provider(model.provider.clone(), model.id.clone())
-        {
-            anyhow::bail!(error);
-        }
+    // next session starts on the switched model. The settings store is
+    // file-backed (reads, an atomic write, and lock-contention retries
+    // that sleep), so the write runs off the Tokio worker — the config
+    // queue this handler holds must not park a runtime thread other ACP
+    // work shares (`spawn_blocking`'s contract).
+    let persist = {
+        let cwd = Arc::clone(&mode.actual_cwd);
+        let agent_dir = Arc::clone(&mode.agent_dir);
+        let provider = model.provider.clone();
+        let id = model.id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut settings =
+                pa_core::settings::SettingsManager::create(cwd.as_path(), agent_dir.as_path());
+            settings.set_default_model_and_provider(provider, id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("the settings persist task failed: {error}"))?
+    };
+    if let Err(error) = persist {
+        anyhow::bail!(error);
     }
     // The thinking level follows the switch (TS
     // `_getThinkingLevelForModelSwitch` + `setThinkingLevel`): the current
-    // level when the current model reasons, else the settings default —
-    // always clamped to the switched model.
-    let previous = mode.current_model().await;
+    // level when the pre-switch model is thinking-capable, else the
+    // settings default — always clamped to the switched model. TS reads
+    // the decision off `this.model` BEFORE the assignment, so the
+    // pre-switch capture (`previous_model`) is the source, not the live
+    // slot (which already names the switched model). The capability is
+    // #2858's map-driven one: an addressable thinking-level map marks
+    // the model thinking-capable even when the coarse `reasoning` flag
+    // is false.
     let current_level = session.agent().state().await.thinking_level;
-    let requested = if previous.as_ref().is_some_and(|model| model.reasoning) {
+    let requested = if previous_model
+        .as_ref()
+        .is_some_and(pa_ai::models::supports_thinking)
+    {
         pa_core::session_engine::provider_adapter::model_thinking_level(current_level)
     } else {
-        let settings = pa_core::settings::SettingsManager::create(
-            mode.actual_cwd.as_path(),
-            mode.agent_dir.as_path(),
-        );
-        settings.get_default_thinking_level().map_or(
+        // The settings read runs off the worker like the write above.
+        let default = {
+            let cwd = Arc::clone(&mode.actual_cwd);
+            let agent_dir = Arc::clone(&mode.agent_dir);
+            tokio::task::spawn_blocking(move || {
+                let settings =
+                    pa_core::settings::SettingsManager::create(cwd.as_path(), agent_dir.as_path());
+                settings.get_default_thinking_level()
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("the settings read task failed: {error}"))?
+        };
+        default.map_or(
             pa_types::ai::ModelThinkingLevel::Medium,
             pa_core::settings::ThinkingLevelSetting::model_level,
         )
     };
     let effective = pa_ai::models::clamp_thinking_level(&model, requested);
-    apply_level_change(session, mode, effective, model.reasoning)
-        .await
-        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    // The session's live model is the switched model (the session-command
-    // executors follow it).
-    *mode.model.lock().await = Some(model);
+    apply_level_change(
+        session,
+        mode,
+        effective,
+        pa_ai::models::supports_thinking(&model),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     Ok(())
 }
 
@@ -391,18 +430,22 @@ async fn apply_in_process_thinking_level(
     let parsed = pa_types::ai::thinking_level_from_str(level)
         .ok_or_else(|| ConfigOptionError::invalid_params("Invalid thinking level"))?;
     let current = mode.current_model().await;
-    let reasoning = current.as_ref().is_some_and(|model| model.reasoning);
-    apply_level_change(session, mode, parsed, reasoning).await
+    // #2858's map-driven capability (see the validation gate).
+    let thinking = current
+        .as_ref()
+        .is_some_and(pa_ai::models::supports_thinking);
+    apply_level_change(session, mode, parsed, thinking).await
 }
 
 /// The shared level application: agent + durable row when the effective
-/// level changed, settings default when the model reasons or the level is
-/// not `off` (TS `setThinkingLevel`'s persist gate).
+/// level changed, settings default when the model has a thinking surface
+/// or the level is not `off` (TS `setThinkingLevel`'s persist gate, gated
+/// on #2858's map-driven capability rather than the coarse flag).
 async fn apply_level_change(
     session: &Arc<AcpSession>,
     mode: &AcpModeState,
     level: pa_types::ai::ModelThinkingLevel,
-    reasoning: bool,
+    thinking: bool,
 ) -> Result<(), ConfigOptionError> {
     let mapped = pa_core::session_engine::provider_adapter::map_thinking_level(level);
     let current = session.agent().state().await.thinking_level;
@@ -418,23 +461,28 @@ async fn apply_level_change(
             "thinking level switch failed: {error:#}"
         )));
     }
-    if reasoning || level != pa_types::ai::ModelThinkingLevel::Off {
-        let mut settings = pa_core::settings::SettingsManager::create(
-            mode.actual_cwd.as_path(),
-            mode.agent_dir.as_path(),
-        );
+    if thinking || level != pa_types::ai::ModelThinkingLevel::Off {
+        // The file-backed settings write runs off the Tokio worker, like
+        // the model switch's persist (the queue this handler holds must
+        // not park a runtime thread).
+        let cwd = Arc::clone(&mode.actual_cwd);
+        let agent_dir = Arc::clone(&mode.agent_dir);
+        let setting = pa_core::settings::ThinkingLevelSetting::from_model_level(level);
+        let persist = tokio::task::spawn_blocking(move || {
+            let mut settings =
+                pa_core::settings::SettingsManager::create(cwd.as_path(), agent_dir.as_path());
+            settings.set_default_thinking_level(setting)
+        })
+        .await
+        .map_err(|error| {
+            ConfigOptionError::Internal(format!("the settings persist task failed: {error}"))
+        })?;
         // TS `setThinkingLevel`'s chain rejects on a failed settings
         // write (the level assignment and the durable row already ran,
         // exactly like the model switch).
-        settings
-            .set_default_thinking_level(pa_core::settings::ThinkingLevelSetting::from_model_level(
-                level,
-            ))
-            .map_err(|error| {
-                ConfigOptionError::Internal(format!(
-                    "thinking level default persist failed: {error:#}"
-                ))
-            })?;
+        persist.map_err(|error| {
+            ConfigOptionError::Internal(format!("thinking level default persist failed: {error:#}"))
+        })?;
     }
     Ok(())
 }
