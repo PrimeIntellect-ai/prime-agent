@@ -1234,6 +1234,19 @@ impl SessionUi {
         });
         self.turn_active = streaming;
         self.streaming_index = None;
+        // The turn-end watermark restarts with the stream: the ends this
+        // attach will see belong to the newly mounted session, and an end
+        // owed by the previous stream (a turn whose submit outlived the
+        // switch — the daemon keeps running it for the detached session,
+        // and its end never arrives on this stream) must not pin the
+        // watermark. Without the reset a later prompt's ack would re-arm
+        // `turn_active` against an end count that can never catch up, and
+        // the idle gates would wait for an end that will never come (the
+        // submit-outlived wedge: a turn never "settles" and the run
+        // parks). The mounted snapshot's `streaming` flag carries the
+        // live-turn state across the attach instead.
+        self.turn_ends_seen = 0;
+        self.last_prompt_turn_end = 0;
         // TS `applyConnectionStateSnapshot` -> `bindPromptStashSession`: the
         // stash state follows the stable id of the session now rendered.
         // The initial attach and every in-place switch (`/switch`, `/new`)
