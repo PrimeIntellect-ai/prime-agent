@@ -878,6 +878,11 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
     ) -> pa_tui::provider_auth::ProviderAuthFuture {
         Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
     }
+
+    fn anthropic_subscription_warning(&self) -> pa_tui::provider_auth::ProviderWarningFuture {
+        // The faux full-flow drives no Anthropic subscription auth.
+        Box::pin(async move { None })
+    }
 }
 
 /// The full first-run flow on a fresh home with no usable model (TS

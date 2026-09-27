@@ -922,19 +922,20 @@ fn load_scope(
     scope: SettingsScope,
     errors: &mut Vec<SettingsError>,
 ) -> (Settings, Option<serde_json::Value>, Option<String>) {
-    let mut content: Option<String> = None;
     let mut load_error: Option<String> = None;
-    let result = storage.with_lock(scope, &mut |current| {
-        content = current;
-        None
-    });
-    if let Err(error) = result {
-        errors.push(SettingsError {
-            scope,
-            message: error.to_string(),
-        });
-        return (Settings::default(), None, Some(error.to_string()));
-    }
+    // The pure-read arm: a locked protocol read on any cache miss, the
+    // process-cached copy on a hit (see `SettingsStorage::read`).
+    let content = match storage.read(scope) {
+        Ok(content) => content,
+        Err(error) => {
+            let message = error.to_string();
+            errors.push(SettingsError {
+                scope,
+                message: message.clone(),
+            });
+            return (Settings::default(), None, Some(message));
+        }
+    };
     let Some(content) = content else {
         return (Settings::default(), None, None);
     };
