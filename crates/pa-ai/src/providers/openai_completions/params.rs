@@ -471,8 +471,8 @@ mod tests {
         }
     }
 
-    /// TS #2144: the completions path forwards `service_tier` for OpenAI
-    /// and OpenRouter only — other OpenAI-compatible gateways may reject
+    /// TS #2144: the completions path forwards `service_tier` for `OpenAI`
+    /// and `OpenRouter` only — other OpenAI-compatible gateways may reject
     /// unknown fields, and Prime Inference tolerates but ignores the field.
     #[test]
     fn forwards_service_tier_for_openai_and_openrouter_only() {

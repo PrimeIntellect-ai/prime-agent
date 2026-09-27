@@ -311,6 +311,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,

@@ -263,6 +263,18 @@ pub(crate) struct SessionUi {
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     /// Snapshot chat entries to fold into the view on the next rebuild.
     pending_snapshot: Option<Vec<ChatEntry>>,
+    /// One-shot: return the freed heap of the first frame that renders
+    /// after an attach fold (the fold itself trims the wire/parse churn;
+    /// the first frame's visible-window materialization is its own,
+    /// bigger transient — see the draw loop's post-frame trim).
+    trim_after_frame: bool,
+    /// Snapshot labels (model) for the next rebuild: `Some(None)` clears
+    /// the label (a session that reports no model), `None` leaves the
+    /// chrome untouched (a rebuild outside the attach flow).
+    pending_model: Option<Option<String>>,
+    /// Snapshot tray effort suffix for the next rebuild (the attach
+    /// state's level; `None` clears it).
+    pending_thinking_suffix: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
