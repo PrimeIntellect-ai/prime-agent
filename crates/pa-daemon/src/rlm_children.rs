@@ -3084,8 +3084,9 @@ mod spawn_name_reservation_tests {
                                     ),
                                 }
                             }
-                            "prompt" => response_success(Some(&id), command_type, None),
-                            "wait_for_idle" => response_success(Some(&id), command_type, None),
+                            "prompt" | "wait_for_idle" => {
+                                response_success(Some(&id), command_type, None)
+                            }
                             "get_state" => response_success(
                                 Some(&id),
                                 command_type,

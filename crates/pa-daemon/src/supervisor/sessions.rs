@@ -801,7 +801,6 @@ impl Supervisor {
             key,
         }))
     }
-
 }
 
 /// One resident's roster identity for the `list --all` merge.
