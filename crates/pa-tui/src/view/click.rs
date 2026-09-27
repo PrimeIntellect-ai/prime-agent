@@ -23,11 +23,17 @@ use crate::chat::ChatEntry;
 /// vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClickAction {
-    /// Cycle the conversation detail (the `app.tools.expand` key's exact
-    /// action): the click target spans a condensed run block, a tool
-    /// card, a bash execution card, an agent-message notice, or a
-    /// shell-completion row.
-    CycleDetail,
+    /// Toggle the clicked card's own expansion (TS's per-card `expanded`
+    /// state mapped onto the detail level, operator directive
+    /// 2026-09-26: the click lands on the card the user means, so the
+    /// level jumps to `all` — where the card's own content expands
+    /// (tool output, notice body, completion content) — and back to the
+    /// collapsed `overview`; the `details` level a blind cycle would
+    /// reach only expands the thinking blocks around the card): the
+    /// click target spans a condensed run block, a tool card, a bash
+    /// execution card, an agent-message notice, or a shell-completion
+    /// row.
+    ToggleCardExpansion,
     /// Place the editor caret at the clicked cell: `row` indexes the
     /// editor's visible content rows, `col` is the column relative to
     /// the row's text start, and `content_width` is the width the
@@ -229,7 +235,7 @@ impl AgentView {
     /// The click action for one transcript window row: a row inside a
     /// visible activity entry (a condensed run block, a tool card, a
     /// bash card, an agent-message notice, a shell-completion row)
-    /// cycles the conversation detail. Plain text rows (user,
+    /// toggles that card's own expansion. Plain text rows (user,
     /// assistant, status, panels) are not clickable — the TS components
     /// register no regions there either.
     fn transcript_click_target(&self, window_row: usize) -> Option<ClickAction> {
@@ -246,7 +252,7 @@ impl AgentView {
                 | ChatEntry::AgentMessage(_)
                 | ChatEntry::ShellCompletion(_)
         ))
-        .then_some(ClickAction::CycleDetail)
+        .then_some(ClickAction::ToggleCardExpansion)
     }
 }
 
@@ -304,7 +310,7 @@ mod tests {
         let card_row = section_screen_row(&view, 1);
         assert_eq!(
             view.click_target_at(card_row, 2),
-            Some(ClickAction::CycleDetail)
+            Some(ClickAction::ToggleCardExpansion)
         );
         // Every row the card occupies is clickable, not just its first.
         let section = view
@@ -316,7 +322,7 @@ mod tests {
         for window_row in section.from..section.to {
             assert_eq!(
                 view.click_target_at(view.click.window_screen_start + window_row, 0),
-                Some(ClickAction::CycleDetail)
+                Some(ClickAction::ToggleCardExpansion)
             );
         }
     }

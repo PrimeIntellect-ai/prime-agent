@@ -215,6 +215,17 @@ pub struct AgentView {
     dock_cursor: Option<(usize, usize)>,
     /// Window height of the last composed frame (cursor positioning).
     pub(crate) window_rows: usize,
+    /// Whether the last composed frame's transcript window reached the
+    /// transcript tail (operator directive 2026-09-26: the follow hint
+    /// composites only when following would actually scroll — a window
+    /// that already shows the tail is at the bottom, not paused above
+    /// new content).
+    pub(crate) window_shows_tail: bool,
+    /// A detail change whose window `resolve_sparse_geometry` consumed
+    /// before its first composition: the next window build's dense arm
+    /// re-derives the follow state from the post-transition geometry
+    /// (operator directive 2026-09-26).
+    pub(crate) detail_transition: bool,
     /// Plain text of the last frame's rows: OSC zone-marker emission only
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
@@ -395,6 +406,8 @@ impl AgentView {
             terminal_rows: 24,
             dock_cursor: None,
             window_rows: 0,
+            window_shows_tail: false,
+            detail_transition: false,
             osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
@@ -1739,8 +1752,11 @@ impl AgentView {
             frame.push(pad_row(line, width));
         }
         // A paused viewport carries the follow hint over the last transcript
-        // window row (TS composites it above the dock, below overlays).
-        if !self.following {
+        // window row (TS composites it above the dock, below overlays) —
+        // but only when following would actually scroll: a window that
+        // already shows the transcript tail is at the bottom, not paused
+        // above new content (operator directive 2026-09-26).
+        if !self.following && !self.window_shows_tail {
             if let Some(row) = frame.get_mut(window_height) {
                 let key = self
                     .editor
@@ -1971,7 +1987,11 @@ fn split_at_chars(text: &str, at: usize) -> (&str, &str) {
 
 /// One scroll-indicator surface row (`↑ N more` on the editor background).
 fn indicator_row(indicator: &str, bg: Style, border: Style, width: usize) -> Line {
-    let mut row: Line = vec![Span::styled(indicator.to_string(), border)];
+    // The indicator text paints on the editor surface's background too
+    // (operator directive 2026-09-26): the bar's `↑/↓ N more` rows read
+    // as part of the prompt bar, not as text floating on the terminal's
+    // bare background.
+    let mut row: Line = vec![Span::styled(indicator.to_string(), border.patch(bg))];
     let used = str_width(indicator);
     row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
     row
@@ -2541,6 +2561,93 @@ mod tests {
         let top_frame = v.render_frame(80, 24);
         assert!(!v.is_following());
         assert!(top_frame.iter().any(|l| row_text(l).contains("to follow")));
+    }
+
+    /// A transcript with thinking blocks: long in `all`/`details` (the
+    /// thinking renders, far past a page above the tail), and short
+    /// enough in `overview` (thinking hidden) that the whole
+    /// conversation fits the window.
+    fn thinking_filled(v: AgentView, turns: usize) -> AgentView {
+        let mut v = filled(v, 0);
+        for index in 0..turns {
+            v.push(TranscriptItem::UserMessage {
+                text: format!("user line {index}"),
+            });
+            v.push(TranscriptItem::Assistant {
+                blocks: vec![crate::chat::MessageBlock::Thinking(format!(
+                    "thinking {index} {} the expanded mode dwarfs the collapsed one",
+                    "reasoning word ".repeat(56)
+                ))],
+                has_tool_calls: false,
+            });
+        }
+        v
+    }
+
+    /// The mode-exit follow recompute (operator directive 2026-09-26):
+    /// pausing in an expanded mode and collapsing back to `overview`
+    /// when the collapsed transcript fits the window resumes following —
+    /// the view already shows the transcript tail, so the follow hint
+    /// does not render and the tail keeps following new content.
+    #[test]
+    fn collapse_resumes_following_when_the_tail_is_in_view() {
+        let mut v = thinking_filled(view(), 2);
+        v.detail = Detail::All;
+        v.render_frame(80, 24);
+        assert!(v.is_following());
+        // Pause a page up in the expanded mode (thinking rows on end).
+        v.scroll_by(-(v.page_size() as isize));
+        assert!(!v.is_following());
+        // Collapse: the hidden thinking shrinks the transcript below the
+        // window — the re-walked window shows the tail.
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(v.is_following(), "the collapse re-derived the follow state");
+        assert!(
+            !collapsed.iter().any(|l| row_text(l).contains("to follow")),
+            "the tail-in-view window carries no follow hint: {collapsed:?}"
+        );
+        assert_eq!(v.scroll_info().lines_below, 0);
+    }
+
+    /// The recompute is not a blanket un-pause: a collapse that leaves
+    /// real rows below the window keeps following paused and the hint
+    /// rendered (following would actually scroll).
+    #[test]
+    fn collapse_keeps_the_hint_when_rows_remain_below() {
+        let mut v = filled(view(), 30);
+        v.render_frame(80, 24);
+        v.scroll_by(-2);
+        assert!(!v.is_following());
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(!v.is_following());
+        assert!(
+            collapsed
+                .iter()
+                .any(|l| row_text(l).contains("ctrl+shift+down to follow")),
+            "the paused window with rows below keeps the hint"
+        );
+    }
+
+    /// The prompt bar's scroll indicators paint on the editor surface's
+    /// background (operator directive 2026-09-26): the `↑ N more` row
+    /// reads as part of the bar, not as text floating on the terminal's
+    /// bare background.
+    #[test]
+    fn the_more_indicator_carry_the_bar_background() {
+        let bg = ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(10, 11, 12));
+        let border = ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
+        for label in [" ↑ 14 more", " ↓ 3 more"] {
+            let row = indicator_row(label, bg, border, 20);
+            for span in &row {
+                assert_eq!(
+                    span.style.bg,
+                    Some(ratatui::style::Color::Rgb(10, 11, 12)),
+                    "every span of {label:?} carries the bar background"
+                );
+            }
+        }
     }
 
     #[test]

@@ -248,6 +248,11 @@ impl AgentView {
             return;
         };
         self.sparse_enabled = false;
+        // A window resolved while its detail went stale carries the
+        // mode exit to the next composition's dense arm (the resolved
+        // geometry is the old mode's; the first frame after it
+        // re-derives the follow state — operator directive 2026-09-26).
+        self.detail_transition = self.detail_transition || window.detail != self.detail;
         let detail = self.detail;
         self.detail = window.detail;
         let layout = crate::image_component::with_fullscreen_image_fallback(|| {
@@ -320,6 +325,17 @@ impl AgentView {
             });
             self.sparse_enabled = true;
             // Only visible entries acquired Lines; exact heights remain cached.
+            self.window_shows_tail = self.scroll_top >= self.last_max_scroll;
+            // The mode exit's dense arm: the clamped scroll position
+            // already sits at the bottom when the transition collapsed
+            // the layout past the paused offset — the same rule
+            // `scroll_by` re-derives following by.
+            if self.detail_transition {
+                self.detail_transition = false;
+                if !self.following && self.window_shows_tail {
+                    self.following = true;
+                }
+            }
             return (rows, self.scroll_top);
         }
         let mut window = self.sparse_window.expect("sparse window established above");
@@ -331,6 +347,13 @@ impl AgentView {
             }
         }
         self.prepare_layout(width);
+        // The mode exit's follow-state recompute (operator directive
+        // 2026-09-26): a detail change rides the same walked window, and
+        // the first composition after it re-derives the follow state
+        // from the post-transition geometry below — a paused window
+        // whose re-walked rows still reach the transcript tail is at
+        // the bottom, not paused above new content.
+        let detail_transition = window.detail != self.detail;
         window.detail = self.detail;
         window.width = width;
         let mut touched = Vec::new();
@@ -424,12 +447,17 @@ impl AgentView {
         window.pending = 0;
         window.cursor = Some((section, row));
         let mut rows = Vec::with_capacity(height);
+        // Whether the fill consumed through the tail section's end: the
+        // window shows the transcript tail (the follow-hint rule — the
+        // walk's own truth, no extra geometry pass).
+        let mut shows_tail = false;
         while rows.len() < height && section <= last {
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
             let before = rows.len();
             rows.extend_from_slice(&source[from..to]);
+            shows_tail = section == last && to == source.len();
             // The entry's visible span feeds the click surface's window
             // map (view/click.rs) — bounded by the rows on screen.
             if before < rows.len() && section >= 1 && section < last {
@@ -479,6 +507,16 @@ impl AgentView {
         rows.truncate(height);
         window.visible_rows = rows.len();
         self.sparse_window = Some(window);
+        self.window_shows_tail = shows_tail;
+        // The mode-exit follow-state recompute: a detail change whose
+        // re-walked window still reaches the tail is at the bottom —
+        // the pause distance measured in the previous mode's rows
+        // collapsed along with the layout, so the window resumes
+        // following instead of hinting at a scroll that shows nothing
+        // new (operator directive 2026-09-26).
+        if detail_transition && !self.following && shows_tail {
+            self.following = true;
+        }
         let start = match window.anchor {
             Anchor::Tail(distance) => TAIL_SELECTION_ORIGIN
                 .saturating_sub(distance)
