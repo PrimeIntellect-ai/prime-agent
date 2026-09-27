@@ -25,7 +25,7 @@ use crate::daemon_reconnect::RecoveryKind;
 use crate::exit_guard::ExitGuard;
 use crate::keybindings::KeybindingsManager;
 use crate::session_ui::SessionUi;
-use crate::view::{AgentView, FlushPlan};
+use crate::view::AgentView;
 
 use crossterm::event::KeyEvent;
 use crossterm::terminal;
@@ -884,15 +884,21 @@ async fn run_onboarding_phase(
         // A composition root without the Prime row has no sign-in to run.
         return Ok(false);
     };
-    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-        panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            prime_row.name
-        ))),
-        heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
-    });
     let prime_panel = session.auth_panel_handle();
     let prime_cancel = prime_panel.cancel_signal();
+    // TS `loginDialogOptions()`'s onboarding shape: the panel mounts
+    // chrome-less (`topRule: false, hideTitle: true`) — the splash's
+    // heading names the step — and the actions row reads the same
+    // resolved keybindings the pane answers with; the panel carries the
+    // flow's cancel signal, so the row's cancel hint ends the login (TS
+    // the dialog's abort signal).
+    let mut prime_dialog =
+        crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", prime_row.name));
+    prime_dialog.set_cancel_signal(prime_cancel.clone());
+    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+        panel: std::boxed::Box::new(prime_dialog),
+        heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+    });
     let prime_row_for_flow = prime_row.clone();
     let prime_auth = provider_auth.clone();
     let prime_flow = OnboardingFlowTask::spawn(
@@ -1032,15 +1038,15 @@ async fn run_onboarding_phase(
         // TS `loginProvider`: the row's flow — the panel-prompted key,
         // or the panel-driven flow.
         if row.flow == crate::provider_auth::AuthFlow::ApiKeyPrompt {
-            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-                    "Login to {}",
-                    row.name
-                ))),
-                heading: None,
-            });
             let panel = session.auth_panel_handle();
             let prompt_cancel = panel.cancel_signal();
+            let mut api_key_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            api_key_dialog.set_cancel_signal(prompt_cancel.clone());
+            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                panel: std::boxed::Box::new(api_key_dialog),
+                heading: None,
+            });
             let prompt_cancel_body = prompt_cancel.clone();
             let provider_id = row.id.clone();
             let row = row.clone();
@@ -1055,6 +1061,9 @@ async fn run_onboarding_phase(
                     match panel
                         .paste_prompt(
                             crate::onboarding_flow::API_KEY_PROMPT,
+                            // TS `showPrompt` renders the prompt as a
+                            // section title in the text colour.
+                            crate::auth_panel::PastePromptTone::Text,
                             // The field renders bullets, not the typed key:
                             // a first-run screen is exactly the shared and
                             // recorded surface a secret must never render on
@@ -1084,7 +1093,7 @@ async fn run_onboarding_phase(
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
                 PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 PaneOutcome::Flow(result) => {
                     let outcome = result.unwrap_or_else(|_| {
@@ -1106,16 +1115,18 @@ async fn run_onboarding_phase(
             // subscription OAuth: the `/login` selector's panel path
             // (the non-panel body answers the silent cancel for OAuth
             // rows, so it would dead-end the available rows; the picker
-            // keeps the unavailable ones inert).
-            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
-                panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::new(format!(
-                    "Login to {}",
-                    row.name
-                ))),
-                heading: None,
-            });
+            // keeps the unavailable ones inert). The panel mounts
+            // chrome-less (TS the onboarding `loginDialogOptions`) with
+            // the pane's resolved keybindings.
             let panel = session.auth_panel_handle();
             let service_cancel = panel.cancel_signal();
+            let mut service_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            service_dialog.set_cancel_signal(service_cancel.clone());
+            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                panel: std::boxed::Box::new(service_dialog),
+                heading: None,
+            });
             let provider_id = row.id.clone();
             let row = row.clone();
             let service_auth = provider_auth.clone();
@@ -1135,7 +1146,7 @@ async fn run_onboarding_phase(
             match outcome {
                 PaneOutcome::InputClosed => return Ok(false),
                 PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 PaneOutcome::Flow(result) => {
                     let outcome = result.unwrap_or_else(|_| {
@@ -1893,7 +1904,7 @@ async fn run_interactive_surface(
     // so the respawned worker serves the session again.
     let mut session_reconnect: Option<SessionReconnect> = None;
 
-    while running {
+    'run: while running {
         // The enhanced-key modes settle once per run: the kitty probe
         // answered, or the modifyOtherKeys fallback fired. One adoption
         // event reports the established combination.
@@ -2238,8 +2249,24 @@ async fn run_interactive_surface(
                 // `/resume`, `/exit`): in terminal mode the teardown below must
                 // run this iteration, not after the select's 50ms idle tick
                 // parks the loop — that park reads directly as switch latency
-                // (TS's event loop leaves on the key). Headless runs keep the
-                // tail pass so captured frames stay identical.
+                // (TS's event loop leaves on the key). A HANDOFF takes the
+                // leave now: the bare `break` below only leaves the
+                // input-drain loop, and the select after it parks the exit
+                // for the tick — measured as ~50ms of chat->agents switch
+                // latency on every handoff. The handoff's next surface owns
+                // the pane (its mount clears the alt screen), so nothing the
+                // tail pass paints can reach the user. A non-handoff exit
+                // (`/exit`, `/quit`) keeps the tail pass: its frame gate
+                // paints the final chat frame the exit's main-screen flush
+                // shows. Headless runs keep the tail pass so captured
+                // frames stay identical.
+                if renderer.is_terminal()
+                    && session.exit_requested
+                    && (session.open_agents_view || session.pending_selection.is_some())
+                {
+                    session.exit_reason = "session_request";
+                    break 'run;
+                }
                 if session.exit_requested && renderer.is_terminal() {
                     session.exit_reason = "session_request";
                     break;
@@ -3022,6 +3049,16 @@ async fn run_interactive_surface(
                     last_render_at = Some(Instant::now());
                     last_pulse_phase = view.pulse_frame;
                     render_deadline = None;
+                    // The attach fold arms this once: the first frame
+                    // that renders the rebuilt transcript materializes
+                    // its visible window (the wrap/render churn on top
+                    // of the fold's parse churn), so return that freed
+                    // heap right after the frame paints instead of
+                    // keeping the resume's peak resident for the
+                    // process lifetime.
+                    if session.take_trim_after_frame() {
+                        pa_types::memory_release::trim_freed_heap();
+                    }
                 } else {
                     render_deadline = Some(last_render_at.unwrap() + MIN_RENDER_INTERVAL);
                 }
@@ -3538,22 +3575,12 @@ impl Renderer {
             return Ok(());
         }
         let (width, height) = terminal::size()?;
-        let plan = view.take_flush_plan(width as usize, height as usize);
+        // The flush streams row-by-row in bounded chunks: a long transcript
+        // must reach the terminal without ever holding the whole frame (a
+        // +O(rows) peak right at exit) — the bytes are the materialized
+        // flush's bytes, the peak is one section plus one chunk.
         let mut out = std::io::stdout();
-        let mut buffer = String::new();
-        match plan {
-            FlushPlan::Append(rows) if rows.is_empty() => {}
-            FlushPlan::Append(rows) => {
-                write_flush_rows(&mut buffer, &rows);
-            }
-            FlushPlan::Repaint(rows) => {
-                // Erase the visible screen only — scrollback above it
-                // stays (TS `fullRender`'s `\x1b[2J\x1b[H`).
-                buffer.push_str("\x1b[2J\x1b[H");
-                write_flush_rows(&mut buffer, &rows);
-            }
-        }
-        out.write_all(buffer.as_bytes())?;
+        view.stream_flush_to(&mut out, width as usize, height as usize)?;
         out.flush()?;
         Ok(())
     }
@@ -3698,7 +3725,7 @@ impl Renderer {
 /// feed), rows are joined with CRLF, and a trailing CRLF parks the cursor
 /// below the frame (TS `TUI.stop`'s closing newline) so whatever prints
 /// next — the shell prompt or the resume hint — starts on a fresh line.
-fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
+pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
     for row in rows {
         buffer.push('\r');
         // An image-placement row is written raw (TS `applyLineResets` /

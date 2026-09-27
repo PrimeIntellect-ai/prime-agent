@@ -15,12 +15,12 @@ pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
 /// the unambiguous retryable error, never as an ambiguous timeout.
 pub(super) async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
     if let Some(reply) = resident.pending.lock().await.remove(request_id) {
-        let _ = reply.send(response_failure(
+        let _ = reply.send(WorkerReply::Typed(response_failure(
             Some(request_id),
             "route",
             WORKER_NOT_CONNECTED,
             None,
-        ));
+        )));
     }
 }
 pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
@@ -33,7 +33,7 @@ impl Supervisor {
         payload: Value,
         timeout_ms: u64,
         admission: RouteAdmission,
-    ) -> Result<DaemonResponse> {
+    ) -> Result<WorkerReply> {
         let cmd_tx = {
             let guard = resident.cmd_tx.lock().await;
             guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
@@ -56,9 +56,8 @@ impl Supervisor {
                 Ok(permit) => permit,
                 Err(_saturated) => {
                     self.note_daemon_event("worker_overloaded", None);
-                    return Ok(crate::backpressure::overloaded_response(
-                        command_type,
-                        &resident.worker_id,
+                    return Ok(WorkerReply::Typed(
+                        crate::backpressure::overloaded_response(command_type, &resident.worker_id),
                     ));
                 }
             },
@@ -107,9 +106,8 @@ impl Supervisor {
                 RouteAdmission::ClientRequest => {
                     resident.pending.lock().await.remove(&request_id);
                     self.note_daemon_event("worker_overloaded", None);
-                    return Ok(crate::backpressure::overloaded_response(
-                        command_type,
-                        &resident.worker_id,
+                    return Ok(WorkerReply::Typed(
+                        crate::backpressure::overloaded_response(command_type, &resident.worker_id),
                     ));
                 }
                 RouteAdmission::SupervisorInternal => {
@@ -130,13 +128,15 @@ impl Supervisor {
         match tokio::time::timeout_at(deadline, reply_rx).await {
             // The writer pump resolves provably-unsent requests with the
             // not-connected failure: surface it as the retryable route
-            // error instead of a worker response.
-            Ok(Ok(response))
+            // error instead of a worker response. Only a typed reply can
+            // carry that marker (the supervisor itself produces it), so
+            // relayed bytes pass through untouched.
+            Ok(Ok(WorkerReply::Typed(response)))
                 if !response.success && response.error.as_deref() == Some(WORKER_NOT_CONNECTED) =>
             {
                 Err(anyhow!(WORKER_NOT_CONNECTED))
             }
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
             Err(_) => {
                 // A timed-out request's reply slot must not sit in the
@@ -171,7 +171,7 @@ impl Supervisor {
         payload: Value,
         timeout_ms: u64,
         admission: RouteAdmission,
-    ) -> Result<DaemonResponse> {
+    ) -> Result<WorkerReply> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             self.await_route_ready(resident, deadline).await?;
@@ -203,6 +203,37 @@ impl Supervisor {
                 other => return other,
             }
         }
+    }
+
+    /// The typed [`Self::route_command`]: supervisor-internal forwards read
+    /// the response tree, so the relayed byte path parses back here (the
+    /// payloads those routes carry are small).
+    pub(crate) async fn route_command_typed(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+        admission: RouteAdmission,
+    ) -> Result<DaemonResponse> {
+        self.route_command(resident, command_type, payload, timeout_ms, admission)
+            .await?
+            .typed()
+    }
+
+    /// The typed [`Self::route_command_ready`]: the replacement-aware route
+    /// with the response tree parsed back for callers that read it.
+    pub(crate) async fn route_command_ready_typed(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+        admission: RouteAdmission,
+    ) -> Result<DaemonResponse> {
+        self.route_command_ready(resident, command_type, payload, timeout_ms, admission)
+            .await?
+            .typed()
     }
 
     /// Wait until the resident is route-ready (a live connection whose
@@ -240,9 +271,15 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: String,
         type_name: String,
+        // The connection's raw outbound queue, when the caller is the
+        // client connection dispatch itself: the byte relay hands the
+        // spliced line to the connection writer directly. `None` (the
+        // supervisor-internal callers) forces the typed path - their
+        // responses are small and their callers read the returned lines.
+        raw_out: Option<&tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>>,
     ) -> (Vec<Value>, bool) {
         // TS routing gate: the generic forward requires the
         // `activeSessionId` field (present-but-empty is an unknown session,
@@ -299,7 +336,7 @@ impl Supervisor {
                         // supervisor retires the stale address
                         // itself and answers the detach.
                         if matches!(command, DaemonCommand::Detach { .. }) {
-                            attached.lock().unwrap().retain(|id| id != &selector);
+                            attached.detach(&self.session_subscribers, &selector);
                             return (
                                 vec![response_line(&response_success(
                                     Some(&command_id),
@@ -493,8 +530,123 @@ impl Supervisor {
         let response = self
             .route_command_ready(&resident, worker_command, payload, timeout, admission)
             .await;
+        // The byte relay: a routed response the supervisor neither edits nor
+        // inspects goes to the client as the worker's own payload bytes with
+        // the client's command id spliced in front. The worker serializes
+        // `response_line` (id absent), so its payload opens with
+        // `"type":"response"` and the splice reproduces the exact line the
+        // typed path would - without the parse, the per-key clone walk of
+        // `from_value`, the `response_line` deep clone, and the re-serialize.
+        // The typed path stays for every response this arm edits or reads
+        // beyond the frame header's hints: the chunked-snapshot attach
+        // clients, a rebound reattach (command echo rewrite), and the
+        // small-payload bookkeeping commands (detach, kill, rename, the
+        // promote-owned catalog forms). An attach-family relay also needs
+        // the frame header's success/activeSessionId hints for the
+        // supervisor's own bookkeeping; a hint-less one falls back to the
+        // typed parse so the bookkeeping never silently changes shape.
+        let client_wants_chunked = match command {
+            DaemonCommand::Attach {
+                capabilities,
+                supports_extension_ui,
+                ..
+            }
+            | DaemonCommand::Reattach {
+                capabilities,
+                supports_extension_ui,
+                ..
+            } => wants_chunked(&attach_client_capabilities(
+                capabilities.as_deref(),
+                *supports_extension_ui,
+            )),
+            _ => false,
+        };
+        let attach_family = matches!(
+            command,
+            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. }
+        );
+        let typed_needed = rebound_to.is_some()
+            || client_wants_chunked
+            || matches!(
+                command,
+                DaemonCommand::Detach { .. }
+                    | DaemonCommand::Kill { .. }
+                    | DaemonCommand::Rename { .. }
+                    | DaemonCommand::CronAdd {
+                        promote_owned_session: Some(true),
+                        ..
+                    }
+                    | DaemonCommand::HeartbeatSet {
+                        promote_owned_session: Some(true),
+                        ..
+                    }
+            );
+        let splice = match response.as_ref() {
+            Ok(reply) if raw_out.is_some() => {
+                // Only the response_line shape splices: an object that opens
+                // with the response tag carries no id field, so prepending
+                // one reproduces the typed path's key order exactly.
+                let has_payload = reply
+                    .relayed_payload()
+                    .is_some_and(|payload| payload.starts_with(b"{\"type\":\"response\""));
+                let hints_present = !attach_family
+                    || (reply.relayed_success().is_some()
+                        && reply.relayed_active_session_id().is_some());
+                has_payload && hints_present && !typed_needed
+            }
+            // No raw queue (a supervisor-internal caller) or a typed-only
+            // command: the typed path below.
+            _ => false,
+        };
+        if splice {
+            let Ok(reply) = response.as_ref() else {
+                unreachable!("the splice arm only runs on an Ok reply")
+            };
+            let success = reply.relayed_success();
+            let payload = reply.relayed_payload().unwrap_or_default();
+            if success == Some(true) && attach_family {
+                let active_id = reply
+                    .relayed_active_session_id()
+                    .map_or_else(|| resident.worker_id.clone(), str::to_string);
+                self.note_daemon_event(
+                    if matches!(command, DaemonCommand::Reattach { .. }) {
+                        "reattach"
+                    } else {
+                        "attach"
+                    },
+                    None,
+                );
+                let (session_id, session_file) = {
+                    let descriptor = resident.descriptor.lock().await;
+                    (
+                        descriptor.root_session_id.clone(),
+                        descriptor.session_file.clone(),
+                    )
+                };
+                self.record_session_binding(
+                    &active_id,
+                    session_id.as_deref(),
+                    session_file.as_deref(),
+                );
+                attached.attach(&self.session_subscribers, &active_id);
+            }
+            let line = spliced_client_line(&command_id, payload);
+            if let Some(raw_out) = raw_out {
+                let _ = raw_out.send((vec![Outbound::Raw(line)], false)).await;
+            }
+            return (Vec::new(), false);
+        }
+
         match response {
-            Ok(mut response) => {
+            Ok(reply) => {
+                let mut response = reply.typed().unwrap_or_else(|_| {
+                    response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "invalid worker response",
+                        None,
+                    )
+                });
                 // Worker replies carry no client request id; clients match
                 // responses by the id they sent, so stamp it back here.
                 response.id = Some(command_id.clone());
@@ -544,10 +696,7 @@ impl Supervisor {
                                 session_id.as_deref(),
                                 session_file.as_deref(),
                             );
-                            let mut attached = attached.lock().unwrap();
-                            if !attached.iter().any(|id| id == &active_id) {
-                                attached.push(active_id.clone());
-                            }
+                            attached.attach(&self.session_subscribers, &active_id);
                             // The client's own capability set, not the
                             // supervisor's worker-facing one, is echoed in
                             // the attach result.
@@ -575,14 +724,13 @@ impl Supervisor {
                     if response.success {
                         self.note_daemon_event("detach", None);
                         // The retire removes the RESIDENT's active id - the
-                        // id the attached vec actually holds (the selector
+                        // id the attached list actually holds (the selector
                         // may be a durable-id alias for the same session).
                         // A rebound detach never reaches this handler; the
                         // rebind seam retires its superseded address itself.
-                        attached
-                            .lock()
-                            .unwrap()
-                            .retain(|id| id != &resident.worker_id);
+                        // The registry entry goes first: delivery stops at
+                        // the detach instant (TS send-time semantics).
+                        attached.detach(&self.session_subscribers, &resident.worker_id);
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
@@ -671,4 +819,25 @@ impl Supervisor {
             }
         }
     }
+}
+
+/// The client response line for one relayed worker payload: the worker's
+/// own `response_line` bytes with the client's command id spliced in front.
+/// The worker serializes its responses with the id field absent, so the
+/// payload opens with `"type":"response"` and the splice reproduces the
+/// exact bytes the typed path's `response_line` -> `to_string` round trip
+/// emits. The trailing newline is part of the line.
+pub(crate) fn spliced_client_line(command_id: &str, worker_payload: &[u8]) -> Vec<u8> {
+    let mut line = Vec::with_capacity(command_id.len() + worker_payload.len() + 8);
+    line.extend_from_slice(b"{\"id\":");
+    serde_json::to_writer(&mut line, &Value::String(command_id.to_string()))
+        .expect("a command id serializes");
+    line.extend_from_slice(b",");
+    if worker_payload.first() == Some(&b'{') {
+        line.extend_from_slice(&worker_payload[1..]);
+    } else {
+        line.extend_from_slice(worker_payload);
+    }
+    line.push(b'\n');
+    line
 }

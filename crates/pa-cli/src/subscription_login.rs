@@ -25,7 +25,7 @@ use pa_ai::oauth::{
 use pa_core::auth::{
     AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID, XAI_PROVIDER_ID,
 };
-use pa_tui::auth_panel::{AuthPanelHandle, PasteStyle};
+use pa_tui::auth_panel::{AuthPanelHandle, PastePromptTone, PasteStyle};
 use pa_tui::provider_auth::ProviderAuthOutcome;
 
 /// TS the login dialog's manual-input prompt (the callback-server
@@ -60,7 +60,10 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
         self.panel.auth_url(url, instructions);
         pa_core::platform::browser::open_in_browser(url);
         if self.provider_id == GITHUB_COPILOT_PROVIDER_ID {
-            self.panel.progress(COPILOT_WAITING);
+            // TS `showWaiting` (the dialog's own method, no onboarding
+            // guard — never the `onProgress` chatter arm the onboarding
+            // block drops).
+            self.panel.waiting(COPILOT_WAITING);
         }
     }
 
@@ -80,18 +83,23 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
             if allow_empty {
                 // TS `OAuthPrompt.allowEmpty`: a blank submit is a valid
                 // answer (the Copilot domain prompt's "blank for
-                // github.com").
+                // github.com"). TS `showPrompt` renders the message as
+                // the text-coloured section title.
                 panel
-                    .paste_prompt_allow_empty(&message, PasteStyle::Visible)
+                    .paste_prompt_allow_empty(&message, PastePromptTone::Text, PasteStyle::Visible)
                     .await
             } else {
-                panel.paste_prompt(&message, PasteStyle::Visible).await
+                panel
+                    .paste_prompt(&message, PastePromptTone::Text, PasteStyle::Visible)
+                    .await
             }
         })
     }
 
     fn on_progress(&self, message: &str) {
-        self.panel.progress(message);
+        // TS `showLoginDialog`'s `onProgress` arm is unguarded chatter —
+        // a direct `dialog.showProgress` line: renders on every surface.
+        self.panel.progress_line(message);
     }
 
     fn on_manual_code_input(
@@ -100,7 +108,11 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
         let panel = self.panel.clone();
         Some(Box::pin(async move {
             panel
-                .paste_prompt(MANUAL_INPUT_PROMPT, PasteStyle::Visible)
+                .paste_prompt(
+                    MANUAL_INPUT_PROMPT,
+                    PastePromptTone::Muted,
+                    PasteStyle::Visible,
+                )
                 .await
         }))
     }
@@ -665,10 +677,11 @@ mod tests {
             }
             _ => panic!("expected the url block request"),
         }
-        // TS `showWaiting` for the Copilot device flow.
+        // TS `showWaiting` for the Copilot device flow: the dialog's own
+        // method, on every surface — never the `onProgress` chatter arm.
         let waiting = rx.recv().await.expect("the waiting line sends");
         match waiting {
-            pa_tui::auth_panel::AuthPanelRequest::Progress { message } => {
+            pa_tui::auth_panel::AuthPanelRequest::Waiting { message } => {
                 assert_eq!(message, "Waiting for browser authentication...");
             }
             _ => panic!("expected the waiting line request"),

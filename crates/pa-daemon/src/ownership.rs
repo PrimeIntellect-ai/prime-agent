@@ -260,7 +260,7 @@ impl Supervisor {
     /// worker cannot answer - the TS arm answers `data: null` then).
     async fn retry_summary(&self, resident: &Arc<ResidentWorker>) -> Option<Value> {
         match self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "get_state",
                 json!({}),

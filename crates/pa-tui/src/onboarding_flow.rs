@@ -7,6 +7,7 @@
 //! the picker, the loop re-mounts a fresh picker, the question ends the
 //! flow).
 
+use crate::auth_panel::PrimeTeamPick;
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::search_field_plain_row;
 use crate::onboarding::{highlight_wash, wrap_words, OnboardingDecision};
@@ -15,6 +16,7 @@ use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use ratatui::style::Modifier;
+use tokio::sync::oneshot;
 
 /// TS `prompt` (the picker's question line).
 pub(crate) const PROVIDERS_PROMPT: &str = "Connect other providers, or continue.";
@@ -365,6 +367,17 @@ pub enum OnboardingPanel {
     Providers(ProviderPicker),
     /// The trace question (TS `askOnboardingTraceOptIn`'s choice).
     Question(OnboardingChoice),
+    /// The Prime team question (TS `showPrimeTeamSelector`'s onboarding
+    /// arm — `OnboardingChoiceComponent` with the personal account and
+    /// the teams' rows; no heading, so the brand line returns). The
+    /// pick answers the flow's `SelectTeam` request directly: the login
+    /// flow settles through its own future (the panel yields no
+    /// decision).
+    TeamQuestion {
+        choice: OnboardingChoice,
+        teams: Vec<crate::auth_panel::PrimeTeamOption>,
+        reply: Option<oneshot::Sender<PrimeTeamPick>>,
+    },
 }
 
 impl OnboardingPanel {
@@ -389,7 +402,9 @@ impl OnboardingPanel {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.render(theme, width, kb),
             OnboardingPanel::Providers(picker) => picker.render(theme, width),
-            OnboardingPanel::Question(choice) => choice.render(theme, width),
+            OnboardingPanel::Question(choice) | OnboardingPanel::TeamQuestion { choice, .. } => {
+                choice.render(theme, width)
+            }
         }
     }
 
@@ -430,18 +445,63 @@ impl OnboardingPanel {
                 }
                 None
             }
+            // TS `showPrimeTeamSelector`'s onboarding arm: the choice
+            // answers its own oneshot (index 0 the personal account,
+            // 1.. the teams; a cancel keeps the stored selection) — the
+            // login flow behind the question settles through its own
+            // future, so the panel yields no decision.
+            OnboardingPanel::TeamQuestion {
+                choice,
+                teams,
+                reply,
+            } => {
+                if kb.matches(key, "tui.select.cancel") {
+                    if let Some(reply) = reply.take() {
+                        let _ = reply.send(PrimeTeamPick::Cancelled);
+                    }
+                    return None;
+                }
+                if kb.matches(key, "tui.select.up") {
+                    choice.move_selection(-1);
+                    return None;
+                }
+                if kb.matches(key, "tui.select.down") {
+                    choice.move_selection(1);
+                    return None;
+                }
+                if kb.matches(key, "tui.select.confirm") {
+                    if let Some(reply) = reply.take() {
+                        let _ = reply.send(Self::choice_pick(choice.selected(), teams));
+                    }
+                }
+                None
+            }
         }
     }
 
     /// One paste payload (TS the mounted input's paste): the login
-    /// dialog's field, or the picker's search — the question has no
+    /// dialog's field, or the picker's search — the questions have no
     /// input.
     pub fn handle_paste(&mut self, text: &str) {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.handle_paste(text),
             OnboardingPanel::Providers(picker) => picker.handle_paste(text),
-            OnboardingPanel::Question(_) => {}
+            OnboardingPanel::Question(_) | OnboardingPanel::TeamQuestion { .. } => {}
         }
+    }
+
+    /// The team question's answer (TS `OnboardingChoiceComponent`'s
+    /// `onSelect`): index 0 the personal account, 1.. the team row — a
+    /// row past the list (a clamped seed cannot reach it) answers the
+    /// personal account.
+    fn choice_pick(selected: usize, teams: &[crate::auth_panel::PrimeTeamOption]) -> PrimeTeamPick {
+        if selected == 0 {
+            return PrimeTeamPick::PersonalAccount;
+        }
+        teams
+            .get(selected - 1)
+            .cloned()
+            .map_or(PrimeTeamPick::PersonalAccount, PrimeTeamPick::Team)
     }
 }
 
