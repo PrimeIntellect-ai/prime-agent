@@ -3,6 +3,19 @@
 //! event application, and session switching. Rendering itself lives in the
 //! view crate modules; this module only decides what the view shows.
 
+mod auth;
+mod heartbeats;
+mod stream;
+
+use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
+use heartbeats::paused_heartbeat_count;
+pub(crate) use heartbeats::HeartbeatsUpdate;
+use stream::already_running_warning;
+pub(crate) use stream::resume_hint_from_stats;
+use stream::streaming_tray_hint;
+use stream::LoaderTokenTracker;
+use stream::SpeedStats;
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
@@ -192,18 +205,6 @@ pub(crate) struct CompactionAbortNote {
     pub(crate) outcome: Result<(), String>,
 }
 
-/// A landed heartbeat-catalog refresh for the `/heartbeats` view (TS
-/// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
-/// the fetch error that keeps the last catalog (stale-while-revalidate).
-pub(crate) struct HeartbeatsUpdate {
-    /// The refresh epoch this snapshot belongs to: a response older than
-    /// the session's current epoch is stale and never overwrites a newer
-    /// catalog.
-    pub epoch: u64,
-    pub heartbeats: Vec<HeartbeatEntry>,
-    pub fetch_error: Option<String>,
-}
-
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
@@ -292,30 +293,6 @@ struct TraceUploadAllRun {
 enum TracesLoginIntent {
     Login,
     Enable,
-}
-
-/// The outcome of one daemon `set_model` attempt: the switch landed, the
-/// provider is not signed in (the typed refusal — the sign-in flow owns
-/// the retry), or the switch failed (the error row already rendered).
-#[derive(Debug)]
-enum SetModelOutcome {
-    Switched,
-    NeedsSignIn,
-    Failed,
-}
-
-/// A model selection parked on the provider's sign-in (TS
-/// `ensureModelProviderConfigured` → `completeModelSelection`): the
-/// picker applied a model whose provider is not signed in, the sign-in
-/// flow runs, and a successful login retries the switch — including the
-/// user-edited effort, exactly like a direct selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingModelSignIn {
-    /// The provider the sign-in serves (the login outcome must match it).
-    provider: String,
-    model_id: String,
-    /// The picked model's user-edited effort, applied after the retry.
-    effort: Option<String>,
 }
 
 /// TS status notes: the mutation status vocabulary (`applied`, `rejected`,
@@ -450,6 +427,10 @@ pub(crate) struct SessionUi {
     /// when the flow spawns (so a later key cannot spawn a second flow
     /// over the same panel), consumed by the settle.
     traces_login_run: Option<TracesLoginIntent>,
+    /// The generation of the in-flight traces login: incremented on
+    /// each spawn; a late settle from a superseded run never clears
+    /// the newer login's panel (#2845 review).
+    traces_login_gen: u64,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -917,6 +898,7 @@ impl SessionUi {
             traces_upload_notes,
             pending_traces_login: None,
             traces_login_run: None,
+            traces_login_gen: 0,
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -3072,129 +3054,6 @@ impl SessionUi {
             .expect("prompt stash store poisoned");
         store.for_session(stash_session_id).stash_draft_head(stash);
     }
-
-    /// The working loader starts with a `Waiting` activity and a zero
-    /// token count (TS `agent_start` resets the tracker).
-    fn start_loader(&mut self, view: &mut AgentView) {
-        view.working = Some(WorkingState {
-            activity: "Waiting",
-            message: None,
-            download: false,
-            tokens: 0,
-            elapsed_secs: 0,
-        });
-        view.working_since = Some(std::time::Instant::now());
-        self.working_tokens.reset();
-    }
-
-    /// Update the loader's activity label from one provider stream event
-    /// (TS `AgentActivityTracker`: thinking/text/toolcall events switch the
-    /// label and direction). Token counting lives in
-    /// [`Self::track_stream_tokens`]: the event's own delta is only the
-    /// last of possibly many coalesced provider deltas, so the message —
-    /// not the delta — carries the token truth.
-    fn track_stream_activity(&mut self, event: &Value, view: &mut AgentView) {
-        let (activity, download) = match event.get("type").and_then(Value::as_str) {
-            Some("thinking_start" | "thinking_delta") => ("Thinking", true),
-            Some("text_start" | "text_delta") => ("Writing", true),
-            Some("toolcall_start" | "toolcall_delta") => ("Writing code", true),
-            _ => return,
-        };
-        if let Some(working) = &mut view.working {
-            working.activity = activity;
-            working.download = download;
-        }
-    }
-}
-
-/// The loader's token accounting (TS `AgentActivityTracker`): the live
-/// count is completed-message output tokens plus max(reported usage, the
-/// content estimate at 4 chars per token), reported monotonically within a
-/// run. The live count derives from the streamed message itself — never
-/// from per-delta sums — because the worker coalesces provider deltas into
-/// latest-snapshot frames and a delta sum would undercount.
-#[derive(Debug, Default)]
-struct LoaderTokenTracker {
-    /// Settled-message output tokens, banked at `message_end` (TS
-    /// `completedTokens`).
-    completed_tokens: u64,
-    /// The streaming message's reported `usage.output` (TS
-    /// `streamingUsageTokens`).
-    streaming_usage: u64,
-    /// The streaming message's content size in chars (TS accumulates the
-    /// same value as a delta sum; the snapshot message carries it directly).
-    streaming_chars: u64,
-}
-
-impl LoaderTokenTracker {
-    /// TS `agent_start`/`reset`: a fresh run counts from zero.
-    fn reset(&mut self) {
-        self.completed_tokens = 0;
-        self.start_message();
-    }
-
-    /// TS `message_start` (assistant): the new message's live state starts
-    /// empty — its reported usage only counts from the first update.
-    fn start_message(&mut self) {
-        self.streaming_usage = 0;
-        self.streaming_chars = 0;
-    }
-
-    /// TS `message_update`: adopt the message's reported usage and size,
-    /// returning the live count.
-    fn apply_streaming(&mut self, usage_output: u64, content_chars: u64) -> u64 {
-        self.streaming_usage = usage_output;
-        self.streaming_chars = content_chars;
-        self.current()
-    }
-
-    /// TS `message_end`: bank the message's tokens into the completed
-    /// count (authoritative usage when reported, else the live estimate)
-    /// and clear the live state.
-    fn settle(&mut self, usage_output: u64) {
-        let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
-        self.completed_tokens += if usage_output > 0 {
-            usage_output
-        } else {
-            estimate
-        };
-        self.start_message();
-    }
-
-    /// TS `currentTokens`: completed tokens plus max(reported usage, the
-    /// chars/4 estimate).
-    fn current(&self) -> u64 {
-        let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
-        self.completed_tokens + self.streaming_usage.max(estimate)
-    }
-}
-
-/// Per-session output tok/sec accumulation for `/speed` (TS `speedStats`):
-/// output tokens and wall-clock spans summed over the session's completed
-/// responses.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct SpeedStats {
-    tokens: u64,
-    duration_ms: i64,
-    samples: u32,
-}
-
-impl SpeedStats {
-    /// The session-average rate in tok/s over the accumulated span (TS
-    /// `speedStats.tokens / (speedStats.durationMs / 1000)`).
-    fn average_rate(&self) -> f64 {
-        self.tokens as f64 / (self.duration_ms as f64 / 1000.0)
-    }
-}
-
-/// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
-/// below.
-fn format_rate(tokens_per_second: f64) -> String {
-    if tokens_per_second >= 100.0 {
-        format!("{tokens_per_second:.0}")
-    } else {
-        format!("{tokens_per_second:.1}")
-    }
 }
 
 impl SessionUi {
@@ -4172,322 +4031,6 @@ impl SessionUi {
     }
 
     // ------------------------------------------------------------------
-    // Provider auth (/login, /logout)
-    // ------------------------------------------------------------------
-
-    /// `/login` / `/logout` (TS `showConfigurationMenu("providers")` /
-    /// `showLogoutSelector`): fetch the hook's rows and mount the selector.
-    /// An empty logout store answers the TS status directly.
-    async fn open_provider_auth(
-        &mut self,
-        kind: AuthSelectorKind,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(auth) = self.provider_auth.clone() else {
-            let command = if kind == AuthSelectorKind::Login {
-                "/login"
-            } else {
-                "/logout"
-            };
-            self.note(
-                &format!("{command} is not available in this client yet"),
-                view,
-            );
-            return Ok(());
-        };
-        let rows = match kind {
-            AuthSelectorKind::Login => auth.0.login_options().await,
-            AuthSelectorKind::Logout => auth.0.logout_options().await,
-        };
-        if kind == AuthSelectorKind::Logout && rows.is_empty() {
-            self.note(
-                "No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
-                view,
-            );
-            return Ok(());
-        }
-        view.editor.set_text("");
-        view.provider_auth = Some(crate::provider_auth::ProviderAuthSelector::new(kind, rows));
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// One key press while the provider selector owns the frame (TS
-    /// `OAuthSelectorComponent.handleInput`): Enter closes the panel and
-    /// runs the row's flow; the panel-driven flows mount the inline auth
-    /// panel and spawn.
-    async fn handle_provider_auth_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        let action = {
-            let Some(selector) = view.provider_auth.as_mut() else {
-                return Ok(());
-            };
-            let kb = view.editor.keybindings();
-            selector.handle_key(&id, kb)
-        };
-        match action {
-            AuthSelectorAction::None => {}
-            AuthSelectorAction::Cancel => {
-                view.provider_auth = None;
-                // Closing the sign-in menu abandons the parked model
-                // selection (TS: a cancelled login never applies the
-                // model).
-                self.pending_model_sign_in = None;
-            }
-            AuthSelectorAction::LoginError { message } => {
-                view.provider_auth = None;
-                // A failed key submission abandons the parked model
-                // selection too (an empty key never counts as a login).
-                self.pending_model_sign_in = None;
-                self.error_row(&message, view);
-            }
-            AuthSelectorAction::Login { provider, api_key } => {
-                view.provider_auth = None;
-                // The panel-prompted key: store it (TS
-                // `showApiKeyLoginDialog`'s save path, no panel
-                // needed).
-                if let Some(api_key) = api_key {
-                    let auth = self.provider_auth.clone().expect("the selector was open");
-                    let outcome = auth.0.login(&provider, Some(&api_key)).await;
-                    self.apply_auth_outcome(outcome, &provider.id, view).await;
-                } else {
-                    let auth = self.provider_auth.clone().expect("the selector was open");
-                    if provider.id.starts_with("mcp:")
-                        || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        || crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
-                            .contains(&provider.id.as_str())
-                    {
-                        self.start_provider_panel_login(&provider, auth, view);
-                    } else {
-                        // The menu marks unported subscription rows
-                        // unavailable and Enter never selects them; a row
-                        // reaching here answers the silent cancel — no
-                        // after-selection error wall.
-                        let outcome = auth.0.login(&provider, None).await;
-                        self.apply_auth_outcome(outcome, &provider.id, view).await;
-                    }
-                }
-            }
-            AuthSelectorAction::Logout { provider } => {
-                view.provider_auth = None;
-                // The settled outcome drops any parked model sign-in
-                // (`apply_auth_outcome` consumes it), so a logout never
-                // leaves a model waiting on the credential it removed.
-                let auth = self.provider_auth.clone().expect("the selector was open");
-                let outcome = auth.0.logout(&provider).await;
-                self.apply_auth_outcome(outcome, &provider.id, view).await;
-            }
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// The auth panel's request channel (TS the login dialog's surface
-    /// seam): the onboarding phase drives its flows against the same
-    /// channel the run loop services after the pane ends.
-    pub(crate) fn auth_panel_handle(&self) -> crate::auth_panel::AuthPanelHandle {
-        crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone())
-    }
-
-    /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
-    /// Inference login, the Codex Subscription login): mount the inline
-    /// auth panel (TS `showAuthPanel` mounts the login dialog as the
-    /// flow starts) and spawn the flow against it. The flow's requests
-    /// fold into the panel through the run loop's channel arm; the
-    /// settled outcome lands the same way (the flow never touches the
-    /// terminal). Flows that check the cooperative cancel (#2770: the
-    /// codex subscription login) arm its shared flag so Esc/ctrl+c on
-    /// the mounted panel ends the flow without writing credentials.
-    fn start_provider_panel_login(
-        &mut self,
-        provider: &crate::provider_auth::ProviderRow,
-        auth: crate::provider_auth::ProviderAuthCommandsHandle,
-        view: &mut AgentView,
-    ) {
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            provider.name
-        )));
-        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
-        // A still-running previous flow ends before its replacement arms:
-        // its flag marks the blocking body out of the way, and its late
-        // settle is skipped below so it can never close the newer panel.
-        if let Some(previous) = self.auth_panel_cancel.take() {
-            previous.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
-            .contains(&provider.id.as_str())
-            .then(|| panel.cancel_flag());
-        let provider = provider.clone();
-        tokio::spawn(async move {
-            let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            // The driving surface already exited (Esc, or a newer login
-            // re-armed): the panel is unmounted, the outcome is cancelled
-            // or errored by the flow's own checks, and applying a stale
-            // settle would close the NEWER flow's panel — so it never
-            // lands (TS the cancelled dialog's outcome is dropped with
-            // the dialog).
-            if !panel.cancelled() {
-                panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
-                    provider: provider.id.clone(),
-                    outcome,
-                });
-            }
-        });
-    }
-
-    /// One key press while the inline auth panel owns the frame (TS the
-    /// login dialog's / team selector's `handleInput`): the panel answers
-    /// its mounted input through the request's oneshot.
-    async fn handle_auth_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        // The panel consumes Ctrl+C (cancel the mounted input, not the
-        // app): report the handled press so the force-quit guard stays in
-        // sync with the reader's observations.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let kb = view.editor.keybindings();
-        if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_key(&id, kb, &mut self.osc_sink);
-        }
-        // A cancel key on an armed panel flow ends it cooperatively
-        // (#2770): the flag marks the blocking body (no credential write
-        // after the exit), the panel unmounts, and the settled outcome
-        // is the silent cancel.
-        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
-        if cancel_key {
-            if let Some(cancel) = self.auth_panel_cancel.take() {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                view.auth_panel = None;
-            }
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// One flow outcome (TS `completeProviderAuthentication`'s status vs
-    /// the flow's error row). The parked model sign-in is consumed by the
-    /// outcome: a successful login of its provider retries the switch;
-    /// a failed or cancelled flow — or a settled login for a different
-    /// provider, which abandons the route the user left — drops the park
-    /// (the outcome's own rows render as usual).
-    pub(crate) async fn apply_auth_outcome(
-        &mut self,
-        outcome: crate::provider_auth::ProviderAuthOutcome,
-        provider: &str,
-        view: &mut AgentView,
-    ) {
-        let parked = self
-            .pending_model_sign_in
-            .take()
-            .filter(|pending| pending.provider == provider);
-        match outcome {
-            crate::provider_auth::ProviderAuthOutcome::Status(message) => {
-                self.note(&message, view);
-                if let Some(pending) = parked {
-                    self.finish_model_sign_in(pending, view).await;
-                }
-                // A landed login or logout may change the auth scope the
-                // daemon's catalog refreshes under: re-fetch now so the
-                // next open serves the new account's view. The parked
-                // sign-in arm already fires one (both are harmless: the
-                // daemon's AuthChange detector forces the same gated,
-                // idempotent refresh).
-                self.spawn_model_catalog_refresh();
-            }
-            // The failed and cancelled flows drop the park above (the
-            // `take`); their own rows render as usual.
-            crate::provider_auth::ProviderAuthOutcome::Error(message) => {
-                self.error_row(&message, view);
-            }
-            // A cancelled flow stays silent (the TS cancelled state shows
-            // no row either).
-            crate::provider_auth::ProviderAuthOutcome::Cancelled => {}
-        }
-    }
-
-    /// One paste payload while the inline auth panel owns the frame: the
-    /// payload lands in the panel's mounted input (the paste field or
-    /// the picker's search) — never in the hidden editor behind the
-    /// panel, where a later Enter could submit the secret as a prompt.
-    pub(crate) fn paste_to_auth_panel(&mut self, text: &str, view: &mut AgentView) {
-        if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_paste(text);
-        }
-        self.dirty = true;
-    }
-
-    /// One request from a login flow driving the inline auth panel (the
-    /// run loop's channel arm folds it in): the render requests mount
-    /// into the panel (a request with no mounted panel cancels its flow
-    /// — the dropped oneshot reply, the same contract a closed terminal
-    /// input had); the settled requests unmount the panel and apply the
-    /// outcome (a flow that never needed input — the credential-reuse
-    /// paths — still settles).
-    pub(crate) async fn apply_auth_panel_request(
-        &mut self,
-        request: crate::auth_panel::AuthPanelRequest,
-        view: &mut AgentView,
-    ) {
-        use crate::auth_panel::AuthPanelRequest;
-        match request {
-            AuthPanelRequest::Progress { message } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.push_progress(message);
-                }
-            }
-            AuthPanelRequest::AuthUrl { url, instructions } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.show_auth_url(url, instructions);
-                }
-            }
-            AuthPanelRequest::PastePrompt {
-                prompt,
-                style,
-                allow_empty,
-                reply,
-            } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, allow_empty, reply);
-                }
-            }
-            AuthPanelRequest::SelectTeam {
-                teams,
-                current,
-                reply,
-            } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_teams(teams, current, reply);
-                }
-            }
-            AuthPanelRequest::ProviderSettled { provider, outcome } => {
-                self.auth_panel_cancel = None;
-                view.auth_panel = None;
-                self.apply_auth_outcome(outcome, &provider, view).await;
-                self.maybe_warn_anthropic_subscription_auth(&provider, view);
-            }
-            AuthPanelRequest::McpSettled { note } => {
-                view.auth_panel = None;
-                self.note(&note, view);
-            }
-            AuthPanelRequest::TracesSettled { outcome } => {
-                view.auth_panel = None;
-                self.finish_traces_login(outcome, view).await;
-            }
-        }
-        self.dirty = true;
-    }
-
-    // ------------------------------------------------------------------
     // Update (/update)
     // ------------------------------------------------------------------
 
@@ -4783,13 +4326,15 @@ impl SessionUi {
             return;
         };
         self.traces_login_run = Some(intent);
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
-            "Login to Prime Agent Traces",
-        ));
+        self.traces_login_gen += 1;
+        let gen = self.traces_login_gen;
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
+        traces_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(traces_dialog);
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
+            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome, gen });
         });
     }
 
@@ -5551,71 +5096,6 @@ impl SessionUi {
         }
     }
 
-    /// `/speed on/off`: toggles the footer tok/sec readout for this
-    /// session (TS `setSpeedDisplay`): the flag lives on the client;
-    /// disabling clears the stats and the row (TS `resetSpeedStats`), and
-    /// the status row reports the TS wording either way.
-    fn set_speed_display(&mut self, enabled: bool, view: &mut AgentView) {
-        self.speed_display_enabled = enabled;
-        if !enabled {
-            self.speed_stats = None;
-            view.chrome.speed_text = None;
-        }
-        let status = if enabled {
-            "Speed display on — footer shows output tok/s per model response and a session average"
-        } else {
-            "Speed display off"
-        };
-        self.note(status, view);
-    }
-
-    /// Updates the footer tok/sec readout from a completed assistant
-    /// message (TS `recordSpeedSample`): output tokens over the
-    /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this `message_end` arrival. Timestamps keep the span true
-    /// even when buffered session events replay back-to-back on attach.
-    /// Aborted/failed responses and samples without a finite positive
-    /// span or token count are skipped: some providers only fill usage at
-    /// stream end, so they never produce a bogus rate.
-    fn record_speed_sample(&mut self, message: &Value, view: &mut AgentView) {
-        if !self.speed_display_enabled {
-            return;
-        }
-        let stop_reason = message
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if stop_reason == "aborted" || stop_reason == "error" {
-            return;
-        }
-        // TS reads `Number(message.timestamp)`: a frame without one is NaN
-        // in TS and fails its `> 0` guard, so it is skipped here too — a
-        // zero-default would span the epoch and poison the average.
-        let Some(timestamp) = message.get("timestamp").and_then(Value::as_i64) else {
-            return;
-        };
-        let duration_ms = crate::agents_view_state::now_ms() as i64 - timestamp;
-        let output_tokens = message
-            .get("usage")
-            .and_then(|usage| usage.get("output"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if duration_ms <= 0 || output_tokens == 0 {
-            return;
-        }
-        let stats = self.speed_stats.get_or_insert_with(SpeedStats::default);
-        stats.tokens += output_tokens;
-        stats.duration_ms += duration_ms;
-        stats.samples += 1;
-        let last = format_rate(output_tokens as f64 / (duration_ms as f64 / 1000.0));
-        let average = format_rate(stats.average_rate());
-        view.chrome.speed_text = Some(if stats.samples > 1 {
-            format!("{last} tok/s · avg {average}")
-        } else {
-            format!("{last} tok/s")
-        });
-    }
-
     /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
@@ -6195,54 +5675,6 @@ impl SessionUi {
         self.escape_repeat_until = Some(Instant::now() + ESCAPE_REPEAT_WINDOW_MS);
     }
 
-    /// `/mcp` (menu-only: the bare command opens the inline connections
-    /// view; a submitted argument is the usage error; the view resolves
-    /// its own auth through the internal seam).
-    async fn handle_mcp_command(
-        &mut self,
-        resolved: &pa_types::slash_commands::ResolvedSlashCommand,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        self.track_command_used("mcp");
-        // `/mcp` is menu-only: the TS `handleMcpCommand` typed subcommands
-        // (login/logout/...) are deliberately removed — the connections
-        // view resolves its own auth internally, and a submitted argument
-        // is the usage error. A partial + Tab opens the view filtered.
-        if !resolved.args.trim().is_empty() {
-            view.editor
-                .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-            self.error_row("Usage: /mcp (Tab filters the menu)", view);
-            return Ok(());
-        }
-        self.open_mcp_view("/mcp", view, "").await?;
-        self.track_menu_opened("mcp", "command");
-        Ok(())
-    }
-
-    /// Run one internal MCP auth request (the `/mcp` view's resolution):
-    /// mount the inline auth panel (TS the login dialog / token paste
-    /// panel mounts as the flow starts) and spawn the command against
-    /// it; the settled line folds in through the panel channel. An
-    /// unavailable auth client reports the TS note.
-    pub(crate) fn run_mcp_auth(&mut self, view: &mut AgentView) {
-        let Some(intent) = self.pending_mcp_auth.take() else {
-            return;
-        };
-        let Some(auth) = self.client_auth.clone() else {
-            self.note("/mcp is not available in this client yet", view);
-            return;
-        };
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
-        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
-        let args = intent.args;
-        tokio::spawn(async move {
-            let note =
-                crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &args, panel.clone())
-                    .await;
-            panel.send(crate::auth_panel::AuthPanelRequest::McpSettled { note });
-        });
-    }
-
     /// Whether the `/mcp` view parked an auth request for the loop to
     /// spawn (checked after each dispatched key).
     pub(crate) fn pending_mcp_auth(&self) -> bool {
@@ -6289,115 +5721,6 @@ impl SessionUi {
                 telemetry.menu_opened(menu, source).await;
             });
         }
-    }
-
-    /// Open the inline `/mcp` connections view over the daemon's
-    /// `get_mcp_connections` roster, its filter prefilled with `search`
-    /// (the Tab-intercepted partial). The daemon answers from local state
-    /// (the roster and the resolved catalog views, no kernel round-trip),
-    /// so the open is as instant as the TS picker's and the ordinary
-    /// request deadline applies.
-    /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
-    /// failed roster load reports the command that failed.
-    async fn open_mcp_view(
-        &mut self,
-        command: &str,
-        view: &mut AgentView,
-        search: &str,
-    ) -> Result<()> {
-        let data = match self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetMcpConnections {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    rest: Map::default(),
-                },
-            )
-            .await
-        {
-            Ok(data) => data,
-            Err(error) => {
-                self.note(&format!("{command} failed: {error:#}"), view);
-                return Ok(());
-            }
-        };
-        let mut mcp_view = crate::mcp_view::McpView::from_response(
-            &data,
-            picker_viewport_rows(view.terminal_rows()),
-        );
-        if !search.trim().is_empty() {
-            mcp_view.set_search(search);
-        }
-        view.mcp_view = Some(mcp_view);
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter (or the paste flow) resolves the selected
-    /// connection by parking `pending_mcp_auth`, which the input loop
-    /// mounts the inline auth panel for once the key handler returns;
-    /// everything else navigates or edits the search field.
-    async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        // The view consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let action = view
-            .mcp_view
-            .as_mut()
-            .map(|mcp_view| mcp_view.handle_key(&id, view.editor.keybindings()));
-        match action {
-            Some(crate::mcp_view::McpViewAction::None) | None => {}
-            Some(crate::mcp_view::McpViewAction::Cancel) => {
-                view.mcp_view = None;
-                self.picker_restored_draft = false;
-                self.dirty = true;
-            }
-            Some(crate::mcp_view::McpViewAction::Select { server, label }) => {
-                view.mcp_view = None;
-                self.dirty = true;
-                // The Tab path leaves the typed `/mcp <partial>` behind;
-                // resolving fulfills the command (a Cancel keeps it). The
-                // browse-restore path holds the user's draft instead —
-                // the resolution fulfills the command, the draft stays.
-                if self.picker_restored_draft {
-                    self.picker_restored_draft = false;
-                } else {
-                    view.editor.set_text("");
-                }
-                // TS `authenticate`: Enter runs the connection's login
-                // flow. The typed-command arg path is gone, so the view
-                // resolves through the internal auth seam instead of a
-                // submitted `/mcp login <name>` string.
-                self.pending_mcp_auth = Some(McpAuthIntent {
-                    args: format!("login {server}"),
-                    title: format!("Login to {label}"),
-                });
-            }
-            Some(crate::mcp_view::McpViewAction::Paste { server, label }) => {
-                view.mcp_view = None;
-                self.dirty = true;
-                if self.picker_restored_draft {
-                    self.picker_restored_draft = false;
-                } else {
-                    view.editor.set_text("");
-                }
-                // The inline paste panel's client surface: prompt for the
-                // token, store it bound to the service endpoint, verify.
-                self.pending_mcp_auth = Some(McpAuthIntent {
-                    args: format!("paste {server}"),
-                    title: format!("Connect {label}"),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
@@ -6740,6 +6063,17 @@ impl SessionUi {
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
             if !overlay_focused {
                 view.scroll_by(delta);
+                self.dirty = true;
+            }
+            return;
+        }
+        // A buttonless motion report is the hover (operator directive
+        // 2026-09-26: `?1003` any-event tracking delivers it): the
+        // hovered clickable card row records its hover state, and the
+        // frame re-renders only when that state changed — a motion burst
+        // across one row never schedules a render per report.
+        if event.button == crate::mouse::BUTTON_NONE && event.motion {
+            if view.note_hover(row, col) {
                 self.dirty = true;
             }
             return;
@@ -7400,220 +6734,6 @@ impl SessionUi {
         Ok(())
     }
 
-    /// One key press while the `/heartbeats` view is open: Esc/Ctrl+C/close
-    /// binding close it; Enter on the list opens the selected heartbeat's
-    /// action pane; Enter on an action runs the management request.
-    async fn handle_heartbeats_picker_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        // The view consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let action = view
-            .heartbeats_picker
-            .as_mut()
-            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
-        match action {
-            Some(HeartbeatsPickerAction::None) => {
-                self.dirty = true;
-            }
-            Some(HeartbeatsPickerAction::Close) => {
-                view.heartbeats_picker = None;
-                self.dirty = true;
-            }
-            Some(HeartbeatsPickerAction::Manage {
-                active_session_id,
-                job_id,
-                action,
-            }) => {
-                self.run_heartbeat_manage(active_session_id, job_id, action, view)
-                    .await;
-            }
-            None => {}
-        }
-        Ok(())
-    }
-
-    /// Run one heartbeat management request (TS `manageHeartbeat` →
-    /// `agentConnection.manageHeartbeat`): the daemon owns the job; the
-    /// updated job (or the stop's removal) patches the open view locally,
-    /// a background refresh reconciles the catalog, and a failure
-    /// surfaces as the view's error row.
-    async fn run_heartbeat_manage(
-        &mut self,
-        active_session_id: String,
-        job_id: String,
-        action: HeartbeatAction,
-        view: &mut AgentView,
-    ) {
-        let request = DaemonCommand::HeartbeatManage {
-            id: None,
-            active_session_id,
-            job_id,
-            action: Value::String(action.as_wire().to_string()),
-            rest: Map::default(),
-        };
-        match self
-            .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
-            .await
-        {
-            Ok(data) => {
-                // The daemon returns the updated job (a stop keeps the
-                // cancelled row's identity); a patch that cannot parse still
-                // leaves the actions pane, and the refresh reconciles.
-                match data
-                    .get("heartbeat")
-                    .and_then(crate::heartbeats_picker::parse_heartbeat_job)
-                {
-                    Some(job) => {
-                        let stopped = action == HeartbeatAction::Stop;
-                        let job_id = job.id.clone();
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
-                            picker.apply_managed_job(job.clone(), stopped);
-                        }
-                        // The activity dock follows the same patch the
-                        // manager view applied (TS `manageHeartbeat`
-                        // rewrites the catalog entry, not just the open
-                        // manager).
-                        if stopped {
-                            self.heartbeat_catalog
-                                .retain(|entry| entry.job.id != job_id);
-                        } else if let Some(entry) = self
-                            .heartbeat_catalog
-                            .iter_mut()
-                            .find(|entry| entry.job.id == job_id)
-                        {
-                            entry.job = job;
-                        }
-                    }
-                    None => {
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
-                            picker.back_to_list();
-                        }
-                    }
-                }
-                self.sync_activity_dock(view);
-                self.spawn_heartbeat_refresh();
-                self.dirty = true;
-            }
-            Err(error) => {
-                if let Some(picker) = view.heartbeats_picker.as_mut() {
-                    picker.set_action_error(format!("{error:#}"));
-                }
-                self.dirty = true;
-            }
-        }
-    }
-
-    /// Scope a fetched catalog to THIS session only (operator scoping:
-    /// nested sessions' heartbeats do not surface in the dock, the
-    /// panel, or the `/heartbeats` view — a sanctioned divergence from
-    /// TS `scopeHeartbeatsToSession`, which also kept the RLM children's
-    /// jobs; the child ids stay empty here).
-    fn scope_heartbeats(&self, heartbeats: Vec<HeartbeatEntry>) -> Vec<HeartbeatEntry> {
-        scope_heartbeats(
-            heartbeats,
-            (!self.active_session_id.is_empty()).then_some(self.active_session_id.as_str()),
-            (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
-            &[],
-        )
-    }
-
-    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
-    /// response scopes and sorts into the catalog synchronously with the
-    /// attach (bounded like every UI request), so the dock's heartbeat
-    /// rows ride the first content frame instead of popping in late. A
-    /// failed or timed-out fetch leaves the just-cleared catalog — the
-    /// same empty-open state the background refresh's failure arm
-    /// produces, and the next `heartbeats_changed` event refills.
-    async fn fetch_heartbeat_catalog(&mut self) {
-        // Advance the epoch so a refresh still in flight from before the
-        // attach (a `heartbeats_changed` burst's spawned fetch) never
-        // overwrites this fold with its older catalog: the epoch's
-        // staleness check drops it at fold time.
-        self.heartbeat_refresh_epoch += 1;
-        let Ok(data) = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::HeartbeatsList {
-                    id: None,
-                    active_session_id: None,
-                    rest: Map::default(),
-                },
-            )
-            .await
-        else {
-            return;
-        };
-        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
-        sort_heartbeats(&mut heartbeats);
-        self.heartbeat_catalog = heartbeats;
-    }
-
-    /// Fire a background heartbeat-catalog refresh (TS
-    /// `refreshHeartbeatCatalog`): the fetch lands through the run loop's
-    /// channel into the open view; failures clear nothing — the next
-    /// `heartbeats_changed` event retries. At most one refresh runs in
-    /// flight with one queued trailing refresh (daemon-wide broadcasts can
-    /// burst; stacked concurrent requests would load the supervisor), and
-    /// every response carries the epoch it was issued under so a stale
-    /// one never overwrites a newer catalog.
-    pub(crate) fn spawn_heartbeat_refresh(&mut self) {
-        if self.heartbeat_refresh_in_flight {
-            self.heartbeat_refresh_queued = true;
-            return;
-        }
-        self.heartbeat_refresh_in_flight = true;
-        let updates = self.heartbeat_updates.clone();
-        let client = self.client.clone();
-        let epoch = self.heartbeat_refresh_epoch;
-        tokio::spawn(async move {
-            let request = DaemonCommand::HeartbeatsList {
-                id: None,
-                active_session_id: None,
-                rest: Map::default(),
-            };
-            let fetched = tokio::time::timeout(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                client.request_ok(request),
-            )
-            .await;
-            match fetched {
-                Ok(Ok(data)) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: parse_heartbeats(&data),
-                        fetch_error: None,
-                    });
-                }
-                Ok(Err(error)) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: Vec::new(),
-                        fetch_error: Some(format!("{error:#}")),
-                    });
-                }
-                Err(_) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: Vec::new(),
-                        fetch_error: Some(
-                            "timed out waiting for the Prime Agent daemon response".to_string(),
-                        ),
-                    });
-                }
-            }
-        });
-    }
-
     /// Fetch the session's slash-command catalog in the background (TS
     /// `refreshConnectionCatalog`'s `getCommands` arm, best-effort with a
     /// bounded wait like the heartbeat refresh): the response carries the
@@ -7690,70 +6810,6 @@ impl SessionUi {
             Vec::new()
         };
         view.editor.set_autocomplete_skill_commands(skills);
-        self.dirty = true;
-    }
-
-    /// Fold a landed heartbeat-catalog refresh into the session: re-scope
-    /// and re-sort, keep the open view's selection, surface the fetch
-    /// error, and re-sync the activity dock (TS `applyHeartbeatCatalog` over
-    /// both the manager and the tray's `getTrayHeartbeatLabel`).
-    pub(crate) fn apply_heartbeat_update(
-        &mut self,
-        update: HeartbeatsUpdate,
-        view: &mut AgentView,
-    ) {
-        // The refresh slot frees whether the response landed, failed, or
-        // timed out; a burst's queued refresh runs next.
-        self.heartbeat_refresh_in_flight = false;
-        let queued = std::mem::take(&mut self.heartbeat_refresh_queued);
-        // A response from an older refresh never overwrites the newer
-        // catalog (an in-flight refresh raced a fresher epoch).
-        if update.epoch < self.heartbeat_refresh_epoch {
-            if queued {
-                self.spawn_heartbeat_refresh();
-            }
-            return;
-        }
-        // TS stale-while-revalidate: a failed refresh keeps the last catalog
-        // (the dock keeps counting the heartbeats it knows; the daemon's
-        // scheduler keeps firing while its catalog read times out), and the
-        // failure surfaces only inside an open manager view.
-        if let Some(error) = update.fetch_error {
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
-                picker.set_fetch_error(Some(error));
-            }
-            self.dirty = true;
-        } else {
-            let mut heartbeats = self.scope_heartbeats(update.heartbeats);
-            sort_heartbeats(&mut heartbeats);
-            self.heartbeat_catalog.clone_from(&heartbeats);
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
-                picker.apply_catalog(heartbeats, None);
-            }
-            self.sync_activity_dock(view);
-            self.dirty = true;
-        }
-        if queued {
-            self.spawn_heartbeat_refresh();
-        }
-    }
-
-    /// Open the `/heartbeats` view over the CACHED catalog at once (TS
-    /// `showHeartbeatManager`'s mount): the keypress never waits on the
-    /// daemon — a non-blocking refresh lands through the update channel,
-    /// and stale-while-revalidate keeps the mounted catalog on failure
-    /// (the error surfaces inside the open view only). The picker owns
-    /// the frame: the dock's focus hands off, so closing the picker
-    /// returns to the editor, not the dock.
-    fn open_heartbeats_view(&mut self, view: &mut AgentView) {
-        self.subagents_focused = false;
-        view.heartbeats_picker = Some(HeartbeatsPicker::new(
-            self.heartbeat_catalog.clone(),
-            None,
-            None,
-            picker_viewport_rows(view.terminal_rows()),
-        ));
-        self.spawn_heartbeat_refresh();
         self.dirty = true;
     }
 
@@ -7960,80 +7016,6 @@ impl SessionUi {
                     view,
                 );
             }
-        }
-    }
-
-    /// Route a picked model whose provider is not signed in to the
-    /// provider sign-in flow (TS `ensureModelProviderConfigured`): park
-    /// the selection, then mount the `/login` provider menu preselected on
-    /// the provider's row — a successful login retries the switch
-    /// automatically, a cancelled or failed login leaves it parked off.
-    /// A provider without a login row keeps the TS external-config error.
-    async fn begin_model_sign_in(&mut self, applied: &ModelSelectionApplied, view: &mut AgentView) {
-        let provider = &applied.provider;
-        let model_id = &applied.model_id;
-        let Some(auth) = self.provider_auth.clone() else {
-            self.error_row(
-                &format!("Authentication for {provider} must be configured externally."),
-                view,
-            );
-            return;
-        };
-        let rows = auth.0.login_options().await;
-        if !rows.iter().any(|row| row.id == applied.provider) {
-            self.error_row(
-                &format!("Authentication for {provider} must be configured externally."),
-                view,
-            );
-            return;
-        }
-        self.pending_model_sign_in = Some(PendingModelSignIn {
-            provider: provider.clone(),
-            model_id: model_id.clone(),
-            effort: applied.effort.clone(),
-        });
-        self.note(
-            &format!("Sign in to {provider} to use {provider}/{model_id}"),
-            view,
-        );
-        // The picker's Apply arm already settled the editor (the command
-        // partial cleared, a restored draft kept) — the sign-in route never
-        // rewrites it.
-        let mut selector =
-            crate::provider_auth::ProviderAuthSelector::new(AuthSelectorKind::Login, rows);
-        selector.preselect_provider(provider);
-        view.provider_auth = Some(selector);
-        self.dirty = true;
-    }
-
-    /// The parked sign-in's retry (TS `completeModelSelection` after a
-    /// successful `loginProvider`): refresh the catalog (the picker's
-    /// "require sign in" marks clear), retry the switch exactly once —
-    /// a still-unavailable provider keeps TS's post-login refusal — and
-    /// apply the parked effort only after the switch lands.
-    async fn finish_model_sign_in(&mut self, pending: PendingModelSignIn, view: &mut AgentView) {
-        let PendingModelSignIn {
-            provider,
-            model_id,
-            effort,
-        } = pending;
-        self.spawn_model_catalog_refresh();
-        match self.try_set_model(&provider, &model_id, view).await {
-            SetModelOutcome::Switched => {
-                if let Some(level) = &effort {
-                    self.apply_thinking_level(level, view).await;
-                }
-            }
-            // The login succeeded but the provider still refuses the
-            // switch: TS's post-login re-check message (never a second
-            // sign-in route).
-            SetModelOutcome::NeedsSignIn => {
-                self.error_row(
-                    &format!("Authentication completed, but {provider} is still unavailable."),
-                    view,
-                );
-            }
-            SetModelOutcome::Failed => {}
         }
     }
 
@@ -10313,74 +9295,12 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     sessions
 }
 
-/// The streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
-/// arm): `<followUp> to queue message` — the tray override while the agent
-/// streams and a draft sits in the editor (an empty draft or an idle
-/// session shows nothing; the Ctrl+C exit hint outranks it at the call
-/// site, TS `isCtrlCExitHintVisible()`'s early return).
-fn streaming_tray_hint(
-    keybindings: &crate::keybindings::KeybindingsManager,
-    turn_active: bool,
-    draft: &str,
-) -> Option<String> {
-    if !turn_active || draft.trim().is_empty() {
-        return None;
-    }
-    let follow_up = keybindings
-        .first_key("app.message.followUp")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_default();
-    Some(format!("{follow_up} to queue message"))
-}
-
-/// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
-/// the running user command, spelled through the effective keybindings.
-fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
-    let key = keybindings.first_key("app.clear").map_or_else(
-        || "Ctrl+C".to_string(),
-        |key| crate::keybindings::format_key_text(&key),
-    );
-    // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
-    // row text (the StatusKind tier is color only).
-    format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")
-}
-
-/// TS `formatResumeHint` (resume-hint.ts): the post-exit hint names how to
-/// resume the session just left. Ephemeral (no session file) and unflushed
-/// empty sessions are omitted — neither can be resumed. Persistence is
-/// lazy: a file that does not exist on disk cannot be resumed either.
-pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
-    let session_id = stats.get("sessionId").and_then(Value::as_str)?;
-    let session_file = stats.get("sessionFile").and_then(Value::as_str)?;
-    let user_messages = stats
-        .get("userMessages")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if session_file.is_empty() || user_messages == 0 || !std::path::Path::new(session_file).exists()
-    {
-        return None;
-    }
-    Some(format!(
-        "Resume this session with: prime-agent --resume {session_id}"
-    ))
-}
-
 /// Send a `create` command and return the new session's active id. A
 /// non-empty selection picks the reopen form: `continueRecent` or an
 /// explicit saved-session path.
 /// The picker's viewport row budget (TS `showConfigurationMenu` passes
 /// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
 /// row for its hint).
-/// The dock's paused-heartbeat count over the scoped catalog: the count
-/// is label-independent (the dogfood repro: unlabeled agent heartbeats
-/// fire on schedule but a label-keyed count showed none of them).
-fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
-    heartbeats
-        .iter()
-        .filter(|entry| entry.job.status == "paused")
-        .count()
-}
-
 pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
@@ -10496,15 +9416,6 @@ async fn describe_session_open_failure(
     })
 }
 
-/// The `/mcp` view's parked auth request: the auth-args form (e.g.
-/// `login <server>`) and the title the inline auth panel mounts (TS
-/// `Login to {label}` for the login dialog, `Connect {label}` for the
-/// token paste panel).
-pub(crate) struct McpAuthIntent {
-    pub(crate) args: String,
-    pub(crate) title: String,
-}
-
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
 /// ruling 2026-09-23): pop the trailing failed-attempt error row the
 /// retry supersedes, so the ONE line the episode shows while it runs is
@@ -10523,51 +9434,6 @@ pub(crate) fn pop_superseded_attempt_row(view: &mut AgentView) -> bool {
     }
 }
 
-#[cfg(test)]
-mod streaming_tray_hint_tests {
-    use super::streaming_tray_hint;
-    use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
-
-    /// TS `getTrayOverrideLabel`'s streaming arm: the follow-up hint names
-    /// the effective `app.message.followUp` key (the default is
-    /// alt+enter).
-    #[test]
-    fn the_hint_names_the_follow_up_key_over_a_draft() {
-        let kb = KeybindingsManager::new();
-        assert_eq!(
-            streaming_tray_hint(&kb, true, "a draft in the editor"),
-            Some("Alt+Enter to queue message".to_string()),
-            "the default binding renders the TS sentence"
-        );
-    }
-
-    /// TS `!this.isAgentStreaming() || !text.trim()` — an idle session or
-    /// an empty (whitespace-only) draft shows no hint.
-    #[test]
-    fn idle_or_empty_draft_shows_no_hint() {
-        let kb = KeybindingsManager::new();
-        assert_eq!(streaming_tray_hint(&kb, false, "draft"), None);
-        assert_eq!(streaming_tray_hint(&kb, true, ""), None);
-        assert_eq!(streaming_tray_hint(&kb, true, "   "), None);
-    }
-
-    /// A user-rebound follow-up key spells through the effective binding
-    /// (TS `keyText("app.message.followUp")`).
-    #[test]
-    fn the_hint_spells_a_rebound_follow_up_key() {
-        let mut config = KeybindingsConfig::new();
-        config.insert(
-            "app.message.followUp".to_string(),
-            vec!["ctrl+q".to_string()],
-        );
-        let kb = KeybindingsManager::with_user_bindings(config);
-        assert_eq!(
-            streaming_tray_hint(&kb, true, "draft"),
-            Some("Ctrl+Q to queue message".to_string()),
-            "the hint follows the effective binding"
-        );
-    }
-}
 #[cfg(test)]
 mod bash_bang_tests {
     use super::already_running_warning;
@@ -10669,83 +9535,6 @@ mod activity_dock_counts_tests {
             .count();
         assert_eq!(running, 2, "finished runs never inflate the indicator");
         assert_eq!(activities.len(), 3);
-    }
-}
-
-#[cfg(test)]
-mod loader_token_tests {
-    use super::{format_rate, LoaderTokenTracker, SpeedStats};
-
-    /// The live count derives from the streamed message, so coalesced
-    /// frames (one latest-snapshot wire frame per flush tick) count the
-    /// full streamed size — a per-delta sum would undercount them ~20x.
-    #[test]
-    fn coalesced_frames_count_from_the_message_not_deltas() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        // A message streams to 400 chars; the coalesced wire frame carries
-        // the full snapshot but only the final provider delta.
-        assert_eq!(tracker.apply_streaming(0, 400), 100);
-        // A provider that reports usage upfront wins over the estimate.
-        assert_eq!(tracker.apply_streaming(600, 400), 600);
-        // Settle banks the reported usage, then the live state is empty.
-        tracker.settle(600);
-        assert_eq!(tracker.current(), 600);
-    }
-
-    /// Settling without reported usage banks the live estimate (TS
-    /// `usage.output > 0 ? usage.output : estimatedStreamingTokens()`).
-    #[test]
-    fn settle_without_usage_banks_the_estimate() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        assert_eq!(tracker.apply_streaming(0, 404), 101);
-        tracker.settle(0);
-        assert_eq!(tracker.current(), 101);
-    }
-
-    /// A new message resets the live state but keeps the run's completed
-    /// count; `agent_start` resets the whole tracker (TS `reset`).
-    #[test]
-    fn message_start_resets_the_live_state_and_agent_start_the_run() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        assert_eq!(tracker.apply_streaming(0, 800), 200);
-        tracker.settle(0);
-        tracker.start_message();
-        // The live count rides on the run's completed count: 200 banked
-        // plus the new message's reported 50.
-        assert_eq!(tracker.apply_streaming(50, 8), 250);
-        tracker.settle(50);
-        assert_eq!(tracker.current(), 250);
-        tracker.reset();
-        assert_eq!(tracker.current(), 0);
-    }
-
-    /// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
-    /// below.
-    #[test]
-    fn format_rate_matches_the_ts_boundaries() {
-        assert_eq!(format_rate(150.0), "150");
-        assert_eq!(format_rate(100.0), "100");
-        assert_eq!(format_rate(99.96), "100.0");
-        assert_eq!(format_rate(12.34), "12.3");
-        assert_eq!(format_rate(0.5), "0.5");
-    }
-
-    /// The session average sums tokens over the summed wall-clock span (TS
-    /// `speedStats`); it only reads once a positive-span sample exists.
-    #[test]
-    fn speed_stats_average_rate_sums_tokens_over_spans() {
-        let mut stats = SpeedStats {
-            tokens: 300,
-            duration_ms: 1500,
-            samples: 1,
-        };
-        assert_eq!(stats.average_rate(), 200.0);
-        stats.tokens += 100;
-        stats.duration_ms += 500;
-        assert_eq!(stats.average_rate(), 200.0);
     }
 }
 

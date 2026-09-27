@@ -31,12 +31,7 @@ impl Supervisor {
                     "sessionId": binding.session_id,
                     "sessionFile": binding.session_file,
                 });
-                let _ = self.events.send((
-                    ClientRouting::AttachedSession {
-                        active_session_id: previous,
-                    },
-                    std::sync::Arc::new(event),
-                ));
+                self.publish_session_event(&previous, std::sync::Arc::new(event));
             }
         }
     }
@@ -56,24 +51,14 @@ impl Supervisor {
         &self,
         selector: &str,
         resident: &Arc<ResidentWorker>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<subscribers::ClientSubscriptions>,
     ) -> String {
         let current = resident.worker_id.clone();
         self.log_line(&format!(
             "rebinding stale session id {selector} -> {current}"
         ));
         self.note_daemon_event("session_rebound", None);
-        let was_attached = {
-            let mut attached = attached.lock().unwrap();
-            let was = attached.iter().any(|id| id == selector);
-            if was {
-                attached.retain(|id| id != selector);
-                if !attached.iter().any(|id| id == &current) {
-                    attached.push(current.clone());
-                }
-            }
-            was
-        };
+        let was_attached = attached.rebind(&self.session_subscribers, selector, &current);
         if was_attached {
             let (session_id, session_file) = {
                 let descriptor = resident.descriptor.lock().await;
@@ -82,10 +67,8 @@ impl Supervisor {
                     descriptor.session_file.clone(),
                 )
             };
-            let _ = self.events.send((
-                ClientRouting::AttachedSession {
-                    active_session_id: current.clone(),
-                },
+            self.publish_session_event(
+                &current,
                 std::sync::Arc::new(json!({
                     "type": "session_binding",
                     "previousActiveSessionId": selector,
@@ -93,7 +76,7 @@ impl Supervisor {
                     "sessionId": session_id,
                     "sessionFile": session_file,
                 })),
-            ));
+            );
         }
         current
     }
@@ -298,6 +281,13 @@ impl Supervisor {
                 ))];
             }
         };
+        // The scan's per-line parse trees folded and freed inside the
+        // blocking task; return their arena high-water to the OS at the
+        // phase boundary instead of letting every grown catalog's scan
+        // peak stay resident for the daemon's lifetime (the #2872
+        // phase-boundary pattern). The per-file cached scan states are
+        // live cache and stay untouched.
+        pa_types::memory_release::trim_freed_heap();
         // The current-cwd scope keeps only the session's own rows in the
         // terminal array (the stream above already skipped the others'
         // frames): the response is the authoritative catalog.
