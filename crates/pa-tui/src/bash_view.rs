@@ -1344,6 +1344,36 @@ mod tests {
         }
     }
 
+    /// The selected row's wash is the theme's shared selection and it
+    /// READS (the operator's 2026-09-26 directive: the shell-runs
+    /// selection was barely visible): the whole-row band is the same wash
+    /// the `›`-marker rows carry, and its rendered luminance clears the
+    /// theme's visibility bar over the editor surface.
+    #[test]
+    fn the_selected_row_wash_reads_off_the_surface() {
+        let theme = theme();
+        let frame = BashView::new(activities(), 24).render(&theme, 90, &kb());
+        let selected = frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains("cargo")))
+            .expect("the selected row");
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        assert!(
+            selected.iter().all(|span| span.style.bg == Some(wash)),
+            "every span of the selected row carries the shared wash: {selected:?}"
+        );
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the shell-runs wash must read off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
+    }
+
     /// The status column color-codes the rows (the operator's
     /// color-coding directive): running green, a nonzero exit red — the
     /// failed state — a clean exit dim. The selected row's wash patches a
