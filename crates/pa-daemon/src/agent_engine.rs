@@ -902,15 +902,21 @@ impl AgentSessionEngine {
         };
         if job_id != persisted.job_id {
             // Write through the BUILT session: the installed slot is
-            // still empty while the build runs.
-            self.append_quota_park_entry(
-                Some(built.session.shared_persistence()),
-                persisted.resume_at_ms,
-                persisted.park_count,
-                job_id.as_deref(),
-                None,
-            )
-            .await;
+            // still empty while the build runs. A failed write surfaces
+            // as a log: the wake exists (rebuilt above), so the restart's
+            // stale-park arms still own the recovery.
+            if let Err(write_error) = self
+                .append_quota_park_entry(
+                    Some(built.session.shared_persistence()),
+                    persisted.resume_at_ms,
+                    persisted.park_count,
+                    job_id.as_deref(),
+                    None,
+                )
+                .await
+            {
+                eprintln!("pa-daemon: restored quota park entry write failed: {write_error}");
+            }
         }
         *self
             .quota_park
@@ -2397,14 +2403,23 @@ impl AgentSessionEngine {
                             job_id: job_id.clone(),
                             wake_retries: park.wake_retries,
                         });
-                    self.append_quota_park_entry(
-                        self.installed_persistence().await,
-                        resume_at_ms,
-                        park.park_count,
-                        job_id.as_deref(),
-                        Some(message.provider.as_str()),
-                    )
-                    .await;
+                    // A failed replacement write surfaces as a log:
+                    // the rebuilt wake exists, so the restart's stale-park
+                    // arms still own the recovery.
+                    if let Err(write_error) = self
+                        .append_quota_park_entry(
+                            self.installed_persistence().await,
+                            resume_at_ms,
+                            park.park_count,
+                            job_id.as_deref(),
+                            Some(message.provider.as_str()),
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "pa-daemon: quota park wake-rebuild entry write failed: {write_error}"
+                        );
+                    }
                 }
                 let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
                 return Some(ProviderParkOutcome {
@@ -2465,6 +2480,28 @@ impl AgentSessionEngine {
         // silent death, so a failed job creation declines the park.
         let job_id = self.create_quota_resume_job(resume_at_ms).await?;
         let park_count = parks_used + 1;
+        // The durable park record gates the park exactly like the wake:
+        // TS's appendCustomEntry throws on a failed persist (the append
+        // rolls back and the park path never reports success), so a
+        // failed session-file write cancels the wake and declines the
+        // park — the give-up stands instead of a live park a restart
+        // would silently lose.
+        if let Err(write_error) = self
+            .append_quota_park_entry(
+                self.installed_persistence().await,
+                resume_at_ms,
+                park_count,
+                Some(job_id.as_str()),
+                Some(message.provider.as_str()),
+            )
+            .await
+        {
+            self.cancel_quota_resume_job(&job_id);
+            eprintln!(
+                "pa-daemon: quota park entry write failed, the park is declined: {write_error}"
+            );
+            return None;
+        }
         let state = QuotaParkState {
             park_count,
             resume_at_ms,
@@ -2475,14 +2512,6 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        self.append_quota_park_entry(
-            self.installed_persistence().await,
-            resume_at_ms,
-            park_count,
-            Some(job_id.as_str()),
-            Some(message.provider.as_str()),
-        )
-        .await;
         Some(ProviderParkOutcome {
             status_message: quota_parked_final_error(abort, resume_at_ms, &error),
         })
@@ -2512,6 +2541,35 @@ impl AgentSessionEngine {
         }
         let resume_at_ms = crate::util::now_ms().saturating_add(QUOTA_WAKE_RETRY_DELAY_MS);
         let job_id = self.create_quota_resume_job(resume_at_ms).await?;
+        // The re-armed wake needs a replacement entry (TS
+        // `_recoverQuotaParkWake` appends one so a restart reads the
+        // replacement wake instead of the spent one; it carries no
+        // provider field, like the TS). TS's appendCustomEntry throws on
+        // a failed persist, so a failed write cancels the re-armed wake
+        // and drops the park — the give-up stands.
+        if let Err(write_error) = self
+            .append_quota_park_entry(
+                self.installed_persistence().await,
+                resume_at_ms,
+                park.park_count,
+                Some(job_id.as_str()),
+                None,
+            )
+            .await
+        {
+            self.cancel_quota_resume_job(&job_id);
+            eprintln!(
+                "pa-daemon: quota park entry write failed, the re-armed wake is dropped: {write_error}"
+            );
+            // The spent park cannot stay live without a wake (nothing
+            // would ever resume it): the episode ends here and the
+            // give-up stands.
+            *self
+                .quota_park
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return None;
+        }
         let state = QuotaParkState {
             park_count: park.park_count,
             resume_at_ms,
@@ -2522,18 +2580,6 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        // The re-armed wake needs a replacement entry (TS
-        // `_recoverQuotaParkWake` appends one so a restart reads the
-        // replacement wake instead of the spent one; it carries no
-        // provider field, like the TS).
-        self.append_quota_park_entry(
-            self.installed_persistence().await,
-            resume_at_ms,
-            park.park_count,
-            Some(job_id.as_str()),
-            None,
-        )
-        .await;
         let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
         Some(pa_core::session_engine::provider_park::ProviderParkOutcome {
             status_message: format!(
@@ -2555,10 +2601,20 @@ impl AgentSessionEngine {
             return;
         };
         let mut session = persistence.lock().await;
-        let _ = session.append_custom_entry(
+        // TS's appendCustomEntry throws on a failed persist; the resume
+        // path's live clear still stands (the quota IS back — keeping the
+        // park armed after a successful model call would be wrong), so
+        // the failure surfaces as a log and the restart's stale-park arms
+        // own the recovery (the spent park entry cannot restore a live
+        // park without a wake).
+        if let Err(write_error) = session.append_custom_entry(
             pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
             Some(serde_json::json!({ "outcome": outcome })),
-        );
+        ) {
+            eprintln!(
+                "pa-daemon: quota resume entry write failed (outcome {outcome}): {write_error}"
+            );
+        }
     }
 
     /// Whether the park's wake job is still scheduled (Active) in the
@@ -2590,7 +2646,7 @@ impl AgentSessionEngine {
         park_count: u32,
         job_id: Option<&str>,
         provider: Option<&str>,
-    ) {
+    ) -> std::io::Result<()> {
         let data = serde_json::json!({
             "resumeAt": pa_core::session::manager::format_iso(resume_at_ms as i64),
             "parkCount": park_count,
@@ -2598,13 +2654,15 @@ impl AgentSessionEngine {
             "provider": provider,
         });
         let Some(persistence) = persistence else {
-            return;
+            return Ok(());
         };
         let mut session = persistence.lock().await;
-        let _ = session.append_custom_entry(
-            pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
-            Some(data),
-        );
+        session
+            .append_custom_entry(
+                pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
+                Some(data),
+            )
+            .map(|_| ())
     }
 
     /// The installed session's persistence handle (the park callback's
