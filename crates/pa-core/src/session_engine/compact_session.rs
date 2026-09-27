@@ -515,14 +515,16 @@ pub async fn execute_compaction(
             };
             // A JoinError (the closure panicked) degrades to the session
             // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning.
-            let routed =
-                join.await
-                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
-                        model: options.model.clone(),
-                        api_key: options.api_key.clone(),
-                        headers: None,
-                    });
+            // selector resolves to the fallback with the warning. The
+            // fallback keeps the merged headers (the registry's single
+            // owner of the team header).
+            let routed = join.await.unwrap_or_else(|_| {
+                super::auxiliary_model::session_fallback_with_headers(
+                    context,
+                    &options.model,
+                    options.api_key.clone(),
+                )
+            });
             (routed.model, routed.api_key, routed.headers)
         }
         None => (options.model.clone(), options.api_key.clone(), None),
@@ -666,15 +668,22 @@ pub async fn execute_compaction(
         tokens_before,
         usage: summed_usage(&slices),
     };
-    // TS `_performCompaction` passes `this._harnessDigest()` into
-    // `appendCompaction`: the snapshot is attached mechanically at the
-    // commit and never flows through the summarizer. The harness-state
-    // read happens here, after the summarizer resolved, so harness state
-    // written during the run is a fresh read.
-    let harness_digest = options
+    // TS `_performCompaction` passes `this._harnessDigestWithFingerprint()`
+    // into `appendCompaction`: the snapshot plus the fingerprint of the
+    // state behind it are attached mechanically at the commit and never
+    // flow through the summarizer. The harness-state read happens here,
+    // after the summarizer resolved, so harness state written during the
+    // run is a fresh read — one read feeds the digest and its
+    // fingerprint.
+    let (harness_digest, harness_state_fingerprint) = options
         .harness_digest
         .as_ref()
-        .map(super::harness_digest::HarnessDigestInputs::render);
+        .map(|inputs| {
+            let render =
+                super::harness_digest::HarnessDigestInputs::render_with_fingerprint(inputs);
+            (Some(render.digest), Some(render.state_fingerprint))
+        })
+        .unwrap_or_default();
     super::compaction_trace::trace(
         "compact.digest_rendered",
         serde_json::json!({ "digest": harness_digest.is_some() }),
@@ -684,6 +693,7 @@ pub async fn execute_compaction(
         &details,
         options.custom_instructions,
         harness_digest,
+        harness_state_fingerprint,
     );
     // TS `appendCompaction` persists the full record: `details`,
     // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
@@ -792,6 +802,7 @@ mod tests {
                 custom_instructions: None,
                 usage: None,
                 harness_digest: None,
+                harness_state_fingerprint: None,
             },
             base: EntryBase {
                 id: Some("c".to_string()),
@@ -2592,7 +2603,9 @@ mod tests {
         assert!(digest.contains("Compaction test memory"));
         // Mechanical attachment: the digest never flows through the summarizer.
         assert!(!run.entry.summary.contains("# Continual Harness State"));
-        // The durable row carries the TS wire shape (`harnessDigest`).
+        // The durable row carries the TS wire shape (`harnessDigest`) plus
+        // the fingerprint of the state behind it (`harnessStateFingerprint`,
+        // TS #2400): one state read feeds the digest and the fingerprint.
         let serialized = serde_json::to_value(&run.entry).unwrap();
         assert_eq!(
             serialized
@@ -2600,6 +2613,43 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some(digest)
         );
+        let fingerprint = run
+            .entry
+            .harness_state_fingerprint
+            .as_deref()
+            .expect("digest state fingerprint");
+        assert_eq!(
+            serialized
+                .get("harnessStateFingerprint")
+                .and_then(|value| value.as_str()),
+            Some(fingerprint)
+        );
+        // The fingerprint is the merged-state fingerprint the digest
+        // rendered: rewriting the state (same content, new timestamps)
+        // must not move it, and a real content change must.
+        let inputs = super::super::harness_digest::HarnessDigestInputs {
+            context: super::super::harness_digest::HarnessDigestContext {
+                global_dir,
+                local_dir: Some(local_dir.clone()),
+                include_ipython: true,
+                include_shell_examples: true,
+                include_refine: true,
+            },
+            terms: super::super::harness_digest::digest_query_terms(Some("fresh terms"), &[]),
+        };
+        let re_rendered = inputs.render_with_fingerprint();
+        assert_eq!(re_rendered.state_fingerprint, fingerprint);
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .get_mut("compaction_test_memory")
+            .unwrap()
+            .content
+            .push_str(" changed");
+        crate::refinement::save_harness_state(&local_dir, &state).unwrap();
+        let changed = inputs.render_with_fingerprint();
+        assert_ne!(changed.state_fingerprint, fingerprint);
         // Provider conversion leads with the digest block before the
         // compaction summary; the live context keeps the summary marker.
         let rebuilt = rebuilt_context_after_compaction(&session);

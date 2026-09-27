@@ -11,6 +11,7 @@
 #![cfg(unix)]
 
 use std::fmt::Write as _;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -55,17 +56,29 @@ impl Drop for Supervisor {
 fn kill_worker(pid: &u32) {
     // The worker pid is a child of the supervisor we just killed, so it is
     // not our child and cannot be waited on directly; poll /proc liveness.
-    unsafe {
-        libc::kill(*pid as i32, libc::SIGKILL);
+    // Best effort by design: this runs inside `Drop` (a failing test's
+    // unwind path included), where an assert would abort the process and
+    // orphan every other parallel test's daemons. The contractual
+    // worker-leak detection lives in `assert_daemon_stops_clean` (a plain
+    // test body, where a panic is a proper failure); here a surviving
+    // worker is re-killed and reported to stderr instead.
+    for round in 0..2 {
+        unsafe {
+            libc::kill(*pid as i32, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(*pid) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !process_alive(*pid) {
+            return;
+        }
+        eprintln!("worker {pid} survived teardown kill round {round}; re-killing");
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(*pid) {
-        assert!(
-            Instant::now() < deadline,
-            "worker {pid} survived the teardown kill"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    eprintln!("worker {pid} still alive after two teardown kills");
 }
 
 /// RAII guard for a detached supervisor (spawned by
@@ -76,6 +89,10 @@ struct DetachedDaemon {
 
 impl Drop for DetachedDaemon {
     fn drop(&mut self) {
+        // Best effort by design: this runs inside `Drop` (a failing test's
+        // unwind path included), where an assert would ABORT the process and
+        // orphan every other parallel test's daemons. A supervisor that
+        // misses the graceful exit deadline is SIGKILLed by pid instead.
         let supervisor_pid = graceful_shutdown(&self.socket);
         if let Some(pid) = supervisor_pid {
             // Snapshot the supervisor's live worker children before it goes
@@ -84,10 +101,13 @@ impl Drop for DetachedDaemon {
             let worker_pids = child_pids_of(pid);
             let deadline = Instant::now() + Duration::from_secs(10);
             while process_alive(pid) {
-                assert!(
-                    Instant::now() < deadline,
-                    "the spawned supervisor {pid} did not exit after shutdown"
-                );
+                if Instant::now() >= deadline {
+                    eprintln!("spawned supervisor {pid} missed the shutdown deadline; killing");
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
             for worker in worker_pids {
@@ -246,8 +266,117 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
     supervisor_pid
 }
 
+/// The headless run's wall: the plan's barriers are each bounded, but the
+/// run loop has no global exit bound — a turn that never settles holds the
+/// idle gate closed and the run parks forever. The wall turns that into a
+/// failing test instead of a hung binary; dropping the expired future
+/// cancels the run loop, and the supervisor guards still tear the daemons
+/// down. Generous against real load: the suite settles in 16-63s wall and
+/// the longest plan's barriers sum to ~120s.
+const HEADLESS_RUN_BOUND: Duration = Duration::from_secs(300);
+
+async fn run_headless_bounded(
+    options: pa_tui::interactive::InteractiveOptions,
+    plan: pa_tui::interactive::HeadlessPlan,
+) -> anyhow::Result<pa_tui::interactive::InteractiveOutcome> {
+    let started = Instant::now();
+    match tokio::time::timeout(
+        HEADLESS_RUN_BOUND,
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan)),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_expired) => panic!(
+            "the headless run exceeded the {HEADLESS_RUN_BOUND:?} wall after {:?}: the wedge class - a turn never settled and the idle gate never opened",
+            started.elapsed()
+        ),
+    }
+}
+
+/// Kill supervisors leaked by earlier runs of this verifier: a binary
+/// that dies without unwinding (a kill, an abort) runs no `Drop`, so its
+/// daemons get reparented to init and keep contending for CPU and memory
+/// with every later run. A daemon matches when its `--daemon-socket` sits
+/// in a `tempfile`-created `.tmpXXXXXX` dir (this suite's spawn shape —
+/// the product's own daemons never use that prefix) and its parent is
+/// dead (ppid 1). A daemon of a still-running test keeps its test binary
+/// as the parent and never matches.
+fn sweep_orphan_test_daemons() {
+    static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if SWEEPED.set(()).is_err() {
+        return; // a later test's spawn: the first spawn already swept
+    }
+    let mut swept = 0;
+    for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        // /proc cmdline is NUL-separated.
+        let args: Vec<String> = cmdline
+            .split(|b| *b == 0)
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        let flag = |needle: &str| args.iter().any(|a| a == needle);
+        let arg_after = |needle: &str| {
+            args.iter()
+                .position(|a| a == needle)
+                .and_then(|idx| args.get(idx + 1))
+                .cloned()
+        };
+        if !flag("--mode") || arg_after("--mode").as_deref() != Some("daemon") {
+            continue;
+        }
+        let Some(socket) = arg_after("--daemon-socket") else {
+            continue;
+        };
+        // The orphan signature: a test-spawned daemon (its socket lives in a
+        // `tempfile`-created `.tmpXXXXXX` dir — the product's own daemons
+        // never use that prefix) whose parent is dead (ppid 1 after the
+        // killed run's reparent). A live run's daemon keeps its owning test
+        // binary as the parent, and the user's product daemons fail the
+        // path test, so neither is ever swept.
+        let orphan_socket_dir = Path::new(&socket)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tmp"));
+        if !orphan_socket_dir {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let Ok(ppid) = rest
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .parse::<u32>()
+        else {
+            continue;
+        };
+        if ppid != 1 && process_alive(ppid) {
+            continue; // a live run's daemon: its test binary is still up
+        }
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        swept += 1;
+    }
+    if swept > 0 {
+        eprintln!("swept {swept} orphan test daemon(s) (socket dir gone) before spawning");
+    }
+}
+
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
+    sweep_orphan_test_daemons();
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -305,6 +434,18 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     // creates deterministic under that load (the supervisor passes its
     // environment to the workers it spawns).
     command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
+    // Die with this test binary: a supervisor that outlives the process
+    // (a kill or abort runs no `Drop`) gets reparented to init and keeps
+    // running, so the kernel SIGKILLs it the moment its parent dies. The
+    // guard's protocol teardown below stays the normal exit path; this is
+    // the backstop. The per-test guards drop before the owning harness
+    // thread can exit, so the early-fire window is empty.
+    unsafe {
+        command.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
     let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
@@ -442,10 +583,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
@@ -631,10 +771,9 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // The question owned the pane first, then released it to the session:
     // the answer and the completion flag persisted together.
@@ -708,10 +847,9 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     let rendered = outcome.frames.join("\n");
     assert!(
@@ -878,6 +1016,11 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
     ) -> pa_tui::provider_auth::ProviderAuthFuture {
         Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
     }
+
+    fn anthropic_subscription_warning(&self) -> pa_tui::provider_auth::ProviderWarningFuture {
+        // The faux full-flow drives no Anthropic subscription auth.
+        Box::pin(async move { None })
+    }
 }
 
 /// The full first-run flow on a fresh home with no usable model (TS
@@ -982,10 +1125,9 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     let rendered = outcome.frames.join("\n");
     assert!(
@@ -1099,10 +1241,9 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("the run survives the failed write");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("the run survives the failed write");
 
     let rendered = outcome.frames.join("\n");
     assert!(
@@ -1183,12 +1324,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         width: 100,
         height: 30,
     };
-    let first = pa_tui::interactive::run_interactive(
-        options.clone(),
-        pa_tui::interactive::UiMode::Headless(first_plan),
-    )
-    .await
-    .expect("first interactive run");
+    let first = run_headless_bounded(options.clone(), first_plan)
+        .await
+        .expect("first interactive run");
     let first_rendered = first.frames.join("\n");
     assert!(
         first_rendered.contains("Share agent traces"),
@@ -1219,12 +1357,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         width: 100,
         height: 30,
     };
-    let second = pa_tui::interactive::run_interactive(
-        options,
-        pa_tui::interactive::UiMode::Headless(second_plan),
-    )
-    .await
-    .expect("second interactive run");
+    let second = run_headless_bounded(options, second_plan)
+        .await
+        .expect("second interactive run");
     let second_rendered = second.frames.join("\n");
     assert!(
         second_rendered.contains("hello each session"),
@@ -1308,16 +1443,14 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     pa_cli::ensure_daemon_running_with(&exe, &socket, dir.path())
         .await
         .expect("spawn the daemon");
-    let outcome = pa_tui::interactive::run_interactive(
-        options,
-        pa_tui::interactive::UiMode::Headless(pa_tui::interactive::HeadlessPlan {
-            steps: vec![pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 }],
-            width: 80,
-            height: 24,
-        }),
-    )
-    .await
-    .expect("headless interactive run");
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 }],
+        width: 80,
+        height: 24,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("headless interactive run");
     assert!(
         outcome
             .frames
@@ -1422,10 +1555,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -1605,10 +1737,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Mock 1"),
@@ -1736,10 +1867,9 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Model: chat-plus"),
@@ -1838,10 +1968,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
@@ -2002,10 +2131,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -2213,10 +2341,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         width: 100,
         height: 34,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -2386,10 +2513,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         height: 30,
     };
     let started = Instant::now();
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let wall = started.elapsed();
 
     // Verification seam: dump the captured frames for manual frame-diffing
@@ -2556,10 +2682,9 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         // of the guide.
         height: 60,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
 
     // The hint renders the user's binding, not the default, at the
@@ -2699,10 +2824,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
@@ -2825,10 +2949,9 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("must be configured externally") && rendered.contains("prime-inference"),
@@ -2961,10 +3084,9 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Model: mock-2"),
@@ -3056,10 +3178,9 @@ async fn tui_renames_session_through_slash_command() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -3198,10 +3319,9 @@ async fn tui_side_question_pane_flow() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -3304,10 +3424,9 @@ async fn tui_settings_menu_cycles_rows() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -3400,10 +3519,9 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
         width: 100,
         height: 34,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // The menu listed the cwd's non-hidden entries and never the dot dir.
     assert!(
@@ -3514,10 +3632,9 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -3657,12 +3774,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         width: 100,
         height: 30,
     };
-    let outcome_one = pa_tui::interactive::run_interactive(
-        make_options(),
-        pa_tui::interactive::UiMode::Headless(plan_one),
-    )
-    .await
-    .expect("interactive run one");
+    let outcome_one = run_headless_bounded(make_options(), plan_one)
+        .await
+        .expect("interactive run one");
     assert!(
         outcome_one.return_to_agents_view,
         "the resume key hands the pane to the agents view"
@@ -3683,12 +3797,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         width: 100,
         height: 30,
     };
-    let outcome_two = pa_tui::interactive::run_interactive(
-        make_options(),
-        pa_tui::interactive::UiMode::Headless(plan_two),
-    )
-    .await
-    .expect("interactive run two");
+    let outcome_two = run_headless_bounded(make_options(), plan_two)
+        .await
+        .expect("interactive run two");
     let rendered = outcome_two.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -3847,10 +3958,9 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -3970,10 +4080,9 @@ async fn tui_attach_to_idle_session_renders_without_input() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     assert!(
         !outcome.frames.is_empty(),
         "the attach painted frames with no key, submit, or resize input"
@@ -4030,7 +4139,7 @@ async fn tui_idle_session_event_repaints_without_input() {
             width: 100,
             height: 30,
         };
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+        run_headless_bounded(options, plan)
             .await
             .expect("interactive run")
     });
@@ -4103,10 +4212,9 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // The fresh session ran the turn; the poisoned session was never the
     // opened one.
@@ -4224,10 +4332,9 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("first scripted reply"),
@@ -4356,10 +4463,9 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert_eq!(
         outcome.active_session_id, second,
@@ -4600,10 +4706,9 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     kill_task.await.expect("the kill task");
     let rendered = outcome.frames.join("\n");
     // The refusal surfaced as the error row, and the draft returned to the

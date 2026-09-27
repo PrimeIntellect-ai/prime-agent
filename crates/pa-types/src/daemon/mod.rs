@@ -124,6 +124,7 @@ pub use outbound::{
     DaemonClosingReason, DaemonErrorInfo, DaemonEventEnvelope, DaemonOutbound,
     DaemonPeerTransportTicket, DaemonResponse, DaemonRuntimeIdentity, DaemonSavedSessionInfo,
     DaemonSessionClosedReason, DaemonSessionSnapshot, SnapshotPurpose, SocketIdentity,
+    UPDATE_RESTART_PREPARING_MESSAGE,
 };
 pub use plane::{
     command_plane, is_daemon_mutating_command, is_session_plane_daemon_command,

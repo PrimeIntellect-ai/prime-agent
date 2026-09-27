@@ -347,7 +347,17 @@ impl WindowedSessionStore {
             } else if window_done
                 && (matches!(
                     meta.kind.as_str(),
-                    "session_info" | "session_state" | "git_state" | "child_usage_attributed"
+                    "session_info"
+                        | "session_state"
+                        | "agent_status"
+                        | "git_state"
+                        | "child_usage_attributed"
+                ) || matches!(
+                    (meta.kind.as_str(), meta.custom_type.as_deref()),
+                    (
+                        "custom",
+                        Some("provider_quota_park" | "provider_quota_resume")
+                    )
                 ))
             {
                 metadata_entries.push(
@@ -571,6 +581,17 @@ impl WindowedSessionStore {
                         .is_some_and(|id| retained_ids.contains(id)) =>
                 {
                     latest.insert(format!("attribution:{}", value["targetId"]), index);
+                }
+                // The quota-park chain is scanned newest-first with resume
+                // entries ending episodes, so every park/resume row must
+                // survive the keep filter (not just the newest of a kind).
+                "custom"
+                    if matches!(
+                        value["customType"].as_str(),
+                        Some("provider_quota_park" | "provider_quota_resume")
+                    ) =>
+                {
+                    keep.insert(index);
                 }
                 _ => {}
             }
