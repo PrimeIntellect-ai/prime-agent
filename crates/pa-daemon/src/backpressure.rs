@@ -185,7 +185,7 @@ mod tests {
         // The client command answers the overload refusal — an answer, not
         // an error and not a dropped request.
         let refused = supervisor
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "get_state",
                 serde_json::json!({}),
@@ -216,7 +216,7 @@ mod tests {
         // Internal traffic at the same bound never refuses: it waits out
         // its budget and surfaces the budget error.
         let waited = supervisor
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "shutdown",
                 serde_json::json!({}),
@@ -235,7 +235,7 @@ mod tests {
         // and waits for its reply — bounded, visible, retryable).
         held.pop();
         let admitted = supervisor
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "get_state",
                 serde_json::json!({}),
@@ -269,7 +269,7 @@ mod tests {
             let resident = Arc::clone(&resident);
             tokio::spawn(async move {
                 supervisor
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "get_state",
                         serde_json::json!({}),
@@ -321,7 +321,7 @@ mod tests {
             });
         }
         let refused = supervisor
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "get_state",
                 serde_json::json!({}),
@@ -344,7 +344,7 @@ mod tests {
             "the refused request never entered the in-flight set"
         );
         let waited = supervisor
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "shutdown",
                 serde_json::json!({}),

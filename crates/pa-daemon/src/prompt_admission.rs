@@ -256,7 +256,7 @@ impl Supervisor {
             // An admission that vanished before the route: the prompt
             // routes through the generic path (TS `admission undefined`).
             return self
-                .route_client_command(command, client_id, attached, command_id, type_name)
+                .route_client_command(command, client_id, attached, command_id, type_name, None)
                 .await;
         };
         // Resolve the session (the generic route's wake-aware resolution).
@@ -339,7 +339,7 @@ impl Supervisor {
         // prompt still lands exactly once (the generic client route's
         // contract).
         let response = self
-            .route_command_ready(
+            .route_command_ready_typed(
                 &resident,
                 command_type,
                 payload,
@@ -462,7 +462,7 @@ impl Supervisor {
                     payload["cancelOwned"] = json!(true);
                 }
                 let mut response = match self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "cancel_prompt_admission",
                         payload,

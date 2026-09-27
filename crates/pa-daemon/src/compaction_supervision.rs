@@ -507,7 +507,7 @@ impl crate::supervisor::Supervisor {
             let payload = payload?;
             Some(
                 supervisor
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "abort_compaction",
                         payload,

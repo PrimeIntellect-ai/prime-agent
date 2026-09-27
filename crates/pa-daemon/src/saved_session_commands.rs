@@ -514,6 +514,7 @@ impl Supervisor {
             attached,
             command_id.to_string(),
             type_name.to_string(),
+            None,
         )
         .await
     }
