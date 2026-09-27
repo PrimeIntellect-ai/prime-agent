@@ -368,6 +368,28 @@ impl AgentSessionEngine {
 
     /// Resolve the request API key for `model`: the create-config key (the
     /// TS `setRuntimeApiKey` path), else the registry's auth resolution
+    /// The request-time api key AND its resolved provider headers (the
+    /// selection's own headers lead; the registry resolves the model's
+    /// configured ones otherwise): the provider target carries both, so
+    /// models needing custom or auth headers send them on every
+    /// request — the same resolution `set_model`'s swap applies.
+    pub(crate) fn resolve_request_key_and_headers(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+    ) {
+        if let Some(api_key) = &self.current_selection().api_key {
+            return (Some(api_key.clone()), model.headers.clone());
+        }
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        (resolved.api_key, resolved.headers)
+    }
+
     /// (auth storage, then the models.json provider `apiKey` — the same
     /// sources `getApiKeyAndHeaders` merges in the TS product).
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {

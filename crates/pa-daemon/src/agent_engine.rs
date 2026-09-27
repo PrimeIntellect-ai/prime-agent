@@ -756,7 +756,7 @@ impl AgentSessionEngine {
             Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
                 turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
                 agent: std::sync::Arc::clone(built.session.agent()),
-                compaction: *built.session.compaction_settings(),
+                compaction: built.session.compaction_settings(),
             });
         // The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
         // reads the provisioner's kernel manager): the same deadlock-free
@@ -1158,10 +1158,12 @@ impl AgentSessionEngine {
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
             let mut target = self.provider_target.write().expect("provider target lock");
+            let (api_key, headers) = self.resolve_request_key_and_headers(model);
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(model),
+                api_key,
                 model: model.clone(),
+                headers,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {
@@ -1809,6 +1811,7 @@ impl SessionEngine for AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key: self.resolve_request_api_key(&model),
                 model: model.clone(),
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -3126,9 +3129,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -3159,9 +3163,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
