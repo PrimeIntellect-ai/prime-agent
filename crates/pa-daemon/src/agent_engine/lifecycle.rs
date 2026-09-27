@@ -224,7 +224,7 @@ impl AgentSessionEngine {
     }
 
     /// The session's live working directory (the engine's cwd slot).
-    pub(super) fn cwd(&self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 
@@ -907,6 +907,10 @@ impl AgentSessionEngine {
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             telemetry,
             cwd,
+            // TS settings.imageModel routing: the daemon owns the routing
+            // (the armed route overrides the serving target + the run's
+            // model); the headless surfaces pass `None` to keep their own.
+            image_model_router: None,
             agent_dir: self.config.agent_dir.clone(),
             mcp_manager: Some(std::sync::Arc::clone(&self.mcp)),
             model: Some(agent_model),
