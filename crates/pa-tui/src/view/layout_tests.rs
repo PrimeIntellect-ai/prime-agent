@@ -18,7 +18,7 @@ fn condensed_runs(view: &AgentView) -> Vec<crate::tool_runs::ToolRun> {
 fn row_pack_expands_byte_exact() {
     let styled = ratatui::style::Style::new().fg(ratatui::style::Color::Rgb(1, 2, 3));
     let plain = ratatui::style::Style::default();
-    let mut span = |text: &str, is_styled: bool| crate::Span {
+    let span = |text: &str, is_styled: bool| crate::Span {
         style: if is_styled { styled } else { plain },
         content: text.to_string(),
     };
