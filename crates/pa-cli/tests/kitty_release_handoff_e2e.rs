@@ -304,6 +304,16 @@ impl HandoffHarness {
     }
 }
 
+impl Drop for HandoffHarness {
+    fn drop(&mut self) {
+        // A panicking wait must never leak the pty child: it owns the
+        // controlling terminal of its own session and outlives the
+        // harness (the cursor e2e reaps only on its success path).
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Non-blocking reader over the pty master, collecting the raw byte
 /// stream the child writes.
 struct PtyReader {
