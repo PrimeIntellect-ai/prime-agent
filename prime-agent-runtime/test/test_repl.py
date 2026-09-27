@@ -2543,7 +2543,11 @@ class SnapshotRestoreBoundsTest(unittest.TestCase):
             # cover it (a sparse file: no real bytes, so the size check alone
             # passes it — the cap must reject first).
             fh.write(huge_len.to_bytes(4, "little"))
-            fh.truncate(fh.tell() + huge_len)
+            # The file's APPARENT size must cover the declared name PLUS the
+            # 8-byte blob-length field that follows it, so the pre-existing
+            # truncated-record size check passes and the NAME cap is the
+            # guard that actually fires.
+            fh.truncate(fh.tell() + huge_len + 8)
         with open(path, "rb") as fh:
             with self.assertRaises(ValueError):
                 self.repl_module._read_snapshot_records(fh, 256 * 1024 * 1024, 16 * 1024 * 1024)
