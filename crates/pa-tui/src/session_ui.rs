@@ -1889,21 +1889,6 @@ impl SessionUi {
             })?
     }
 
-    /// The catalog entry for the current model (the `/fast` and `/tier`
-    /// eligibility checks need the provider and api, not just the id).
-    /// When the current provider is known (the session state reports it),
-    /// a same-id entry from another provider never wins the lookup.
-    fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
-        let model_id = view.chrome.model_id.as_deref()?;
-        match self.current_model_provider.as_deref() {
-            Some(provider) => self
-                .model_catalog
-                .iter()
-                .find(|model| model.id == model_id && model.provider == provider),
-            None => self.model_catalog.iter().find(|model| model.id == model_id),
-        }
-    }
-
     /// Recompute the model-eligibility autocomplete state (TS
     /// `getAvailableCommands` drops `/fast` when the current model is not
     /// fast-mode-eligible; TS `getArgumentCompletions` for `/tier` lists
@@ -1971,67 +1956,6 @@ impl SessionUi {
                 }
             })
             .collect()
-    }
-
-    /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
-    /// The TS queue (`serviceTierChangeQueue`) serializes tier changes
-    /// across `/fast`, `/tier`, and the settings row; here the dispatch
-    /// is the only submission path and awaits to completion, so changes
-    /// cannot interleave.
-    async fn handle_fast_command(&mut self, view: &mut AgentView) {
-        const UNAVAILABLE: &str = "Current model does not support fast mode (priority tier)";
-        let eligible = self
-            .current_model_entry(view)
-            .is_some_and(pa_types::ai::supports_fast_mode);
-        if !eligible {
-            self.note(UNAVAILABLE, view);
-            return;
-        }
-        // TS reads `connectionState.serviceTier` (priority = on) and flips
-        // it; the refresh after the switch confirms the daemon's tier.
-        let enabled = self.service_tier.as_deref() == Some("priority");
-        let target = if enabled { "default" } else { "priority" };
-        let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(
-            serde_json::Value::String(target.to_string()),
-        ) {
-            Ok(tier) => tier,
-            Err(error) => {
-                self.error_row(&format!("{error:#}"), view);
-                return;
-            }
-        };
-        let switched = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::SetServiceTier {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    service_tier: Some(tier),
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        if let Err(error) = switched {
-            self.error_row(&format!("{error:#}"), view);
-            return;
-        }
-        // TS re-reads the state after the switch (`connection.getState()`)
-        // and patches the local tier from the response.
-        let state = self.connection_state(view).await;
-        if let Some(state) = state {
-            if let Some(tier) = state.get("serviceTier").and_then(Value::as_str) {
-                self.service_tier = Some(tier.to_string());
-            }
-        }
-        // The tray badge and the `/tier` completions follow the applied
-        // tier (the `fast` token for priority).
-        view.chrome.service_tier.clone_from(&self.service_tier);
-        self.update_model_eligibility_filters(view);
-        let on = self.service_tier.as_deref() == Some("priority");
-        self.note(
-            &format!("Fast mode: {}", if on { "on" } else { "off" }),
-            view,
-        );
     }
 
     /// `/tier [tier]` (TS `handleTierCommand`): without an argument report

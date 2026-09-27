@@ -517,7 +517,7 @@ impl SessionUi {
                             id: None,
                             active_session_id: self.active_session_id.clone(),
                             service_tier: Some(tier),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         },
                     )
                     .await;
@@ -691,6 +691,10 @@ impl SessionUi {
                 self.service_tier = Some(tier.to_string());
             }
         }
+        // The tray badge and the `/tier` completions follow the applied
+        // tier (the `fast` token for priority).
+        view.chrome.service_tier.clone_from(&self.service_tier);
+        self.update_model_eligibility_filters(view);
         let on = self.service_tier.as_deref() == Some("priority");
         self.note(
             &format!("Fast mode: {}", if on { "on" } else { "off" }),

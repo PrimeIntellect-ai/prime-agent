@@ -18,10 +18,18 @@ pub(crate) struct ModelCatalogUpdate {
 
 impl SessionUi {
     /// The catalog entry for the current model (the `/fast` eligibility
-    /// check needs the provider and api, not just the id).
+    /// check needs the provider and api, not just the id). When the
+    /// current provider is known (the session state reports it), a
+    /// same-id entry from another provider never wins the lookup.
     pub(super) fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
         let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
+        match self.current_model_provider.as_deref() {
+            Some(provider) => self
+                .model_catalog
+                .iter()
+                .find(|model| model.id == model_id && model.provider == provider),
+            None => self.model_catalog.iter().find(|model| model.id == model_id),
+        }
     }
 
     /// Open the `/model` picker over the cached catalog, its search

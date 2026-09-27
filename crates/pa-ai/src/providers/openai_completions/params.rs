@@ -448,7 +448,7 @@ mod tests {
             messages: vec![Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             tools: None,
         };
