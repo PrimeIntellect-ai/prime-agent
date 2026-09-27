@@ -1,7 +1,14 @@
 //! Sparse fullscreen windows. Unknown global row totals are resolved only
 //! for callers that require absolute coordinates (selection and scroll info).
-use super::{layout::EntryLayout, AgentView};
+use super::{layout::EntryLayout, layout::EntryRows, layout::RowPack, AgentView};
 use crate::chat::Detail;
+
+/// The row count above which packing frees a large enough transient that
+/// the freed heap is returned to the OS immediately (allocator plumbing;
+/// no output-path effect). Ordinary transcript entries render far fewer
+/// rows; only a resumed session's pad-scale row sets cross this.
+const HUGE_PACKED_ROWS: usize = 8192;
+
 use crate::chrome::render_splash;
 use crate::Line;
 
@@ -181,31 +188,26 @@ impl AgentView {
         // the streaming tail content it cannot show.
         let mut section_rows = |view: &mut Self, section: usize| {
             if section == 0 {
-                splash
-                    .get_or_insert_with(|| {
-                        #[cfg(test)]
-                        SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                        // The suppressed splash is an empty section: the
-                        // sparse walker skips zero-row sections exactly
-                        // like an empty tail.
-                        if view.splash_suppressed {
-                            std::sync::Arc::new(Vec::new())
-                        } else {
-                            std::sync::Arc::new(render_splash(
-                                &view.chrome,
-                                &view.theme,
-                                window.width,
-                            ))
-                        }
-                    })
-                    .clone()
+                let splash = splash.get_or_insert_with(|| {
+                    #[cfg(test)]
+                    SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
+                    // The suppressed splash is an empty section: the
+                    // sparse walker skips zero-row sections exactly
+                    // like an empty tail.
+                    if view.splash_suppressed {
+                        std::sync::Arc::new(Vec::new())
+                    } else {
+                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, window.width))
+                    }
+                });
+                EntryRows::Fresh(splash.clone())
             } else if section == last {
-                tail.get_or_insert_with(|| {
+                let tail = tail.get_or_insert_with(|| {
                     #[cfg(test)]
                     TAIL_RENDERS.with(|count| count.set(count.get() + 1));
                     std::sync::Arc::new(view.render_transcript_tail(window.width))
-                })
-                .clone()
+                });
+                EntryRows::Fresh(tail.clone())
             } else {
                 view.sparse_entry_rows(section - 1, window.width)
             }
@@ -236,7 +238,7 @@ impl AgentView {
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
-            rows.extend_from_slice(&source[from..to]);
+            rows.extend(source.range(from, to));
             section += 1;
             row = 0;
         }
@@ -386,31 +388,29 @@ impl AgentView {
         // window in the middle of the transcript never pays for the splash
         // or the streaming tail content (the shortcut guide, the pending
         // bash output, the loaders) its rows cannot show.
-        let mut section_rows = |view: &mut Self, section: usize| -> std::sync::Arc<Vec<Line>> {
+        let mut section_rows = |view: &mut Self, section: usize| -> EntryRows {
             if section == 0 {
-                return splash
-                    .get_or_insert_with(|| {
-                        #[cfg(test)]
-                        SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                        // The suppressed splash is an empty section: the
-                        // sparse walker skips zero-row sections exactly
-                        // like an empty tail.
-                        if view.splash_suppressed {
-                            std::sync::Arc::new(Vec::new())
-                        } else {
-                            std::sync::Arc::new(render_splash(&view.chrome, &view.theme, width))
-                        }
-                    })
-                    .clone();
+                let splash = splash.get_or_insert_with(|| {
+                    #[cfg(test)]
+                    SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
+                    // The suppressed splash is an empty section: the
+                    // sparse walker skips zero-row sections exactly
+                    // like an empty tail.
+                    if view.splash_suppressed {
+                        std::sync::Arc::new(Vec::new())
+                    } else {
+                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, width))
+                    }
+                });
+                return EntryRows::Fresh(splash.clone());
             }
             if section == last {
-                return tail
-                    .get_or_insert_with(|| {
-                        #[cfg(test)]
-                        TAIL_RENDERS.with(|count| count.set(count.get() + 1));
-                        std::sync::Arc::new(view.render_transcript_tail(width))
-                    })
-                    .clone();
+                let tail = tail.get_or_insert_with(|| {
+                    #[cfg(test)]
+                    TAIL_RENDERS.with(|count| count.set(count.get() + 1));
+                    std::sync::Arc::new(view.render_transcript_tail(width))
+                });
+                return EntryRows::Fresh(tail.clone());
             }
             touched.push(section - 1);
             view.sparse_entry_rows(section - 1, width)
@@ -459,7 +459,7 @@ impl AgentView {
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
             let before = rows.len();
-            rows.extend_from_slice(&source[from..to]);
+            rows.extend(source.range(from, to));
             filled_to_section_end = to == source.len();
             shows_tail = section == last && to == source.len();
             // The entry's visible span feeds the click surface's window
@@ -544,11 +544,7 @@ impl AgentView {
         (rows, start)
     }
 
-    pub(super) fn sparse_entry_rows(
-        &mut self,
-        index: usize,
-        width: usize,
-    ) -> std::sync::Arc<Vec<Line>> {
+    pub(super) fn sparse_entry_rows(&mut self, index: usize, width: usize) -> EntryRows {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         self.sparse_entries.insert(index);
@@ -564,7 +560,7 @@ impl AgentView {
         if self.entry_cacheable_at(index, entry) {
             if let Some(layout) = &self.entry_layout[index][detail] {
                 if layout.spacing == spacing {
-                    return layout.rows.clone();
+                    return EntryRows::Packed(layout.rows.clone());
                 }
             }
         }
@@ -576,11 +572,25 @@ impl AgentView {
             preceded_by_tool,
         ));
         if self.entry_cacheable_at(index, entry) {
+            // The cache is storage, not output: the entry's rows stay
+            // resident for the process lifetime, so they are stored
+            // packed (byte-exact expansion on read) instead of as the
+            // renderers' fragment-sized spans — a scroll walk's
+            // retention is the per-span chunk overhead, not the text.
             self.entry_layout[index][detail] = Some(EntryLayout {
                 spacing,
-                rows: rows.clone(),
+                rows: std::sync::Arc::new(RowPack::pack(&rows)),
             });
+            // A huge entry's rendered rows are the transcript's biggest
+            // single transient (the pad row set of a resumed large
+            // session): the pack just replaced them, and the freed
+            // pages only return to the OS if the allocator's trim can
+            // reach them. Gate on the row count so ordinary entries
+            // never pay a trim call — only the rare huge materialization.
+            if rows.len() >= HUGE_PACKED_ROWS {
+                pa_types::memory_release::trim_freed_heap();
+            }
         }
-        rows
+        EntryRows::Fresh(rows)
     }
 }
