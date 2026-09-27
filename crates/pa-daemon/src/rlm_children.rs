@@ -11,6 +11,7 @@
 //! session. The kernel-visible surface (handles, roster rows, collect
 //! snapshots, selector errors) is TS parity.
 
+use serde_json::Map;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -259,7 +260,7 @@ struct SupervisorChildSessionsInner {
     /// `None` until the engine wires it.
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The worker's model-allowlist refusal telemetry (`model refused`):
-    /// spawn/create_session refusals emit through the engine's shared
+    /// `spawn/create_session` refusals emit through the engine's shared
     /// lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
     /// The engine's child-usage attribution producer (wired once the
@@ -309,6 +310,11 @@ impl SupervisorChildSessions {
     /// Wire the delete notification hook (the worker's context-tree cache
     /// invalidation): called once per completed `delete_subagent` with
     /// the deleted child's id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the delete-notifier mutex is poisoned (a holder
+    /// panicked while holding the lock).
     pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
         *self
             .inner
@@ -328,6 +334,11 @@ impl SupervisorChildSessions {
     /// once per settled child run — the natural settle watcher, the
     /// cancel walk, and the delete path — so a goal continuation owed
     /// behind descendant work re-evaluates when descendants settle.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the settle-hook mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_settle_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
     }
@@ -337,6 +348,11 @@ impl SupervisorChildSessions {
     /// capture-before-unlink teardown paths) deliver per-origin batches
     /// into this sink (TS `flushPendingChildUsageAttribution`'s Rust
     /// seam — the producer owns the target row and the durable append).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the usage-sink mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
     }
@@ -365,18 +381,34 @@ impl SupervisorChildSessions {
     /// notice (the parent session is going away), and each child's own
     /// close cascades to its children through the child worker's kill
     /// handler with the same close reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first close failure after walking every child (a
+    /// failed close keeps the child tracked so the caller can retry); a
+    /// child whose session is already gone is a completed no-op.
     pub async fn close_children(&self, reason: ChildCloseReason) -> Result<()> {
         self.inner.close_children_inner(reason).await
     }
 
     /// Replace the parent identity (the worker session sets it once its own
     /// session exists).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_identity(&self, identity: ParentIdentity) {
         *self.inner.identity.lock().expect("identity lock") = identity;
     }
 
     /// The inherited RLM depth bound (TS `getRlmMaxDepthStatus().maxDepth`
     /// before any chat override).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn rlm_max_depth(&self) -> u32 {
         self.inner
             .identity
@@ -407,6 +439,11 @@ impl SupervisorChildSessions {
     /// run status, elapsed duration, answer preview, and session dir.
     /// `parent_id` (the parent's own RLM node id) is overlaid by the
     /// worker, which owns that identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn child_snapshots(&self) -> Vec<Value> {
         let model = self
             .inner
@@ -520,6 +557,11 @@ impl SupervisorChildSessions {
 
     /// Set only the inherited model selector (the engine resolves its model
     /// when it builds the session, after the create command arrived).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_model(&self, model: String) {
         self.inner.identity.lock().expect("identity lock").model = Some(model);
     }
@@ -527,6 +569,11 @@ impl SupervisorChildSessions {
     /// Set the session's RLM depth bound (TS `setRlmMaxDepth`): the
     /// registry is the bound every spawn checks, so the override is the
     /// live limit children respect immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_rlm_max_depth(&self, max_depth: u32) {
         self.inner
             .identity
@@ -550,6 +597,12 @@ impl SupervisorChildSessions {
     /// child is torn down with its ledger tombstone, `"not_found"` for an
     /// unknown id. A teardown failure surfaces as `Err` (the TS delete
     /// throws through the wire arm).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child teardown fails (the kill of the
+    /// child worker times out or errors), which the TS delete throws
+    /// through the wire arm.
     pub async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
         self.inner.delete_inactive_subagent(child_id).await
     }
@@ -745,7 +798,7 @@ impl SupervisorChildSessionsInner {
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let summary = self
             .command(&create, CREATE_TIMEOUT_MS)
@@ -839,8 +892,9 @@ impl SupervisorChildSessionsInner {
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
+                rlm_notice_nonce: None,
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         self.command(&command, PROMPT_TIMEOUT_MS)
             .await
@@ -870,7 +924,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let state = self.command(&command, STATE_TIMEOUT_MS).await?;
         Ok(state
@@ -890,7 +944,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let answer = self.command(&command, STATE_TIMEOUT_MS).await?;
         Ok(answer
@@ -911,7 +965,7 @@ impl SupervisorChildSessionsInner {
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let _ = self
             .command(&command, budget.as_millis() as u64 + IDLE_WAIT_GRACE_MS)
@@ -1056,7 +1110,13 @@ impl SupervisorChildSessionsInner {
     /// Deliver one terminal notice into the parent session: the notice rides
     /// the supervisor's `follow_up` route as an injected custom turn (the
     /// row renders in the parent transcript and the turn runs on the
-    /// notice content, the TS `followUp` notice action).
+    /// notice content, the TS `followUp` notice action). The reserved
+    /// custom kinds are daemon provenance, so the command carries the
+    /// one-shot notice capability minted in this same worker process
+    /// (`child_status_notices`): the parent's queue admission accepts a
+    /// reserved-kind row exclusively with a live mint, and answers
+    /// anything a caller sends — with or without a guessed nonce —
+    /// loudly instead.
     async fn deliver_terminal_notice(&self, notice: &RlmChildTerminalNotice) {
         let message = create_rlm_child_terminal_notice(notice, now_ms());
         let Some(content) = custom_message_text(&message) else {
@@ -1065,6 +1125,7 @@ impl SupervisorChildSessionsInner {
         };
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
+        let nonce = crate::child_status_notices::mint();
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
@@ -1081,8 +1142,9 @@ impl SupervisorChildSessionsInner {
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
+                rlm_notice_nonce: Some(nonce),
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         if let Err(error) = self.command(&command, NOTICE_DELIVERY_TIMEOUT_MS).await {
             eprintln!(
@@ -1385,7 +1447,7 @@ impl SupervisorChildSessionsInner {
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             };
             let _ = self
                 .command(&abort, KILL_TIMEOUT_MS)
@@ -1609,7 +1671,7 @@ fn unknown_session(error: &anyhow::Error) -> Option<()> {
 fn custom_message_text(message: &pa_types::session::CustomMessage) -> Option<String> {
     match &message.content {
         pa_types::ai::UserContent::Text(text) => Some(text.clone()),
-        _ => None,
+        pa_types::ai::UserContent::Blocks(_) => None,
     }
 }
 
@@ -2276,6 +2338,10 @@ mod watch_tests {
         let custom = &follow_up["customMessage"];
         assert_eq!(custom["role"], "custom");
         assert_eq!(custom["customType"], "rlm_child_terminal_notice");
+        assert!(
+            follow_up["rlmNoticeNonce"].as_str().is_some(),
+            "the notice carries the one-shot capability the parent's queue admission consumes"
+        );
         assert_eq!(
             custom["content"],
             "[child-exited: no-reply child:f20-worker]\n\nLast assistant text: the child final answer"

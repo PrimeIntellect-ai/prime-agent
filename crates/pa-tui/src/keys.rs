@@ -9,7 +9,7 @@
 //! layer sees crossterm's parsed events, where some encodings fold to the
 //! same event; the mode-aware mappings follow TS where the kitty protocol
 //! flag disambiguates, and the irreducible folds are documented divergences
-//! (see `ctrl_char_id` and docs/FEATURE_PARITY.md, the term-enhanced-keys
+//! (see `ctrl_char_id` and `docs/FEATURE_PARITY.md`, the term-enhanced-keys
 //! rows).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -565,7 +565,7 @@ mod tests {
     }
 
     /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm
-    /// calls it BackTab) even though no keybinding binds it.
+    /// calls it `BackTab`) even though no keybinding binds it.
     #[test]
     fn backtab_reports_shift_tab() {
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
@@ -685,6 +685,18 @@ mod tests {
                 "Ctrl+Home doc start",
             ),
             (
+                KeyCode::Home,
+                KeyModifiers::SUPER,
+                "super+home",
+                "Cmd+Home doc start",
+            ),
+            (
+                KeyCode::End,
+                KeyModifiers::SUPER,
+                "super+end",
+                "Cmd+End doc end",
+            ),
+            (
                 KeyCode::Down,
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 "shift+super+down",
@@ -708,6 +720,15 @@ mod tests {
         assert!(kb.matches("super+right", "tui.editor.cursorLineEnd"));
         assert!(kb.matches("super+up", "tui.editor.cursorDocStart"));
         assert!(kb.matches("super+down", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("super+home", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+end", "tui.editor.cursorDocEnd"));
+        // The list-edge jumps (the agents view handles the ids; home/end
+        // stay line motion in the editor scope).
+        assert!(kb.matches("home", "tui.select.top"));
+        assert!(kb.matches("ctrl+home", "tui.select.top"));
+        assert!(kb.matches("end", "tui.select.bottom"));
+        assert!(kb.matches("super+down", "tui.select.bottom"));
+        assert!(kb.matches("home", "tui.editor.cursorLineStart"));
         assert!(kb.matches("ctrl+up", "tui.editor.cursorParagraphUp"));
         assert!(kb.matches("ctrl+down", "tui.editor.cursorParagraphDown"));
         assert!(kb.matches("shift+super+down", "tui.editor.selectDocEnd"));

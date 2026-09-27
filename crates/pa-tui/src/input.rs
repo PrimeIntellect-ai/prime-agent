@@ -30,7 +30,7 @@
 //! (see [`filter_enhanced_key_events`]): key releases are dropped (TS
 //! tui.ts dispatch filter) and a duplicate-reporting kitty terminal's
 //! raw-text twin of a plain CSI-u character is deduplicated (TS
-//! StdinBuffer `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
+//! `StdinBuffer` `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -273,7 +273,7 @@ fn forward(
 /// - Key releases are dropped before any surface sees them (TS tui.ts:
 ///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — the only
 ///   TS opt-ins are example extensions, which this port does not ship).
-/// - The kitty-printable dedup (TS StdinBuffer
+/// - The kitty-printable dedup (TS `StdinBuffer`
 ///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
 ///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
 ///   and the raw character for one keypress (Italian-style layouts, TS
@@ -924,7 +924,7 @@ mod tests {
 
     /// rxvt-family rows inside the wrapper: shift+arrows (`\x1b[a`),
     /// ctrl+arrows over SS3 (`\x1bOa`), the `$`/`^` tilde complements, and
-    /// the home/end alternates - the TS LEGACY_SHIFT/CTRL/KEY rows its
+    /// the home/end alternates - the TS `LEGACY_SHIFT/CTRL/KEY` rows its
     /// strip-and-match still reaches through the wrapper.
     #[test]
     fn wrapped_rxvt_modifier_rows_decode() {

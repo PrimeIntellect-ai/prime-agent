@@ -767,7 +767,7 @@ impl McpView {
 
     /// The visible row window centered on the selection. A frame too
     /// short for any row carries the EMPTY window — never raised back
-    /// to one row (list_layout's reserved-height guard owns the 0).
+    /// to one row (`list_layout`'s reserved-height guard owns the 0).
     fn window(&self) -> (usize, usize) {
         if self.visible_items == 0 {
             return (0, 0);

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use serde_json::Map;
+
 use super::*;
 use crate::event_stream::AssistantMessageEventExt;
 use crate::registry::get_api_provider;
@@ -12,7 +14,7 @@ fn user_text(text: &str) -> Message {
     Message::User(UserMessage {
         content: UserMessageContent::Text(text.to_string()),
         timestamp: 0,
-        rest: Default::default(),
+        rest: Map::default(),
     })
 }
 
@@ -245,6 +247,130 @@ async fn consumes_queued_responses_in_order_and_errors_when_exhausted() {
 }
 
 #[tokio::test]
+async fn repeat_last_response_replays_the_last_step_once_the_queue_runs_dry() {
+    let registration = register();
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![text_msg("first"), text_msg("last")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let first = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let last = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let dry_one = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let dry_two = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+
+    assert_eq!(first.content, vec![faux_text("first")]);
+    assert_eq!(last.content, vec![faux_text("last")]);
+    assert_eq!(dry_one.content, vec![faux_text("last")]);
+    assert_eq!(dry_one.stop_reason, StopReason::Stop);
+    assert_eq!(dry_two.content, vec![faux_text("last")]);
+    assert_eq!(registration.get_pending_response_count(), 0);
+    assert_eq!(registration.call_count(), 4);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn parses_the_repeat_last_response_script_key_into_the_registration() {
+    let parsed = script::parse_faux_script(&serde_json::json!({
+        "responses": ["only"],
+        "repeatLastResponse": true,
+    }))
+    .expect("script parses");
+    assert!(parsed.repeat_last_response);
+    let registration = script::register_faux_provider_from_script(&parsed);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let queued = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let repeated = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    assert_eq!(queued.content, vec![faux_text("only")]);
+    assert_eq!(repeated.content, vec![faux_text("only")]);
+    assert_eq!(registration.get_pending_response_count(), 0);
+    assert_eq!(registration.call_count(), 2);
+    registration.unregister();
+
+    // The knob stays off unless the script opts in: the finite queue and
+    // its exhaustion error are the response-budget contract.
+    let parsed = script::parse_faux_script(&serde_json::json!({ "responses": ["only"] }))
+        .expect("script parses");
+    assert!(!parsed.repeat_last_response);
+}
+
+#[tokio::test]
+async fn repeat_last_response_switched_on_after_serving_replays_the_last_step() {
+    let registration = register();
+    registration.set_responses(vec![text_msg("first"), text_msg("last")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let first = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let last = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    // The queue is dry and the mode was off while it drained; switching
+    // repeat-last on now still has the last served step recorded.
+    registration.set_repeat_last_response(true);
+    let replay = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+
+    assert_eq!(first.content, vec![faux_text("first")]);
+    assert_eq!(last.content, vec![faux_text("last")]);
+    assert_eq!(replay.content, vec![faux_text("last")]);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn overlapping_streams_in_repeat_last_mode_never_hit_the_exhaustion_error() {
+    let registration = register();
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![text_msg("only")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let calls: Vec<_> = (0..8)
+        .map(|_| {
+            let model = registration.get_model();
+            let context = context.clone();
+            tokio::spawn(async move { complete(&model, &context, None).await })
+        })
+        .collect();
+    for call in calls {
+        let response = call.await.unwrap().expect("the call completes");
+        assert_eq!(response.content, vec![faux_text("only")]);
+        assert_ne!(response.stop_reason, StopReason::Error);
+    }
+    assert_eq!(registration.get_pending_response_count(), 0);
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn can_replace_and_append_queued_responses() {
     let registration = register();
     registration.set_responses(vec![text_msg("first")]);
@@ -382,16 +508,16 @@ async fn estimates_prompt_and_output_tokens_from_serialized_context() {
                     UserOrToolContent::Text(TextContent {
                         text: "hello".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                     UserOrToolContent::Image(ImageContent {
                         mime_type: "image/png".into(),
                         data: "abcd".into(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }),
                 ]),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
             Message::Assistant(faux_assistant_message(
                 vec![faux_text("prior")],
@@ -403,12 +529,12 @@ async fn estimates_prompt_and_output_tokens_from_serialized_context() {
                 content: vec![UserOrToolContent::Text(TextContent {
                     text: "tool out".into(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })],
                 details: None,
                 is_error: false,
                 timestamp: 2,
-                rest: Default::default(),
+                rest: Map::default(),
             }),
         ],
         tools: Some(vec![tool]),
@@ -974,7 +1100,7 @@ async fn supports_aborting_mid_toolcall_stream_when_paced() {
             .cloned()
             .unwrap(),
         thought_signature: None,
-        rest: Default::default(),
+        rest: Map::default(),
     })];
     message.stop_reason = StopReason::ToolUse;
     registration.set_responses(vec![FauxResponseStep::Message(message)]);

@@ -5,6 +5,7 @@
 //! not the first-listed session's.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -111,18 +112,18 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     let mut content = format!(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}}\n"
     );
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -173,6 +174,7 @@ async fn entry_anchor_selects_the_left_session() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
@@ -261,6 +263,7 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
         status_message: Some(notice.clone()),
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![

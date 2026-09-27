@@ -9,7 +9,7 @@
 //! updates. The turn settlement (response boundary, quiescence envelope,
 //! stop reason) mirrors the in-process mode: both serve the same captures.
 //! The daemon worker's `goal_update` session events surface through the
-//! wire mapping (wire_events.rs), and the autonomous accounting rides the
+//! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
 //! and the stop reason (TS `waitForHeadlessCompletion` + `acpStopReason`).
 
@@ -21,7 +21,7 @@ use pa_types::daemon::{
     DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType, DaemonProtocolInfo,
     DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -230,6 +230,17 @@ struct DaemonAcpState {
 /// guarantees the socket answers (the composition spawns a supervisor
 /// when none is listening); a daemon that drops mid-session fails the
 /// hosted session's requests, exactly like the TS daemon connection.
+///
+/// # Errors
+///
+/// Returns an error when the daemon socket connect fails; a daemon that
+/// drops mid-session fails the hosted session's requests instead, exactly
+/// like the TS daemon connection.
+///
+/// # Panics
+///
+/// The frame-consumer task panics when the link's pending-response map
+/// lock is poisoned (a holder panicked while holding it).
 pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::Result<i32> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
@@ -499,7 +510,7 @@ async fn handle_session_new(
         lifecycle: None,
         env: None,
         launch_env: None,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let create_response = match link.request(create, REQUEST_TIMEOUT_MS).await {
         Ok(response) => response,
@@ -535,7 +546,7 @@ async fn handle_session_new(
         recovery_config: None,
         env: None,
         launch_env: None,
-        rest: Default::default(),
+        rest: Map::default(),
     };
     if let Ok(response) = link.request(attach, REQUEST_TIMEOUT_MS).await {
         if !response.success {
@@ -547,7 +558,7 @@ async fn handle_session_new(
                     DaemonCommand::Kill {
                         id: None,
                         active_session_id: daemon_active_session_id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     REQUEST_TIMEOUT_MS,
                 )
@@ -581,7 +592,7 @@ async fn handle_session_new(
                 DaemonCommand::Kill {
                     id: None,
                     active_session_id: hosted.daemon_active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 REQUEST_TIMEOUT_MS,
             )
@@ -631,7 +642,7 @@ async fn replace_session_servers(
                 active_session_id: hosted.daemon_active_session_id.clone(),
                 owner_id: hosted.mcp_owner_id.clone(),
                 servers: serde_json::to_value(resolved)?,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -721,8 +732,9 @@ async fn handle_session_prompt(
             queue_key: None,
             prefix_messages: None,
             admission_id: None,
+            rlm_notice_nonce: None,
         },
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let response = match link.request(prompt, TURN_TIMEOUT_MS).await {
         Ok(response) => response,
@@ -894,7 +906,7 @@ async fn fetch_autonomous_status(
                 id: None,
                 active_session_id: active_session_id.to_string(),
                 wait_for_rlm_quiescence: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             TURN_TIMEOUT_MS,
         )
@@ -929,7 +941,7 @@ async fn session_cancel(
     let abort = DaemonCommand::Abort {
         id: None,
         active_session_id: hosted.daemon_active_session_id.clone(),
-        rest: Default::default(),
+        rest: Map::default(),
     };
     drop(guard);
     let _ = link.request(abort, REQUEST_TIMEOUT_MS).await;
@@ -972,7 +984,7 @@ async fn handle_session_close(
             DaemonCommand::Abort {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -986,7 +998,7 @@ async fn handle_session_close(
             DaemonCommand::Kill {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -1007,7 +1019,7 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
             DaemonCommand::Abort {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )
@@ -1017,7 +1029,7 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
             DaemonCommand::Kill {
                 id: None,
                 active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             },
             REQUEST_TIMEOUT_MS,
         )

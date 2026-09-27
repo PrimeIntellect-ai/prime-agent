@@ -64,6 +64,12 @@ pub struct CompactionState {
     pub reason: CompactionReason,
     /// `/compact <instructions>` focus text (truncated for the label).
     pub custom_instructions: Option<String>,
+    /// The summary as the compaction model generates it: one
+    /// `compaction_summary_delta` event's text appended per event, from
+    /// `compaction_start` (which resets it) to the `compaction_end` that
+    /// resolves the streamed block into the durable summary row. Empty
+    /// until the first delta arrives (the loader stands alone).
+    pub summary: String,
 }
 
 /// The compaction loader rows (TS `Loader`: `["", spinner + message]`, both
@@ -111,6 +117,106 @@ pub fn render_compaction_loader(
         ));
     }
     vec![Vec::new(), row]
+}
+
+/// The most wrapped rows the live streamed block renders: the block
+/// follows the generation (a scrolling tail of the newest text, not the
+/// summary's head), so a long summary never outgrows the status area.
+pub const STREAM_BLOCK_MAX_ROWS: usize = 8;
+
+/// The live streamed-summary block under the compaction loader (the
+/// operator's "stream the compacted summary" feature): while the
+/// compaction model generates the summary, the expanded view (`all`
+/// detail) renders the accumulated text — one `compaction_summary_delta`
+/// append at a time — nested on the branch grammar, exactly like the
+/// expanded `◆ Context compacted` content that later replaces it: the
+/// first row hangs off the loader row on the dim `╰─ ` gutter, every
+/// continuation row on the four-column branch indent. Collapsed details
+/// render nothing (the loader stands alone, exactly like TS), and the
+/// settled `compaction_end` clears the whole block when its durable
+/// summary row lands.
+pub fn render_compaction_stream(
+    state: &CompactionState,
+    expanded: bool,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line> {
+    if !expanded || state.summary.trim().is_empty() {
+        return Vec::new();
+    }
+    let body = theme.fg_style(ThemeColor::RefinementSummary);
+    let content_width = crate::branch::branch_content_width(width);
+    // The wrap window: the block renders only the newest
+    // [`STREAM_BLOCK_MAX_ROWS`] rows, so re-wrapping the whole growing
+    // summary on every delta would be quadratic work for no visual gain.
+    // Wrapping a tail window instead is exact: a text that fits in the
+    // cap rows holds at most cap * (content_width + 1) chars — inside
+    // the (cap + 1) * (content_width + 1) window, so it wraps whole and
+    // unclamped — and a clamped window wraps to at least cap + 1 rows
+    // (no row holds more than content_width chars plus its newline), so
+    // every kept row's boundaries live entirely inside the window. Only
+    // the window's first row can be a partial cut, and it always
+    // scrolls out of the cap.
+    let window = (STREAM_BLOCK_MAX_ROWS + 1) * (content_width + 1);
+    let total_chars = state.summary.chars().count();
+    let clamped = total_chars > window;
+    let text = if clamped {
+        state
+            .summary
+            .chars()
+            .skip(total_chars - window)
+            .collect::<String>()
+    } else {
+        state.summary.clone()
+    };
+    let wrapped = crate::width::wrap_text(&text, content_width);
+    // The tail follows the generation: render the newest rows, marking
+    // every cut with a dim ellipsis. The marker must reflect dropped
+    // CONTENT, not the kept row count: the scalar window bounds
+    // Unicode scalars while rows bound display columns, so a
+    // combining-mark-heavy suffix can clamp yet wrap to fewer rows than
+    // the cap — the ellipsis still shows, because content older than
+    // the window was dropped either way.
+    let truncated = clamped || wrapped.len() > STREAM_BLOCK_MAX_ROWS;
+    let rows_to_paint = wrapped.len().saturating_sub(STREAM_BLOCK_MAX_ROWS)..;
+    let mut painted: Vec<Line> = Vec::new();
+    for (offset, line) in wrapped[rows_to_paint].iter().enumerate() {
+        let mut row: Line = Vec::new();
+        if truncated && offset == 0 {
+            // The ellipsis marks the cut on the oldest kept row. Its two
+            // columns come out of that row's own content — the row is
+            // sliced to `content_width - 2` columns first — so the
+            // prefix never pushes the line past the width and
+            // `truncate_line` never clips the row's tail.
+            row.push(Span::styled(
+                "\u{2026} ".to_string(),
+                theme.fg_style(ThemeColor::Dim),
+            ));
+            row.extend(crate::width::slice_line_by_column(
+                &line
+                    .iter()
+                    .map(|span| Span::styled(span.content.clone(), body))
+                    .collect::<Line>(),
+                0,
+                content_width.saturating_sub(2),
+            ));
+        } else {
+            row.extend(
+                line.iter()
+                    .map(|span| Span::styled(span.content.clone(), body)),
+            );
+        }
+        painted.push(row);
+    }
+    crate::branch::branch_rows(painted, theme)
+        .into_iter()
+        .map(|row| {
+            // The branch prefix alone can outgrow a tiny viewport, so
+            // clip before padding (the expanded summary's own rule).
+            let row = crate::width::truncate_line(&row, width, "");
+            crate::chat::pad_to(row, width, ratatui::style::Style::default())
+        })
+        .collect()
 }
 
 /// The `◆ Context compacted` transcript row (TS
@@ -370,6 +476,15 @@ mod tests {
         CompactionState {
             reason,
             custom_instructions,
+            summary: String::new(),
+        }
+    }
+
+    fn streamed_state(reason: CompactionReason, summary: &str) -> CompactionState {
+        CompactionState {
+            reason,
+            custom_instructions: None,
+            summary: summary.to_string(),
         }
     }
 
@@ -403,6 +518,120 @@ mod tests {
         );
     }
 
+    /// The live streamed block renders only in the expanded detail
+    /// (`all`): collapsed details keep the loader alone (TS geometry),
+    /// and the expanded block nests on the branch grammar — the gutter
+    /// on the first content row hanging off the loader, the four-column
+    /// continuation indent on every row after — exactly like the
+    /// expanded `◆ Context compacted` content that settles it.
+    #[test]
+    fn stream_block_renders_expanded_only_on_the_branch_grammar() {
+        let state = streamed_state(
+            CompactionReason::Threshold,
+            "Summary line one.\nSecond line.",
+        );
+        // Collapsed details: nothing (the loader stands alone).
+        assert!(render_compaction_stream(&state, false, &theme(), 80).is_empty());
+        // An empty live summary: nothing yet (no delta arrived).
+        let empty = CompactionState {
+            reason: CompactionReason::Threshold,
+            custom_instructions: None,
+            summary: String::new(),
+        };
+        assert!(render_compaction_stream(&empty, true, &theme(), 80).is_empty());
+
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        let text = plain(&rows);
+        assert_eq!(text.len(), 2, "one wrapped row per summary line: {text:?}");
+        assert!(
+            text[0].starts_with(&format!(" {}", crate::branch::BRANCH_GUTTER)),
+            "the first content row hangs off the loader on the branch gutter: {text:?}"
+        );
+        assert!(text[0].contains("Summary line one."));
+        assert!(
+            text[1].starts_with(crate::branch::BRANCH_INDENT),
+            "continuation rows sit on the branch indent: {text:?}"
+        );
+        assert!(text[1].contains("Second line."));
+    }
+
+    /// The live block follows the generation: a summary longer than the
+    /// cap renders its newest wrapped rows (a scrolling tail), with a
+    /// dim ellipsis marking the cut — the status area never outgrows
+    /// [`STREAM_BLOCK_MAX_ROWS`].
+    #[test]
+    fn stream_block_follows_the_generation_tail() {
+        let summary: String = (0..40)
+            .map(|index| format!("generated line {index}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let state = streamed_state(CompactionReason::Threshold, &summary);
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        assert_eq!(rows.len(), STREAM_BLOCK_MAX_ROWS);
+        let text = plain(&rows);
+        assert!(
+            text[0].starts_with(&format!(" {}\u{2026}", crate::branch::BRANCH_GUTTER))
+                || text[0].contains('\u{2026}'),
+            "the cut tail is marked: {text:?}"
+        );
+        // The tail shows the NEWEST rows: the last rendered row carries
+        // the summary's final line.
+        assert!(
+            text.last()
+                .is_some_and(|row| row.contains("generated line 39.")),
+            "the block follows the generation: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("generated line 0.")),
+            "the oldest rows scrolled out of the cap: {text:?}"
+        );
+    }
+
+    /// The ellipsis marks dropped CONTENT, not the kept row count: a
+    /// combining-mark-heavy summary (zero-width scalars ride every row,
+    /// so the scalar window holds more display rows than usual) can
+    /// clamp yet wrap to fewer rows than the cap — the cut still shows
+    /// its marker (Macroscope round 3).
+    #[test]
+    fn stream_block_marks_the_cut_even_when_the_clamped_suffix_is_few_rows() {
+        // Combining marks: each base char carries a zero-width mark, so
+        // the scalar count doubles while the display columns stay one
+        // per pair.
+        let mut summary = String::new();
+        for _ in 0..400 {
+            summary.push('x');
+            summary.push('\u{0301}'); // combining acute accent
+        }
+        let state = streamed_state(CompactionReason::Threshold, &summary);
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        let text = plain(&rows);
+        // The scalar window (693) clamps the 800-scalar summary, and the
+        // 400-column content wraps past the cap — but the invariant
+        // under test is the marker: the first rendered row carries it.
+        assert!(
+            text.first().is_some_and(|row| row.contains('\u{2026}')),
+            "the clamped cut shows its ellipsis: {text:?}"
+        );
+        assert!(
+            rows.len() <= STREAM_BLOCK_MAX_ROWS,
+            "the cap bounds the block: {text:?}"
+        );
+        // And a SHORT combining-mark summary (inside the window, at most
+        // a few rows) stays unmarked — nothing was dropped.
+        let mut short = String::new();
+        for _ in 0..20 {
+            short.push('x');
+            short.push('\u{0301}');
+        }
+        let state = streamed_state(CompactionReason::Threshold, &short);
+        let rows = render_compaction_stream(&state, true, &theme(), 80);
+        let text = plain(&rows);
+        assert!(
+            !text.iter().any(|row| row.contains('\u{2026}')),
+            "nothing was dropped, no marker: {text:?}"
+        );
+    }
+
     #[test]
     fn loader_label_truncates_long_focus() {
         let long = "x".repeat(80);
@@ -418,6 +647,7 @@ mod tests {
         let state = CompactionState {
             reason: CompactionReason::Manual,
             custom_instructions: None,
+            summary: String::new(),
         };
         let rows = render_compaction_loader(&state, 0, "Ctrl+C", &theme(), 80);
         assert_eq!(rows.len(), 2, "TS Loader renders a blank then the row");

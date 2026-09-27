@@ -56,5 +56,5 @@ either changes.
 
 ## Generated files
 
-- Edit generated data via its generator, never by hand: the model catalog `crates/pa-ai/src/models.generated.json` comes from `crates/pa-ai/scripts/generate-models.py` (the `models_generated.rs` beside it is the handwritten loader, not the generated artifact). Flag hand-edits to generated files: require regeneration instead.
-- Generated files are exempt from the size guidance; the exemption's reason is that the file is generator-owned output.
+- The model catalog is hand-maintained data: `crates/pa-ai/src/models_generated.rs` mirrors the TS `packages/ai/src/models.generated.ts` object literal (no generator, no generated JSON — edit it by hand exactly like its TS source), and the parity fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with `scripts/generate-catalog-fixture.py` from the real `PrimeIntellect-ai/prime-agent-catalog` snapshot. Flag edits that would reintroduce a generator or hand-tweak the fixture rows.
+- Bulk data files are exempt from the size guidance; the exemption's reason is that the file mirrors an upstream data source.

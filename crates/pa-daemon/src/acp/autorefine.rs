@@ -137,8 +137,8 @@ mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -235,6 +235,7 @@ mod tests {
                 // The settings default (no prewarm); the ACP autorefine
                 // tests do not exercise kernel boot paths.
                 prewarm_ipython_kernel: None,
+                on_background_work_settled: None,
                 queued_goal_context_purge: None,
             })
             .await

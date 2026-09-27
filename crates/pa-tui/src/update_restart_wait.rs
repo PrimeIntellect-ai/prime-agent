@@ -163,7 +163,7 @@ where
         let attempt = attempt();
         let result = tokio::select! {
             result = attempt => result,
-            _ = tokio::time::sleep_until(deadline) => {
+            () = tokio::time::sleep_until(deadline) => {
                 return Err(update_restart_deadline_error(wait_ms, last_error.as_ref()));
             }
         };
@@ -196,17 +196,17 @@ where
 fn log_update_restart_wait(error: &anyhow::Error) {
     use std::io::Write;
     let write = || -> std::io::Result<()> {
+        // TS `appendRotatingLog`: the oversize log rolls to `.old`, then
+        // the line appends; every failure stays silent (a broken log dir
+        // must not break the open).
+        const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
         let Some(agent_dir) = pa_types::platform::agent_dir() else {
             return Ok(());
         };
         let dir = agent_dir.join("logs");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("client-errors.log");
-        // TS `appendRotatingLog`: the oversize log rolls to `.old`, then
-        // the line appends; every failure stays silent (a broken log dir
-        // must not break the open).
-        const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-        if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > MAX_LOG_BYTES {
+        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
             let _ = std::fs::remove_file(dir.join("client-errors.log.old"));
             let _ = std::fs::rename(&path, dir.join("client-errors.log.old"));
         }
@@ -229,8 +229,7 @@ fn log_update_restart_wait(error: &anyhow::Error) {
 fn now_iso() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_millis() as u64);
     let secs = (ms / 1000) as i64;
     let millis = (ms % 1000) as u32;
     let days = secs.div_euclid(86_400);

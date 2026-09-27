@@ -22,6 +22,10 @@ pub enum SettingsScope {
 /// Read/modify/write under a per-file advisory lock. `update` returns the next
 /// document or `None` to leave the file unchanged (TS `withLock`).
 pub trait SettingsStorage: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error when the storage fails to lock, read, or write the
+    /// scope's settings file.
     fn with_lock(
         &self,
         scope: SettingsScope,

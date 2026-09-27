@@ -4274,6 +4274,14 @@ class Battery:
         # separately.
         text = text.replace("◆ Agent message", "<AMICON> Agent message")
         text = text.replace("✉ Agent message", "<AMICON> Agent message")
+        # The label/participant divergence (the operator's 2026-09-25
+        # directive): the Rust rows render the shared `Agent message`
+        # label with the viewer-relative arrow plus the counterpart name
+        # (received ↓, sent/queued ↑); the TS rows keep the direction
+        # word plus the `from/to <role> <name>` participant. The summary
+        # row is its own line, so the whole composition canonicalizes to
+        # one marker per side; the f15 flow asserts each side's exact row.
+        text = re.sub(r"<AMICON> Agent message[^\n]*", "<AMICON><AMROW>", text)
         return text
 
 
@@ -4466,9 +4474,13 @@ class Battery:
         """agent_message send/receive: the icon-decorated rows in both
         directions — the received row in the receiver's transcript, the sent
         summary row inside the sender's ipython cell — with participant
-        labels and the expanded preview body (the icon diverges by
-        directive: ts renders the ◆ diamond, rust the ✉ mail envelope —
-        the Kevin-directed 2026-09-24 divergence). Two sibling daemon
+        labels and the expanded preview body (the shape diverges by
+        directive: ts renders the ◆ diamond with the direction word and
+        the `from/to <role> <name>` participant; rust renders the ✉ mail
+        envelope — the Kevin-directed 2026-09-24 divergence — with the
+        shared `Agent message` label, the viewer-relative ↓/↑ arrow, and
+        the counterpart name only, no collapsed preview — the operator's
+        2026-09-25 directive). Two sibling daemon
         sessions exchange one message each way through their kernels."""
         flow = "f15_a2a"
         reply = "f15 a2a turn reply"
@@ -4519,33 +4531,44 @@ class Battery:
                 {"type": "prompt_and_wait", "activeSessionId": id_a, "message": "f15 send the sibling message to b"},
             )
             wire_a.close()
-            received = B.tmux_wait_text(tui, "Agent message received|f15 a2a payload", timeout=120)
+            wait_a = (
+                "Agent message received|f15 a2a payload"
+                if side.name == "ts"
+                else "Agent message \u00b7 \u2193|f15 a2a payload"
+            )
+            received = B.tmux_wait_text(tui, wait_a, timeout=120)
             side.evidence(flow, "01-received.txt", received)
             settled = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "02-received-settled.txt", settled)
             frames[side.name]["received"] = settled
-            # The received row's icon diverges by directive (Kevin,
-            # 2026-09-24): the TS side keeps the ◆ diamond; the Rust side
-            # renders the ✉ mail envelope (the a2a rows read as agent
-            # mail).
-            icon_a = "◆" if side.name == "ts" else "✉"
-            if icon_a + " Agent message received" in settled:
+            # The received row's shape diverges by directive: the TS side
+            # keeps the ◆ diamond with the `Agent message received ·
+            # from …` participant (the baseline); the Rust side renders
+            # the ✉ mail envelope (the a2a rows read as agent mail —
+            # Kevin directive 2026-09-24) with the shared `Agent
+            # message` label, the viewer-relative ↓ arrow, and the
+            # counterpart name only (operator directive 2026-09-25).
+            if side.name == "ts":
+                row_a = "◆ Agent message received"
+            else:
+                row_a = "✉ Agent message \u00b7 \u2193"
+            if row_a in settled:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: a sibling agent message renders the '{icon_a} Agent message received' row with participant label",
+                    f"{side.name}: a sibling agent message renders the '{row_a.strip()}' row with the participant",
                     gap=False,
                 )
-            elif "Agent message received" in settled:
+            elif "Agent message" in settled:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: the received agent-message row renders the wrong icon (expected '{icon_a}')",
+                    f"{side.name}: the received agent-message row renders the wrong shape (expected '{row_a.strip()}')",
                     evidence=side.root / flow / "02-received-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the delivered sibling message shows no 'Agent message received' row",
+                    f"{side.name}: the delivered sibling message shows no agent-message row",
                     evidence=side.root / flow / "02-received-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
@@ -4564,32 +4587,43 @@ class Battery:
                 ]
             )
             self.tui_send(tui, "f15 send the sibling message back to a")
-            sent = B.tmux_wait_text(tui, "Agent message sent|Agent message queued", timeout=120)
+            wait_b = (
+                "Agent message sent|Agent message queued"
+                if side.name == "ts"
+                else "Agent message \u00b7 \u2191"
+            )
+            sent = B.tmux_wait_text(tui, wait_b, timeout=120)
             side.evidence(flow, "03-sent.txt", sent)
             settled2 = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "04-sent-settled.txt", settled2)
             frames[side.name]["sent"] = settled2
-            # The sent/queued receipt rows share the same summary line (and
-            # its icon divergence): TS ◆ diamond, Rust ✉ envelope.
-            icon_b = "◆" if side.name == "ts" else "✉"
-            if (icon_b + " Agent message sent" in settled2
-                    or icon_b + " Agent message queued" in settled2):
+            # The sent/queued receipt rows share the same summary line
+            # (and its per-side shape): TS keeps the ◆ diamond with the
+            # direction word; Rust renders the ✉ envelope with the
+            # shared `Agent message` label and the viewer-relative ↑
+            # arrow — delivered and queued fold into one row shape (the
+            # operator's 2026-09-25 directive).
+            if side.name == "ts":
+                rows_b = ("◆ Agent message sent", "◆ Agent message queued")
+            else:
+                rows_b = ("✉ Agent message \u00b7 \u2191",)
+            if any(row in settled2 for row in rows_b):
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell renders the '{icon_b} Agent message sent/queued' summary row with the participant label",
+                    f"{side.name}: the sender's ipython cell renders the sent/queued agent-message summary row with the participant",
                     gap=False,
                 )
-            elif "Agent message sent" in settled2 or "Agent message queued" in settled2:
+            elif "Agent message" in settled2:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: the sent agent-message row renders the wrong icon (expected '{icon_b}')",
+                    f"{side.name}: the sent agent-message row renders the wrong shape (expected one of {rows_b})",
                     evidence=side.root / flow / "04-sent-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell shows no 'Agent message sent/queued' row",
+                    f"{side.name}: the sender's ipython cell shows no sent/queued agent-message row",
                     evidence=side.root / flow / "04-sent-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
@@ -4865,8 +4899,11 @@ class Battery:
         `app.tools.expand` from ctrl+o to the plain key x. Both sides must render
         the OVERRIDE in the prompt-context hint, fire the action on the
         override key, ignore the removed default key, and document the
-        effective binding in `/hotkeys`. Keybindings are client-side only:
-        no wire surface is touched by this flow."""
+        effective binding in `/hotkeys` (TS: the guide as chat rows; Rust:
+        the read-only info panel — the operator's 2026-09-26 directive).
+        The `?` quick-shortcut guide diverges BY THE SAME DIRECTIVE (TS
+        mounts it; Rust removed it entirely). Keybindings are client-side
+        only: no wire surface is touched by this flow."""
         flow = "f23_keybindings"
         frames: dict[str, dict[str, str]] = {"ts": {}, "rust": {}}
         for side in (self.sides["ts"], self.sides["rust"]):
@@ -4941,74 +4978,167 @@ class Battery:
                     evidence=side.root / flow / "03-default-key.txt",
                     lane=FLOW_LANES[flow],
                 )
-            # 4) `/hotkeys` documents the effective binding. The guide is
-            #    taller than the default 36-row pane and renders in the
-            #    alternate screen (no tmux scrollback), so the pane grows
-            #    to 80 rows first — both products relayout to the new size
-            #    — and the whole guide renders in one capture.
+            # 4) `/hotkeys` documents the effective binding. The TS side
+            #    renders the guide as chat rows (the whole guide in one
+            #    80-row capture); the Rust side mounts the read-only info
+            #    panel (the operator's 2026-09-26 directive: the guide
+            #    no longer floods the transcript) — the pane grows to 80
+            #    rows on both sides, then Rust scrolls the panel to the
+            #    guide's bottom with End. The two shapes differ BY
+            #    DIRECTIVE, so this step records per-side findings and
+            #    carries no cross-side frame diff.
             B.tmux("resize-window", "-t", tui, "-x", "120", "-y", "80")
             time.sleep(1.0)
             self.tui_send(tui, "/hotkeys")
-            time.sleep(2.5)
-            guide = B.tmux_capture(tui)
-            side.evidence(flow, "04-hotkeys-guide.txt", guide)
-            frames[side.name]["hotkeys-guide"] = guide
-            if "Cycle overview" in guide and "Ctrl+O" not in guide:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: /hotkeys documents the effective override (X row)",
-                    gap=False,
-                )
+            if side.name == "ts":
+                time.sleep(2.5)
+                guide = B.tmux_capture(tui)
+                side.evidence(flow, "04-hotkeys-guide.txt", guide)
+                frames[side.name]["hotkeys-guide"] = guide
+                if "Cycle overview" in guide and "Ctrl+O" not in guide:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: /hotkeys documents the effective override (X row)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: /hotkeys did not show the effective override",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
             else:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: /hotkeys did not show the effective override",
-                    evidence=side.root / flow / "04-hotkeys-guide.txt",
-                    lane=FLOW_LANES[flow],
-                )
-            # 5) `?` (app.shortcuts, empty editor) mounts the quick-
-            #    shortcut guide; the next submission clears it (TS
-            #    `clearShortcutGuide`). The pane stays at 80 rows: the
-            #    guide renders at the transcript tail below the `/hotkeys`
-            #    block. "shell mode" appears only in the quick guide (not
-            #    the `/hotkeys` tables), so the cleared check is exact.
-            self.tui_send(tui, "?", enter=False)
-            guide2 = B.tmux_wait_text(tui, "shell mode", timeout=30)
-            guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
-            side.evidence(flow, "05-shortcut-guide.txt", guide2)
-            frames[side.name]["shortcut-guide"] = guide2
-            if "shell mode" in guide2 and "full reference" in guide2:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: the ? quick-shortcut guide mounted with the effective bindings",
-                    gap=False,
-                )
+                guide = B.tmux_wait_text(tui, "Hotkeys", timeout=30)
+                # The override's row sits mid-document: page down until
+                # the Other section (the expand-tools row, X vs the
+                # removed default Ctrl+O) rides the window — bounded by
+                # the guide's finite length, so the X-vs-Ctrl+O check
+                # reads the actual row, not an off-screen region.
+                for _ in range(12):
+                    self.tui_send(tui, "PageDown", enter=False)
+                    # tmux_wait_text returns the last frame on timeout,
+                    # so the break condition reads the pattern in the
+                    # returned frame, never the frame's mere existence.
+                    if "Cycle overview" in B.tmux_wait_text(tui, "Cycle overview", timeout=4):
+                        break
+                guide = self.settle_frame(tui, quiet_s=1.0, timeout=20)
+                side.evidence(flow, "04-hotkeys-guide.txt", guide)
+                frames[side.name]["hotkeys-guide"] = guide
+                if "Cycle overview" in guide and "Ctrl+O" not in guide:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel scrolled to the override's row (X, not Ctrl+O)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel did not show the effective override",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+                # Esc closes the panel deterministically: send the key,
+                # then poll until the panel's key-hint row is gone from
+                # the pane (the next step's ? must reach the EDITOR, not
+                # an open panel).
+                self.tui_send(tui, "Escape", enter=False)
+                deadline = time.time() + 20
+                closed = B.tmux_capture(tui)
+                while "Esc close" in closed and time.time() < deadline:
+                    time.sleep(0.5)
+                    closed = B.tmux_capture(tui)
+                if "Esc close" in closed:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the /hotkeys info panel did not close on Esc",
+                        evidence=side.root / flow / "04-hotkeys-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+            # 5) The `?` key. TS (`app.shortcuts`, empty editor) mounts
+            #    the quick-shortcut guide and the next submission clears
+            #    it (`clearShortcutGuide`); Rust REMOVED the guide (the
+            #    operator's 2026-09-26 directive): the key types a
+            #    literal `?` into the editor and the guide's vocabulary
+            #    never mounts. Divergent BY DIRECTIVE — per-side
+            #    findings, no cross-side frame diff.
+            if side.name == "ts":
+                self.tui_send(tui, "?", enter=False)
+                guide2 = B.tmux_wait_text(tui, "shell mode", timeout=30)
+                guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
+                side.evidence(flow, "05-shortcut-guide.txt", guide2)
+                frames[side.name]["shortcut-guide"] = guide2
+                if "shell mode" in guide2 and "full reference" in guide2:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the ? quick-shortcut guide mounted with the effective bindings",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the ? quick-shortcut guide did not render",
+                        evidence=side.root / flow / "05-shortcut-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
             else:
-                self.record(
-                    flow, "visual",
-                    f"{side.name}: the ? quick-shortcut guide did not render",
-                    evidence=side.root / flow / "05-shortcut-guide.txt",
-                    lane=FLOW_LANES[flow],
-                )
+                self.tui_send(tui, "?", enter=False)
+                time.sleep(1.0)
+                guide2 = self.settle_frame(tui, quiet_s=1.5, timeout=20)
+                side.evidence(flow, "05-shortcut-guide.txt", guide2)
+                frames[side.name]["shortcut-guide"] = guide2
+                if "shell mode" not in guide2 and "full reference" not in guide2:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the removed ? guide never mounts (operator directive)",
+                        gap=False,
+                    )
+                else:
+                    self.record(
+                        flow, "visual",
+                        f"{side.name}: the removed ? guide still mounted",
+                        evidence=side.root / flow / "05-shortcut-guide.txt",
+                        lane=FLOW_LANES[flow],
+                    )
+                # Esc clears the typed `?` back to the empty editor:
+                # send the key, then poll until the `?` is gone from the
+                # pane (the typed char is the only `?` on this surface),
+                # so the closing submission starts from a clean editor.
+                self.tui_send(tui, "Escape", enter=False)
+                deadline = time.time() + 20
+                cleared_editor = B.tmux_capture(tui)
+                while "?" in cleared_editor and time.time() < deadline:
+                    time.sleep(0.5)
+                    cleared_editor = B.tmux_capture(tui)
+            # 6) The closing submission. TS clears the quick guide at its
+            #    top; Rust's editor is already clean (the panel closed on
+            #    Esc in step 4). Both sides run the turn and return to the
+            #    ready prompt; the guide vocabulary must be gone from
+            #    both frames.
             self.tui_send(tui, "f23 closing turn")
             cleared = self.settle_frame(tui, quiet_s=2.5, timeout=60)
             side.evidence(flow, "06-guide-cleared.txt", cleared)
             frames[side.name]["guide-cleared"] = cleared
-            if "shell mode" not in cleared:
+            if "shell mode" not in cleared and "full reference" not in cleared:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the submission cleared the quick-shortcut guide",
+                    f"{side.name}: the closing turn left the surface guide-free",
                     gap=False,
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the quick-shortcut guide survived the submission",
+                    f"{side.name}: the guide survived the closing submission",
                     evidence=side.root / flow / "06-guide-cleared.txt",
                     lane=FLOW_LANES[flow],
                 )
             B.tmux_kill(tui)
-        for step in ("detail-hint", "override-fired", "default-key", "hotkeys-guide", "shortcut-guide", "guide-cleared"):
+        # The detail-hint, override-fired, and default-key steps render
+        # identically on both sides (the keybindings engine is shared
+        # vocabulary); the /hotkeys and ? surfaces diverge BY OPERATOR
+        # DIRECTIVE (Rust: the read-only info panel + the removed guide),
+        # so only the shared steps carry the cross-side frame diff.
+        for step in ("detail-hint", "override-fired", "default-key"):
             self.frame_diff(
                 flow, step,
                 {name: frames[name].get(step, "") for name in ("ts", "rust")},

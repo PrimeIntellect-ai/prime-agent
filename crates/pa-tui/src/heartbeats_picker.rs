@@ -39,10 +39,14 @@ const LIST_FRAME_ROWS: usize = 7;
 const MAX_DETAIL_ROWS: usize = 7;
 
 /// The table's column width caps: the schedule expression and the label
-/// shrink to their content, the timestamp column is the fixed
-/// `YYYY-MM-DD HH:MM` cell, and the status word keeps its own width.
+/// shrink to their content, the next-run column is the fixed natural
+/// language cell, and the status word keeps its own width.
 const INTERVAL_CAP: usize = 18;
 const LABEL_CAP: usize = 32;
+/// The next-run column's fixed cell: wide enough for its header and every
+/// countdown the schedule can produce (the next run is bounded within a
+/// year, so at most "in 365d").
+const NEXT_RUN_CELL: usize = 8;
 
 /// The management-action vocabulary (TS `AgentHeartbeatManagementAction`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,10 +279,42 @@ pub fn format_timestamp(value: &str) -> String {
     }
 }
 
+/// The next-run label in natural language ("in 45s", "in 5m", "in 10h").
+/// The unit rules mirror TS `formatHeartbeatCountdown`: rounded seconds
+/// under a minute, then rounded minutes, hours, and days, with a
+/// one-second floor so a due or overdue run reads "in 1s". The `in `
+/// prefix is the operator's wording (2026-09-26 directive) — TS renders
+/// the bare countdown in its agents view and a raw timestamp in its
+/// manager, both superseded here. A missing next run keeps the `—`
+/// placeholder; a value the clock cannot parse renders raw.
+pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
+    let Some(value) = next_run_at else {
+        return "\u{2014}".to_string();
+    };
+    let Some(at) = crate::agents_view_state::iso_to_unix_ms(value) else {
+        return value.to_string();
+    };
+    let delta = ((at - now_ms as i64).max(0) as f64) / 1000.0;
+    let seconds = (delta.round() as i64).max(1);
+    if seconds < 60 {
+        return format!("in {seconds}s");
+    }
+    let minutes = ((seconds as f64) / 60.0).round() as i64;
+    if minutes < 60 {
+        return format!("in {minutes}m");
+    }
+    let hours = ((minutes as f64) / 60.0).round() as i64;
+    if hours < 24 {
+        return format!("in {hours}h");
+    }
+    let days = ((hours as f64) / 24.0).round() as i64;
+    format!("in {days}d")
+}
+
 /// The detail drill-in's labeled pairs (the `/model` picker's
 /// detail-block idiom): who created the heartbeat and the structured
 /// schedule facts.
-fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
+fn detail_pairs(entry: &HeartbeatEntry, now_ms: u64) -> Vec<(&'static str, String)> {
     let mut pairs = vec![
         ("created", source_label(entry).to_string()),
         ("session", session_label(entry)),
@@ -286,11 +322,7 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
         ("schedule", human_schedule_pair(entry)),
         (
             "next run",
-            entry
-                .job
-                .next_run_at
-                .as_deref()
-                .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
+            next_run_label(entry.job.next_run_at.as_deref(), now_ms),
         ),
         ("runs", entry.job.run_count.to_string()),
     ];
@@ -544,12 +576,8 @@ impl HeartbeatsPicker {
     /// One key id (TS `handleInput`, minus the busy gate: the session UI
     /// awaits the management request itself).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> HeartbeatsPickerAction {
-        // Cancel keys — including the open binding (ctrl+r toggles closed)
-        // — close the view (TS `tui.select.cancel` / `app.heartbeats.open`).
-        if key == "ctrl+c"
-            || kb.matches(key, "tui.select.cancel")
-            || kb.matches(key, "app.heartbeats.open")
-        {
+        // Cancel keys close the view (TS `tui.select.cancel`).
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return HeartbeatsPickerAction::Close;
         }
         // Back (left): the detail pane returns to the list, the list closes.
@@ -713,9 +741,10 @@ impl HeartbeatsPicker {
                 .saturating_sub(visible / 2)
                 .min(self.heartbeats.len().saturating_sub(visible));
             let end = (start + visible).min(self.heartbeats.len());
+            let now = crate::agents_view_state::now_ms();
             for (index, entry) in self.heartbeats[start..end].iter().enumerate() {
                 let is_selected = start + index == selected;
-                lines.push(columns.entry_row(theme, width, entry, is_selected));
+                lines.push(columns.entry_row(theme, width, entry, is_selected, now));
             }
             if visible > 0 && (start > 0 || end < self.heartbeats.len()) {
                 lines.push(vec![
@@ -789,7 +818,7 @@ impl HeartbeatsPicker {
         );
         let mut lines = pane_header_lines(theme, width, &name, &[], Some(&subtitle));
         let actions = Self::available_actions(entry);
-        let pairs = detail_pairs(entry);
+        let pairs = detail_pairs(entry, crate::agents_view_state::now_ms());
         // The pane's fixed rows: the header block (rule, title, subtitle,
         // blank), the blank before the actions, the action rows, the
         // footer (blank, hint, blank), and the error rows when present.
@@ -843,7 +872,7 @@ impl HeartbeatsPicker {
                 shown -= 1;
                 clipped = true;
             }
-            for line in wrapped[..shown].iter() {
+            for line in &wrapped[..shown] {
                 let mut row = vec![Span::raw("  ")];
                 row.extend(line.iter().cloned());
                 lines.push(truncate_line(&row, width, ""));
@@ -879,18 +908,30 @@ impl HeartbeatsPicker {
     }
 
     /// The list's bottom hint line: every shortcut in one line (the close
-    /// key never repeats).
+    /// key never repeats). The open and close segments carry both of
+    /// their keys while both are bound — the confirm/openSelected pair
+    /// opens the detail drill-in, the back/cancel pair closes from the
+    /// list — and an override that empties one of the pair drops that
+    /// key (the hint never advertises a key the handler does not take;
+    /// the confirm/cancel fallbacks are the pane's core keys).
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
+        let bound = |binding: &str| kb.first_key(binding).map(|key| format_key_text(&key));
+        let open = match bound("app.heartbeats.openSelected") {
+            Some(detail) => format!("{}/{}", key("tui.select.confirm", "Enter"), detail),
+            None => key("tui.select.confirm", "Enter"),
+        };
+        let close = match bound("app.modal.back") {
+            Some(back) => format!("{}/{}", back, key("tui.select.cancel", "Esc")),
+            None => key("tui.select.cancel", "Esc"),
+        };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {} close",
+            "{}/{} move \u{b7} {open} open \u{b7} {close} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
-            key("tui.select.cancel", "Esc"),
         )
     }
 
@@ -1077,8 +1118,8 @@ impl Columns {
             .max()
             .unwrap_or(0);
         // The fixed cells: the indent, the three two-column gaps, the
-        // timestamp column, and the status column.
-        let fixed = 2 + 2 + 2 + 2 + 2 + 16 + status;
+        // next-run column, and the status column.
+        let fixed = 2 + 2 + 2 + 2 + 2 + NEXT_RUN_CELL + status;
         let label = label_content
             .min(LABEL_CAP)
             .min(width.saturating_sub(fixed + interval_content));
@@ -1095,8 +1136,7 @@ impl Columns {
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Label", self.label)));
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(ThemeColor::Dim, "Next run".to_string()));
-        row.push(Span::raw(" ".repeat(16 - "Next run".len())));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Next run", NEXT_RUN_CELL)));
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, "Status".to_string()));
         truncate_line(&row, width, "")
@@ -1113,6 +1153,7 @@ impl Columns {
         width: usize,
         entry: &HeartbeatEntry,
         selected: bool,
+        now_ms: u64,
     ) -> Line {
         let status_color = if entry.job.is_active() {
             ThemeColor::Success
@@ -1138,19 +1179,13 @@ impl Columns {
             ));
         }
         row.push(Span::raw("  "));
-        row.push(
-            theme.fg_span(
-                ThemeColor::Muted,
-                plain_cell(
-                    &entry
-                        .job
-                        .next_run_at
-                        .as_deref()
-                        .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
-                    16,
-                ),
+        row.push(theme.fg_span(
+            ThemeColor::Muted,
+            plain_cell(
+                &next_run_label(entry.job.next_run_at.as_deref(), now_ms),
+                NEXT_RUN_CELL,
             ),
-        );
+        ));
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&entry.job.status);
         row.push(theme.fg_span(status_color, format!("{dot} {}", entry.job.status)));
@@ -1377,14 +1412,15 @@ mod tests {
         assert!(header.contains("Label"));
         assert!(header.contains("Status"));
         // The rows align under the columns: the schedule expression, the
-        // label, the next-run timestamp, and the status word all ride
-        // one row.
+        // label, the next-run countdown, and the status word all ride
+        // one row. The fixture's next run is long past, so the
+        // one-second floor renders ("in 1s").
         let row = text
             .iter()
             .find(|row| row.contains("every 10m"))
             .expect("a columned row");
         assert!(row.contains("tick user-1"));
-        assert!(row.contains("2026-01-01 00:10"));
+        assert!(row.contains("in 1s"));
         assert!(row.contains("paused"));
         // The prompt does not blob into the list: the detail drill-in
         // owns it.
@@ -1397,13 +1433,42 @@ mod tests {
         );
         assert!(text
             .iter()
-            .any(|row| row.contains("↑/↓ move · Enter open · Esc close")));
+            .any(|row| row.contains("↑/↓ move · Enter/→ open · ←/Esc close")));
         for line in &frame {
             assert!(
                 crate::width::spans_width(line) <= 70,
                 "every row fits the width"
             );
         }
+    }
+
+    /// An override that empties the open-selected or back binding drops
+    /// its key from the list hint (the hint never advertises a key the
+    /// handler does not take); the pane's core keys keep their labels.
+    #[test]
+    fn the_list_hint_drops_unbound_keys() {
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.modal.back".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("↑/↓ move · Enter/→ open · Esc close")),
+            "the emptied back binding drops the arrow: {text:?}"
+        );
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.heartbeats.openSelected".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("↑/↓ move · Enter open · ←/Esc close")),
+            "the emptied open binding drops the arrow: {text:?}"
+        );
     }
 
     /// The table fills the full width of the TUI (the operator's
@@ -1437,6 +1502,36 @@ mod tests {
             .expect("the other row");
         assert!(crate::width::spans_width(plain) < 90);
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    /// The selected row's wash is the theme's shared selection and it
+    /// READS (the operator's 2026-09-26 directive: the heartbeats
+    /// selection was barely visible): the whole-row band is the same
+    /// wash the `›`-marker rows carry, and its rendered luminance clears
+    /// the theme's visibility bar over the editor surface.
+    #[test]
+    fn the_selected_row_wash_reads_off_the_surface() {
+        let theme = theme();
+        let frame = HeartbeatsPicker::new(entries(), None, None, 24).render(&theme, 90, &kb());
+        let selected = frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains("tick user-1")))
+            .expect("the selected row");
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        assert!(
+            selected.iter().all(|span| span.style.bg == Some(wash)),
+            "every span of the selected row carries the shared wash: {selected:?}"
+        );
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the heartbeats wash must read off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
     }
 
     /// The shortcuts ride the pane's last rows with no rule below them
@@ -1475,6 +1570,35 @@ mod tests {
             last.trim().is_empty(),
             "the detail footer ends on the same blank: {last:?}"
         );
+    }
+
+    /// The next-run label is natural language: the exact countdowns and
+    /// every unit boundary, anchored on one fixed clock (the label's
+    /// `now` comes from the same clock the wire timestamps parse with).
+    #[test]
+    fn the_next_run_label_is_natural_language() {
+        let now = crate::agents_view_state::iso_to_unix_ms("2026-06-01T12:00:00.000Z")
+            .expect("the base parses") as u64;
+        let label = |next_run_at: &str| next_run_label(Some(next_run_at), now);
+        // The operator's examples: "in 45s", "in 5m", "in 10h".
+        assert_eq!(label("2026-06-01T12:00:45.000Z"), "in 45s");
+        assert_eq!(label("2026-06-01T12:05:00.000Z"), "in 5m");
+        assert_eq!(label("2026-06-01T22:00:00.000Z"), "in 10h");
+        // Unit boundaries round up into the next unit (TS
+        // `formatHeartbeatCountdown`): 59.5s and 60s read "in 1m", an
+        // hour reads "in 1h", a day reads "in 1d".
+        assert_eq!(label("2026-06-01T12:00:59.500Z"), "in 1m");
+        assert_eq!(label("2026-06-01T12:01:00.000Z"), "in 1m");
+        assert_eq!(label("2026-06-01T13:00:00.000Z"), "in 1h");
+        assert_eq!(label("2026-06-02T12:00:00.000Z"), "in 1d");
+        assert_eq!(label("2026-06-03T12:00:00.000Z"), "in 2d");
+        // A due or overdue run clamps to the one-second floor, never
+        // "in 0s".
+        assert_eq!(label("2026-06-01T11:59:30.000Z"), "in 1s");
+        // A missing next run keeps the placeholder; a value the clock
+        // cannot parse renders raw.
+        assert_eq!(next_run_label(None, now), "\u{2014}");
+        assert_eq!(label("soon-ish"), "soon-ish");
     }
 
     /// The interval column renders the human-readable form (the
@@ -1838,7 +1962,7 @@ mod tests {
 
     /// The schedule pair never displaces the error row (the bot-round
     /// fix): a heartbeat carrying both a schedule fact and a last error
-    /// renders every pair — MAX_DETAIL_ROWS covers the seven base pairs.
+    /// renders every pair — `MAX_DETAIL_ROWS` covers the seven base pairs.
     #[test]
     fn the_schedule_pair_never_hides_the_error_row() {
         let mut catalog = entries();
@@ -1888,7 +2012,7 @@ mod tests {
 
     /// The scroll-indicator row is reserved exactly once: a scrolling
     /// viewport uses every row it can hold (the frame constant excludes
-    /// the conditional indicator; menu_list_layout reserves it).
+    /// the conditional indicator; `menu_list_layout` reserves it).
     #[test]
     fn a_scrolling_viewport_uses_every_row() {
         let mut catalog = entries();

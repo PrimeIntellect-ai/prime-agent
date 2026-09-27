@@ -117,7 +117,7 @@ fn default_adc_path() -> PathBuf {
         .join("application_default_credentials.json")
 }
 
-/// Prime team id from PRIME_TEAM_ID or ~/.prime/config.json.
+/// Prime team id from `PRIME_TEAM_ID` or ~/.prime/config.json.
 pub fn get_prime_team_id() -> Option<String> {
     if let Ok(from_env) = std::env::var("PRIME_TEAM_ID") {
         let trimmed = from_env.trim().to_string();

@@ -1,4 +1,4 @@
-//! OpenAI Completions error surface.
+//! `OpenAI` Completions error surface.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
 //! the user-facing error message for a failed request, composed exactly like
 //! the `openai` npm SDK (`APIError.makeMessage`, openai 6.47.0) whose message
@@ -73,7 +73,7 @@ pub fn openai_http_error(
     })
 }
 
-/// The OpenRouter extra-information field the TS provider appends to the
+/// The `OpenRouter` extra-information field the TS provider appends to the
 /// error message: `error.metadata.raw` on the SDK error (the response body's
 /// `error` object). `None` unless truthy per JS rules.
 pub fn openrouter_raw_metadata(error: &ProviderError) -> Option<String> {
@@ -122,8 +122,9 @@ fn js_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
-    /// The exact composition the TS `openai` SDK produces for an OpenAI error
+    /// The exact composition the TS `openai` SDK produces for an `OpenAI` error
     /// body and the TS provider surfaces verbatim (the parity harness's
     /// scripted overflow probe: `{"error": {"message": ...}}` with status 400).
     #[test]
@@ -206,20 +207,20 @@ mod tests {
     #[test]
     fn openrouter_metadata_appends_only_when_truthy() {
         let body = r#"{"error": {"message": "boom", "metadata": {"raw": "extra context"}}}"#;
-        let error = openai_http_error(400, body, Default::default());
+        let error = openai_http_error(400, body, HashMap::default());
         assert_eq!(
             openrouter_raw_metadata(&error).as_deref(),
             Some("extra context")
         );
 
         let no_metadata =
-            openai_http_error(400, r#"{"error": {"message": "boom"}}"#, Default::default());
+            openai_http_error(400, r#"{"error": {"message": "boom"}}"#, HashMap::default());
         assert_eq!(openrouter_raw_metadata(&no_metadata), None);
 
         let falsy = openai_http_error(
             400,
             r#"{"error": {"message": "boom", "metadata": {"raw": ""}}}"#,
-            Default::default(),
+            HashMap::default(),
         );
         assert_eq!(openrouter_raw_metadata(&falsy), None);
 

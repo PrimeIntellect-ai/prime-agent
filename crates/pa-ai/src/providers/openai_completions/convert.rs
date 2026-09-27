@@ -1,4 +1,4 @@
-//! OpenAI Completions conversion: reasoning-details signatures, messages, and tools.
+//! `OpenAI` Completions conversion: reasoning-details signatures, messages, and tools.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`.
 
 use serde_json::{json, Map, Value};
@@ -8,7 +8,7 @@ use crate::providers::openai_completions::{decode_reasoning_details, ResolvedCom
 use crate::providers::transform_messages::transform_messages_with_normalizer;
 use crate::types::{
     AssistantContent, Context, MessageExt, Model, ModelInput, StopReason, TextContent,
-    ThinkingContent, Tool, ToolCall, Usage, UserMessageContent, UserOrToolContent,
+    ThinkingContent, Tool, ToolCall, Usage, UsageCost, UserMessageContent, UserOrToolContent,
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
@@ -109,8 +109,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 let assistant_text = text_blocks
                     .iter()
                     .map(|block| sanitize_surrogates(&block.text))
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
 
                 let replay_reasoning_details: Vec<Value> = assistant
                     .content
@@ -442,7 +441,7 @@ pub(crate) fn parse_chunk_usage(
         cache_read: cache_read_tokens,
         cache_write: cache_write_tokens,
         total_tokens: input + output_tokens + cache_read_tokens + cache_write_tokens,
-        cost: Default::default(),
+        cost: UsageCost::default(),
     };
     calculate_cost(
         model,
@@ -483,9 +482,9 @@ pub(crate) fn parse_chunk_usage(
     usage
 }
 
-/// The user's real spend for an OpenRouter request, or `None` to keep the
-/// catalog estimate. `usage.cost` only carries what OpenRouter charged the
-/// account's credits: for BYOK requests that is just OpenRouter's fee, so
+/// The user's real spend for an `OpenRouter` request, or `None` to keep the
+/// catalog estimate. `usage.cost` only carries what `OpenRouter` charged the
+/// account's credits: for BYOK requests that is just `OpenRouter`'s fee, so
 /// real spend is the upstream provider's bill plus that fee. A cost of 0 can
 /// mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so
 /// it keeps the catalog estimate.

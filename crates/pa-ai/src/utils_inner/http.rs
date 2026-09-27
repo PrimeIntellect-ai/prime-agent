@@ -19,7 +19,7 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// The HTTP/1.1 client every provider shares (the transport all TS SDK
-/// clients but bedrock's default NodeHttp2Handler speak). Pinned with
+/// clients but bedrock's default `NodeHttp2Handler` speak). Pinned with
 /// `http1_only()` so that enabling the reqwest `http2` feature (bedrock)
 /// cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
@@ -81,7 +81,7 @@ impl HttpResponse {
             Some(signal) => {
                 let next = self.body.chunk();
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                    () = signal.cancelled() => return Err(ProviderError::Aborted),
                     result = next => result,
                 }
             }
@@ -108,7 +108,7 @@ impl HttpResponse {
             Some(signal) => {
                 let next = self.body.chunk();
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                    () = signal.cancelled() => return Err(ProviderError::Aborted),
                     result = next => result,
                 }
             }
@@ -216,7 +216,7 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     let response = match (&signal, request.timeout_ms) {
         (Some(signal), _) => {
             tokio::select! {
-                _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                () = signal.cancelled() => return Err(ProviderError::Aborted),
                 result = send_future => result,
             }
         }

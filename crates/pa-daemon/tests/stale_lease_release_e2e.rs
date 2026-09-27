@@ -17,7 +17,7 @@
 //! to do the daemon's own cleanup by hand.
 //!
 //! The genuine refusals stay intact: a truly live foreign holder still
-//! rejects (the hold_refusal e2e), and the create-reuse seam keeps
+//! rejects (the `hold_refusal` e2e), and the create-reuse seam keeps
 //! answering the live worker for every plain open (multi-client attach).
 #![cfg(target_os = "linux")]
 

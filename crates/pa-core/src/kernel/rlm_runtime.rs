@@ -44,6 +44,11 @@ fn error(operation: &str, message: String) -> anyhow::Error {
 }
 
 /// Validate the requested subagent session name. `None` when absent.
+///
+/// # Errors
+///
+/// Returns an error, prefixed with `operation`, when the name is empty after
+/// trimming or longer than the subagent name length limit.
 pub fn normalize_requested_rlm_subagent_session_name(
     value: Option<&str>,
     operation: &str,
@@ -63,6 +68,11 @@ pub fn normalize_requested_rlm_subagent_session_name(
 }
 
 /// Validate the requested thinking level. `None` when absent.
+///
+/// # Errors
+///
+/// Returns an error, prefixed with `operation`, when the level is not one of
+/// the supported thinking levels.
 pub fn normalize_requested_rlm_subagent_thinking_level(
     value: Option<&str>,
     operation: &str,
@@ -82,6 +92,11 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
 }
 
 /// Validate the requested model override. `None` when absent.
+///
+/// # Errors
+///
+/// Returns an error, prefixed with `operation`, when the model override is
+/// empty after trimming.
 pub fn normalize_requested_rlm_subagent_model(
     value: Option<&str>,
     operation: &str,
@@ -210,6 +225,11 @@ fn normalize_model_search_text(value: &str) -> String {
 
 /// Rank and cap model matches the same way `findRlmModelMatches` does:
 /// exact match, then prefix, then substring, then alphabetical order.
+///
+/// # Panics
+///
+/// Candidates are sorted by score with a `partial_cmp().unwrap()`; every
+/// score is finite by construction, so the unwrap cannot fail.
 pub fn find_rlm_model_matches(
     query: &str,
     models: &[RlmModelInfo],

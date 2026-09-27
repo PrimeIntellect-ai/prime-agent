@@ -68,6 +68,19 @@ pub enum DaemonErrorInfo {
     UpdatePrepareRefused {
         active_update_id: String,
     },
+    /// `set_model` resolved the model but its provider has no credential
+    /// (and none is stale): a sign-in refusal, not a dead end — the
+    /// client offers the provider's sign-in flow (the TUI's `/login`)
+    /// and retries the switch once the login lands.
+    ModelProviderUnauthenticated {
+        provider: String,
+    },
+    /// The supervisor refused to enqueue a request-shaped client command
+    /// because the target worker is at its in-flight bound: the request
+    /// never left the supervisor, so a retry cannot duplicate it. The
+    /// supervisor's answer to a saturated route (the Codex
+    /// `-32001 "Server overloaded; retry later."` analog on our wire).
+    WorkerOverloaded,
 }
 
 /// Saved-session row pushed by `session_list_item` progress events.
@@ -90,8 +103,6 @@ pub struct DaemonSavedSessionInfo {
     pub message_count: u64,
     pub first_message: String,
     pub all_messages_text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_status: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,6 +284,14 @@ pub enum DaemonOutbound {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The Rust-only no-stall picker-open extension: a background
+    /// daemon-side catalog refresh changed the served snapshot, so every
+    /// client re-fetches. Mirrors the wire shape of the worker's
+    /// `model_catalog_changed` broadcast frame.
+    ModelCatalogChanged {
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     RosterUpdate {
         changed: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,15 +312,6 @@ pub enum DaemonOutbound {
     SideQuestionEvent {
         active_session_id: String,
         event: Value,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
-    SessionStatus {
-        active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recap: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<DaemonEventMeta>,
         #[serde(flatten)]
         rest: JsonMap,
     },

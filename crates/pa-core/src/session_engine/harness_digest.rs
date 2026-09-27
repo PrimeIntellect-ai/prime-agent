@@ -114,6 +114,11 @@ pub fn harness_digest_message_text(digest: &str) -> String {
 /// `details`. The row rides the run's prompt messages (so it appears in
 /// `agent_end.messages` and persists through its `message_end`) and converts
 /// to a user turn at the loop's LLM boundary.
+///
+/// # Panics
+///
+/// Panics if serializing the digest row payload fails, which cannot happen
+/// for the plain message struct.
 pub fn harness_digest_prompt_row(digest: &str, timestamp: u64) -> AgentMessage {
     let custom = pa_types::session::CustomMessage {
         custom_type: super::headless::HARNESS_DIGEST_CUSTOM_TYPE.to_string(),
@@ -121,7 +126,7 @@ pub fn harness_digest_prompt_row(digest: &str, timestamp: u64) -> AgentMessage {
         display: false,
         details: Some(serde_json::json!({ "digest": digest })),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
         role: "custom".to_string(),
@@ -131,6 +136,10 @@ pub fn harness_digest_prompt_row(digest: &str, timestamp: u64) -> AgentMessage {
 
 /// The digest as a session message payload for persistence
 /// (`append_custom_message` with `display: false` and the digest in details).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the durable append fails.
 pub fn persist_digest(
     session: &mut crate::session::manager::SessionManager,
     digest: &str,
@@ -182,7 +191,7 @@ pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
                         .iter()
                         .find_map(|part| match part {
                             UserPart::Text(text) => Some(text.text.as_str()),
-                            _ => None,
+                            UserPart::Image(_) => None,
                         })
                         .unwrap_or(""),
                 };
@@ -215,7 +224,7 @@ pub fn latest_context_digest(messages: &[AgentMessage]) -> Option<String> {
                     digest,
                 );
             }
-            _ => {}
+            AgentMessage::Standard(_) => {}
         }
     }
     latest.map(|(_, digest)| digest.to_string())
@@ -253,7 +262,7 @@ pub fn digest_session_message(entry: &FileEntry) -> Option<SessionAgentMessage> 
             display: payload.display,
             details: payload.details.clone(),
             timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         },
     ))
 }
@@ -389,7 +398,7 @@ fn loop_user_text(content: &pa_agent::types::UserContent) -> String {
             .iter()
             .filter_map(|part| match part {
                 pa_agent::types::UserPart::Text(text) => Some(text.text.clone()),
-                _ => None,
+                pa_agent::types::UserPart::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join(" "),

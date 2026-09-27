@@ -3,6 +3,7 @@
 //! rides the real supervisor + worker over the socket and answers the
 //! exact TS wire shape (success and error paths), the same harness the
 //! supervisor e2e suite uses.
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -745,7 +746,7 @@ fn worker_pid(agent_dir: &std::path::Path) -> u32 {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("daemon-workers"))
             .expect("daemon-workers dir")
             .filter_map(std::result::Result::ok)
-            .flat_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
             .flatten()
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())

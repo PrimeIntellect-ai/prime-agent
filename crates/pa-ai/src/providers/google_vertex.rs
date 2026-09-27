@@ -166,7 +166,7 @@ pub fn stream_google_vertex(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -383,9 +383,8 @@ async fn run_stream(
     let mut state = GoogleStreamState::new();
     let mut decoder = SseDecoder::new();
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         for sse in decoder.push_text(&chunk) {
             if sse.data.trim().is_empty() {

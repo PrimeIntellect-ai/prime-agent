@@ -213,7 +213,7 @@ struct ParsedModelResult<'a> {
     warning: Option<String>,
 }
 
-/// `model:level` parsing; colon-suffixed ids (OpenRouter `:exacto`) fall
+/// `model:level` parsing; colon-suffixed ids (`OpenRouter` `:exacto`) fall
 /// through when the suffix is not a valid level.
 fn parse_model_pattern<'a>(
     pattern: &str,

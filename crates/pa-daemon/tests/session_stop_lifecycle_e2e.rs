@@ -225,7 +225,7 @@ impl Session {
             .join("scheduled-jobs.json")
     }
 
-    /// The latest session_state status of the session file.
+    /// The latest `session_state` status of the session file.
     fn session_state(&self) -> String {
         let mut state = String::new();
         for line in std::fs::read_to_string(self.session_file())

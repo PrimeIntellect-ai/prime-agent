@@ -1,4 +1,4 @@
-//! OpenAI Responses stream event processor.
+//! `OpenAI` Responses stream event processor.
 //!
 //! Port of `processResponsesStream` from
 //! `packages/ai/src/providers/openai-responses-shared.ts`: output-item slots,
@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
 use crate::models::calculate_cost;
@@ -24,9 +24,9 @@ pub use crate::providers::openai_responses_hooks::{
 use crate::providers::openai_responses_shared::encode_text_signature_v1;
 use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, TextSignaturePhase,
-    ThinkingContent, ToolCall, Usage,
+    ThinkingContent, ToolCall, Usage, UsageCost,
 };
-use crate::utils_inner::json_parse::parse_streaming_json;
+use crate::utils_inner::json_parse::{parse_streaming_json, StreamingJsonAccumulator};
 use crate::utils_inner::stream_failure::{
     classify_stream_failure, ProviderError, StreamFailureError, StreamFailureInfo,
     StreamFailureKind,
@@ -37,7 +37,7 @@ struct Slot {
     /// The provider's item object (reasoning/message), kept for replay.
     item: Value,
     /// Scratch for tool-call argument accumulation.
-    partial_json: String,
+    partial_json: StreamingJsonAccumulator,
     /// Assistant content index for this slot.
     content_index: usize,
 }
@@ -125,7 +125,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 thinking: String::new(),
                                 thinking_signature: None,
                                 redacted: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::ThinkingStart {
                             content_index: content_index as u64,
@@ -136,7 +136,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: String::new(),
+                                    partial_json: StreamingJsonAccumulator::default(),
                                     content_index,
                                 },
                             );
@@ -148,7 +148,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .push(AssistantContent::Text(TextContent {
                                 text: String::new(),
                                 text_signature: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::TextStart {
                             content_index: content_index as u64,
@@ -159,7 +159,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: String::new(),
+                                    partial_json: StreamingJsonAccumulator::default(),
                                     content_index,
                                 },
                             );
@@ -188,9 +188,9 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .push(AssistantContent::ToolCall(ToolCall {
                                 id: format!("{call_id}|{item_id}"),
                                 name: name.to_string(),
-                                arguments: Default::default(),
+                                arguments: Map::default(),
                                 thought_signature: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::ToolcallStart {
                             content_index: content_index as u64,
@@ -201,7 +201,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: initial_arguments,
+                                    partial_json: StreamingJsonAccumulator::new(initial_arguments),
                                     content_index,
                                 },
                             );
@@ -463,15 +463,17 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     .map(|slot| slot.content_index);
                 if let Some(content_index) = content_index {
                     if self.block_kind(content_index) == Some("toolCall") {
-                        let mut parsed = Value::Null;
+                        let mut parsed: Option<Value> = None;
                         if let Some(slot) = self.current_slot(output_index) {
-                            slot.partial_json.push_str(delta);
-                            parsed = parse_streaming_json(Some(&slot.partial_json));
+                            parsed = slot.partial_json.append(delta);
                         }
-                        if let Some(AssistantContent::ToolCall(tool_call)) =
-                            self.output.content.get_mut(content_index)
-                        {
-                            tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
+                        if let Some(parsed) = parsed {
+                            if let Some(AssistantContent::ToolCall(tool_call)) =
+                                self.output.content.get_mut(content_index)
+                            {
+                                tool_call.arguments =
+                                    parsed.as_object().cloned().unwrap_or_default();
+                            }
                         }
                         self.writer.push(AssistantMessageEvent::ToolcallDelta {
                             content_index: content_index as u64,
@@ -493,9 +495,10 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     if self.block_kind(content_index) == Some("toolCall") {
                         let (previous_partial, parsed) = match self.current_slot(output_index) {
                             Some(slot) => {
-                                let previous = slot.partial_json.clone();
-                                slot.partial_json = arguments.to_string();
-                                (previous, parse_streaming_json(Some(&slot.partial_json)))
+                                let previous = slot.partial_json.text().to_string();
+                                slot.partial_json =
+                                    StreamingJsonAccumulator::new(arguments.to_string());
+                                (previous, parse_streaming_json(Some(arguments)))
                             }
                             None => (String::new(), parse_streaming_json(Some(arguments))),
                         };
@@ -647,7 +650,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             if self.block_kind(content_index) == Some("toolCall") {
                                 let slot_json =
                                     match self.slots.get(&output_index.unwrap_or_default()) {
-                                        Some(slot) => slot.partial_json.clone(),
+                                        Some(slot) => slot.partial_json.text().to_string(),
                                         None => String::new(),
                                     };
                                 let arguments_text = item
@@ -677,7 +680,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                         .to_string(),
                                     arguments: arguments.as_object().cloned().unwrap_or_default(),
                                     thought_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 };
                                 if let Some(AssistantContent::ToolCall(block)) =
                                     self.output.content.get_mut(content_index)
@@ -718,7 +721,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                             .to_string(),
                                         arguments,
                                         thought_signature: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 let content_index = self.output.content.len() - 1;
                                 let tool_call = match self.output.content.last() {
@@ -759,7 +762,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 .get("id")
                                 .and_then(|value| value.as_str())
                                 .unwrap_or("");
-                            for block in self.output.content.iter_mut() {
+                            for block in &mut self.output.content {
                                 let AssistantContent::Thinking(thinking) = block else {
                                     continue;
                                 };
@@ -812,7 +815,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .get("total_tokens")
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
-                        cost: Default::default(),
+                        cost: UsageCost::default(),
                     };
                 }
                 calculate_cost(self.model, &mut self.output.usage, None);
@@ -911,6 +914,35 @@ impl<'a> ResponsesStreamProcessor<'a> {
         }
 
         Ok(())
+    }
+
+    /// Terminal stop reason of the message under construction (read through
+    /// the processor so error-path checks can run while the borrow of the
+    /// output message lives here).
+    pub fn stop_reason(&self) -> StopReason {
+        self.output.stop_reason
+    }
+
+    /// Raw stop-reason string of the message under construction.
+    pub fn stop_reason_raw(&self) -> Option<&str> {
+        self.output.stop_reason_raw.as_deref()
+    }
+
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
+    /// preview may lag the accumulated text under the growth throttle. The
+    /// outer providers call this on their error paths before the error event
+    /// carries the message.
+    pub fn settle_partial_tool_calls(&mut self) {
+        for slot in self.slots.values_mut() {
+            let Some(parsed) = slot.partial_json.flush() else {
+                continue;
+            };
+            if let Some(AssistantContent::ToolCall(tool_call)) =
+                self.output.content.get_mut(slot.content_index)
+            {
+                tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
+            }
+        }
     }
 
     /// Check invariants after the stream ended (port of the trailing checks).

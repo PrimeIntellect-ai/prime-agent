@@ -201,7 +201,10 @@ pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bo
     let Some(name) = socket_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.starts_with("worker-") && name.ends_with(".sock")
+    name.starts_with("worker-")
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "sock")
 }
 
 /// Listening daemons in this state root (TS `scanListeningDaemons`). The OS
@@ -230,9 +233,8 @@ pub(crate) fn is_daemon_process_listening(
 /// so even a root handed in on purpose cannot sweep them.
 #[cfg(unix)]
 fn scan_socket_dir(socket_dir: &Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(socket_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = std::fs::read_dir(socket_dir) else {
+        return Vec::new();
     };
     let mut sockets = Vec::new();
     for entry in entries.flatten() {
@@ -401,7 +403,7 @@ pub(crate) fn probe_daemon(socket_path: &Path) -> ProbeResult {
         cwd: None,
         session_dir: None,
         include_client_owned: None,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     if let Ok(response) = client.request_with_timeout(list, timeout_ms) {
         if response.success {

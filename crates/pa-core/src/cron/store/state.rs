@@ -1,7 +1,7 @@
 //! State save/load for the cron job store: cross-process file locking
 //! (lockfile with stale takeover), state read/write/merge helpers, and the
 //! in-state due-claim / interrupted-dispatch recovery transitions.
-//! Section of the port of the AgentCronJobStore half of core/cron-jobs.ts.
+//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

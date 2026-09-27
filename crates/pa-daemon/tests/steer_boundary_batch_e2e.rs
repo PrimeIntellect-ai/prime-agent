@@ -33,7 +33,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel test",
+        candidate.display()
+    );
     None
 }
 
@@ -43,7 +46,10 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
@@ -235,7 +241,7 @@ impl Client {
                     last_line = Instant::now();
                 }
                 Err(_) => {
-                    if Instant::now() - last_line >= quiet_ms {
+                    if last_line.elapsed() >= quiet_ms {
                         return;
                     }
                 }
@@ -249,7 +255,7 @@ impl Client {
     }
 }
 
-/// The delivered user rows (text) and the delivery agent_starts after the
+/// The delivered user rows (text) and the delivery `agent_starts` after the
 /// long turn's `agent_end`: the batch evidence.
 #[test]
 fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
@@ -418,7 +424,7 @@ fn event_types(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The (role, text) of every message_end row, in wire order — the
+/// The (role, text) of every `message_end` row, in wire order — the
 /// delivered-message trace (user rows and assistant replies).
 fn event_rows(events: &[Value]) -> Vec<(String, String)> {
     events

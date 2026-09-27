@@ -72,6 +72,19 @@ pub fn iso_to_unix_ms(iso: &str) -> Option<u64> {
     {
         return None;
     }
+    // Impossible calendar dates (2026-02-31) read as undatable: the day
+    // count would normalize such a day into the next month, fabricating a
+    // timestamp that never existed (TS `Date.parse` rejects them too).
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        _ => 28,
+    };
+    if day > days_in_month {
+        return None;
+    }
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64;
 
@@ -120,6 +133,18 @@ mod tests {
         assert_eq!(
             iso_from_unix_ms(1_709_251_199_999),
             "2024-02-29T23:59:59.999Z"
+        );
+    }
+
+    #[test]
+    fn iso_rejects_impossible_calendar_dates() {
+        assert_eq!(iso_to_unix_ms("2026-02-31T00:00:00Z"), None);
+        assert_eq!(iso_to_unix_ms("2023-02-29T00:00:00Z"), None);
+        assert_eq!(iso_to_unix_ms("2026-04-31T00:00:00Z"), None);
+        // A real leap day still parses: 2024-02-29T00:00:00Z = 1709164800.
+        assert_eq!(
+            iso_to_unix_ms("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800_000)
         );
     }
 }

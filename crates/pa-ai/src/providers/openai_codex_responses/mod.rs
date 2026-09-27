@@ -1,6 +1,6 @@
-//! OpenAI Codex Responses streaming provider (`openai-codex-responses`).
+//! `OpenAI` Codex Responses streaming provider (`openai-codex-responses`).
 //!
-//! Port of `packages/ai/src/providers/openai-codex-responses.ts`: the ChatGPT
+//! Port of `packages/ai/src/providers/openai-codex-responses.ts`: the `ChatGPT`
 //! backend Codex endpoint over WebSocket (session-cached connections with
 //! connection-anchored continuation deltas, SSE fallback on transport
 //! failures) and plain SSE, JWT `chatgpt-account-id` extraction, usage-limit
@@ -131,7 +131,7 @@ pub fn stream_openai_codex_responses(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -435,30 +435,39 @@ async fn run_websocket_attempt(
         };
         let mut start_emitted = false;
         let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-        while let Some(event) = events.recv().await {
-            match event {
-                websocket::WorkerEvent::Event(event) => {
-                    if !start_emitted {
-                        start_emitted = true;
-                        *websocket_started = true;
-                        writer.push(AssistantMessageEvent::Start {
-                            partial: start_partial.clone(),
-                        });
+        // The TS catch settles partial tool calls before the error event
+        // carries the message (TS PR #2783).
+        let streamed: Result<(), CodexStreamError> = async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    websocket::WorkerEvent::Event(event) => {
+                        if !start_emitted {
+                            start_emitted = true;
+                            *websocket_started = true;
+                            writer.push(AssistantMessageEvent::Start {
+                                partial: start_partial.clone(),
+                            });
+                        }
+                        let mapped = map_codex_event(event)?;
+                        processor.handle_event(&mapped.event)?;
+                        if mapped.done {
+                            break;
+                        }
                     }
-                    let mapped = map_codex_event(event)?;
-                    processor.handle_event(&mapped.event)?;
-                    if mapped.done {
+                    websocket::WorkerEvent::Terminal(result) => {
+                        result?;
                         break;
                     }
                 }
-                websocket::WorkerEvent::Terminal(result) => {
-                    result?;
-                    break;
-                }
             }
+            processor.finish()?;
+            Ok(())
         }
-        processor.finish()?;
-        Ok::<(), CodexStreamError>(())
+        .await;
+        if streamed.is_err() {
+            processor.settle_partial_tool_calls();
+        }
+        streamed
     }
     .await;
 
@@ -471,7 +480,7 @@ async fn run_websocket_attempt(
                 .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
             {
                 keep_connection = false;
-            } else if use_cached_context && connection.cached && !output.response_id.is_none() {
+            } else if use_cached_context && connection.cached && output.response_id.is_some() {
                 let response_items = convert_responses_messages(
                     model,
                     &Context {
@@ -534,30 +543,38 @@ async fn run_sse_stream(
         })),
     };
     let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-    let mut decoder = SseDecoder::new();
-    loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
-        };
-        process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
-    }
-    for sse in decoder.finish() {
-        if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
-            continue;
+    // The TS catch settles partial tool calls before the error event carries
+    // the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = SseDecoder::new();
+        loop {
+            let Some(chunk) = response.next_text().await? else {
+                break;
+            };
+            process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
         }
-        let event = parse_json_with_repair(&sse.data).map_err(|error| {
-            CodexStreamError::Protocol(CodexProtocolError {
-                message: format!("Invalid Codex SSE JSON: {error}"),
-                payload: Some(Value::String(sse.data.clone())),
-            })
-            .into_provider_error()
-        })?;
-        let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
-        processor.handle_event(&mapped.event)?;
+        for sse in decoder.finish() {
+            if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
+                continue;
+            }
+            let event = parse_json_with_repair(&sse.data).map_err(|error| {
+                CodexStreamError::Protocol(CodexProtocolError {
+                    message: format!("Invalid Codex SSE JSON: {error}"),
+                    payload: Some(Value::String(sse.data.clone())),
+                })
+                .into_provider_error()
+            })?;
+            let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
+            processor.handle_event(&mapped.event)?;
+        }
+        processor.finish()?;
+        Ok(())
     }
-    processor.finish()?;
-    Ok(())
+    .await;
+    if stream_result.is_err() {
+        processor.settle_partial_tool_calls();
+    }
+    stream_result
 }
 
 fn process_sse_chunk(
@@ -712,9 +729,7 @@ pub fn stream_simple_openai_codex_responses(
         .and_then(|options| options.base.api_key.clone())
         .filter(|key| !key.is_empty())
         .or_else(|| get_env_api_key(&model.provider));
-    let api_key = if let Some(api_key) = api_key {
-        api_key
-    } else {
+    let Some(api_key) = api_key else {
         let (writer, reader) = create_assistant_message_event_stream();
         let message = AssistantMessage {
             content: Vec::new(),
@@ -729,7 +744,7 @@ pub fn stream_simple_openai_codex_responses(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -784,6 +799,7 @@ impl Provider for OpenAICodexResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// The user-facing text for a failed codex stream is the verbatim error
     /// message; the raw-`fetch` SSE connection failure surfaces the
@@ -796,7 +812,7 @@ mod tests {
                 message: "You have hit your ChatGPT usage limit (pro plan).".to_string(),
                 status: Some(429),
                 body: None,
-                headers: Default::default(),
+                headers: HashMap::default(),
                 request_id: None,
                 sdk_name: Some("CodexApiError".to_string()),
                 retry_after_ms: Some(60_000),
@@ -946,7 +962,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let (writer, _stream) = AssistantMessageEventStream::new();
         let mut processor = ResponsesStreamProcessor::new(
@@ -974,7 +990,7 @@ mod tests {
                 Message::User(UserMessage {
                     content: UserMessageContent::Text("run ls".into()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 Message::Assistant(output),
                 Message::ToolResult(ToolResultMessage {
@@ -983,12 +999,12 @@ mod tests {
                     content: vec![UserOrToolContent::Text(TextContent {
                         text: "ok".into(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             ],
             tools: None,
@@ -1045,7 +1061,7 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_abc")));
     }
 
-    /// Degenerate wire shape: function_call items without an `fc_` item id.
+    /// Degenerate wire shape: `function_call` items without an `fc_` item id.
     /// The recorded tool call id carries an empty item segment; the
     /// follow-up request must omit the `id` key (never `id: ""`).
     #[test]

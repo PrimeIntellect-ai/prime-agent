@@ -2,7 +2,7 @@
 //! provider stream function. Section of the port of
 //! `packages/ai/src/providers/anthropic.ts`.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::cache_pricing::{
     get_anthropic_cache_write_cost, has_standard_anthropic_cache_pricing,
@@ -26,7 +26,9 @@ use crate::types::{
 };
 use crate::utils_inner::diagnostics::now_ms;
 use crate::utils_inner::http::{send, HttpResponse, RequestOptions};
-use crate::utils_inner::json_parse::{parse_json_with_repair, parse_streaming_json};
+use crate::utils_inner::json_parse::{
+    parse_json_with_repair, parse_streaming_json, StreamingJsonAccumulator,
+};
 use crate::utils_inner::sse::{ServerSentEvent, SseDecoder};
 use crate::utils_inner::stream_failure::{
     classify_stream_failure, format_stream_failure_message, record_stream_failure,
@@ -87,7 +89,7 @@ struct StopReasonError(String);
 struct IndexedBlocks {
     blocks: Vec<AssistantContent>,
     indices: Vec<u64>,
-    partial_json: Vec<String>,
+    partial_json: Vec<StreamingJsonAccumulator>,
 }
 
 impl IndexedBlocks {
@@ -101,6 +103,28 @@ impl IndexedBlocks {
 
     fn position(&self, index: u64) -> Option<usize> {
         self.indices.iter().position(|existing| *existing == index)
+    }
+
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
+    /// preview may lag the accumulated text under the growth throttle.
+    fn settle_partial_tool_calls(&mut self) {
+        let Self {
+            blocks,
+            partial_json,
+            ..
+        } = self;
+        for (position, block) in blocks.iter_mut().enumerate() {
+            let AssistantContent::ToolCall(tool_call) = block else {
+                continue;
+            };
+            let Some(parsed) = partial_json
+                .get_mut(position)
+                .and_then(StreamingJsonAccumulator::flush)
+            else {
+                continue;
+            };
+            tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
+        }
     }
 }
 
@@ -129,7 +153,7 @@ pub fn stream_anthropic(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -327,10 +351,12 @@ async fn run_stream(
                                 blocks.blocks.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
                                     text_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
-                                blocks.partial_json.push(String::new());
+                                blocks
+                                    .partial_json
+                                    .push(StreamingJsonAccumulator::default());
                                 sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::TextStart {
                                     content_index: (blocks.blocks.len() - 1) as u64,
@@ -344,10 +370,12 @@ async fn run_stream(
                                         thinking: String::new(),
                                         thinking_signature: Some(String::new()),
                                         redacted: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
-                                blocks.partial_json.push(String::new());
+                                blocks
+                                    .partial_json
+                                    .push(StreamingJsonAccumulator::default());
                                 sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ThinkingStart {
                                     content_index: (blocks.blocks.len() - 1) as u64,
@@ -367,10 +395,12 @@ async fn run_stream(
                                                 .to_string(),
                                         ),
                                         redacted: Some(true),
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 blocks.indices.push(index);
-                                blocks.partial_json.push(String::new());
+                                blocks
+                                    .partial_json
+                                    .push(StreamingJsonAccumulator::default());
                                 sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ThinkingStart {
                                     content_index: (blocks.blocks.len() - 1) as u64,
@@ -405,10 +435,12 @@ async fn run_stream(
                                         .cloned()
                                         .unwrap_or_default(),
                                     thought_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 blocks.indices.push(index);
-                                blocks.partial_json.push(String::new());
+                                blocks
+                                    .partial_json
+                                    .push(StreamingJsonAccumulator::default());
                                 sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ToolcallStart {
                                     content_index: (blocks.blocks.len() - 1) as u64,
@@ -469,16 +501,14 @@ async fn run_stream(
                                         .get("partial_json")
                                         .and_then(|value| value.as_str())
                                         .unwrap_or("");
-                                    if let Some(scratch) = blocks.partial_json.get_mut(position) {
-                                        scratch.push_str(partial_json);
-                                    }
                                     let parsed = blocks
                                         .partial_json
-                                        .get(position)
-                                        .map(|partial| parse_streaming_json(Some(partial)))
-                                        .unwrap_or_else(|| json!({}));
-                                    if let Some(AssistantContent::ToolCall(tool_call)) =
-                                        blocks.blocks.get_mut(position)
+                                        .get_mut(position)
+                                        .and_then(|scratch| scratch.append(partial_json));
+                                    if let (
+                                        Some(parsed),
+                                        Some(AssistantContent::ToolCall(tool_call)),
+                                    ) = (parsed, blocks.blocks.get_mut(position))
                                     {
                                         tool_call.arguments =
                                             parsed.as_object().cloned().unwrap_or_default();
@@ -533,7 +563,7 @@ async fn run_stream(
                                     let parsed = blocks
                                         .partial_json
                                         .get(position)
-                                        .map(|partial| parse_streaming_json(Some(partial)))
+                                        .map(|scratch| parse_streaming_json(Some(scratch.text())))
                                         .unwrap_or_else(|| json!({}));
                                     if let Some(AssistantContent::ToolCall(tool_call)) =
                                         blocks.blocks.get_mut(position)
@@ -623,52 +653,65 @@ async fn run_stream(
         }};
     }
 
-    loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
-        };
-        for sse in decoder.push_text(&chunk) {
+    // The TS try/catch encloses this whole streaming section, including the
+    // abort and stop-reason checks; the catch settles partial tool calls
+    // before the error event carries the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        loop {
+            let Some(chunk) = response.next_text().await? else {
+                break;
+            };
+            for sse in decoder.push_text(&chunk) {
+                handle_sse(&sse, request_id.as_deref(), |event| {
+                    handle_event!(event).map_err(|error| error.0)
+                })?;
+            }
+        }
+        for sse in decoder.finish() {
             handle_sse(&sse, request_id.as_deref(), |event| {
                 handle_event!(event).map_err(|error| error.0)
             })?;
         }
-    }
-    for sse in decoder.finish() {
-        handle_sse(&sse, request_id.as_deref(), |event| {
-            handle_event!(event).map_err(|error| error.0)
-        })?;
-    }
-    if saw_message_start && !saw_message_end {
-        return Err(ProviderError::StreamFailure(StreamFailureError {
-            message: "Anthropic stream ended before message_stop".to_string(),
-            info: StreamFailureInfo {
-                kind: StreamFailureKind::MalformedResponse,
-                request_id,
-                ..StreamFailureInfo::unknown()
-            },
-        }));
-    }
+        if saw_message_start && !saw_message_end {
+            return Err(ProviderError::StreamFailure(StreamFailureError {
+                message: "Anthropic stream ended before message_stop".to_string(),
+                info: StreamFailureInfo {
+                    kind: StreamFailureKind::MalformedResponse,
+                    request_id,
+                    ..StreamFailureInfo::unknown()
+                },
+            }));
+        }
 
-    sync_blocks(output, &blocks);
+        sync_blocks(output, &blocks);
 
-    if base_options
-        .signal
-        .as_ref()
-        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-    {
-        return Err(ProviderError::Aborted);
+        if base_options
+            .signal
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ProviderError::Aborted);
+        }
+        if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            return Err(ProviderError::StreamFailure(
+                stream_failure_from_stop_reason(
+                    output.stop_reason_raw.as_deref(),
+                    request_id.as_deref(),
+                ),
+            ));
+        }
+        if output.stop_reason == StopReason::Length {
+            // "length" is a successful stop.
+        }
+
+        Ok(())
     }
-    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(ProviderError::StreamFailure(
-            stream_failure_from_stop_reason(
-                output.stop_reason_raw.as_deref(),
-                request_id.as_deref(),
-            ),
-        ));
-    }
-    if output.stop_reason == StopReason::Length {
-        // "length" is a successful stop.
+    .await;
+
+    if let Err(error) = stream_result {
+        blocks.settle_partial_tool_calls();
+        sync_blocks(output, &blocks);
+        return Err(error);
     }
 
     Ok(())
