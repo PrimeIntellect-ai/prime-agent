@@ -320,6 +320,62 @@ fn to_terminal_color(color: Color, mode: ColorMode) -> Color {
     }
 }
 
+/// How far a selection wash must stand off the surface it renders on:
+/// TS `SELECTION_MIN_LUMINANCE_DELTA` — "Selection rows must stand out
+/// clearly, much more than passive surfaces" (TS theme.ts). The operator's
+/// 2026-09-26 directive makes the bar binding for the panel redesign's
+/// selection: a wash within a few luminance points of the surface reads as
+/// no selection at all.
+pub(crate) const SELECTION_MIN_LUMINANCE_DELTA: f64 = 28.0;
+
+/// The contrast lift's blend cap (TS `SELECTION_MAX_BLEND_ALPHA`): the
+/// wash never lifts further than halfway toward the endpoint.
+const SELECTION_MAX_BLEND_ALPHA: f32 = 0.5;
+
+/// The contrast lift's step (TS `SELECTION_BLEND_STEP`).
+const SELECTION_BLEND_STEP: f32 = 0.05;
+
+/// The perceived-lightness blend TS weighs every color decision with
+/// (TS `luminance`).
+fn luminance(rgb: (u16, u16, u16)) -> f64 {
+    0.299 * f64::from(rgb.0) + 0.587 * f64::from(rgb.1) + 0.114 * f64::from(rgb.2)
+}
+
+/// The xterm-256 palette slot's RGB (TS `ansi256ToRgb`): the 6x6x6 cube
+/// and the gray ramp. The base ANSI slots (0-15) are terminal-defined, so
+/// their rendered color is unknown.
+fn indexed_to_rgb(index: u8) -> Option<(u16, u16, u16)> {
+    const CUBE_VALUES: [u16; 6] = [0, 95, 135, 175, 215, 255];
+    match index {
+        16..=231 => {
+            let slot = u16::from(index) - 16;
+            let (red, rest) = (slot / 36, slot % 36);
+            let (green, blue) = (rest / 6, rest % 6);
+            Some((
+                CUBE_VALUES[red as usize],
+                CUBE_VALUES[green as usize],
+                CUBE_VALUES[blue as usize],
+            ))
+        }
+        232..=255 => {
+            let gray = u16::from(index) * 10 - 2312;
+            Some((gray, gray, gray))
+        }
+        _ => None,
+    }
+}
+
+/// The luminance of what actually renders: a 256-color terminal paints the
+/// palette slot, not the configured RGB (the quantized candidate evaluates
+/// through this; base ANSI slots stay unknown).
+pub(crate) fn quantized_luminance(color: Color) -> Option<f64> {
+    match color {
+        Color::Rgb(r, g, b) => Some(luminance((u16::from(r), u16::from(g), u16::from(b)))),
+        Color::Indexed(index) => indexed_to_rgb(index).map(luminance),
+        _ => None,
+    }
+}
+
 /// The active theme: resolved styles per color slot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -452,6 +508,24 @@ impl Theme {
     /// halfway toward the editor surface — a softer band than the full
     /// selection block. Non-RGB palettes have no reliable blend base, so
     /// they keep the plain selection background.
+    ///
+    /// The halfway blend is kept only when it still READS against the
+    /// surface: every built-in theme's selection sits a few luminance
+    /// points off the editor surface, so the blend used to paint as a
+    /// near-invisible wash — the operator could not tell which row was
+    /// selected (the operator's 2026-09-26 directive: the panel redesign's
+    /// selection must be unmistakable). When the blend cannot clear
+    /// [`SELECTION_MIN_LUMINANCE_DELTA`] over the surface, the wash steps
+    /// toward the contrast endpoint — white when the selection reads
+    /// lighter than the surface, black when it reads darker — until it
+    /// clears the bar (TS `getSelectionBackgroundColor`'s endpoint ladder,
+    /// anchored to the editor surface because the TUI cannot query the
+    /// terminal's own background the way TS's `getDefaultTerminalColors`
+    /// does; the endpoint machinery is TS's own, TS `theme.ts`:207-209
+    /// "Selection rows must stand out clearly, much more than passive
+    /// surfaces"). Candidates evaluate after [`Theme::mode`]
+    /// quantization, so a 256-color terminal keeps a wash the palette
+    /// actually separates from the surface.
     pub fn soft_selection_style(&self) -> Style {
         let blend = |top: (u16, u16, u16), bottom: (u16, u16, u16), alpha: f32| {
             Color::Rgb(
@@ -460,24 +534,121 @@ impl Theme {
                 (top.2 as f32 * alpha + bottom.2 as f32 * (1.0 - alpha)).round() as u8,
             )
         };
-        let (Some(Color::Rgb(sr, sg, sb)), Some(surface @ Color::Rgb(ur, ug, ub))) = (
-            self.bg_color(ThemeBg::SelectedBg),
-            self.bg_color(ThemeBg::UserMessageBg),
+        // The blend needs real RGB. A truecolor theme carries its
+        // configured RGB directly; a 256-color theme stores the
+        // quantized slot, whose palette RGB is what the terminal
+        // actually renders there. The base ANSI slots (0-15) are
+        // terminal-defined, so those keep the plain selection (TS's
+        // ANSI guard: no reliable blend base exists).
+        let slot_rgb = |color: Option<Color>| -> Option<(u16, u16, u16)> {
+            match color? {
+                Color::Rgb(r, g, b) => Some((u16::from(r), u16::from(g), u16::from(b))),
+                Color::Indexed(index) => indexed_to_rgb(index),
+                _ => None,
+            }
+        };
+        let (Some(selection), Some(editor_surface)) = (
+            slot_rgb(self.bg_color(ThemeBg::SelectedBg)),
+            slot_rgb(self.bg_color(ThemeBg::UserMessageBg)),
         ) else {
             return self.bg_style(ThemeBg::SelectedBg);
         };
-        let selection = (sr as u16, sg as u16, sb as u16);
-        let editor_surface = (ur as u16, ug as u16, ub as u16);
-        let surface_ansi = to_terminal_color(surface, self.mode);
-        // Half contrast by default; strengthen the blend only when
-        // quantization would collapse the highlight into the editor surface.
+        let surface_color = Color::Rgb(
+            editor_surface.0 as u8,
+            editor_surface.1 as u8,
+            editor_surface.2 as u8,
+        );
+        let surface_ansi = to_terminal_color(surface_color, self.mode);
+        // The selection also evaluates through the palette: a 256-color
+        // terminal paints the quantized slot, so the ladder aims from
+        // what actually renders (TS's `renderedSelection`).
+        let selection_render_luminance = quantized_luminance(to_terminal_color(
+            Color::Rgb(selection.0 as u8, selection.1 as u8, selection.2 as u8),
+            self.mode,
+        ))
+        .unwrap_or(luminance(selection));
+        let surface_render_luminance =
+            quantized_luminance(surface_ansi).unwrap_or(luminance(editor_surface));
+        // The wash reads when its rendered color clears the visibility bar
+        // over the surface (both after mode quantization — a 256-color
+        // terminal paints the palette slot, not the blend). A candidate the
+        // palette maps to an unknown slot never blocks: showing the wash
+        // beats refusing to compute.
+        let reads = |candidate: Color| {
+            quantized_luminance(candidate).is_none_or(|candidate_luminance| {
+                (candidate_luminance - surface_render_luminance).abs()
+                    >= SELECTION_MIN_LUMINANCE_DELTA
+            })
+        };
+        // Half contrast by default; strengthen the blend only when the
+        // quantized wash still separates from the editor surface AND reads.
         for alpha in [0.5, 0.75, 1.0] {
             let adjusted = to_terminal_color(blend(selection, editor_surface, alpha), self.mode);
-            if adjusted != surface_ansi {
+            if adjusted != surface_ansi && reads(adjusted) {
                 return Style::default().bg(adjusted);
             }
         }
-        self.bg_style(ThemeBg::SelectedBg)
+        // The blend reads too close to the surface (every built-in
+        // theme): step the wash toward the contrast endpoint — the one on
+        // the selection's side of the surface first, the opposite one
+        // (crossing the surface) second — until the quantized candidate
+        // clears the bar. The strongest step is tracked across BOTH
+        // endpoints like TS: the first candidate to clear the bar wins,
+        // and when nothing clears it a step replaces the selection only
+        // if it improved on the selection's own delta.
+        let delta = (selection_render_luminance - surface_render_luminance).abs();
+        let endpoints = if selection_render_luminance >= surface_render_luminance {
+            [(255u16, 255, 255), (0, 0, 0)]
+        } else {
+            [(0u16, 0, 0), (255, 255, 255)]
+        };
+        let mut best: Option<Color> = None;
+        let mut best_delta = delta;
+        for endpoint in endpoints {
+            let spread = luminance(endpoint) - selection_render_luminance;
+            if spread == 0.0 {
+                continue;
+            }
+            let target = surface_render_luminance + spread.signum() * SELECTION_MIN_LUMINANCE_DELTA;
+            let base_alpha = ((target - selection_render_luminance) / spread)
+                .clamp(0.0, f64::from(SELECTION_MAX_BLEND_ALPHA));
+            // If the direct hit undershoots the bar, keep stepping toward
+            // the cap — a stronger blend may quantize to a palette slot
+            // that passes.
+            let mut alphas = Vec::new();
+            let mut alpha = base_alpha as f32;
+            while alpha < SELECTION_MAX_BLEND_ALPHA {
+                alphas.push(alpha);
+                alpha += SELECTION_BLEND_STEP;
+            }
+            alphas.push(SELECTION_MAX_BLEND_ALPHA);
+            for alpha in alphas {
+                let candidate = to_terminal_color(blend(endpoint, selection, alpha), self.mode);
+                let Some(candidate_luminance) = quantized_luminance(candidate) else {
+                    continue;
+                };
+                let result_delta = (candidate_luminance - surface_render_luminance).abs();
+                if result_delta >= SELECTION_MIN_LUMINANCE_DELTA - 1.0 {
+                    best = Some(candidate);
+                    best_delta = result_delta;
+                    break;
+                }
+                if result_delta > best_delta {
+                    best = Some(candidate);
+                    best_delta = result_delta;
+                }
+            }
+            if best.is_some() && best_delta >= SELECTION_MIN_LUMINANCE_DELTA - 1.0 {
+                break;
+            }
+        }
+        match best {
+            Some(candidate) => Style::default().bg(candidate),
+            // A selection pinned at its own endpoint with a palette too
+            // coarse to reach the bar: the plain selection is the least
+            // surprising fallback (TS keeps the configured value too).
+            None => self.bg_style(ThemeBg::SelectedBg),
+        }
     }
 }
 
@@ -633,6 +804,90 @@ mod tests {
         let theme = Theme::from_json(&json, ColorMode::TrueColor);
         // Case-insensitive 6-hex, reached through a var reference.
         assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
+    }
+
+    /// The selection wash must READ (the operator's 2026-09-26 directive:
+    /// the panel redesign's selection was barely visible): every built-in
+    /// theme's wash clears [`SELECTION_MIN_LUMINANCE_DELTA`] over the
+    /// editor surface, in both color modes — a 256-color terminal
+    /// evaluates the palette slots it actually paints.
+    #[test]
+    fn soft_selection_reads_off_the_editor_surface() {
+        for name in ["prime", "dark", "light"] {
+            for mode in [ColorMode::TrueColor, ColorMode::Color256] {
+                let theme = Theme::builtin(name, mode);
+                let wash = theme
+                    .soft_selection_style()
+                    .bg
+                    .expect("the selection wash paints a background");
+                let surface = theme
+                    .bg_color(ThemeBg::UserMessageBg)
+                    .expect("the editor surface resolves");
+                let (Some(wash_lum), Some(surface_lum)) =
+                    (quantized_luminance(wash), quantized_luminance(surface))
+                else {
+                    panic!("{name}/{mode:?}: wash and surface must both evaluate");
+                };
+                assert!(
+                    (wash_lum - surface_lum).abs() >= SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+                    "{name}/{mode:?}: wash {wash:?} lum {wash_lum:.2} vs surface {surface:?} lum {surface_lum:.2}"
+                );
+            }
+        }
+    }
+
+    /// The ladder's pinned values: the wash clears the bar by stepping
+    /// from the selection toward the endpoint on its side of the surface
+    /// (white for the dark themes, black for the light one), and the
+    /// 256-color palette keeps a slot the surface's slot separates from.
+    #[test]
+    fn soft_selection_pins_the_contrast_ladder_values() {
+        let prime = Theme::builtin("prime", ColorMode::TrueColor);
+        assert_eq!(
+            prime.soft_selection_style().bg,
+            Some(Color::Rgb(54, 54, 58))
+        );
+        let prime256 = Theme::builtin("prime", ColorMode::Color256);
+        assert_eq!(
+            prime256.soft_selection_style().bg,
+            Some(Color::Indexed(237))
+        );
+        let dark = Theme::builtin("dark", ColorMode::TrueColor);
+        assert_eq!(dark.soft_selection_style().bg, Some(Color::Rgb(80, 80, 95)));
+        let dark256 = Theme::builtin("dark", ColorMode::Color256);
+        assert_eq!(dark256.soft_selection_style().bg, Some(Color::Indexed(244)));
+        let light = Theme::builtin("light", ColorMode::TrueColor);
+        assert_eq!(
+            light.soft_selection_style().bg,
+            Some(Color::Rgb(202, 202, 218))
+        );
+        let light256 = Theme::builtin("light", ColorMode::Color256);
+        assert_eq!(
+            light256.soft_selection_style().bg,
+            Some(Color::Indexed(251))
+        );
+    }
+
+    /// No reliable blend base, no ladder: a base-ANSI selection (the
+    /// terminal defines its rendered color) keeps the plain selection —
+    /// TS's ANSI guard.
+    #[test]
+    fn soft_selection_keeps_the_plain_selection_without_a_blend_base() {
+        let json = serde_json::from_str::<ThemeJson>(
+            r##"{
+                "name": "ansi",
+                "colors": {
+                    "selectedBg": 4,
+                    "userMessageBg": "#1a1a1f"
+                }
+            }"##,
+        )
+        .expect("valid theme json");
+        let theme = Theme::from_json(&json, ColorMode::TrueColor);
+        assert_eq!(
+            theme.soft_selection_style().bg,
+            theme.bg_style(ThemeBg::SelectedBg).bg
+        );
     }
 
     #[test]

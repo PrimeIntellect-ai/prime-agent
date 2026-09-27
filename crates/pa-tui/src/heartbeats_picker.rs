@@ -1504,6 +1504,36 @@ mod tests {
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
     }
 
+    /// The selected row's wash is the theme's shared selection and it
+    /// READS (the operator's 2026-09-26 directive: the heartbeats
+    /// selection was barely visible): the whole-row band is the same
+    /// wash the `›`-marker rows carry, and its rendered luminance clears
+    /// the theme's visibility bar over the editor surface.
+    #[test]
+    fn the_selected_row_wash_reads_off_the_surface() {
+        let theme = theme();
+        let frame = HeartbeatsPicker::new(entries(), None, None, 24).render(&theme, 90, &kb());
+        let selected = frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains("tick user-1")))
+            .expect("the selected row");
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        assert!(
+            selected.iter().all(|span| span.style.bg == Some(wash)),
+            "every span of the selected row carries the shared wash: {selected:?}"
+        );
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the heartbeats wash must read off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
+    }
+
     /// The shortcuts ride the pane's last rows with no rule below them
     /// (the operator's 2026-09-24 /model ruling): one blank line of
     /// spacing rides under the hint, never a `─` divider.
