@@ -219,9 +219,9 @@ pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
 }
 
 /// One hug row: the content truncated to the pane, the selected row
-/// padded to its wash width and washed over the hug only (the
-/// onboarding-highlight treatment — a little past the text, not the
-/// whole terminal width).
+/// padded to its wash width and washed over the hug only — the theme's
+/// shared selection wash (the same band the `›`-marker rows carry), a
+/// little past the text, not the whole terminal width.
 pub(crate) fn hug_row(
     theme: &Theme,
     row: Line,
@@ -238,10 +238,10 @@ pub(crate) fn hug_row(
     if used < hug {
         row.push(Span::raw(" ".repeat(hug - used)));
     }
-    let wash = crate::onboarding::highlight_wash(theme);
+    let selection = theme.soft_selection_style();
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(wash);
+            span.style = span.style.patch(selection);
             span
         })
         .collect()
@@ -261,10 +261,10 @@ pub(crate) fn fill_row(theme: &Theme, row: Line, selected: bool, width: usize) -
     if used < width {
         row.push(Span::raw(" ".repeat(width - used)));
     }
-    let wash = crate::onboarding::highlight_wash(theme);
+    let selection = theme.soft_selection_style();
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(wash);
+            span.style = span.style.patch(selection);
             span
         })
         .collect()
@@ -609,6 +609,57 @@ mod tests {
         let text = row_text(&row);
         assert!(text.starts_with("\u{203a}"));
         assert!(text.ends_with("connected"));
+    }
+
+    /// Every selected picker row carries the theme's ONE selection wash
+    /// (the operator's 2026-09-26 directive: the panel redesign's
+    /// selection must be unmistakable) — the `›`-marker menu rows, the
+    /// full-width table rows, and the hug rows all patch the same
+    /// [`crate::theme::Theme::soft_selection_style`], and the wash clears
+    /// the theme's visibility bar over the editor surface, so the
+    /// selected row reads at a glance.
+    #[test]
+    fn selected_rows_carry_the_shared_selection_wash() {
+        let theme = theme();
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        let menu = menu_row(&theme, 40, vec![Span::raw("label")], &[], true);
+        assert!(
+            menu.iter().all(|span| span.style.bg == Some(wash)),
+            "the menu row washes with the shared selection: {menu:?}"
+        );
+        let filled = fill_row(&theme, vec![Span::raw("label")], true, 40);
+        assert!(
+            filled.iter().all(|span| span.style.bg == Some(wash)),
+            "the fill row washes with the shared selection: {filled:?}"
+        );
+        let hugged = hug_row(&theme, vec![Span::raw("label")], 6, true, 40);
+        assert!(
+            hugged.iter().all(|span| span.style.bg == Some(wash)),
+            "the hug row washes with the shared selection: {hugged:?}"
+        );
+        // The wash is unmistakable: its rendered luminance clears the
+        // theme's visibility bar over the editor surface.
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the wash reads off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
+        // Unselected rows keep the surface: no wash at all.
+        for plain in [
+            menu_row(&theme, 40, vec![Span::raw("label")], &[], false),
+            fill_row(&theme, vec![Span::raw("label")], false, 40),
+            hug_row(&theme, vec![Span::raw("label")], 6, false, 40),
+        ] {
+            assert!(
+                plain.iter().all(|span| span.style.bg.is_none()),
+                "an unselected row carries no wash: {plain:?}"
+            );
+        }
     }
 
     #[test]
