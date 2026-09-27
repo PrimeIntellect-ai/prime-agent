@@ -444,10 +444,16 @@ pub(crate) struct SavedSessionContext {
 }
 
 pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessionContext> {
-    let store = crate::session_store::SessionFile::open(path).ok()?;
-    let entries = store.branch_file_entries();
-    let leaf = store.leaf_id().map(str::to_string);
-    let context = pa_core::session::build_session_context(&entries, leaf.as_deref());
+    // Windowed-first: the windowed store answers the same saved-context
+    // semantics (the window walk's model/thinking overlays cover rows the
+    // retained window dropped; `restored_settings` applies them plus any
+    // post-window live rows) without parsing the full history — the cold
+    // resume of a large compacted session otherwise pays a full-file parse
+    // here just to read two scalars. Unsupported or malformed-retained
+    // files fall back to the full open inside `open_windowed` itself, so
+    // every fallback path keeps the pre-windowed behavior.
+    let store = crate::session_store::SessionFile::open_windowed(path).ok()?;
+    let context = store.restored_settings();
     let thinking = store
         .has_thinking_level()
         .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))
