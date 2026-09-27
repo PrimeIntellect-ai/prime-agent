@@ -114,6 +114,16 @@ async fn run_session_command(
                 None,
             ))
             .await;
+        // The direct compact command's contract (TS session.compact
+        // aborts the running turn before the snapshot,
+        // agent-session.ts): an admitted turn that started streaming
+        // behind the admission (a parked row the pump delivered, a
+        // steer queued in the same window) is aborted and drained
+        // before the rebuild — the snapshot summarizes a settled
+        // transcript. The gate (armed above) holds the pump out of the
+        // rebuild's window either way.
+        engine.session.agent().abort();
+        engine.session.agent().wait_for_idle().await;
     }
     let execution = {
         // The executor rebuilds session context on its compact branch

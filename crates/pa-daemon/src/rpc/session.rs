@@ -354,7 +354,6 @@ impl RpcSession {
         // the running turn — the abort defers until the factory succeeds;
         // a failed build returns with the turn alive on the live session
         // (agent-session-runtime.ts:422-431).
-        let sneaked_turn = handle.engine.session.agent().state().await.is_streaming;
         // Reopening the currently-owned session file: ADOPT the current
         // lease (TS `acquireReplacementLease` reuses the current lease
         // for the same path) — the lease never leaves this process, so
@@ -407,12 +406,16 @@ impl RpcSession {
                 }
             }
         };
-        // The sneaked turn aborts only now that the replacement exists
-        // (TS teardownForReplacement runs after the open): the turn's
+        // The teardown aborts only now that the replacement exists (TS
+        // teardownForReplacement runs after the open): the turn's
         // terminal frames still stream (the old feed stays subscribed
         // until after the settle), and the wait drains it before the
-        // teardown hands the file to the replacement.
-        if sneaked_turn {
+        // swap disposes the old engine. The check re-samples the LIVE
+        // streaming state here — a turn admitted after the re-acquire
+        // (a pump already past its last per-batch check when the
+        // in-flight gate armed, mid-admission through the factory) is
+        // caught at this gate, not by any earlier snapshot.
+        if handle.engine.session.agent().state().await.is_streaming {
             handle.engine.session.agent().abort();
             handle.engine.session.agent().wait_for_idle().await;
         }
