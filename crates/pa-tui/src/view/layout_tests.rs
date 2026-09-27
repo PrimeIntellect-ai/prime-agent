@@ -36,16 +36,16 @@ fn row_pack_expands_byte_exact() {
     assert_eq!(pack.range(0, 1), rows[0..1].to_vec());
     assert_eq!(pack.range(1, 3), rows[1..3].to_vec());
     assert_eq!(pack.range(2, 4), rows[2..4].to_vec());
-    assert_eq!(pack.range(9, 12), Vec::new());
+    assert_eq!(pack.range(9, 12), Vec::<crate::Line>::new());
 }
 
 #[test]
 fn cached_packed_rows_render_identical_to_a_fresh_layout() {
-    let mut view = view();
-    view.push_entry(ChatEntry::User {
+    let mut v = view();
+    v.push_entry(ChatEntry::User {
         text: "hello wrapped text ".repeat(9),
     });
-    view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+    v.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
         blocks: vec![
             MessageBlock::Text("para one\n\npara two with more words to wrap\n".repeat(2)),
             MessageBlock::Thinking("thinking body".to_string()),
@@ -55,9 +55,9 @@ fn cached_packed_rows_render_identical_to_a_fresh_layout() {
         error: None,
         aborted: false,
     })));
-    let reference = view.render_frame(37, 24);
+    let reference = v.render_frame(37, 24);
     // a second render replays the packed cache: byte-identical rows.
-    let replayed = view.render_frame(37, 24);
+    let replayed = v.render_frame(37, 24);
     assert_eq!(reference, replayed);
     // a width change re-renders from scratch and matches the same bytes.
     let mut fresh = view();
