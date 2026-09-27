@@ -242,6 +242,7 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }
