@@ -226,11 +226,14 @@ pub struct AgentView {
     /// re-derives the follow state from the post-transition geometry
     /// (operator directive 2026-09-26).
     pub(crate) detail_transition: bool,
-    /// The screen row the mouse currently hovers, set while the row is a
-    /// clickable card row (operator directive 2026-09-26: the hovered
-    /// card row brightens so clickability is discoverable). One row of
-    /// state — a motion report never costs more than one re-style.
-    pub(crate) hover_row: Option<usize>,
+    /// The screen cell the mouse currently hovers, set while its row is
+    /// a clickable card row (operator directive 2026-09-26: the hovered
+    /// card row brightens so clickability is discoverable). One cell of
+    /// state — a motion report never costs more than one re-style —
+    /// revalidated against every composed frame so a scroll, a resize,
+    /// or streaming never leaves the affordance on a row that stopped
+    /// being the hovered card.
+    pub(crate) hover_pos: Option<(usize, usize)>,
     /// Plain text of the last frame's rows: OSC zone-marker emission only
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
@@ -413,7 +416,7 @@ impl AgentView {
             window_rows: 0,
             window_shows_tail: false,
             detail_transition: false,
-            hover_row: None,
+            hover_pos: None,
             osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
@@ -1760,10 +1763,22 @@ impl AgentView {
         // The hover affordance (operator directive 2026-09-26): the
         // hovered clickable card row brightens — Muted text to the
         // theme's foreground, Dim to Muted, the "opacity shift" that
-        // signals the row is clickable. One row, only while hovered.
-        if let Some(hover) = self.hover_row {
-            if let Some(row) = frame.get_mut(hover) {
-                apply_hover_affordance(row, &self.theme);
+        // signals the row is clickable. One row, only while hovered —
+        // and revalidated against THIS frame's just-recorded click
+        // surface, so a scroll, a resize, or streaming that moves other
+        // content onto the hovered row clears the affordance instead of
+        // brightening whatever landed there (the review bots' finding:
+        // the state is a screen coordinate, the layout moves).
+        if let Some((row, col)) = self.hover_pos {
+            if matches!(
+                self.click_target_at(row, col),
+                Some(click::ClickAction::ToggleCardExpansion)
+            ) {
+                if let Some(line) = frame.get_mut(row) {
+                    apply_hover_affordance(line, &self.theme);
+                }
+            } else {
+                self.hover_pos = None;
             }
         }
         // A paused viewport carries the follow hint over the last transcript
@@ -2857,7 +2872,7 @@ mod tests {
         );
         // Hovering onto the block row changes the state and the paint.
         assert!(view.note_hover(block_row, 2));
-        assert_eq!(view.hover_row, Some(block_row));
+        assert_eq!(view.hover_pos, Some((block_row, 2)));
         let hovered = view.render_frame(80, 24);
         for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
             if plain_span.style.fg == muted {
@@ -2867,19 +2882,64 @@ mod tests {
                 );
             }
         }
-        // A motion across the same row changes nothing.
+        // A motion across the same row changes nothing (the cell rides
+        // along; the affordance is row-level).
         assert!(!view.note_hover(block_row, 5));
-        assert_eq!(view.hover_row, Some(block_row));
+        assert_eq!(view.hover_pos, Some((block_row, 5)));
         // Moving onto a non-clickable row clears the hover and restores
         // the paint with the next frame.
         assert!(view.note_hover(0, 2));
-        assert_eq!(view.hover_row, None);
+        assert_eq!(view.hover_pos, None);
         let restored = view.render_frame(80, 24);
         assert!(
             restored[block_row]
                 .iter()
                 .any(|span| span.style.fg == muted),
             "the block's muted paint returns with the hover"
+        );
+    }
+
+    /// The render-side revalidation (the review bots' finding): the
+    /// hover is a screen coordinate, and the layout moves — a scroll
+    /// that brings other content onto the hovered row clears the
+    /// affordance with the next frame instead of brightening whatever
+    /// landed there.
+    #[test]
+    fn a_scrolled_layout_revalidates_the_hover() {
+        let mut view = condensed_view(run_cards(3));
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(view.note_hover(block_row, 2));
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        let hovered = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the muted spans brightened on the hovered row"
+                );
+            }
+        }
+        // Scroll the window: the block's rows move up; whatever now sits
+        // on the recorded row decides, and the hover only survives while
+        // that row still resolves to the same card target.
+        view.scroll_by(1);
+        view.render_frame(80, 24);
+        let resolves = matches!(
+            view.click_target_at(block_row, 2),
+            Some(crate::view::click::ClickAction::ToggleCardExpansion)
+        );
+        assert_eq!(
+            view.hover_pos.is_some(),
+            resolves,
+            "the hover survives exactly while its row still resolves to the card"
         );
     }
 
