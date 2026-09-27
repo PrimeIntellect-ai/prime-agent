@@ -712,17 +712,19 @@ mod tests {
     }
 
     /// Stage the app registration's redirect port busy for a
-    /// dead-callback flow. `Some(listener)` means the caller actively
-    /// holds the port, so the flow's own bind cannot succeed against it
-    /// (an active listener blocks the same-address bind — both sockets
-    /// set `SO_REUSEADDR`, neither sets `SO_REUSEPORT`) and the flow's
+    /// dead-callback flow, on the same host the flow itself binds (the
+    /// `PI_OAUTH_CALLBACK_HOST` override, default `127.0.0.1`).
+    /// `Some(listener)` means the caller actively holds the port, so
+    /// the flow's own bind cannot succeed against it (an active
+    /// listener blocks the same-address bind — both sockets set
+    /// `SO_REUSEADDR`, neither sets `SO_REUSEPORT`) and the flow's
     /// callback server is dead by construction; `None` means the port
-    /// cannot be staged this run and the caller skips — a login run
-    /// against a port the test does not own waits on a live callback
-    /// server to the settle bound (the registered dead-callback red's
-    /// mechanism).
+    /// cannot be staged this run and the caller skips rather than run
+    /// a login against a listener it does not own.
     fn stage_busy_registered_port() -> Option<std::net::TcpListener> {
-        std::net::TcpListener::bind(("127.0.0.1", 1455)).ok()
+        let host = std::env::var(crate::oauth::callback::CALLBACK_HOST_ENV)
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        std::net::TcpListener::bind((host, 1455)).ok()
     }
 
     #[tokio::test]
@@ -934,14 +936,8 @@ mod tests {
         // contract (a bind-anywhere test would not exercise it): the
         // staged listener blocks the flow's own bind, so its server is
         // dead by construction and the paste-free prompt is the only
-        // path, settling in microseconds — and when the port cannot be
-        // staged this run the test skips rather than race a login
-        // against a listener it does not own. The blind form of this
-        // staging (the bind result ignored) carried the registered
-        // settle red: a staging bind that silently lost the port left
-        // the flow's server live, and the no-paste login waited on it
-        // to this test's bound (openai_codex.rs:932 `Elapsed(())` — run
-        // 36212547619 job 108322024076, run 36268944011 shard 4).
+        // path, settling in microseconds. A port that cannot be staged
+        // this run skips the flow rather than races it.
         let Some(held) = stage_busy_registered_port() else {
             return; // the registered port is busy: this run cannot stage it.
         };
@@ -997,8 +993,8 @@ mod tests {
     async fn a_pending_paste_never_holds_a_cancelled_flow() {
         let _registered_port = REDIRECT_PORT.lock().await;
         // The same verified staging as the dead-callback test: the
-        // premise must not be silent, and an unstaged port skips rather
-        // than leaves the flow a listener of its own.
+        // premise must not be silent, and an unstaged port skips
+        // instead of handing the flow a listener of its own.
         let Some(held) = stage_busy_registered_port() else {
             return; // the registered port is busy: this run cannot stage it.
         };
@@ -1019,15 +1015,13 @@ mod tests {
         drop(held);
     }
 
-    /// The registered settle red's lesson, pinned: a login without a
-    /// paste surface has no settle of its own while its callback server
-    /// waits (the browser path is the only settler, live or dead), so
-    /// the surface's cancel flag is the only bound. The flag flips from
-    /// outside the flow here — the pane-exit shape (#2770) — and the
-    /// login must end cancelled inside the poll bound with no exchange;
-    /// the blind-staging form of the dead-callback test had no such
-    /// carrier, which is how its premise break ran to the settle
-    /// timeout.
+    /// A login without a paste surface has no settle of its own while
+    /// its callback server waits (the browser path is the only
+    /// settler, live or dead), so the surface's cancel flag is the
+    /// only bound. The flag flips from outside the flow here — the
+    /// pane-exit shape (#2770) — and the login must end cancelled
+    /// inside the poll bound with no exchange, whichever way its
+    /// callback server's bind went.
     #[tokio::test]
     async fn a_cancelled_surface_ends_a_login_without_a_paste_surface() {
         let _registered_port = REDIRECT_PORT.lock().await;
