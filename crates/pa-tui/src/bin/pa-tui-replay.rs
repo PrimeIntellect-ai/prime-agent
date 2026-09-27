@@ -80,8 +80,9 @@ fn main() -> Result<()> {
         let mut view = AgentView::new(theme);
         let mut stream: Box<dyn SessionStream> = Box::new(stream);
         while let pa_tui::session::SessionEvent::Item(item) = stream.poll()? {
-            if let TranscriptItem::ModelChange { model_id, .. } = &item {
+            if let TranscriptItem::ModelChange { provider, model_id } = &item {
                 view.chrome.model_id = Some(model_id.clone());
+                view.chrome.model_provider = Some(provider.clone());
             }
             view.push(item);
         }

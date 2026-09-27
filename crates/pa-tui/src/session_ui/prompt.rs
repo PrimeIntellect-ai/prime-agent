@@ -335,12 +335,11 @@ impl SessionUi {
     /// Whether the current model takes image input (TS
     /// `model.input.includes("image")`), when the model is known from the
     /// startup catalog; unknown models are assumed capable (the daemon
-    /// re-checks against the resolved model anyway).
+    /// re-checks against the resolved model anyway). The catalog lookup
+    /// is the provider-aware current-model match: a same-id entry under
+    /// another provider is a different model.
     pub(super) fn model_supports_images(&self, view: &AgentView) -> bool {
-        let Some(model_id) = view.chrome.model_id.as_deref() else {
-            return true;
-        };
-        let Some(model) = self.model_catalog.iter().find(|model| model.id == model_id) else {
+        let Some(model) = self.current_model_entry(view) else {
             return true;
         };
         model.input.contains(&pa_types::ai::ModelInput::Image)
