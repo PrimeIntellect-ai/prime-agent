@@ -42,6 +42,11 @@ impl SessionUi {
             }
             Some(HeartbeatsPickerAction::Close) => {
                 view.heartbeats_picker = None;
+                // The exit restores the dock's own group (the operator's
+                // 2026-09-26 panel-exit ruling): ESC/left lands back on
+                // the Heartbeats item, ready to re-open, not on the
+                // prompt bar.
+                self.focus_activity_dock(view);
                 self.dirty = true;
             }
             Some(HeartbeatsPickerAction::Manage {
@@ -279,10 +284,17 @@ impl SessionUi {
     /// daemon — a non-blocking refresh lands through the update channel,
     /// and stale-while-revalidate keeps the mounted catalog on failure
     /// (the error surfaces inside the open view only). The picker owns
-    /// the frame: the dock's focus hands off, so closing the picker
-    /// returns to the editor, not the dock.
+    /// the frame while it is open; its close hands the focus back to the
+    /// dock's own group (the operator's 2026-09-26 panel-exit ruling).
     pub(crate) fn open_heartbeats_view(&mut self, view: &mut AgentView) {
         self.subagents_focused = false;
+        // The view IS the dock's Heartbeates item: every entry path —
+        // the dock's Enter or the `/heartbeats` command — leaves the
+        // panel's own group selected, so the close restores the
+        // Heartbeats dock item (the operator's 2026-09-26 panel-exit
+        // ruling; the command path would otherwise keep whatever group
+        // the dock held).
+        self.activity_group = crate::chrome::ActivityGroup::Heartbeats;
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
             self.heartbeat_catalog.clone(),
             None,
