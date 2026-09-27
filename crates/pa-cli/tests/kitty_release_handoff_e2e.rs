@@ -176,9 +176,15 @@ fn releases_around_the_handoff_never_become_visible() {
     harness.drain_until_quiet(20);
 
     // Exit through the real restore (escape with an empty query), and
-    // inject one more release around the exit's own drain window.
+    // inject one more release around the exit's own drain window. With
+    // disambiguate armed a kitty terminal sends its Esc presses as the
+    // CSI-u form, so the exit drives the same encoding a real kitty
+    // session would (a raw lone ESC byte is the legacy form this guard
+    // arms its meta-wrapper hold for).
+    harness.drain_until_quiet(10);
     let mark_exit = harness.mark();
-    harness.write(&[0x1b]);
+    harness.write(b"\x1b[27u");
+    harness.drain_until_quiet(10);
     harness.write(LEFT_RELEASE);
     harness.wait_from(mark_exit, ALT_SCREEN_LEAVE, "the exit restore ran");
     let exit = harness.wait_child_exit(Duration::from_secs(20));
