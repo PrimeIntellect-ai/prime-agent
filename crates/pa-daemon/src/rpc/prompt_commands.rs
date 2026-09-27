@@ -9,9 +9,14 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use pa_agent::types::AgentEvent;
 use pa_agent::types::AgentMessage;
-use pa_core::session_engine::session_commands::{execute_session_command, SessionCommandParams};
+use pa_core::session_engine::session_commands::{
+    execute_session_command, session_command_echo_row, SessionCommandParams,
+};
+use pa_core::session_engine::session_events::agent_event_json;
 use pa_core::session_engine::{PromptOptions, PromptOutcome};
+use pa_types::session::CustomMessage;
 
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
 use super::protocol::{self, ResponseData};
@@ -82,6 +87,38 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     Ok(ResponseData::Absent)
 }
 
+/// One durable session-command row as its `message_start`/`message_end`
+/// pair (the loop's event shape for persisted rows; the daemon's ACP seam
+/// emits the same pair through its engine-event surface — the RPC stream
+/// forwards the frames verbatim through the connection-output seam).
+async fn write_command_row(state: &RpcState, message: &CustomMessage) {
+    // The session row crosses the pa-core/pa-agent boundary by its
+    // shared camelCase wire shape (the messages module's round-trip
+    // conversion, the same JSON both sides serialize).
+    let custom = serde_json::from_value::<pa_agent::types::CustomAgentMessage>(
+        serde_json::to_value(message)
+            .ok()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    let Ok(custom) = custom else {
+        return;
+    };
+    for event in [
+        AgentEvent::MessageStart {
+            message: AgentMessage::Custom(custom.clone()),
+        },
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Custom(custom),
+        },
+    ] {
+        if let Some(json) = agent_event_json(&event)
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        {
+            state.session.write_connection_output(json).await;
+        }
+    }
+}
+
 /// Execute one session command the prompt admitted (the ACP prompt path's
 /// segment: the pa-core executor persists the echo/result rows, the
 /// compaction publishes its events, the goal publishes on change, and a
@@ -104,6 +141,12 @@ async fn run_session_command(
     } else {
         None
     };
+    // The attempted command's durable echo row streams BEFORE the
+    // execution (TS `_executeSelectedSessionCommand` records the attempt
+    // first; the daemon's ACP seam emits the same pair) — the client
+    // sees the command it ran the moment it runs, as a message pair on
+    // the event stream.
+    write_command_row(state, &session_command_echo_row(command)).await;
     if is_compact {
         state.compacting.fetch_add(1, Ordering::SeqCst);
         // The direct compact command's contract (TS session.compact
@@ -144,6 +187,17 @@ async fn run_session_command(
         execute_session_command(&engine, &mut params, command).await
     };
     if is_compact {
+        // The post-compaction kernel notice rides between the start and
+        // the settled end (TS `_syncKernelStateAfterCompaction` runs
+        // inside `_performCompaction`, so the message pair precedes
+        // `compaction_end` on the wire — the ACP seam's order).
+        if let Some(message) = execution
+            .compaction
+            .as_ref()
+            .and_then(|compaction| compaction.ipython_state.as_ref())
+        {
+            write_command_row(state, message).await;
+        }
         state.compacting.fetch_sub(1, Ordering::SeqCst);
         let result = execution.compaction.as_ref().map(|compaction| {
             crate::compaction::compaction_result_value(&compaction.result, &compaction.entry)
@@ -156,6 +210,13 @@ async fn run_session_command(
                 result.as_ref(),
             ))
             .await;
+    }
+    // The executor's first row is the echo (emitted above); the rest of
+    // the durable rows stream in order — the command results
+    // (`/autonomous`, `/goal`, invalid-command failures, refinement
+    // notices) the ACP seam forwards the same way (its skip(1)).
+    for message in execution.messages.iter().skip(1) {
+        write_command_row(state, message).await;
     }
     // The handle guard is still held here (the admitted command's
     // guard-pass-through): publishing over the held engine's goal state
