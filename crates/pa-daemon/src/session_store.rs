@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use pa_types::ai::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Read, Write};
@@ -1607,21 +1608,26 @@ impl SessionScanState {
 
     /// TS `advanceScanTail`: the consumed prefix's trailing window. A line at
     /// least as long as the window keeps only its last bytes plus the
-    /// newline; a short line rolls into the previous window first.
+    /// newline; a short line rolls into the previous window first. Both
+    /// cases copy inside the fixed window — the old shape allocated a
+    /// fresh `Vec` per line just to keep the last 16 bytes, so the scan
+    /// paid a `line.len()+17` allocation for every row it folded.
     fn advance_tail(&mut self, line: &[u8]) {
         let keep = SESSION_SCAN_RESUME_TAIL_BYTES - 1;
-        let mut combined = Vec::with_capacity(SESSION_SCAN_RESUME_TAIL_BYTES + line.len() + 1);
         if line.len() >= keep {
-            combined.extend_from_slice(&line[line.len() - keep..]);
+            // The window is the line's last `keep` bytes plus the newline.
+            self.tail[..keep].copy_from_slice(&line[line.len() - keep..]);
+            self.tail[keep] = b'\n';
         } else {
-            combined.extend_from_slice(&self.tail);
-            combined.extend_from_slice(line);
+            // The short line rolls: the old window shifts left by the
+            // line's own length plus its newline, the line lands in front
+            // of the final newline byte.
+            let shift = line.len() + 1;
+            self.tail.copy_within(shift.., 0);
+            let at = SESSION_SCAN_RESUME_TAIL_BYTES - shift;
+            self.tail[at..keep].copy_from_slice(line);
+            self.tail[keep] = b'\n';
         }
-        combined.push(b'\n');
-        let start = combined
-            .len()
-            .saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES);
-        self.tail.copy_from_slice(&combined[start..]);
     }
 
     /// TS `scannedPrefixIntact`: the bytes just before the cursor match the
@@ -1653,20 +1659,20 @@ impl SessionScanState {
 }
 
 /// The listing fold only needs message metadata after the search corpus is
-/// full. Unknown fields are skipped by serde; the one field the text fold
-/// still needs — `content` — rides as a borrowed raw span, so a guarded row
-/// re-parses its content alone instead of the whole entry.
+/// full. Unknown fields are skipped by serde; the fields the fold reads
+/// ride as borrowed raw spans (zero copy, no materialization), so a row
+/// re-parses only the spans its arm touches instead of the whole entry.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionInfoMessage<'a> {
-    #[serde(default)]
-    role: Option<Value>,
-    #[serde(default)]
-    provider: Option<Value>,
-    #[serde(default)]
-    model: Option<Value>,
-    #[serde(default)]
-    timestamp: Option<Value>,
+    #[serde(default, borrow)]
+    role: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    provider: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    model: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    timestamp: Option<&'a serde_json::value::RawValue>,
     /// The lenient scan-side shape ([`crate::session_usage::ScanUsage`]):
     /// a partial persisted block must not reject the row.
     #[serde(default)]
@@ -1681,29 +1687,29 @@ struct SessionInfoMessage<'a> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionInfoEntry<'a> {
-    #[serde(rename = "type")]
-    type_: String,
-    #[serde(rename = "id")]
-    id: String,
-    #[serde(rename = "timestamp")]
-    _timestamp: String,
-    #[serde(default, rename = "parentId")]
-    _parent_id: Option<String>,
-    #[serde(default)]
-    name: Option<Value>,
-    #[serde(default)]
-    state: Option<Value>,
-    #[serde(default)]
-    provider: Option<Value>,
-    #[serde(default)]
-    model_id: Option<Value>,
-    #[serde(default)]
-    thinking_level: Option<Value>,
+    #[serde(borrow, rename = "type")]
+    type_: Cow<'a, str>,
+    #[serde(borrow, rename = "id")]
+    id: Cow<'a, str>,
+    #[serde(borrow, rename = "timestamp")]
+    _timestamp: Cow<'a, str>,
+    #[serde(borrow, default, rename = "parentId")]
+    _parent_id: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    name: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    state: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    provider: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    model_id: Option<&'a serde_json::value::RawValue>,
+    #[serde(default, borrow)]
+    thinking_level: Option<&'a serde_json::value::RawValue>,
     #[serde(default, borrow)]
     message: Option<SessionInfoMessage<'a>>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
-    #[serde(default)]
-    target_id: Option<String>,
+    #[serde(borrow, default)]
+    target_id: Option<Cow<'a, str>>,
     #[serde(default)]
     child_usage: Option<crate::session_usage::ScanUsage>,
     #[serde(default)]
@@ -1908,6 +1914,22 @@ fn message_content_text(content: Option<&serde_json::value::RawValue>) -> String
         .unwrap_or_default()
 }
 
+/// Read a borrowed raw span the way the owned-`Value` fold read it:
+/// `Some` only when the field is present and a JSON string, with escapes
+/// unescaped exactly like the `Value` string the full parse materialized
+/// (`Cow::Owned` when the span carries escapes, `Cow::Borrowed` when it
+/// does not — the zero-copy case, the only difference from `Value::as_str`
+/// being the allocation it skips).
+fn raw_string(raw: Option<&serde_json::value::RawValue>) -> Option<Cow<'_, str>> {
+    serde_json::from_str(raw?.get()).ok()
+}
+
+/// `Value::as_u64` over a borrowed raw span: `Some` only when the field is
+/// present and a JSON number a `u64` parses.
+fn raw_u64(raw: Option<&serde_json::value::RawValue>) -> Option<u64> {
+    serde_json::from_str(raw?.get()).ok()
+}
+
 /// Fold one complete line into the scan state (the old scan-loop body).
 /// `None` = the abort arm (a `model_change` without its model identity).
 fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
@@ -1918,16 +1940,18 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
     let Ok(entry) = serde_json::from_str::<SessionInfoEntry>(trimmed) else {
         return Some(());
     };
-    match entry.type_.as_str() {
+    match entry.type_.as_ref() {
         "session" => {
             let parsed: SessionHeader = serde_json::from_str(trimmed).ok()?;
             acc.header = Some(parsed);
         }
         "session_info" => {
-            acc.name = entry
-                .name
-                .as_ref()
-                .and_then(Value::as_str)
+            // The borrowed span reads exactly what `Value::as_str` read:
+            // a present non-string parses back to `None`, the same
+            // absent-as-`None` the owned `Value` gave (the only reader of
+            // `name`, this arm, pays the span's one parse).
+            acc.name = raw_string(entry.name)
+                .as_deref()
                 .map(str::trim)
                 .filter(|n| !n.is_empty())
                 .map(str::to_string);
@@ -1935,6 +1959,7 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
         "session_state" => {
             if let Some(status) = entry
                 .state
+                .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok())
                 .as_ref()
                 .and_then(|s| s.get("status"))
                 .and_then(Value::as_str)
@@ -1943,16 +1968,18 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
             }
         }
         "model_change" => {
+            // The abort arm keeps its exact semantics: a `model_change`
+            // without a string provider or modelId (absent, or present but
+            // not a string) aborts the scan — `raw_string` returns `None`
+            // for both, the same two-step `?` the owned values paid for.
             acc.model = Some((
-                entry.provider.as_ref()?.as_str()?.to_string(),
-                entry.model_id.as_ref()?.as_str()?.to_string(),
+                raw_string(entry.provider)?.into_owned(),
+                raw_string(entry.model_id)?.into_owned(),
             ));
         }
         "thinking_level_change" => {
-            if let Some(level) = entry
-                .thinking_level
-                .as_ref()
-                .and_then(Value::as_str)
+            if let Some(level) = raw_string(entry.thinking_level)
+                .as_deref()
                 .map(str::trim)
                 .filter(|level| !level.is_empty())
             {
@@ -1973,19 +2000,23 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
         "message" => {
             acc.message_count += 1;
             if let Some(message) = entry.message {
-                let role = message.role.as_ref().and_then(Value::as_str);
+                // The role span parses back on the read the fold always
+                // made; a non-string role parses to `None` here exactly as
+                // `Value::as_str` returned `None` for it before.
+                let role = raw_string(message.role);
+                let role = role.as_deref();
                 acc.usage_scan
                     .fold_message(&entry.id, role, message.usage.map(Usage::from));
                 if role == Some("assistant") {
                     if let (Some(provider), Some(model_id)) = (
-                        message.provider.as_ref().and_then(Value::as_str),
-                        message.model.as_ref().and_then(Value::as_str),
+                        raw_string(message.provider),
+                        raw_string(message.model),
                     ) {
                         acc.model = Some((provider.to_string(), model_id.to_string()));
                     }
                 }
                 if matches!(role, Some("user" | "assistant")) {
-                    if let Some(timestamp) = message.timestamp.as_ref().and_then(Value::as_u64) {
+                    if let Some(timestamp) = raw_u64(message.timestamp) {
                         acc.last_activity_ms =
                             Some(acc.last_activity_ms.unwrap_or(0).max(timestamp));
                     }
@@ -3121,6 +3152,59 @@ mod tests {
             ]
         );
     }
+
+
+/// The in-place tail window matches the rolling `Vec` reference (the
+/// previous implementation) byte for byte across line-length regimes: the
+/// keep cut at the window edge, the short-line roll, the empty line, and
+/// multibyte bytes that never decode mid-window.
+#[test]
+fn resume_tail_window_matches_the_rolling_reference() {
+    let mut state = SessionScanState::fresh(SessionInfoGeneration {
+        len: 0,
+        dev: 0,
+        ino: 0,
+        mtime: 0,
+        mtime_ns: 0,
+        ctime: 0,
+        ctime_ns: 0,
+    });
+    let mut reference = [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES];
+    let mut rolling_reference = |tail: &mut [u8; SESSION_SCAN_RESUME_TAIL_BYTES], line: &[u8]| {
+        let keep = SESSION_SCAN_RESUME_TAIL_BYTES - 1;
+        let mut combined = Vec::with_capacity(SESSION_SCAN_RESUME_TAIL_BYTES + line.len() + 1);
+        if line.len() >= keep {
+            combined.extend_from_slice(&line[line.len() - keep..]);
+        } else {
+            combined.extend_from_slice(tail);
+            combined.extend_from_slice(line);
+        }
+        combined.push(b'\n');
+        let start = combined.len().saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES);
+        tail.copy_from_slice(&combined[start..]);
+    };
+    let lines: Vec<Vec<u8>> = [
+        &b""[..],
+        b"x",
+        b"fourteen xx",
+        &b"exactly fifteen"[..],
+        b"sixteen bytes..",
+        &b"a much longer line than the window will ever keep"[..],
+        b"",
+        &"multibyte 世界未詠 line".as_bytes()[..],
+        &b"final"[..],
+    ]
+    .into_iter()
+    .map(|l| l.to_vec())
+    .collect();
+    for line in &lines {
+        state.advance_tail(line);
+        rolling_reference(&mut reference, line);
+        assert_eq!(state.tail, reference, "line {line:?}");
+    }
+    // The prefix-intact read keeps proving resumes from the same bytes.
+    assert_eq!(state.tail, reference);
+}
 
     /// The session header line leads with the `type` tag, exactly like the
     /// TS session file's first line (`{"type":"session","version":...}`).

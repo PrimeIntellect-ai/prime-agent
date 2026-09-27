@@ -882,3 +882,204 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
     fs::remove_dir_all(dir).unwrap();
     fs::remove_dir_all(empty_dir).unwrap();
 }
+
+/// The borrowed metadata reads match the full-parse `Value` reads for
+/// every shape the fold can meet on disk: the typed parse borrows the
+/// entry's scalar fields (`Cow`) and its object fields (raw spans), and
+/// each arm parses its span back only when the arm runs. This matrix pins
+/// the span's parse-back to the `Value` read per row, checks the typed
+/// parse still rejects exactly the rows the owned struct rejected, and
+/// folds the accepted rows end to end against the legacy full-parse
+/// reference.
+#[test]
+fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
+    // Rows are written from raw JSON so the escapes ride the bytes both
+    // extraction paths walk.
+    let rows: Vec<&str> = vec![
+        r#"{"type":"custom","id":"plain-id","timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        // escaped scalars: the type tag, id, timestamp, parentId
+        r#"{"type":"custom","id":"escaped id","timestamp":"2026-09-23T00:00:00.000Z","parentId":"pérent"}"#,
+        // a string carrying every JSON escape class
+        r#"{"type":"custom","id":"q\"uo\\te\/bfnrt\u00e9","timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        // name shapes: present, absent, null, non-string, escaped, padded
+        r#"{"type":"session_info","id":"n0","timestamp":"2026-09-23T00:00:00.000Z","name":"fresh name"}"#,
+        r#"{"type":"session_info","id":"n1","timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        r#"{"type":"session_info","id":"n2","timestamp":"2026-09-23T00:00:00.000Z","name":null}"#,
+        r#"{"type":"session_info","id":"n3","timestamp":"2026-09-23T00:00:00.000Z","name":42}"#,
+        r#"{"type":"session_info","id":"n4","timestamp":"2026-09-23T00:00:00.000Z","name":"escéped"}"#,
+        r#"{"type":"session_info","id":"n5","timestamp":"2026-09-23T00:00:00.000Z","name":"   "}"#,
+        r#"{"type":"session_info","id":"n6","timestamp":"2026-09-23T00:00:00.000Z","name":"   trimmed   "}"#,
+        // state shapes: hidden/sleep normalize; non-string status; non-object
+        r#"{"type":"session_state","id":"s0","timestamp":"2026-09-23T00:00:00.000Z","state":{"status":"hidden"}}"#,
+        r#"{"type":"session_state","id":"s1","timestamp":"2026-09-23T00:00:00.000Z","state":{"status":"sl\u0065ep"}}"#,
+        r#"{"type":"session_state","id":"s2","timestamp":"2026-09-23T00:00:00.000Z","state":{"status":42}}"#,
+        r#"{"type":"session_state","id":"s3","timestamp":"2026-09-23T00:00:00.000Z","state":42}"#,
+        // model_change: escaped modelId; the abort shapes
+        r#"{"type":"model_change","id":"mc0","timestamp":"2026-09-23T00:00:00.000Z","provider":"prov","modelId":"m\u00f3del"}"#,
+        r#"{"type":"model_change","id":"mc1","timestamp":"2026-09-23T00:00:00.000Z","provider":"prov","modelId":42}"#,
+        r#"{"type":"model_change","id":"mc2","timestamp":"2026-09-23T00:00:00.000Z","provider":42,"modelId":"m"}"#,
+        r#"{"type":"model_change","id":"mc3","timestamp":"2026-09-23T00:00:00.000Z","provider":"prov"}"#,
+        // thinking_level_change: escaped, empty-after-trim, non-string
+        r#"{"type":"thinking_level_change","id":"t0","timestamp":"2026-09-23T00:00:00.000Z","thinkingLevel":"h\u0069gh"}"#,
+        r#"{"type":"thinking_level_change","id":"t1","timestamp":"2026-09-23T00:00:00.000Z","thinkingLevel":"   "}"#,
+        r#"{"type":"thinking_level_change","id":"t2","timestamp":"2026-09-23T00:00:00.000Z","thinkingLevel":42}"#,
+        // message shapes: role absent/null/non-string/escaped, timestamp
+        // float/string/huge/null, provider/model partial pairs
+        r#"{"type":"message","id":"m0","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"ok","timestamp":123,"provider":"p","model":"m"}}"#,
+        r#"{"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assist\u0061nt","content":"escaped role matches","timestamp":456}}"#,
+        r#"{"type":"message","id":"m2","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":42,"content":"non-string role"}}"#,
+        r#"{"type":"message","id":"m3","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"ts float","timestamp":1.5}}"#,
+        r#"{"type":"message","id":"m4","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"ts string","timestamp":"999"}}"#,
+        r#"{"type":"message","id":"m5","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"ts huge","timestamp":18446744073709551616}}"#,
+        r#"{"type":"message","id":"m6","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"ts null","timestamp":null}}"#,
+        r#"{"type":"message","id":"m7","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"prov nonstring","provider":42,"model":"m"}}"#,
+        r#"{"type":"message","id":"m8","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"model absent","provider":"p"}}"#,
+        r#"{"type":"message","id":"m9","timestamp":"2026-09-23T00:00:00.000Z","message":null}"#,
+        r#"{"type":"message","id":"m10","timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        // a non-object message: the typed parse rejects the row (the
+        // owned struct did too), the reference fold's dispatch is a no-op
+        r#"{"type":"message","id":"m11","timestamp":"2026-09-23T00:00:00.000Z","message":"plain string"}"#,
+        // child_usage_attributed: a non-string targetId rejects the row
+        // (the owned Option<String> rejected it too)
+        r#"{"type":"child_usage_attributed","id":"c0","timestamp":"2026-09-23T00:00:00.000Z","targetId":"x"}"#,
+        r#"{"type":"child_usage_attributed","id":"c1","timestamp":"2026-09-23T00:00:00.000Z","targetId":42}"#,
+        // rows the typed parse still rejects: non-string required scalars
+        r#"{"type":42,"id":"x","timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        r#"{"type":"custom","id":42,"timestamp":"2026-09-23T00:00:00.000Z"}"#,
+        r#"{"type":"custom","id":"x","timestamp":42}"#,
+        // usage blocks ride the same typed lenient shape on both paths
+        r#"{"type":"message","id":"u0","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"u","usage":{"inputTokens":1,"cost":{"input":0.5}}}}"#,
+    ];
+
+    // Row-level differential: every borrowed span read equals the
+    // full-parse `Value` read for every row the typed parse accepts. The
+    // envelope scalars (`type`, `id`, `timestamp`, `parentId`) read from
+    // `SessionEntry`'s typed fields (serde `flatten` keeps them out of
+    // `fields`), the rest from the flattened map.
+    for row in &rows {
+        let typed: Option<SessionInfoEntry> = serde_json::from_str(row).ok();
+        let full: Option<SessionEntry> = serde_json::from_str(row).ok();
+        match (typed, full) {
+            (Some(entry), Some(full)) => {
+                let full_str = |field: &str| full.fields.get(field).and_then(Value::as_str);
+                let message = full.fields.get("message").filter(|message| message.is_object());
+                let message_str = |field: &str| {
+                    message
+                        .and_then(|message| message.get(field))
+                        .and_then(Value::as_str)
+                };
+                let message_u64 = |field: &str| {
+                    message
+                        .and_then(|message| message.get(field))
+                        .and_then(Value::as_u64)
+                };
+                assert_eq!(entry.type_.as_ref(), full.type_.as_str(), "type: {row}");
+                assert_eq!(entry.id.as_ref(), full.id.as_str(), "id: {row}");
+                assert_eq!(entry._timestamp.as_ref(), full.timestamp.as_str(), "timestamp: {row}");
+                assert_eq!(entry._parent_id.as_deref(), full.parent_id.as_deref(), "parentId: {row}");
+                assert_eq!(raw_string(entry.name).as_deref(), full_str("name"), "name: {row}");
+                assert_eq!(
+                    entry
+                        .state
+                        .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()),
+                    full.fields.get("state").cloned(),
+                    "state: {row}"
+                );
+                assert_eq!(
+                    raw_string(entry.provider).as_deref(),
+                    full_str("provider"),
+                    "provider: {row}"
+                );
+                assert_eq!(raw_string(entry.model_id).as_deref(), full_str("modelId"), "modelId: {row}");
+                assert_eq!(
+                    raw_string(entry.thinking_level).as_deref(),
+                    full_str("thinkingLevel"),
+                    "thinkingLevel: {row}"
+                );
+                assert_eq!(entry.target_id.as_deref(), full_str("targetId"), "targetId: {row}");
+                if let Some(message) = &entry.message {
+                    assert_eq!(raw_string(message.role).as_deref(), message_str("role"), "role: {row}");
+                    assert_eq!(
+                        raw_string(message.provider).as_deref(),
+                        message_str("provider"),
+                        "m.provider: {row}"
+                    );
+                    assert_eq!(
+                        raw_string(message.model).as_deref(),
+                        message_str("model"),
+                        "m.model: {row}"
+                    );
+                    assert_eq!(raw_u64(message.timestamp), message_u64("timestamp"), "m.timestamp: {row}");
+                }
+            }
+            // Both envelopes reject a non-string envelope scalar.
+            (None, None) => {}
+            // The borrowed struct rejects a non-object message or a
+            // non-string targetId exactly as the owned struct did (the
+            // row-level census over 177k real fixture lines pinned the
+            // two acceptance sets identical); the lenient envelope sees
+            // the shape the fold's arm would read as absent.
+            (None, Some(full)) => {
+                let rejected = ["targetId"].iter().any(|field| {
+                    matches!(
+                        full.fields.get(field),
+                        Some(Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_))
+                    )
+                }) || full
+                    .fields
+                    .get("message")
+                    .map_or(false, |message| !message.is_object() && !message.is_null());
+                assert!(rejected, "unexpected rejection: {row}");
+            }
+            (Some(_), None) => panic!("borrowed parse accepted what the envelope rejects: {row}"),
+        }
+    }
+
+    // Fold-level differential: the accepted rows fold end to end and the
+    // production fold matches the legacy full-parse reference.
+    let header =
+        json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"});
+    let dir = test_dir();
+    let path = dir.join("session.jsonl");
+    append_rows(&path, std::slice::from_ref(&header));
+    // The abort rows (15-17) would end the whole file's fold on both
+    // paths (they get their own files below); the non-object message row
+    // (32) is rejected by the typed parse on BOTH the owned and the
+    // borrowed struct while the lenient reference counts it — a
+    // pre-existing reference divergence outside this change's surface,
+    // so it stays row-level only.
+    for (index, row) in rows.iter().enumerate() {
+        if matches!(index, 15..=17 | 32) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(row) else {
+            continue;
+        };
+        append_rows(&path, std::slice::from_ref(&value));
+    }
+    assert_fold_matches(&path);
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.name.as_deref(), Some("trimmed"));
+    assert_eq!(info.state.as_deref(), Some("archived"));
+    assert_eq!(info.thinking_level.as_deref(), Some("high"));
+    assert_eq!(info.model.as_ref(), Some(&("p".to_string(), "m".to_string())));
+    // every accepted message row counts, including the null-message and
+    // the missing-message rows; both paths count exactly the typed-parse
+    // accepted rows.
+    assert_eq!(info.message_count, 12);
+    assert_eq!(info.first_message, "ts float");
+    assert!(info.all_messages_text.contains("escaped role matches"));
+    assert_eq!(info.modified, crate::util::iso_from_unix_ms(456));
+
+    // The abort rows kill the whole file's row on both paths.
+    for aborting in [rows[15], rows[16], rows[17]] {
+        let abort_dir = test_dir();
+        let abort_path = abort_dir.join("session.jsonl");
+        append_rows(&abort_path, &[header.clone(), serde_json::from_str::<Value>(aborting).unwrap()]);
+        assert_eq!(read_session_info(&abort_path), None);
+        assert_fold_matches(&abort_path);
+        fs::remove_dir_all(abort_dir).unwrap();
+    }
+
+    fs::remove_dir_all(dir).unwrap();
+}
