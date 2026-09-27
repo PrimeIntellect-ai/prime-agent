@@ -916,6 +916,18 @@ impl<'a> ResponsesStreamProcessor<'a> {
         Ok(())
     }
 
+    /// Terminal stop reason of the message under construction (read through
+    /// the processor so error-path checks can run while the borrow of the
+    /// output message lives here).
+    pub fn stop_reason(&self) -> StopReason {
+        self.output.stop_reason
+    }
+
+    /// Raw stop-reason string of the message under construction.
+    pub fn stop_reason_raw(&self) -> Option<&str> {
+        self.output.stop_reason_raw.as_deref()
+    }
+
     /// Port of the TS catch settle: finalize tool-call blocks whose parsed
     /// preview may lag the accumulated text under the growth throttle. The
     /// outer providers call this on their error paths before the error event

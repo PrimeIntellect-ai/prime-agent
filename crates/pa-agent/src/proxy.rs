@@ -1028,10 +1028,11 @@ mod tests {
             events.push(r#"{"type":"toolcall_end","contentIndex":0}"#.to_string());
             events.push(r#"{"type":"done","reason":"toolUse","usage":{}}"#.to_string());
         }
-        let body = events
-            .iter()
-            .map(|event| format!("data: {event}\n\n"))
-            .collect::<String>();
+        let mut body = String::new();
+        for event in &events {
+            use std::fmt::Write as _;
+            let _ = write!(body, "data: {event}\n\n");
+        }
 
         let base_url = serve_proxy_sse(body, !ends_cleanly).await;
         let (_handle, mut stream) = stream_proxy(

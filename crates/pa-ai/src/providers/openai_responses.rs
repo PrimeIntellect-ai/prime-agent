@@ -399,9 +399,15 @@ async fn run_stream(
             {
                 return Err(ProviderError::Aborted);
             }
-            if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            if matches!(
+                processor.stop_reason(),
+                StopReason::Aborted | StopReason::Error
+            ) {
                 return Err(ProviderError::StreamFailure(
-                    stream_failure_from_stop_reason(output.stop_reason_raw.as_deref(), request_id),
+                    stream_failure_from_stop_reason(
+                        processor.stop_reason_raw(),
+                        request_id.as_deref(),
+                    ),
                 ));
             }
             Ok(())

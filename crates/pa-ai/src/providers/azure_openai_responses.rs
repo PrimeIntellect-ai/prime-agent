@@ -378,7 +378,7 @@ async fn run_stream(
         partial: output.clone(),
     });
 
-    let mut stream_result: Result<(), ProviderError> = Ok(());
+    let stream_result: Result<(), ProviderError>;
     {
         let hooks = ResponsesStreamHooks::default();
         let mut processor =
@@ -424,10 +424,13 @@ async fn run_stream(
             {
                 return Err(ProviderError::Aborted);
             }
-            if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            if matches!(
+                processor.stop_reason(),
+                StopReason::Aborted | StopReason::Error
+            ) {
                 return Err(ProviderError::StreamFailure(
                     stream_failure_from_stop_reason(
-                        output.stop_reason_raw.as_deref(),
+                        processor.stop_reason_raw(),
                         request_id.as_deref(),
                     ),
                 ));
