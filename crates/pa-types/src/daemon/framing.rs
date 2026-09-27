@@ -166,6 +166,44 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Write a private frame without re-buffering the payload.
+///
+/// Same wire bytes as [`write_frame`] — the length prefix, header, and
+/// payload go out in order, one frame — only the intermediate
+/// whole-frame buffer is skipped: the payload writes straight from the
+/// caller's slice, so a large payload does not pay a second
+/// payload-sized allocation and copy per frame. The header serializes and
+/// both frame lengths assert exactly like [`encode_private_frame`]; the
+/// caller holds its write lock across both writes, so no other frame can
+/// interleave.
+///
+/// # Errors
+///
+/// Returns an error if serializing `header` fails, if the encoded header is
+/// empty, if the header or payload length exceeds `limits`, or if writing
+/// the frame on `writer` fails.
+pub async fn write_frame_segments<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    header: &serde_json::Value,
+    payload: &[u8],
+    limits: PrivateFrameLimits,
+) -> Result<()> {
+    let header_bytes = serde_json::to_vec(header).context("serialize private frame header")?;
+    if header_bytes.is_empty() {
+        return Err(anyhow!("Private frame header cannot be empty"));
+    }
+    assert_frame_length("header length", header_bytes.len(), limits.max_header_bytes)?;
+    assert_frame_length("payload length", payload.len(), limits.max_payload_bytes)?;
+    let mut prefix = Vec::with_capacity(FRAME_PREFIX_BYTES + header_bytes.len());
+    prefix.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&header_bytes);
+    writer.write_all(&prefix).await?;
+    writer.write_all(payload).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Stateful frame reader over a byte stream. Frames that arrive in the same
 /// chunk (or arrive while previous frames wait in the queue) are all handed
 /// out one `read_frame` call at a time; partial frames stay buffered until the
@@ -243,6 +281,46 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].header["kind"], "command");
         assert_eq!(decoded[0].payload, b"{\"x\":1}");
+    }
+
+    #[tokio::test]
+    async fn segments_write_the_same_stream_as_the_buffered_frame() {
+        let payload: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let mut buffered = Vec::new();
+        write_frame(&mut buffered, &header("outbound"), &payload, DEFAULT_PRIVATE_FRAME_LIMITS)
+            .await
+            .unwrap();
+        let mut segmented = Vec::new();
+        write_frame_segments(
+            &mut segmented,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(buffered, segmented);
+
+        let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
+        let decoded = decoder.push(&segmented).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].header["kind"], "outbound");
+        assert_eq!(decoded[0].payload, payload);
+    }
+
+    #[tokio::test]
+    async fn segments_reject_the_same_oversized_frames() {
+        let payload = vec![0u8; DEFAULT_PRIVATE_FRAME_LIMITS.max_payload_bytes + 1];
+        let mut sink = Vec::new();
+        let error = write_frame_segments(
+            &mut sink,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await;
+        assert!(error.is_err());
+        assert!(sink.is_empty());
     }
 
     #[test]
