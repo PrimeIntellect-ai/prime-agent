@@ -2610,6 +2610,41 @@ mod tests {
         assert_eq!(v.scroll_info().lines_below, 0);
     }
 
+    /// The height-exact boundary (the review bots' finding): a window
+    /// whose bottom lands exactly on the transcript's final chat row —
+    /// with the empty tail section below it — is at the bottom, not
+    /// paused above new content: the follow state re-derives and the
+    /// hint does not render.
+    #[test]
+    fn a_window_ending_exactly_at_the_tail_shows_no_hint() {
+        let mut v = thinking_filled(view(), 8);
+        v.render_frame(80, 24);
+        // The scroll distance to the exact bottom (a following window
+        // sits at `last_max_scroll`, which `lines_above` reports; the
+        // resolve happens before the top pin, so the walked window below
+        // stays sparse).
+        let bottom = v.scroll_info().lines_above;
+        v.scroll_to_top();
+        // The render establishes the walked top window; each row step
+        // keeps the walk (the sparse path), so the final window is a
+        // walked Top anchor sitting exactly on the bottom.
+        v.render_frame(80, 24);
+        for _ in 0..bottom {
+            v.scroll_by(1);
+        }
+        let frame = v.render_frame(80, 24);
+        assert_eq!(
+            v.scroll_info().lines_below,
+            0,
+            "the window sits exactly at the bottom"
+        );
+        assert!(
+            !frame.iter().any(|l| row_text(l).contains("to follow")),
+            "the at-the-bottom window carries no follow hint (following \
+             would scroll nothing)"
+        );
+    }
+
     /// The recompute is not a blanket un-pause: a collapse that leaves
     /// real rows below the window keeps following paused and the hint
     /// rendered (following would actually scroll).

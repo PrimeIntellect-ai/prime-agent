@@ -451,12 +451,16 @@ impl AgentView {
         // window shows the transcript tail (the follow-hint rule — the
         // walk's own truth, no extra geometry pass).
         let mut shows_tail = false;
+        // Whether the last consumed section ended exactly at the
+        // window's bottom (the height-exact boundary).
+        let mut filled_to_section_end = false;
         while rows.len() < height && section <= last {
             let source = section_rows(self, section);
             let from = row.min(source.len());
             let to = from.saturating_add(height - rows.len()).min(source.len());
             let before = rows.len();
             rows.extend_from_slice(&source[from..to]);
+            filled_to_section_end = to == source.len();
             shows_tail = section == last && to == source.len();
             // The entry's visible span feeds the click surface's window
             // map (view/click.rs) — bounded by the rows on screen.
@@ -466,6 +470,20 @@ impl AgentView {
             }
             section += 1;
             row = 0;
+        }
+        // The height-exact boundary: the window filled through a
+        // section's end, so the sections below the boundary decide the
+        // bottom signal — an empty tail (and hidden zero-row entries)
+        // leaves the window at the transcript end even though the fill
+        // loop never enters the empty tail section to set the flag
+        // itself (the boundary case the review bots flagged: a window
+        // that exactly ends on the final chat entry).
+        if rows.len() == height && section <= last && filled_to_section_end {
+            let mut peek = section;
+            while peek <= last && section_rows(self, peek).is_empty() {
+                peek += 1;
+            }
+            shows_tail = peek > last;
         }
         // A top-origin window reaching the tail needs the same bottom clamp
         // as the full renderer. Re-anchor from the end once, not per draw.
