@@ -46,6 +46,11 @@ pub struct Reconstructed {
     pub chat: Vec<ChatEntry>,
     /// Current model id (`state.model.id`), when the session reports one.
     pub model_id: Option<String>,
+    /// The current model's provider (`state.model.provider`), when the
+    /// session reports one: the picker resolves the current-model catalog
+    /// entry by provider plus id, so a same-id entry under another
+    /// provider never wins (older daemons report no provider).
+    pub model_provider: Option<String>,
     /// The tray effort suffix for that model (TS `getModelContextLabel`),
     /// when the state's model carries its reasoning level.
     pub thinking_suffix: Option<String>,
@@ -351,9 +356,10 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .map(|messages| transcript_to_entries(messages))
         .unwrap_or_default();
     let state = snapshot.get("state");
-    let model_id = state
+    let (model_id, model_provider) = state
         .and_then(|state| state.get("model"))
-        .and_then(model_id_value);
+        .and_then(model_identity_value)
+        .map_or((None, None), |(id, provider)| (Some(id), provider));
     let thinking_suffix = state.and_then(crate::chrome::tray_thinking_suffix);
     let session_name = state
         .and_then(|state| state.get("sessionName"))
@@ -396,6 +402,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     Reconstructed {
         chat: messages,
         model_id,
+        model_provider,
         thinking_suffix,
         session_name,
         session_id,
@@ -466,12 +473,22 @@ fn queue_lane(actions: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The model id from a `state.model` wire value (`{id, provider}` or a
-/// display string).
-fn model_id_value(model: &Value) -> Option<String> {
+/// The model id and provider from a `state.model` wire value
+/// (`{id, provider}` or a display string): the provider is `None` for the
+/// display-string form and the object form that omits it (older daemons),
+/// and the whole identity is `None` when no id parses — a provider
+/// without an id matches nothing in the catalog.
+fn model_identity_value(model: &Value) -> Option<(String, Option<String>)> {
     match model {
-        Value::String(label) => Some(label.clone()),
-        Value::Object(map) => map.get("id").and_then(Value::as_str).map(str::to_string),
+        Value::String(label) => Some((label.clone(), None)),
+        Value::Object(map) => {
+            let id = map.get("id").and_then(Value::as_str)?;
+            let provider = map
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some((id.to_string(), provider))
+        }
         _ => None,
     }
 }
@@ -2080,6 +2097,37 @@ mod tests {
     /// TS `getModelContextLabel`: the attach snapshot's state carries the
     /// tray effort suffix with the model (reasoning + level), and a model
     /// without reasoning reconstructs bare.
+    /// The attach state's model block carries the provider next to the id
+    /// (TS `state.model.provider`): both reconstruct, so the picker's
+    /// current-model match disambiguates the same id across providers
+    /// (prime-inference and openrouter both list `z-ai/glm-5.3`). The
+    /// display-string form and a provider-less object keep `None` (older
+    /// daemons).
+    #[test]
+    fn reconstructs_the_model_provider_alongside_the_id() {
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["model"] =
+            json!({ "id": "z-ai/glm-5.3", "provider": "prime-inference" });
+        let data = attach_data_from_response(attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(view.model_id.as_deref(), Some("z-ai/glm-5.3"));
+        assert_eq!(view.model_provider.as_deref(), Some("prime-inference"));
+
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["model"] = json!({ "id": "z-ai/glm-5.3" });
+        let data = attach_data_from_response(attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(view.model_id.as_deref(), Some("z-ai/glm-5.3"));
+        assert_eq!(view.model_provider, None, "an object without a provider");
+
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["model"] = json!("z-ai/glm-5.3");
+        let data = attach_data_from_response(attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(view.model_id.as_deref(), Some("z-ai/glm-5.3"));
+        assert_eq!(view.model_provider, None, "the display-string form");
+    }
+
     #[test]
     fn reconstructs_the_tray_effort_suffix() {
         let mut attach = slim_attach();
