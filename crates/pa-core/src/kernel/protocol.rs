@@ -32,6 +32,12 @@ pub enum Request {
     },
     Restore {
         path: String,
+        /// The snapshot's own byte caps bound the restore's record reads:
+        /// a corrupt or sparse snapshot file cannot force a huge allocation
+        /// (the writer enforced these when it framed the payload; the
+        /// reader enforces the same limits before every blob read).
+        max_bytes: u64,
+        max_variable_bytes: u64,
     },
     ListNames,
     McpStatus {
@@ -74,7 +80,16 @@ impl Request {
                 "max_variable_bytes": max_variable_bytes,
                 "prune_oversized": prune_oversized,
             }),
-            Request::Restore { path } => json!({ "type": "restore", "path": path }),
+            Request::Restore {
+                path,
+                max_bytes,
+                max_variable_bytes,
+            } => json!({
+                "type": "restore",
+                "path": path,
+                "max_bytes": max_bytes,
+                "max_variable_bytes": max_variable_bytes,
+            }),
             Request::ListNames => json!({ "type": "list_names" }),
             Request::McpStatus {
                 servers,

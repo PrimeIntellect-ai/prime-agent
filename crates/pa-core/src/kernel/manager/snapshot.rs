@@ -103,6 +103,10 @@ impl Inner {
         }
         let request = Request::Restore {
             path: cfg.path.to_string_lossy().to_string(),
+            max_bytes: cfg.max_bytes.unwrap_or(DEFAULT_SNAPSHOT_MAX_BYTES),
+            max_variable_bytes: cfg
+                .max_variable_bytes
+                .unwrap_or(DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
         };
         let result = self
             .enqueue_request(

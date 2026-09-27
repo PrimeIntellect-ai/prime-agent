@@ -2479,6 +2479,92 @@ class SnapshotTempCleanupTest(unittest.TestCase):
 
 
 
+class SnapshotRestoreBoundsTest(unittest.TestCase):
+    """The restore's record reader enforces the writer's own byte caps: a
+    sparse multi-gigabyte snapshot file cannot OOM the process (Macroscope
+    PR #2744 HIGH repl.py:731), and a failed revival merges no backfill
+    (Macroscope PR #2744 MED repl.py:1077)."""
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm import repl as repl_module
+
+        self.repl_module = repl_module
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+
+    def _frame(self, name: bytes, blob: bytes) -> bytes:
+        return (
+            len(name).to_bytes(4, "little")
+            + name
+            + len(blob).to_bytes(8, "little")
+            + blob
+        )
+
+    def test_oversized_record_declared_length_is_capped_before_reading(self):
+        import dill
+
+        magic = self.repl_module._SNAPSHOT_MAGIC
+        # A sparse file whose APPARENT size covers a declared 2 GiB record:
+        # the file-size bounds check alone would pass it (the allocation is
+        # the attack), so the per-record cap must reject it first.
+        huge_len = 2 * 1024 * 1024 * 1024
+        path = os.path.join(self.dir, "sparse-state.dill")
+        with open(path, "wb") as fh:
+            fh.write(magic)
+            fh.write(self._frame(b"victim", dill.dumps(b"x")))
+        # Truncate-declare: append the header of a huge record, then make the
+        # file's apparent size cover it (a sparse file: no real bytes).
+        with open(path, "ab") as fh:
+            fh.write((4).to_bytes(4, "little"))
+            fh.write(b"huge")
+            fh.write(huge_len.to_bytes(8, "little"))
+            fh.truncate(fh.tell() + huge_len)
+        with open(path, "rb") as fh:
+            with self.assertRaises(ValueError):
+                self.repl_module._read_snapshot_records(fh, 256 * 1024 * 1024, 16 * 1024 * 1024)
+
+    def test_failed_revival_merges_no_backfill(self):
+        import dill
+
+        path = os.path.join(self.dir, "state.dill")
+        records = self._frame(b"good", dill.dumps("ok")) + self._frame(b"bad", dill.dumps("BAD"))
+        with open(path, "wb") as fh:
+            fh.write(self.repl_module._SNAPSHOT_MAGIC)
+            fh.write(records)
+        ns = {"keep": 0}
+        real_revive = self.repl_module._revive_with_live_globals
+        state = {"revived": 0}
+
+        def revive(value, live_ns, backfill):
+            if value == "BAD":
+                # The buggy shape appended to the shared backfill BEFORE the
+                # revival completed: a failed name still merged its globals.
+                backfill.append(("leaked_from_bad", 42))
+                raise RuntimeError("revival boom")
+            backfill.append(("good_global", 1))
+            state["revived"] += 1
+            return value
+
+        self.repl_module._revive_with_live_globals = revive
+        try:
+            result = self.repl_module._restore_state(
+                ns, path, max_bytes=1 << 20, max_variable_bytes=1 << 20
+            )
+        finally:
+            self.repl_module._revive_with_live_globals = real_revive
+        self.assertIn("good", result["restored"])
+        self.assertIn("good_global", ns)
+        self.assertNotIn("leaked_from_bad", ns, "a failed revival must merge nothing")
+        self.assertEqual(
+            [entry["name"] for entry in result["failed"]],
+            ["bad"],
+        )
+        self.assertEqual(ns["good"], "ok")
+
+
 class SnapshotPairConsistencyTest(unittest.TestCase):
     # Direct fault injection into _snapshot_state: portable and deterministic
     # (chmod-based injection breaks as root and has different Windows semantics).

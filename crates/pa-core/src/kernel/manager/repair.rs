@@ -115,11 +115,16 @@ impl Inner {
             }
             self.append_diagnostic("protocol repair restore failed; discarding replacement kernel");
             self.kill_child_to_idle();
-            // The snapshot is the declared culprit; the lazy path must not
-            // retry it, and the dispose flush should replace the corrupt
-            // payload rather than preserve it.
+            // The snapshot is the declared suspect, never the proven
+            // culprit: the restore may have failed transiently (a
+            // transport hiccup in the replacement kernel, the repair step
+            // timeout) with the on-disk payload perfectly good. Only the
+            // retry guard drops — the lazy path must not spin on it. The
+            // dispose-flush protection STAYS: a never-restored namespace
+            // must not overwrite the fresher on-disk payload on the next
+            // shutdown (Macroscope PR #2744: clearing it here removed the
+            // protection for every transient failure).
             lock(&self.guarded).pending_restore = false;
-            lock(&self.guarded).restore_incomplete = false;
             return;
         }
 

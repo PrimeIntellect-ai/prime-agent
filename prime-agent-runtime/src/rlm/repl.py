@@ -711,13 +711,16 @@ class _CappedWriter:
         return size
 
 
-def _read_snapshot_records(fh: Any) -> dict[str, bytes]:
+def _read_snapshot_records(fh: Any, max_bytes: int, max_variable_bytes: int) -> dict[str, bytes]:
     """Framing damage is a corrupt snapshot: a restore error, never a partial namespace.
-    Length fields are bounds-checked before their reads, so a corrupt header cannot force a huge allocation."""
+    Length fields are bounds-checked before their reads, so a corrupt header cannot force a huge
+    allocation; the writer's own per-record and aggregate caps bound every blob read, so a
+    sparse multi-gigabyte file cannot OOM the process either."""
     fh.seek(0, os.SEEK_END)
     size = fh.tell()
     fh.seek(len(_SNAPSHOT_MAGIC))
     records: dict[str, bytes] = {}
+    total = 0
     while fh.tell() < size:
         header = fh.read(4)
         if len(header) < 4:
@@ -730,6 +733,11 @@ def _read_snapshot_records(fh: Any) -> dict[str, bytes]:
         blob_len = int.from_bytes(raw_len, "little")
         if len(raw_len) < 8 or fh.tell() + blob_len > size:
             raise ValueError("truncated snapshot record")
+        if blob_len > max_variable_bytes:
+            raise ValueError("snapshot record exceeds the per-variable byte cap")
+        total += blob_len
+        if total > max_bytes:
+            raise ValueError("snapshot payload exceeds the aggregate byte cap")
         blob = fh.read(blob_len)
         if len(blob) < blob_len:
             raise ValueError("truncated snapshot record")
@@ -1037,7 +1045,11 @@ def _revive_with_live_globals(
 
 
 def _restore_state(
-    ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
+    ns: dict[str, Any],
+    path: str,
+    committed: list[dict[str, Any]] | None = None,
+    max_bytes: int | None = None,
+    max_variable_bytes: int | None = None,
 ) -> dict[str, Any]:
     if not os.path.exists(path):
         return {"restored": [], "failed": [], "reason": "snapshot not found"}
@@ -1048,7 +1060,15 @@ def _restore_state(
     try:
         with open(path, "rb") as fh:
             if fh.read(len(_SNAPSHOT_MAGIC)) == _SNAPSHOT_MAGIC:
-                payload = _read_snapshot_records(fh)
+                payload = _read_snapshot_records(
+                    fh,
+                    max_bytes if max_bytes is not None else DEFAULT_SNAPSHOT_MAX_BYTES,
+                    (
+                        max_variable_bytes
+                        if max_variable_bytes is not None
+                        else DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES
+                    ),
+                )
             else:
                 # Legacy: one dill-pickled dict; old snapshot files must keep restoring.
                 fh.seek(0)
@@ -1073,10 +1093,16 @@ def _restore_state(
     backfill: list[tuple[str, Any]] = []
     revive_failed: list[dict[str, str]] = []
     for name, value in staged.items():
+        # The backfill entries a name's revival produced merge only if THAT
+        # name revives: a failed revival adds nothing (its saved globals
+        # would partially restore state the failure report says failed).
+        name_backfill: list[tuple[str, Any]] = []
         try:
-            prepared[name] = _revive_with_live_globals(value, ns, backfill)
+            prepared[name] = _revive_with_live_globals(value, ns, name_backfill)
         except Exception as err:  # noqa: BLE001 - one broken revival must not abort the restore
             revive_failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+            continue
+        backfill.extend(name_backfill)
     result = {"restored": sorted(prepared), "failed": failed + revive_failed}
     # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
     previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
@@ -1124,7 +1150,13 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 prune,
                 committed,
             )
-        return _restore_state(ns, req["path"], committed)
+        return _restore_state(
+            ns,
+            req["path"],
+            committed,
+            req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
+            req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
+        )
 
     assert _loop is not None
     task = _loop.create_task(run())
