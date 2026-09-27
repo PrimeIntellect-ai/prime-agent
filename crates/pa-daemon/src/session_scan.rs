@@ -13,8 +13,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::session_store::{
-    parse_session_header_line, read_first_line_bounded, read_session_info, SessionInfo,
-    SESSION_LIST_HEADER_READ_MAX_BYTES,
+    parse_session_header_line, read_first_line_bounded_from, read_session_info, read_session_info_from,
+    SessionInfo, SESSION_LIST_HEADER_READ_MAX_BYTES,
 };
 
 /// The bounded header read's verdict for one roster file.
@@ -34,8 +34,8 @@ enum HeaderGate {
     Unjudged,
 }
 
-fn bounded_header_gate(path: &Path) -> HeaderGate {
-    let Some(line) = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES) else {
+fn bounded_header_gate(file: &mut fs::File) -> HeaderGate {
+    let Some(line) = read_first_line_bounded_from(file, SESSION_LIST_HEADER_READ_MAX_BYTES) else {
         return HeaderGate::Unjudged;
     };
     let Ok(text) = std::str::from_utf8(&line) else {
@@ -68,10 +68,21 @@ fn bounded_header_gate(path: &Path) -> HeaderGate {
 }
 
 /// One file's roster row: `None` when the file produces none.
+///
+/// One open serves both the bounded header judgment and the fold: the gate
+/// reads the first line from the fresh handle, the fold rewinds the same
+/// handle and folds from byte 0. The double-open judged and folded two
+/// handles opened moments apart, so a rename/replace racing between them
+/// could judge one file and fold another (and paid an open+close per file
+/// for the chance); the shared handle pins the judgment and the fold to
+/// the same inode — the fold's cursor, generation, and certification
+/// re-stat read the file the gate judged, never a replacement that landed
+/// in between.
 fn roster_session_info(path: &Path) -> Option<SessionInfo> {
-    match bounded_header_gate(path) {
+    let mut file = fs::File::open(path).ok()?;
+    match bounded_header_gate(&mut file) {
         HeaderGate::NotAHeader => None,
-        HeaderGate::Header | HeaderGate::Unjudged => read_session_info(path),
+        HeaderGate::Header | HeaderGate::Unjudged => read_session_info_from(&mut file, path),
     }
 }
 

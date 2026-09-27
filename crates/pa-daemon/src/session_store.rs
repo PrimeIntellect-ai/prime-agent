@@ -250,6 +250,16 @@ pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
 /// still a line (`str::lines` reads one too).
 pub(crate) fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
     let mut file = fs::File::open(path).ok()?;
+    read_first_line_bounded_from(&mut file, max_bytes)
+}
+
+/// The bounded first-line read over an already-open handle (the roster
+/// gate shares one open with the fold: the fresh handle sits at byte 0,
+/// where the path-based read started).
+pub(crate) fn read_first_line_bounded_from(
+    file: &mut fs::File,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
     // One byte over the cap separates "a line that fits the cap" (judgeable)
     // from "an over-long line" (not): a newline at index `max_bytes` still
     // bounds a complete `max_bytes`-byte line.
@@ -1725,6 +1735,14 @@ struct SessionInfoEntry<'a> {
 /// prefix-tail check, and a rewritten file rescans from the top.
 pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut file = fs::File::open(path).ok()?;
+    read_session_info_from(&mut file, path)
+}
+
+/// [`read_session_info`] over an already-open handle: the roster gate
+/// shares one open with the fold (the gate reads the first line, the fold
+/// rewinds the same handle and folds from byte 0), every other caller
+/// passes a fresh open.
+pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option<SessionInfo> {
     let generation = SessionInfoGeneration::from_metadata(&file.metadata().ok()?);
 
     // The unchanged case answers from the cache; the grown case resumes.
@@ -1740,7 +1758,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
                 if cached.same_file_identity(&generation)
                     && generation.len > cached.generation.len =>
             {
-                if cached.prefix_intact(&file) {
+                if cached.prefix_intact(file) {
                     cached.clone_for_resume()
                 } else {
                     SessionScanState::fresh(generation)
@@ -1753,21 +1771,30 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     // to byte 0: `prefix_intact` leaves the cursor at the old consumed end
     // (its tail-window read), and a fresh scan started there would miss the
     // session header. TS restarts its stream at `state.offset` every scan.
-    if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
+    if std::io::Seek::seek(file, std::io::SeekFrom::Start(state.offset)).is_err() {
         return None;
     }
-    let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut file);
-    let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
+    let torn_tail = {
+        let mut reader =
+            std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut *file);
+        state.scan_from_cursor(&mut reader, generation.len)?
+    };
     // TS's listing stat (`stats.mtime`): the durable last-resort value for
     // `modified`, captured from the open file like TS captures it at
     // readdir. `None` keeps unavailable (unreadable, pre-epoch) metadata
-    // distinct from a real epoch timestamp.
-    let stats_mtime_ms = file.metadata().ok().and_then(|meta| {
-        meta.modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as u64)
-    });
+    // distinct from a real epoch timestamp. The stat is read lazily —
+    // only when the `modified` fallback chain actually reaches it (a row
+    // with message timestamps, or a parseable header timestamp, never
+    // does) — the same metadata at the same moment the eager read paid a
+    // per-file stat for on every scan.
+    let stats_mtime_ms = || {
+        file.metadata().ok().and_then(|meta| {
+            meta.modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+        })
+    };
     let info = state.build_info(path, stats_mtime_ms, Some(&torn_tail))?;
     // A concurrent append/replacement must never certify stale metadata.
     // Records without message timestamps never certify either: their
@@ -1836,7 +1863,7 @@ impl SessionScanState {
     fn build_info(
         &self,
         path: &Path,
-        stats_mtime_ms: Option<u64>,
+        stats_mtime_ms: impl FnOnce() -> Option<u64>,
         torn: Option<&str>,
     ) -> Option<SessionInfo> {
         let snapshot;
@@ -1866,7 +1893,7 @@ impl SessionScanState {
             .last_activity_ms
             .filter(|ms| *ms > 0)
             .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
-            .or(stats_mtime_ms);
+            .or_else(stats_mtime_ms);
         let modified = modified_ms
             .map(crate::util::iso_from_unix_ms)
             .unwrap_or_default();
@@ -2923,7 +2950,7 @@ mod tests {
         let capped_info = state
             .build_info(
                 Path::new("/repo/s1.jsonl"),
-                None,
+                || None,
                 Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
             )
             .unwrap();
@@ -2946,7 +2973,7 @@ mod tests {
         let uncapped_info = uncapped
             .build_info(
                 Path::new("/repo/s1.jsonl"),
-                None,
+                || None,
                 Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
             )
             .unwrap();
