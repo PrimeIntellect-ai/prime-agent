@@ -676,7 +676,7 @@ mod tests {
     /// A theme too partial to compute a selection (no `selectedBg`, no
     /// RGB on either side) still paints a wash — the onboarding wash —
     /// so a selected heartbeat/shell row never reads as unselected
-    /// (Macroscope PR #2908: the highlight_wash fallback must survive
+    /// (Macroscope PR #2908: the `highlight_wash` fallback must survive
     /// the shared-wash switch).
     #[test]
     fn partial_themes_keep_the_onboarding_wash_on_selected_rows() {
