@@ -5,10 +5,11 @@
 //! decode-and-dispatch path a terminal's clicks take.
 //!
 //! Verifies the operator's core interactions: a plain click on a
-//! condensed run block expands it (the `app.tools.expand` cycle), a
-//! plain click in the prompt bar places the caret at the clicked cell
-//! (then typing inserts there), and a plain click on a `/model` picker
-//! row moves the selection onto it.
+//! condensed run block expands the card's own output (operator directive
+//! 2026-09-26: the card click toggles the card, not the thinking blocks
+//! around it), a plain click in the prompt bar places the caret at the
+//! clicked cell (then typing inserts there), and a plain click on a
+//! `/model` picker row moves the selection onto it.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -426,10 +427,14 @@ fn ctrl_o() -> crossterm::event::KeyEvent {
     )
 }
 
-/// A click on a condensed run block expands it: the plain press/release
-/// pair on the block's summary row cycles the conversation detail to the
-/// level that renders every card (`app.tools.expand`'s action), so the
-/// cards appear and the condensed block is gone.
+/// A click on a condensed run block expands the card's own output: the
+/// plain press/release pair on the block's summary row toggles the
+/// clicked card's expansion (operator directive 2026-09-26: the click
+/// lands on the card the user means, so the level jumps to `all` —
+/// where the cards render WITH their output bodies — instead of the
+/// `details` level a blind cycle reaches from `overview`, which only
+/// expands the thinking blocks around them), so the cards' output
+/// bodies appear and the condensed block is gone.
 #[test]
 fn a_click_on_a_condensed_run_expands_it() {
     let frames = run_plan(
@@ -462,9 +467,10 @@ fn a_click_on_a_condensed_run_expands_it() {
             },
             click,
             release,
-            // The click's frame: the cards render at the details level.
+            // The click's frame: the card's own output body renders (the
+            // `╰─` gutter row only appears with tool output expanded).
             HeadlessStep::WaitRender {
-                needle: "print(3)".to_string(),
+                needle: "\u{2570}\u{2500} print(4)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
@@ -472,12 +478,91 @@ fn a_click_on_a_condensed_run_expands_it() {
     );
     let last = frames.last().expect("a frame after the click");
     assert!(
-        last.contains("print(3)"),
-        "the click expanded the run's cards: {last}"
+        last.contains("\u{2570}\u{2500} print(4)"),
+        "the click expanded the card's own output (the `all` level, not the \
+         `details` level that only opens the thinking around it): {last}"
     );
     assert!(
         !last.contains("8 tool calls"),
         "the condensed block is gone at the expanded level: {last}"
+    );
+}
+
+/// The card click is a toggle: a second click on an expanded card
+/// collapses the conversation back to the `overview` level — the cards
+/// fold into the condensed run block again and the output bodies fold
+/// away.
+#[test]
+fn a_second_click_on_a_card_collapses_back() {
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let (_, block_row, block_col) =
+        locate(&frames, "8 tool calls").expect("the condensed run renders before the click");
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+            // The first click expands the run (the block's own row).
+            HeadlessStep::Mouse(press(block_col + 1, block_row + 1)),
+            HeadlessStep::Mouse(release(block_col + 1, block_row + 1)),
+            HeadlessStep::WaitRender {
+                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    // The expanded frame: locate a rendered card row for the second
+    // click (its row toggles the card back).
+    let (_, row, col) = locate(&frames, "print(4)").expect("the cards render expanded");
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+            HeadlessStep::Mouse(press(block_col + 1, block_row + 1)),
+            HeadlessStep::Mouse(release(block_col + 1, block_row + 1)),
+            HeadlessStep::WaitRender {
+                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                timeout_ms: 5_000,
+            },
+            // The second click lands on the now-rendered card row.
+            HeadlessStep::Mouse(press(col + 1, row + 1)),
+            HeadlessStep::Mouse(release(col + 1, row + 1)),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let last = frames.last().expect("a frame after the second click");
+    assert!(
+        last.contains("8 tool calls"),
+        "the second click collapsed the cards back: {last}"
+    );
+    assert!(
+        !last.contains("\u{2570}\u{2500} print(4)"),
+        "the expanded output folded away again: {last}"
     );
 }
 

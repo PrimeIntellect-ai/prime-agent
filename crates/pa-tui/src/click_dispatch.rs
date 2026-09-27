@@ -2,11 +2,12 @@
 //! `fullscreenPressedClick` + `dispatchFullscreenClick`): a plain left
 //! press records the click target under it — a hyperlink or a
 //! shift/alt/ctrl press records nothing, so those stay selection-only —
-//! and a plain release on the same row fires the target's action. Every
-//! action mirrors the keyboard grammar: a card or condensed run block
-//! cycles the conversation detail (the `app.tools.expand` key), an
-//! editor content row places the caret, and a picker row moves the
-//! picker's selection.
+//! and a plain release on the same row fires the target's action. A
+//! card or condensed run block toggles its own expansion (the clicked
+//! card's content, operator directive 2026-09-26 — not the keyboard's
+//! `app.tools.expand` cycle, which from `overview` would only expand
+//! the thinking blocks around the card), an editor content row places
+//! the caret, and a picker row moves the picker's selection.
 
 use crate::session_ui::SessionUi;
 use crate::view::click::ClickAction;
@@ -58,9 +59,9 @@ impl SessionUi {
             return;
         }
         match pressed.action {
-            ClickAction::CycleDetail => {
+            ClickAction::ToggleCardExpansion => {
                 self.track_click("transcript");
-                self.cycle_detail(view);
+                self.toggle_card_expansion(view);
             }
             ClickAction::PlaceCaret {
                 row,
@@ -89,11 +90,37 @@ impl SessionUi {
     }
 
     /// Cycle the conversation detail (TS `app.tools.expand`, default
-    /// ctrl+o — the key handler's exact action, so the click grammar
-    /// fires the same cycle; #2709 saves the new level as the
+    /// ctrl+o — the keyboard grammar's exact cycle: overview ->
+    /// details -> all -> overview; #2709 saves the new level as the
     /// `chatDetail` setting either way).
     pub(crate) fn cycle_detail(&mut self, view: &mut AgentView) {
         view.detail = view.detail.next();
+        self.save_chat_detail(view);
+        // TS `applyChatExpansion` also re-flags the side-question pane
+        // (the pane has no bash rows here, so the flag is the only
+        // carried state).
+        if let Some(pane) = view.side_pane.as_mut() {
+            pane.expanded = view.detail == crate::chat::Detail::All;
+        }
+        self.dirty = true;
+    }
+
+    /// Toggle the clicked card's own expansion (operator directive
+    /// 2026-09-26: clicking a tool call must open the tool call, not
+    /// the thinking block around it). TS toggles a per-card `expanded`
+    /// state; this port's cards are detail-mode driven, so the card's
+    /// expansion maps onto the level: `all` when the clicked card's
+    /// content is collapsed (tool output, notice body, completion
+    /// content — the `details` level a blind cycle reaches from
+    /// `overview` only expands the thinking blocks around the card),
+    /// `overview` when it is expanded. #2709 saves the new level as
+    /// the `chatDetail` setting either way.
+    pub(crate) fn toggle_card_expansion(&mut self, view: &mut AgentView) {
+        view.detail = if view.detail.tool_output_expanded() {
+            crate::chat::Detail::Overview
+        } else {
+            crate::chat::Detail::All
+        };
         self.save_chat_detail(view);
         // TS `applyChatExpansion` also re-flags the side-question pane
         // (the pane has no bash rows here, so the flag is the only
