@@ -247,6 +247,74 @@ async fn consumes_queued_responses_in_order_and_errors_when_exhausted() {
 }
 
 #[tokio::test]
+async fn repeat_last_response_replays_the_last_step_once_the_queue_runs_dry() {
+    let registration = register();
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![text_msg("first"), text_msg("last")]);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let first = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let last = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let dry_one = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let dry_two = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+
+    assert_eq!(first.content, vec![faux_text("first")]);
+    assert_eq!(last.content, vec![faux_text("last")]);
+    assert_eq!(dry_one.content, vec![faux_text("last")]);
+    assert_eq!(dry_one.stop_reason, StopReason::Stop);
+    assert_eq!(dry_two.content, vec![faux_text("last")]);
+    assert_eq!(registration.get_pending_response_count(), 0);
+    assert_eq!(registration.call_count(), 4);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn parses_the_repeat_last_response_script_key_into_the_registration() {
+    let parsed = script::parse_faux_script(&serde_json::json!({
+        "responses": ["only"],
+        "repeatLastResponse": true,
+    }))
+    .expect("script parses");
+    assert!(parsed.repeat_last_response);
+    let registration = script::register_faux_provider_from_script(&parsed);
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let queued = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    let repeated = complete(&registration.get_model(), &context, None)
+        .await
+        .unwrap();
+    assert_eq!(queued.content, vec![faux_text("only")]);
+    assert_eq!(repeated.content, vec![faux_text("only")]);
+    assert_eq!(registration.get_pending_response_count(), 0);
+    assert_eq!(registration.call_count(), 2);
+    registration.unregister();
+
+    // The knob stays off unless the script opts in: the finite queue and
+    // its exhaustion error are the response-budget contract.
+    let parsed = script::parse_faux_script(&serde_json::json!({ "responses": ["only"] }))
+        .expect("script parses");
+    assert!(!parsed.repeat_last_response);
+}
+
+#[tokio::test]
 async fn can_replace_and_append_queued_responses() {
     let registration = register();
     registration.set_responses(vec![text_msg("first")]);
