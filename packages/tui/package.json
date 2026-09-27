@@ -36,11 +36,9 @@
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
-		"@types/mime-types": "^3.0.1",
 		"chalk": "^5.5.0",
 		"get-east-asian-width": "^1.6.0",
-		"marked": "^18.0.7",
-		"mime-types": "^3.0.1"
+		"marked": "^18.0.7"
 	},
 	"optionalDependencies": {
 		"koffi": "^2.9.0"
