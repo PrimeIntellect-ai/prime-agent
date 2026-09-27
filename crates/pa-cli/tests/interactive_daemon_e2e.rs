@@ -57,12 +57,11 @@ fn kill_worker(pid: &u32) {
     // The worker pid is a child of the supervisor we just killed, so it is
     // not our child and cannot be waited on directly; poll /proc liveness.
     // Best effort by design: this runs inside `Drop` (a failing test's
-    // unwind path included), where an assert would ABORT the process and
-    // orphan every other parallel test's daemons — the exact leak the
-    // teardown exists to prevent. The contractual worker-leak detection
-    // lives in `assert_daemon_stops_clean` (a plain test body, where a
-    // panic is a proper failure); here a surviving worker is re-killed and
-    // reported to stderr instead.
+    // unwind path included), where an assert would abort the process and
+    // orphan every other parallel test's daemons. The contractual
+    // worker-leak detection lives in `assert_daemon_stops_clean` (a plain
+    // test body, where a panic is a proper failure); here a surviving
+    // worker is re-killed and reported to stderr instead.
     for round in 0..2 {
         unsafe {
             libc::kill(*pid as i32, libc::SIGKILL);
@@ -267,17 +266,13 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
     supervisor_pid
 }
 
-/// The headless run's hard wall (the wedge kill): the plan's barriers are
-/// each bounded, but the run loop itself was not — a turn that never settles
-/// holds the idle gate closed, the plan cannot advance past its barriers,
-/// and the binary parks until the CI job's 45-minute cancel (the registered
-/// `red-interactivedaemon-e2e-load-wedge-20260926-1` signature: the cancel's
-/// cleanup then finds the binary plus its live daemons, because no `Drop`
-/// ever ran). The bound converts that hang into a named, bounded red test;
-/// the expired future's drop cancels the run loop, and the supervisor
-/// guards still tear the daemons down (with `PR_SET_PDEATHSIG` as the
-/// process-death backstop). Generous against real load: the healthy unit
-/// settles in 16-63s wall and the longest plan's barriers sum to ~120s.
+/// The headless run's wall: the plan's barriers are each bounded, but the
+/// run loop has no global exit bound — a turn that never settles holds the
+/// idle gate closed and the run parks forever. The wall turns that into a
+/// failing test instead of a hung binary; dropping the expired future
+/// cancels the run loop, and the supervisor guards still tear the daemons
+/// down. Generous against real load: the suite settles in 16-63s wall and
+/// the longest plan's barriers sum to ~120s.
 const HEADLESS_RUN_BOUND: Duration = Duration::from_secs(300);
 
 async fn run_headless_bounded(
@@ -299,17 +294,14 @@ async fn run_headless_bounded(
     }
 }
 
-/// Kill test-daemon orphans from earlier runs (this binary's own daemons
-/// die with the process via `PR_SET_PDEATHSIG` — the sweep covers the
-/// pre-existing pile-up: a killed or wedged e2e run leaks its supervisors,
-/// and those daemons contend with every later run's startup under load).
-/// The orphan signature is exact: a live `prime-agent --mode daemon` whose
-/// `--daemon-socket` sits in a `tempfile`-style `.tmpXXXXXX` dir (the
-/// product's own daemons never use that prefix) AND whose parent is dead
-/// (ppid 1 after the killed run's reparent — a killed binary runs no
-/// `Drop`, so the tempdir survives too). A live run's daemon keeps its
-/// owning test binary as the parent; neither it nor the user's product
-/// daemons is ever swept.
+/// Kill supervisors leaked by earlier runs of this verifier: a binary
+/// that dies without unwinding (a kill, an abort) runs no `Drop`, so its
+/// daemons get reparented to init and keep contending for CPU and memory
+/// with every later run. A daemon matches when its `--daemon-socket` sits
+/// in a `tempfile`-created `.tmpXXXXXX` dir (this suite's spawn shape —
+/// the product's own daemons never use that prefix) and its parent is
+/// dead (ppid 1). A daemon of a still-running test keeps its test binary
+/// as the parent and never matches.
 fn sweep_orphan_test_daemons() {
     static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SWEEPED.set(()).is_err() {
@@ -442,14 +434,12 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     // creates deterministic under that load (the supervisor passes its
     // environment to the workers it spawns).
     command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
-    // Root-kill for the wedge's leak signature (three live daemons after a
-    // wedged/killed run): die with this test binary. When the harness or the
-    // CI job kills the binary mid-run, no `Drop` runs and the supervisor
-    // would otherwise be reparented to init and keep running — the kernel
-    // now SIGKILLs it the moment the spawning thread/process group dies.
-    // The guard's protocol teardown below remains the normal exit path
-    // (this is the backstop), and the per-test guards drop before the
-    // owning harness thread can exit, so the early-fire window is empty.
+    // Die with this test binary: a supervisor that outlives the process
+    // (a kill or abort runs no `Drop`) gets reparented to init and keeps
+    // running, so the kernel SIGKILLs it the moment its parent dies. The
+    // guard's protocol teardown below stays the normal exit path; this is
+    // the backstop. The per-test guards drop before the owning harness
+    // thread can exit, so the early-fire window is empty.
     unsafe {
         command.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
