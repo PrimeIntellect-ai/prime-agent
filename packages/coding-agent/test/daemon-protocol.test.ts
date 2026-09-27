@@ -33,6 +33,7 @@ describe("daemon protocol helpers", () => {
 		["abort_and_send_queued", { minProtocol: 7, minSchemaRevision: 29, capability: "abort_and_send_queued" }, true],
 		["get_rlm_max_depth_status", { minProtocol: 7, minSchemaRevision: 11 }, undefined],
 		["set_rlm_max_depth", { minProtocol: 7, minSchemaRevision: 11 }, undefined],
+		["set_cwd", { minProtocol: 7, minSchemaRevision: 31 }, undefined],
 		[
 			"acquire_session_input_pause",
 			{ minProtocol: 7, minSchemaRevision: 19, capability: "session_input_pause" },
@@ -75,6 +76,11 @@ describe("daemon protocol helpers", () => {
 			"create carrying a telemetry policy",
 			{ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } },
 			[{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }],
+		],
+		[
+			"create carrying a cwd override",
+			{ type: "create", sessionPath: "/tmp/s.jsonl", config: { cwd: "/tmp" }, cwdOverride: "/tmp/other" },
+			[{ minProtocol: 7, minSchemaRevision: 31 }, { minProtocol: 7 }],
 		],
 		[
 			"attach carrying a telemetry policy",

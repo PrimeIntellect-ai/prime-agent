@@ -593,6 +593,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		this.session.setSessionName(trimmedName);
 	}
 
+	async setCwd(path: string): Promise<string> {
+		return this.session.setCwd(path);
+	}
+
 	async getRlmMaxDepthStatus() {
 		return this.session.getRlmMaxDepthStatus();
 	}

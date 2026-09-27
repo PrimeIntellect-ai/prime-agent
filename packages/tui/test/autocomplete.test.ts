@@ -362,6 +362,25 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.strictEqual(applied.lines[0], '@"my folder/test.txt" ');
 		});
 
+		it("completes a pathArgument command's argument like @ but without the prefix", async () => {
+			setupFolder(baseDir, { dirs: ["src", "docs"] });
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "cwd", takesArgument: true, pathArgument: true }],
+				baseDir,
+				requireFdPath(),
+			);
+			const result = await getSuggestions(provider, ["/cwd src"], 0, 8);
+			const values = result?.items.map((item) => item.value) ?? [];
+
+			assert.strictEqual(values[0], "src/");
+			assert.ok(
+				values.every((value) => !value.startsWith("@")),
+				`Unexpected @ in ${JSON.stringify(values)}`,
+			);
+			assert.strictEqual(result?.prefix, "src");
+			assert.strictEqual(result?.kind, "file");
+		});
+
 		it("returns the same @ suggestions when the cwd path contains the query", async () => {
 			const normalBaseDir = join(rootDir, "cwd-normal");
 			const queryInPathBaseDir = join(rootDir, "cwd-plan-repro");

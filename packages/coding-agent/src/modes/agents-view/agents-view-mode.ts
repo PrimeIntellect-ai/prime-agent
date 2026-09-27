@@ -220,21 +220,6 @@ export async function resolveAgentsViewSessionUiServices(
 	return options.createUiServicesForSession ? await options.createUiServicesForSession(summary) : options.uiServices;
 }
 
-// Stripping cwd opens the session in its own stored directory; overrideCwd is
-// sent when that directory no longer exists so the daemon doesn't reject it.
-export function createAgentsViewResumeConfig(
-	config: AgentSessionRuntimeConfig,
-	overrideCwd?: string,
-): AgentSessionRuntimeConfig {
-	const resumeConfig: AgentSessionRuntimeConfig = { ...config };
-	if (overrideCwd) {
-		resumeConfig.cwd = overrideCwd;
-	} else {
-		delete resumeConfig.cwd;
-	}
-	return resumeConfig;
-}
-
 export function createAgentsViewListCommand(): Extract<DaemonCommand, { type: "list" }> {
 	// Omitting `all` returns daemon-resident sessions only; on-disk ones come back
 	// through the view's saved-session catalog.
@@ -570,8 +555,9 @@ async function resumeSavedAgentsViewSession(
 	const { overrideCwd, notice } = resolveAgentsViewOpenCwd(summary, config.cwd);
 	const response = await client.request({
 		type: "create",
-		config: createAgentsViewResumeConfig(config, overrideCwd),
+		config,
 		sessionPath: summary.sessionFile,
+		...(overrideCwd ? { cwdOverride: overrideCwd } : {}),
 	});
 	const createdSummary = expectSessionSummary(requireDaemonData(response));
 	return {

@@ -565,6 +565,7 @@ editor.setAutocompleteProvider(provider);
 - Press `Tab` for file path completion
 - Works with `~/`, `./`, `../`, and `@` prefix
 - Filters to attachable files for `@` prefix
+- Slash commands can declare `pathArgument: true` to complete their argument with the same fuzzy file search as `@` references
 
 ## Key Detection
 

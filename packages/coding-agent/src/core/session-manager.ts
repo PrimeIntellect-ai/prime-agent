@@ -30,6 +30,7 @@ import {
 	createCustomMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 } from "./messages.js";
+import { isExistingDirectory } from "./session-cwd.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -40,6 +41,7 @@ import {
 } from "./usage.js";
 
 export const CURRENT_SESSION_VERSION = 3;
+const SESSION_CWD_STATE_CUSTOM_TYPE = "session_cwd_state";
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
 const SESSION_LIST_PARSE_MAX_LINE_CHARS = 1024 * 1024;
 const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
@@ -1743,6 +1745,7 @@ export class SessionManager {
 	private sessionFile: string | undefined;
 	private sessionDir: string;
 	private cwd: string;
+	readonly hasCwdOverride: boolean;
 	private persist: boolean;
 	private flushed: boolean = false;
 	// Flip-once cache for the no-assistant guard in _persist: true from the first
@@ -1768,8 +1771,10 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		preloadedEntries?: FileEntry[],
+		hasCwdOverride = false,
 	) {
 		this.cwd = cwd;
+		this.hasCwdOverride = hasCwdOverride;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
 		if (persist && sessionDir && !existsSync(sessionDir)) {
@@ -1912,6 +1917,7 @@ export class SessionManager {
 				}
 			}
 		}
+		this.resolveCwd();
 	}
 
 	private _rewriteFile(): void {
@@ -1956,6 +1962,12 @@ export class SessionManager {
 
 	getCwd(): string {
 		return this.cwd;
+	}
+
+	/** Records a /cwd on the active branch and moves the session there; `resolveCwd` states the rule. */
+	recordCwd(cwd: string): void {
+		this.appendCustomEntryWithRollback(SESSION_CWD_STATE_CUSTOM_TYPE, { cwd });
+		this.cwd = cwd;
 	}
 
 	getSessionDir(): string {
@@ -2445,7 +2457,7 @@ export class SessionManager {
 		// Leaf-path reads are the per-turn hot path (compaction checks, context
 		// usage); a read for another entry walks the chain instead.
 		const isLeafPath = fromId === undefined || fromId === this.leafId;
-		if (isLeafPath && this.leafBranchCache?.leafId === this.leafId) {
+		if (isLeafPath && this.leafBranchCache !== null && this.leafBranchCache.leafId === this.leafId) {
 			return this.leafBranchCache.entries;
 		}
 		// push+reverse, not unshift-per-entry: unshift is O(n), which makes this O(n^2) on long sessions.
@@ -2461,6 +2473,27 @@ export class SessionManager {
 			this.leafBranchCache = { leafId: this.leafId, entries: path };
 		}
 		return path;
+	}
+
+	/**
+	 * An explicit cwd override pins the cwd for the entire run (a later /cwd re-pins it) and persisted /cwd entries never
+	 * apply in an override run; otherwise the newest still-existing session_cwd_state entry on the active branch wins, else
+	 * the header cwd when it still exists, else the cwd stays; /tree recomputes through this same path as open()/create().
+	 */
+	private resolveCwd(): void {
+		if (this.hasCwdOverride) return;
+		const branch = this.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "custom" || entry.customType !== SESSION_CWD_STATE_CUSTOM_TYPE) continue;
+			const cwd = (entry.data as { cwd?: unknown } | undefined)?.cwd;
+			if (typeof cwd === "string" && isExistingDirectory(cwd)) {
+				this.cwd = cwd;
+				return;
+			}
+		}
+		const headerCwd = this.getHeader()!.cwd;
+		if (isExistingDirectory(headerCwd)) this.cwd = headerCwd;
 	}
 
 	buildSessionContext(): SessionContext {
@@ -2531,11 +2564,13 @@ export class SessionManager {
 		}
 		this.leafId = branchFromId;
 		this.leafBranchCache = null;
+		this.resolveCwd();
 	}
 
 	resetLeaf(): void {
 		this.leafId = null;
 		this.leafBranchCache = null;
+		this.resolveCwd();
 	}
 
 	branchWithSummary(
@@ -2562,6 +2597,7 @@ export class SessionManager {
 			usage,
 		};
 		this._appendEntry(entry);
+		this.resolveCwd();
 		return entry.id;
 	}
 
@@ -2689,7 +2725,7 @@ export class SessionManager {
 			cwd = header?.cwd;
 		}
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, undefined, cwdOverride !== undefined);
 	}
 
 	static async openAsync(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
@@ -2703,7 +2739,7 @@ export class SessionManager {
 		}
 		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries, cwdOverride !== undefined);
 	}
 
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
@@ -2715,8 +2751,8 @@ export class SessionManager {
 		return new SessionManager(cwd, dir, undefined, true);
 	}
 
-	static inMemory(cwd: string = process.cwd(), sessionDir = ""): SessionManager {
-		return new SessionManager(cwd, sessionDir, undefined, false);
+	static inMemory(cwd: string = process.cwd(), sessionDir = "", hasCwdOverride = false): SessionManager {
+		return new SessionManager(cwd, sessionDir, undefined, false, undefined, hasCwdOverride);
 	}
 
 	static forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string): SessionManager {
@@ -2760,11 +2796,14 @@ export class SessionManager {
 		try {
 			writeAllSync(descriptor, `${JSON.stringify(newHeader)}\n`, newSessionFile);
 
-			// Drop the source's git_state entries (re-linking children): they describe the source repo,
-			// so the fork would otherwise report the source's git instead of its own target context.
+			// Drop the source's git_state and session_cwd_state entries (re-linking children): they describe the source repo
+			// and the source's /cwd moves, so the fork would otherwise report the source's git or start in the source's directory.
+			const isSourceScoped = (entry: FileEntry): entry is GitStateEntry | CustomEntry =>
+				entry.type === "git_state" ||
+				(entry.type === "custom" && entry.customType === SESSION_CWD_STATE_CUSTOM_TYPE);
 			const droppedParent = new Map<string, string | null>();
 			for (const entry of sourceEntries) {
-				if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
+				if (isSourceScoped(entry)) droppedParent.set(entry.id, entry.parentId);
 			}
 			const liveParent = (parentId: string | null): string | null => {
 				let pid = parentId;
@@ -2772,7 +2811,7 @@ export class SessionManager {
 				return pid;
 			};
 			for (const entry of sourceEntries) {
-				if (entry.type === "session" || entry.type === "git_state") continue;
+				if (entry.type === "session" || isSourceScoped(entry)) continue;
 				const parentId = liveParent(entry.parentId);
 				const out = parentId === entry.parentId ? entry : { ...entry, parentId };
 				writeAllSync(descriptor, `${JSON.stringify(out)}\n`, newSessionFile);

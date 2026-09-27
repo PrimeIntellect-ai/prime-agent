@@ -444,6 +444,7 @@ function readSessionManager(path: string, sessionDir?: string, cwdOverride?: str
 	const manager = SessionManager.inMemory(
 		cwdOverride ?? header?.cwd ?? process.cwd(),
 		sessionDir ?? dirname(resolve(path)),
+		cwdOverride !== undefined,
 	);
 	manager.setSessionFile(path, entries);
 	return manager;
@@ -508,7 +509,7 @@ export async function createSessionManager(
 		if (readOnly) {
 			const dir = sessionDir ?? getDefaultSessionDir(cwd);
 			const path = findMostRecentSessionForCwd(dir, cwd);
-			return path ? readSessionManager(path, dir, cwd) : SessionManager.inMemory(cwd, dir);
+			return path ? readSessionManager(path, dir) : SessionManager.inMemory(cwd, dir);
 		}
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
@@ -1045,6 +1046,7 @@ async function createDaemonClientConnection(options: {
 	socketPath: string;
 	config: AgentSessionRuntimeConfig;
 	sessionPath?: string;
+	cwdOverride?: string;
 	continueRecent?: boolean;
 	activeSessionId?: string;
 	clientOwned?: boolean;
@@ -1097,6 +1099,7 @@ async function createDaemonClientConnection(options: {
 			type: "create",
 			config: options.config,
 			sessionPath: options.sessionPath,
+			cwdOverride: options.cwdOverride,
 			continueRecent: options.continueRecent,
 			noSession: options.noSession,
 			env: collectDaemonClientEnv(),
@@ -1500,11 +1503,11 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		daemonReady = (await awaitDaemonReady(daemonReady)).ready;
+		const sessionPath = getInteractiveDaemonSessionPath(parsed, sessionManager);
 		// A fresh default chat opens a real but message-less session; the lifecycle
 		// axis treats it as a draft (hidden, discarded on detach if never used), so
 		// no DeferredAgentConnection is needed to avoid creating it up front.
-		const isFreshDefaultSession =
-			!activeDaemonSessionSummary && !getInteractiveDaemonSessionPath(parsed, sessionManager);
+		const isFreshDefaultSession = !activeDaemonSessionSummary && !sessionPath;
 		let connection: DaemonAgentConnection;
 		let summary: SessionSummary;
 		try {
@@ -1514,7 +1517,8 @@ export async function main(args: string[], options?: MainOptions) {
 				activeSessionId: activeDaemonSessionSummary
 					? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
 					: undefined,
-				sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
+				sessionPath,
+				cwdOverride: sessionPath && sessionManager.hasCwdOverride ? sessionManager.getCwd() : undefined,
 				clientOwned: parsed.noSession,
 				noSession: parsed.noSession,
 				supportsExtensionUi: true,
@@ -1601,6 +1605,10 @@ export async function main(args: string[], options?: MainOptions) {
 				socketPath: daemonSocketPath,
 				config: defaultSessionConfig,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
+				cwdOverride:
+					!parsed.noSession && sessionManager.getSessionFile() && sessionManager.hasCwdOverride
+						? sessionManager.getCwd()
+						: undefined,
 				continueRecent: parsed.continue,
 				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
 				noSession: parsed.noSession,

@@ -24,6 +24,8 @@ import {
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 	type RlmChildFailureDetails,
 	type RlmChildTerminalNoticeDetails,
+	SESSION_CWD_CHANGED_CUSTOM_TYPE,
+	type SessionCwdChangedDetails,
 } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
@@ -36,7 +38,8 @@ type InjectedPromptDetails =
 	| IpythonStateRestoredDetails
 	| PythonSkillsUnavailableDetails
 	| RlmChildFailureDetails
-	| RlmChildTerminalNoticeDetails;
+	| RlmChildTerminalNoticeDetails
+	| SessionCwdChangedDetails;
 type InjectedPromptMessage = CustomMessage<InjectedPromptDetails>;
 
 export function isInjectedPromptMessage(message: AgentMessage): message is InjectedPromptMessage {
@@ -48,7 +51,8 @@ export function isInjectedPromptMessage(message: AgentMessage): message is Injec
 			message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE ||
 			message.customType === PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE ||
 			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
-			message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE)
+			message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE ||
+			message.customType === SESSION_CWD_CHANGED_CUSTOM_TYPE)
 	);
 }
 
@@ -153,6 +157,12 @@ export class InjectedPromptMessageComponent extends Container {
 				: "";
 			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
 			return theme.fg("muted", "Python skills unavailable") + theme.fg("dim", skills + hint);
+		}
+		if (this.message.customType === SESSION_CWD_CHANGED_CUSTOM_TYPE) {
+			const details = this.message.details as SessionCwdChangedDetails | undefined;
+			const cwd = details?.cwd ? ` · ${details.cwd}` : "";
+			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
+			return `${theme.fg("accent", "◆")} ${theme.fg("muted", "Working directory changed")}${theme.fg("dim", cwd + hint)}`;
 		}
 		if (
 			this.message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||

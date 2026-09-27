@@ -1,0 +1,1 @@
+- Slash commands can declare `pathArgument: true` to complete their argument with the same fuzzy file search as `@` references.
