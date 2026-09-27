@@ -50,6 +50,15 @@ pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) use tests::FAUX_TEST_LOCK;
 
+// The artifact-reference free fns (the sha256 artifact-id mint, the
+// cwd-relative logical-path resolution, and the epoch-millis clock) moved to
+// the child module; the facade re-export keeps the in-file trait-impl
+// callers' bare-name resolution (no crate paths outside the facade -
+// caller scan: resource_snapshot x3, run_prompt-region x2).
+mod artifacts;
+
+pub(crate) use artifacts::{artifact_reference, now_millis};
+
 /// Configuration for the real engine.
 #[derive(Clone)]
 pub struct AgentEngineConfig {
@@ -739,7 +748,7 @@ impl AgentSessionEngine {
             Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
                 turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
                 agent: std::sync::Arc::clone(built.session.agent()),
-                compaction: *built.session.compaction_settings(),
+                compaction: built.session.compaction_settings(),
             });
         // The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
         // reads the provisioner's kernel manager): the same deadlock-free
@@ -1438,6 +1447,28 @@ impl AgentSessionEngine {
             .api_key
     }
 
+    /// The request-time api key AND its resolved provider headers (the
+    /// selection's own headers lead; the registry resolves the model's
+    /// configured ones otherwise): the provider target carries both, so
+    /// models needing custom or auth headers send them on every
+    /// request — the same resolution `set_model`'s swap applies.
+    pub(crate) fn resolve_request_key_and_headers(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+    ) {
+        if let Some(api_key) = &self.current_selection().api_key {
+            return (Some(api_key.clone()), model.headers.clone());
+        }
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        (resolved.api_key, resolved.headers)
+    }
+
     /// Kernel host-request handlers for agent messaging and observation,
     /// routed through the worker's supervisor link. `None` outside a daemon
     /// worker: without a supervisor there is nobody to reach.
@@ -1517,10 +1548,12 @@ impl AgentSessionEngine {
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
             let mut target = self.provider_target.write().expect("provider target lock");
+            let (api_key, headers) = self.resolve_request_key_and_headers(model);
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(model),
+                api_key,
                 model: model.clone(),
+                headers,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {
@@ -1747,81 +1780,6 @@ pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessi
         model: context.model,
         thinking,
     })
-}
-
-/// One artifact reference (TS `createArtifactReference` in
-/// modes/agent-connection/snapshot.ts): the sha256-derived id, the owning
-/// session, the artifact type, and the logical path (cwd-relative when the
-/// file lives under the cwd, else the basename).
-fn artifact_reference(
-    session_id: &str,
-    cwd: &str,
-    artifact_type: &str,
-    file_path: &str,
-) -> Option<Value> {
-    use sha2::{Digest, Sha256};
-    if file_path.is_empty() {
-        return None;
-    }
-    let digest = Sha256::new()
-        .chain_update(format!("{session_id}\0{artifact_type}\0{file_path}"))
-        .finalize();
-    let id = format!("artifact_{}", hex_prefix(&digest, 16));
-    let mut reference = json!({
-        "id": id,
-        "sessionId": session_id,
-        "type": artifact_type,
-        "logicalPath": logical_artifact_path(cwd, file_path),
-    });
-    let logical = reference["logicalPath"].as_str().unwrap_or_default();
-    let resolved_cwd = std::path::Path::new(cwd);
-    let resolved_path = std::path::Path::new(file_path);
-    if let (Ok(relative), true) = (
-        resolved_path.strip_prefix(resolved_cwd),
-        logical.chars().next().is_some_and(|c| c != '.' && c != '/'),
-    ) {
-        reference["relativePath"] = json!(relative.to_string_lossy().replace('\\', "/"));
-    }
-    Some(reference)
-}
-
-/// The first `len` hex characters of a digest.
-fn hex_prefix(digest: &[u8], len: usize) -> String {
-    digest
-        .iter()
-        .flat_map(|byte| [format!("{:02x}", byte >> 4), format!("{:02x}", byte & 0x0f)])
-        .collect::<String>()
-        .chars()
-        .take(len)
-        .collect()
-}
-
-/// TS `createArtifactPathInfo`: synthetic paths (`<...>`) stay as-is; a
-/// path under the cwd keeps its cwd-relative form; anything else degrades
-/// to the basename.
-fn logical_artifact_path(cwd: &str, file_path: &str) -> String {
-    if file_path.starts_with('<') && file_path.ends_with('>') {
-        return file_path.to_string();
-    }
-    let resolved_cwd = std::path::Path::new(cwd);
-    let resolved_path = std::path::Path::new(file_path);
-    if let Ok(relative) = resolved_path.strip_prefix(resolved_cwd) {
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        if !relative.is_empty() && !relative.starts_with("..") && !relative.starts_with('/') {
-            return relative;
-        }
-    }
-    std::path::Path::new(file_path).file_name().map_or_else(
-        || "artifact".to_string(),
-        |name| name.to_string_lossy().to_string(),
-    )
-}
-
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
 }
 
 impl AgentSessionEngine {
@@ -2296,6 +2254,7 @@ impl SessionEngine for AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key: self.resolve_request_api_key(&model),
                 model: model.clone(),
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -3613,9 +3572,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -3646,9 +3606,10 @@ impl AgentSessionEngine {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
+                                headers: None,
                             });
                         }
                         agent.set_model(agent_model).await;

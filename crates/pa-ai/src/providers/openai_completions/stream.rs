@@ -27,7 +27,9 @@ use crate::types::{
     StopReason, TextContent, ThinkingContent, ToolCall, Usage,
 };
 use crate::utils_inner::http::{send, HttpResponse, RequestOptions};
-use crate::utils_inner::json_parse::{parse_json_with_repair, parse_streaming_json};
+use crate::utils_inner::json_parse::{
+    parse_json_with_repair, parse_streaming_json, StreamingJsonAccumulator,
+};
 use crate::utils_inner::sse::{ServerSentEvent, SseDecoder};
 use crate::utils_inner::stream_failure::{record_stream_failure, ProviderError};
 
@@ -37,7 +39,7 @@ struct StreamingState {
     thinking_block: Option<usize>,
     tool_call_blocks_by_index: HashMap<u64, usize>,
     tool_call_blocks_by_id: HashMap<String, usize>,
-    tool_call_partial_args: HashMap<usize, String>,
+    tool_call_partial_args: HashMap<usize, StreamingJsonAccumulator>,
     reasoning_details_by_index: Vec<(u64, Value)>,
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
@@ -169,9 +171,10 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
             }
             AssistantContent::ToolCall(_) => {
                 let partial_args = state.tool_call_partial_args.remove(&index);
-                let arguments = partial_args
-                    .as_deref()
-                    .map_or_else(|| json!({}), |partial| parse_streaming_json(Some(partial)));
+                let arguments = partial_args.as_ref().map_or_else(
+                    || json!({}),
+                    |accumulator| parse_streaming_json(Some(accumulator.text())),
+                );
                 let arguments = arguments.as_object().cloned().unwrap_or_default();
                 if let AssistantContent::ToolCall(tool_call) = &mut state.output.content[index] {
                     tool_call.arguments = arguments;
@@ -321,14 +324,17 @@ fn handle_chunk(
                 .and_then(|value| value.as_str())
             {
                 delta_text = arguments.to_string();
-                let entry = state.tool_call_partial_args.entry(index).or_default();
-                entry.push_str(arguments);
-                if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index)
-                {
-                    block.arguments = parse_streaming_json(Some(entry))
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
+                let parsed = state
+                    .tool_call_partial_args
+                    .entry(index)
+                    .or_default()
+                    .append(arguments);
+                if let Some(parsed) = parsed {
+                    if let Some(AssistantContent::ToolCall(block)) =
+                        state.output.content.get_mut(index)
+                    {
+                        block.arguments = parsed.as_object().cloned().unwrap_or_default();
+                    }
                 }
             }
             writer.push(AssistantMessageEvent::ToolcallDelta {
@@ -398,34 +404,52 @@ fn handle_chunk(
                 }
             }
         }
-        if !state.reasoning_details_by_index.is_empty() {
-            if state.reasoning_details_block.is_none() {
-                state
-                    .output
-                    .content
-                    .push(AssistantContent::Thinking(ThinkingContent {
-                        thinking: String::new(),
-                        thinking_signature: None,
-                        redacted: Some(true),
-                        rest: Map::default(),
-                    }));
-                let index = state.output.content.len() - 1;
-                state.reasoning_details_block = Some(index);
-                writer.push(AssistantMessageEvent::ThinkingStart {
-                    content_index: index as u64,
-                    partial: state.output.clone(),
-                });
-            }
-            let mut sorted = state.reasoning_details_by_index.clone();
-            sorted.sort_by_key(|(index, _)| *index);
-            let details: Vec<Value> = sorted.into_iter().map(|(_, detail)| detail).collect();
-            if let Some(index) = state.reasoning_details_block {
-                if let Some(AssistantContent::Thinking(thinking)) =
-                    state.output.content.get_mut(index)
-                {
-                    thinking.thinking_signature = Some(encode_reasoning_details(&details));
-                }
-            }
+        // The signature is encoded once at stream end (and on the error path)
+        // by `encode_reasoning_details_signature`, not per delta (TS PR #2783).
+        if !state.reasoning_details_by_index.is_empty() && state.reasoning_details_block.is_none() {
+            state
+                .output
+                .content
+                .push(AssistantContent::Thinking(ThinkingContent {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    redacted: Some(true),
+                    rest: Map::default(),
+                }));
+            let index = state.output.content.len() - 1;
+            state.reasoning_details_block = Some(index);
+            writer.push(AssistantMessageEvent::ThinkingStart {
+                content_index: index as u64,
+                partial: state.output.clone(),
+            });
+        }
+    }
+}
+
+/// Port of the TS `encodeReasoningDetailsSignature`: encode the merged
+/// reasoning-details signature once at stream end and on the error path,
+/// instead of on every `reasoning_details` delta.
+fn encode_reasoning_details_signature(state: &mut StreamingState) {
+    let Some(block_index) = state.reasoning_details_block else {
+        return;
+    };
+    let mut sorted = state.reasoning_details_by_index.clone();
+    sorted.sort_by_key(|(index, _)| *index);
+    let details: Vec<Value> = sorted.into_iter().map(|(_, detail)| detail).collect();
+    if let Some(AssistantContent::Thinking(thinking)) = state.output.content.get_mut(block_index) {
+        thinking.thinking_signature = Some(encode_reasoning_details(&details));
+    }
+}
+
+/// Port of the TS catch settle: finalize tool-call blocks whose parsed
+/// preview may lag the accumulated text under the growth throttle.
+fn settle_partial_tool_calls(state: &mut StreamingState) {
+    for (index, accumulator) in &mut state.tool_call_partial_args {
+        let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(*index) else {
+            continue;
+        };
+        if let Some(parsed) = accumulator.flush() {
+            block.arguments = parsed.as_object().cloned().unwrap_or_default();
         }
     }
 }
@@ -614,6 +638,11 @@ async fn run_stream(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(error) => {
+                // TS catch: encode the reasoning-details signature, then
+                // settle the partial tool calls before the error event
+                // carries the message (TS PR #2783).
+                encode_reasoning_details_signature(&mut state);
+                settle_partial_tool_calls(&mut state);
                 *output = state.output;
                 return Err(error);
             }
@@ -640,6 +669,7 @@ async fn run_stream(
         );
     }
 
+    encode_reasoning_details_signature(&mut state);
     finish_blocks(&mut state, writer);
     *output = state.output;
 
