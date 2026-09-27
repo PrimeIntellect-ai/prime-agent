@@ -28,7 +28,7 @@ fn row_pack_expands_byte_exact() {
         Vec::new(),
         vec![span("tail", false), span("tail", false)],
     ];
-    let pack = RowPack::pack(&rows);
+    let pack = RowPack::pack(&rows).expect("representable rows pack");
     assert_eq!(pack.len(), rows.len());
     // every range expands to the exact original spans: same boundaries,
     // same styles, same content bytes (empty spans included).
