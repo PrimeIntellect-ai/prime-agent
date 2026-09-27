@@ -103,6 +103,11 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // A routed image-model episode applies its override BEFORE the
+        // first provider call: the serving target swaps to the image
+        // model and the run carries the route's model override (the
+        // agent state itself never swaps - TS the override is per-run).
+        self.apply_armed_image_route(&agent);
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
         let candidates = self.failover_candidates(&model);
@@ -286,7 +291,7 @@ impl AgentSessionEngine {
                             if let Some(route) = self.armed_image_route() {
                                 let mut target =
                                     self.provider_target.write().expect("provider target lock");
-                                *target = Some(route.target.clone());
+                                *target = Some(route.target);
                             } else {
                                 let (api_key, headers) =
                                     self.resolve_request_key_and_headers(&next);
@@ -339,7 +344,7 @@ impl AgentSessionEngine {
                             // episode runs: the episode keeps serving the
                             // routed model across the failover restore.
                             if let Some(route) = self.armed_image_route() {
-                                *target = Some(route.target.clone());
+                                *target = Some(route.target);
                             } else {
                                 *target = Some(ProviderTarget {
                                     service_tier: *self
