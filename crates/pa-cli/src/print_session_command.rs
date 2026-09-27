@@ -340,6 +340,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());

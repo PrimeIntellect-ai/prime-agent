@@ -1238,18 +1238,33 @@ impl Supervisor {
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        let written = match outbound {
-                            Outbound::Line(value) => write_line(&mut writer, &value).await,
-                            Outbound::Raw(line) => write_raw_line(&mut writer, &line).await,
+                        let written = match &outbound {
+                            Outbound::Line(value) => write_line(&mut writer, value).await,
+                            Outbound::Raw(line) => write_raw_line(&mut writer, line).await,
                         };
-                        if let Err(error) = written {
-                            // A failed response write must not strand the
-                            // shutdown: the stop pass still has to run.
-                            if stop {
-                                self.ensure_shutdown_started().await;
+                        let bytes = match written {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                // A failed response write must not strand the
+                                // shutdown: the stop pass still has to run.
+                                if stop {
+                                    self.ensure_shutdown_started().await;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
-                        }
+                        };
+                        // A large outbound response (a catalog scan's
+                        // rows, a routed snapshot before the byte relay,
+                        // any locally-built summary of a grown session)
+                        // carried big transients - the Value tree of a
+                        // Line, the shared payload bytes of a Raw - and
+                        // the frame is out, so return the freed heap to
+                        // the OS instead of letting the arenas hold the
+                        // phase's peak for the daemon's lifetime (the
+                        // #2872 phase-boundary guard, mirrored on the
+                        // supervisor's write path).
+                        drop(outbound);
+                        pa_types::memory_release::trim_freed_heap_if_large(bytes);
                     }
                     if stop {
                         // The initiating client's response and daemon_closing
@@ -2663,6 +2678,13 @@ impl Supervisor {
                 ))];
             }
         };
+        // The scan's per-line parse trees folded and freed inside the
+        // blocking task; return their arena high-water to the OS at the
+        // phase boundary instead of letting every grown catalog's scan
+        // peak stay resident for the daemon's lifetime (the #2872
+        // phase-boundary pattern). The per-file cached scan states are
+        // live cache and stay untouched.
+        pa_types::memory_release::trim_freed_heap();
         // The current-cwd scope keeps only the session's own rows in the
         // terminal array (the stream above already skipped the others'
         // frames): the response is the authoritative catalog.
@@ -3523,20 +3545,23 @@ pub(crate) enum Outbound {
     Raw(Vec<u8>),
 }
 
-async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
+async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
+    let bytes = line.len();
     writer.write_all(line.as_bytes()).await?;
     writer.flush().await?;
-    Ok(())
+    Ok(bytes)
 }
 
 /// Write one pre-serialized client line (the byte relay's raw form already
-/// carries its trailing newline).
-async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -> Result<()> {
+/// carries its trailing newline). Reports the written byte count like
+/// [`write_line`].
+async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -> Result<usize> {
+    let bytes = line.len();
     writer.write_all(line).await?;
     writer.flush().await?;
-    Ok(())
+    Ok(bytes)
 }
 
 /// The worker-side command name plus payload for a routed client command.
