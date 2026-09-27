@@ -366,6 +366,13 @@ async fn set_session_name(state: &Arc<RpcState>, payload: &Value) -> Result<Resp
     if name.is_empty() {
         return Err("Session name cannot be empty".to_string());
     }
+    // Serialize the rename with any whole-session replacement (the
+    // replacement lease, held across the durable write AND the event
+    // publication): a switch_session or new_session that moves the
+    // connection between them would publish the retired session's name
+    // as the live session's `session_info_changed` — TS's single thread
+    // runs the write and the emit with no interleave.
+    let _lease = state.session.replacement_lease().await;
     {
         let handle = state.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();

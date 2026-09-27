@@ -235,6 +235,12 @@ impl RpcSession {
         self.signal_shutdown.cancel();
     }
 
+    /// Whether the signal exit has begun: replacements refuse and queued
+    /// input delivery stays parked (the exit's dispose owns the settle).
+    pub fn shutdown_fired(&self) -> bool {
+        self.signal_shutdown.is_cancelled()
+    }
+
     /// Whole-session replacement with the lease already held by the
     /// caller (`replacement_lease` / `replace` acquire it).
     ///
@@ -396,16 +402,20 @@ impl RpcSession {
 
     /// The stdin-close settle (TS `onInputEnd` -> `waitForIdle` ->
     /// `shutdown`): retires the queued-input pumps, waits the running
-    /// turn out, then disposes the kernel.
+    /// turn out, then unsubscribes and disposes the kernel.
     pub async fn dispose(&self) {
         // Retire the detached pumps first: none may deliver queued input
         // onto the session this settle is about to dispose.
         self.pump_epoch.fetch_add(1, Ordering::SeqCst);
         let engine = self.handle.read().await.engine.clone();
+        // The settle precedes the unsubscribe (TS `waitForIdle` before
+        // `shutdown`): the running turn's trailing frames and terminal
+        // `agent_end` still stream while it settles — the subscription
+        // retires only ahead of the kernel disposal.
+        engine.session.agent().wait_for_idle().await;
         if let Some(subscription) = self.subscription.lock().await.take() {
             subscription.unsubscribe().await;
         }
-        engine.session.agent().wait_for_idle().await;
         engine.dispose_kernel().await;
     }
 }

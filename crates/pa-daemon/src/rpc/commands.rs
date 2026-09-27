@@ -115,8 +115,15 @@ pub fn resume_pump(state: &Arc<RpcState>) {
 /// whole-session replacement: the pre-settle pump-epoch bump retired the
 /// old pump, and the still-serving session's parked steer/follow-up rows
 /// must keep delivering (a failed assembly never owned them — the
-/// success paths resume delivery the same way).
+/// success paths resume delivery the same way). A signal exit never
+/// rearms delivery: the parked rows stay parked for the exit's dispose
+/// (TS never resumes admission on a signal — the process exits), so a
+/// rearmed pump cannot race the exit's retire/abort and admit one last
+/// turn the exit's settle would then have to wait out.
 pub async fn restart_queue_pump(state: &Arc<RpcState>) {
+    if state.session.shutdown_fired() {
+        return;
+    }
     resume_pump(state);
     let engine = state.session.handle().await.engine.clone();
     kick_queue_pump(state, &engine);

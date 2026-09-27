@@ -186,12 +186,15 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // swap under the abort/dispose.
             let _replacement = terminate_session.replacement_lease().await;
             let engine = terminate_session.handle().await.engine.clone();
-            engine.session.agent().abort();
-            // Retire the queued-input pumps the instant the abort fires
-            // (the dispose bumps again — idempotent): a pump that wakes
-            // as the aborted turn settles must not deliver the next
-            // queued row while the exit drains.
+            // Retire the queued-input pumps BEFORE the abort (the dispose
+            // bumps again — idempotent): the bump closes the admission
+            // window — every delivery that starts after it self-retires
+            // at the pump's per-batch generation check, and the delivery
+            // already running is the turn the abort settles — so no
+            // queued row can start a turn the exit's wait_for_idle would
+            // then have to wait out.
             terminate_session.retire_pumps();
+            engine.session.agent().abort();
             terminate_session.dispose().await;
             terminate_writer.drain_bounded().await;
             exit_with(SIGTERM_EXIT);
@@ -210,11 +213,14 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             // dispose target the session that is live NOW.
             let _replacement = hangup_session.replacement_lease().await;
             let engine = hangup_session.handle().await.engine.clone();
-            engine.session.agent().abort();
-            // Retire the queued-input pumps the instant the abort fires
-            // (the dispose bumps again — idempotent): the exit settles
-            // the aborted turn without running the next queued one.
+            // Retire the queued-input pumps BEFORE the abort (the dispose
+            // bumps again — idempotent): the bump closes the admission
+            // window — every delivery that starts after it self-retires
+            // at the pump's per-batch generation check, and the delivery
+            // already running is the turn the abort settles — so the exit
+            // never waits out a turn a rearmed pump admitted.
             hangup_session.retire_pumps();
+            engine.session.agent().abort();
             hangup_session.dispose().await;
             hangup_writer.drain_bounded().await;
             exit_with(SIGHUP_EXIT);
