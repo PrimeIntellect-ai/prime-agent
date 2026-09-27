@@ -628,10 +628,7 @@ impl Supervisor {
                     session_id.as_deref(),
                     session_file.as_deref(),
                 );
-                let mut attached = attached.lock().unwrap();
-                if !attached.iter().any(|id| id == &active_id) {
-                    attached.push(active_id);
-                }
+                attached.attach(&self.session_subscribers, &active_id);
             }
             let line = spliced_client_line(&command_id, payload);
             if let Some(raw_out) = raw_out {
