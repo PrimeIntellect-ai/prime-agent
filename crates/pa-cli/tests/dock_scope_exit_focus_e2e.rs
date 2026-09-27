@@ -68,6 +68,9 @@ fn graceful_shutdown(socket: &Path) {
     let _ = reader.read_line(&mut response);
 }
 
+// The Supervisor holds the Child so its Drop owns the protocol shutdown,
+// the kill, and the wait (teardown runs even on panic); the lint wants the
+// reap inline instead.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
@@ -98,6 +101,9 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    // Readiness is the socket appearing (observable), not the wait: the
+    // sleep is only the poll interval between checks, and the deadline
+    // bounds failure — a missing socket panics, it never passes.
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if socket.exists() {
