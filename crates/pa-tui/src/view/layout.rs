@@ -32,13 +32,24 @@ pub(super) struct EntryLayout {
     pub(super) rows: std::sync::Arc<RowPack>,
 }
 
-/// One span's packed record: its content range in [`RowPack::blob`] plus
-/// its style.
+/// One packed row's start: its content offset in [`RowPack::blob`] and
+/// the index of its first span record.
+#[derive(Debug, Clone, Copy)]
+struct RowStart {
+    offset: u32,
+    first: u32,
+}
+
+/// One span's packed record: its content length plus the id of its
+/// style in [`RowPack::styles`]. The blob offset is not stored — the
+/// blob is contiguous, so a row's spans read as running lengths from
+/// the row's [`RowStart::offset`] (the tui-scroll-retain2 census: the
+/// offset field was structurally redundant, 4 of every 20 record
+/// bytes).
 #[derive(Debug, Clone, Copy)]
 struct PackedSpan {
-    offset: u32,
     len: u32,
-    style: ratatui::style::Style,
+    style: u32,
 }
 
 /// Packed row storage for one cached layout: the entry's rendered rows
@@ -51,21 +62,34 @@ struct PackedSpan {
 /// a 2600-key walk retained 713k spans holding 9.6MB of text — most of
 /// the retained heap was per-span `Vec`/`String` chunk overhead, not
 /// text). Packing stores the same rows — the same span boundaries, the
-/// same styles, the same content bytes — as one blob plus 20-byte
+/// same styles, the same content bytes — as one blob plus dense
 /// records, and [`RowPack::range`] rebuilds the exact `Vec<Line>` form
 /// for any row range, so every consumer (frame composition, selection
 /// walks, the exit-flush inline scrollback) sees byte-identical rows:
 /// the compaction is storage-only, invisible to every output path.
+/// The records stay minimal because every derived field is derived on
+/// read: a span's blob offset is the running length from its row's
+/// start, and its style is an id into the pack's small table of
+/// distinct styles (the styles come from the renderer's fixed palette —
+/// the tui-scroll-retain2 census measured at most 6 distinct styles per
+/// entry on the canonical fixtures — so the dedup scan stays trivial
+/// and the table stays tiny). Each record is 8 bytes (length + style
+/// id) against the expanded span's ~40-byte chunk cost and the earlier
+/// 20-byte records' redundant offset and inline style.
 /// Expansion allocates only the requested range, so a frame inside a
 /// huge entry (the transcript's pad row set) pays only its visible rows
 /// — the same clones the sliced form always cost per frame.
 #[derive(Debug, Clone)]
 pub(super) struct RowPack {
-    /// Row i's spans are `spans[first[i]..first[i + 1]]`; the final
-    /// element is the span count.
-    first: Vec<u32>,
+    /// Row i's spans are `spans[starts[i].first..starts[i + 1].first]`,
+    /// reading content from `starts[i].offset` as running lengths; the
+    /// final element is the sentinel end (blob length, span count).
+    starts: Vec<RowStart>,
     spans: Vec<PackedSpan>,
     blob: String,
+    /// The pack's distinct styles; a record's `style` id indexes this
+    /// table, and expansion copies the exact style back out.
+    styles: Vec<ratatui::style::Style>,
 }
 
 impl RowPack {
@@ -87,27 +111,49 @@ impl RowPack {
         if span_count > u32::MAX as usize || content_bytes > u32::MAX as usize {
             return None;
         }
-        let mut first = Vec::with_capacity(rows.len() + 1);
+        let mut starts = Vec::with_capacity(rows.len() + 1);
         let mut spans = Vec::with_capacity(span_count);
         let mut blob = String::with_capacity(content_bytes);
+        let mut styles: Vec<ratatui::style::Style> = Vec::new();
         for line in rows {
-            first.push(spans.len() as u32);
+            starts.push(RowStart {
+                offset: blob.len() as u32,
+                first: spans.len() as u32,
+            });
             for span in line {
+                // The style id dedups against the pack's few distinct
+                // styles (renderer palette-bounded; see the struct
+                // docs) — the scan cost is bounded by the palette, not
+                // the span count.
+                let style = match styles.iter().position(|style| *style == span.style) {
+                    Some(id) => id,
+                    None => {
+                        styles.push(span.style);
+                        styles.len() - 1
+                    }
+                } as u32;
                 spans.push(PackedSpan {
-                    offset: blob.len() as u32,
                     len: span.content.len() as u32,
-                    style: span.style,
+                    style,
                 });
                 blob.push_str(&span.content);
             }
         }
-        first.push(spans.len() as u32);
-        Some(Self { first, spans, blob })
+        starts.push(RowStart {
+            offset: blob.len() as u32,
+            first: spans.len() as u32,
+        });
+        Some(Self {
+            starts,
+            spans,
+            blob,
+            styles,
+        })
     }
 
     /// The number of packed rows.
     pub(super) fn len(&self) -> usize {
-        self.first.len().saturating_sub(1)
+        self.starts.len().saturating_sub(1)
     }
 
     /// Rebuild rows `[from, to)` in the expanded `Vec<Line>` form
@@ -118,16 +164,18 @@ impl RowPack {
         let to = to.min(rows);
         let mut expanded = Vec::with_capacity(to.saturating_sub(from));
         for row in from..to {
-            let start = self.first[row] as usize;
-            let end = self.first[row + 1] as usize;
-            let mut line = Vec::with_capacity(end - start);
-            for packed in &self.spans[start..end] {
-                let content = &self.blob
-                    [packed.offset as usize..packed.offset as usize + packed.len as usize];
+            let start = self.starts[row];
+            let end = self.starts[row + 1].first as usize;
+            let first = start.first as usize;
+            let mut offset = start.offset as usize;
+            let mut line = Vec::with_capacity(end - first);
+            for packed in &self.spans[first..end] {
+                let content = &self.blob[offset..offset + packed.len as usize];
                 line.push(crate::Span {
-                    style: packed.style,
+                    style: self.styles[packed.style as usize],
                     content: content.to_string(),
                 });
+                offset += packed.len as usize;
             }
             expanded.push(line);
         }
