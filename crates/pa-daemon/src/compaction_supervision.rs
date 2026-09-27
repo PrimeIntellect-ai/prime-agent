@@ -617,7 +617,7 @@ impl crate::supervisor::Supervisor {
             crate::supervisor::ClientRouting::AttachedSession {
                 active_session_id: terminal.active_session_id.clone(),
             },
-            frame,
+            std::sync::Arc::new(frame),
         ));
         self.log_line(&format!(
             "declared terminal aborted compaction for {} (reason {}, declared {declared})",
