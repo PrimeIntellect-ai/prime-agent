@@ -477,7 +477,10 @@ mod tests {
     #[test]
     fn forwards_service_tier_for_openai_and_openrouter_only() {
         use crate::types::ServiceTier;
-        for (provider, model_id) in [("openai", "gpt-5.5"), ("openrouter", "openai/gpt-5.5")] {
+        for (provider, model_id) in [
+            ("openai", "gpt-4"),
+            ("openrouter", "~anthropic/claude-fable-latest"),
+        ] {
             let params = tiered_params(provider, model_id, Some(ServiceTier::Priority));
             assert_eq!(
                 params.get("service_tier"),
@@ -492,7 +495,7 @@ mod tests {
         }
         let gateway = tiered_params(
             "prime-inference",
-            "z-ai/glm-5.3",
+            "anthropic/claude-fable-5",
             Some(ServiceTier::Priority),
         );
         assert!(

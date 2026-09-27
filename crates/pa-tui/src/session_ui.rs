@@ -1543,6 +1543,16 @@ impl SessionUi {
             view.working = None;
         }
         view.follow();
+        // The brand splash is the EMPTY chat's header (TS mounts
+        // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
+        // non-empty transcript suppresses it — the chat opened or
+        // switched directly into content, where TS's own direct opens
+        // attach before mount and the tail-anchored viewport scrolls the
+        // splash out of reach — while every rebuild into an empty chat
+        // keeps it (a new session shows its header; the incremental
+        // first-turn growth never passes through here, so a new chat's
+        // splash scrolls away exactly like TS).
+        view.splash_suppressed = !view.chat.is_empty();
         self.dirty = true;
     }
 
