@@ -3,6 +3,26 @@
 
 use super::*;
 
+/// The cell source attached to a host request is capped at this many
+/// characters (TS #2475: `MAX_CELL_SOURCE_CHARS`, repl-manager.ts:81-82):
+/// the spawning cell's source rides on every host request it triggers, and
+/// an uncapped multi-KB cell re-shipped per progress note (and persisted
+/// per child as spawn code) dwarfs the request it tags.
+const MAX_CELL_SOURCE_CHARS: usize = 2 * 1024;
+
+/// Cap a cell source for host-request attachment: a source within the cap
+/// passes verbatim; a longer one keeps the first `MAX_CELL_SOURCE_CHARS`
+/// characters and carries the truncation marker so the consumer knows the
+/// prefix is partial (TS repl-manager.ts:110-111's cap helper).
+fn cap_cell_source(code: &str) -> String {
+    if code.chars().count() <= MAX_CELL_SOURCE_CHARS {
+        code.to_string()
+    } else {
+        let head: String = code.chars().take(MAX_CELL_SOURCE_CHARS).collect();
+        format!("{head}\n[... cell source truncated at {MAX_CELL_SOURCE_CHARS} chars ...]")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Host requests
 // ---------------------------------------------------------------------------
@@ -77,8 +97,8 @@ impl Inner {
             let g = lock(&self.guarded);
             g.active_execution
                 .as_ref()
-                .map(|e| e.code.clone())
-                .or_else(|| g.last_cell_code.clone())
+                .map(|e| cap_cell_source(&e.code))
+                .or_else(|| g.last_cell_code.as_deref().map(cap_cell_source))
         };
         let mut payload = obj.clone();
         if let Some(code) = cell_source_code {
@@ -129,5 +149,42 @@ impl Inner {
                 return;
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marker() -> String {
+        format!("\n[... cell source truncated at {MAX_CELL_SOURCE_CHARS} chars ...]")
+    }
+
+    #[test]
+    fn a_source_within_the_cap_attaches_verbatim() {
+        let code = "x".repeat(MAX_CELL_SOURCE_CHARS);
+        assert_eq!(cap_cell_source(&code), code);
+    }
+
+    #[test]
+    fn an_oversized_source_keeps_the_prefix_and_carries_the_marker() {
+        let code = "x".repeat(MAX_CELL_SOURCE_CHARS + 1);
+        let capped = cap_cell_source(&code);
+        let expected = format!("{}{}", "x".repeat(MAX_CELL_SOURCE_CHARS), marker());
+        assert_eq!(capped, expected);
+    }
+
+    #[test]
+    fn a_short_source_is_untouched() {
+        let code = "print(1)";
+        assert_eq!(cap_cell_source(code), code);
+    }
+
+    #[test]
+    fn the_cap_lands_on_a_character_boundary() {
+        // A multi-byte tail: the cap must slice by characters, never split one.
+        let code = format!("{}{}", "é".repeat(MAX_CELL_SOURCE_CHARS), "é");
+        let capped = cap_cell_source(&code);
+        assert!(capped.starts_with(&"é".repeat(MAX_CELL_SOURCE_CHARS)));
+        assert!(capped.ends_with(&marker()));
     }
 }
