@@ -288,13 +288,13 @@ impl SessionUi {
             menu.handle_key(&id, view.editor.keybindings())
         };
         match action {
-            crate::settings_menu::SettingsMenuAction::None => {}
+            // No-op closes: a bare None and Esc inside a submenu (TS
+            // `onCancel`) keep the menu itself open.
+            crate::settings_menu::SettingsMenuAction::None
+            | crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
-            // Esc inside a submenu closed only the submenu (TS `onCancel`):
-            // the menu itself stays open.
-            crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
                 // TS `onThemePreview`: switch live without persisting.
                 view.theme = crate::app::load_theme(&name);

@@ -873,7 +873,7 @@ mod tests {
                 .unwrap()
                 .store
                 .as_ref()
-                .map_or(0, |store| {
+                .map(|store| {
                     store
                         .entries()
                         .iter()

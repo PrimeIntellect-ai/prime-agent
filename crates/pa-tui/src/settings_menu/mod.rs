@@ -594,7 +594,7 @@ impl SettingsMenu {
                 }),
                 SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES
                     .get(sub.selected)
-                    .cloned()
+                    .copied()
                     .map(|tier| SettingsMenuAction::Change {
                         id: row_id,
                         value: tier.to_string(),

@@ -2009,7 +2009,7 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     service_tier: Some(tier),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
