@@ -2743,8 +2743,7 @@ impl AgentSessionEngine {
         // by a text-only session model that never receives a request.
         let preflight_model = self
             .armed_image_route()
-            .map(|route| route.target.model)
-            .unwrap_or_else(|| model.clone());
+            .map_or_else(|| model.clone(), |route| route.target.model);
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
             let mut registry = pa_core::models::ModelRegistry::create(
@@ -2946,7 +2945,8 @@ impl AgentSessionEngine {
                         // the session model + thinking level the agent state
                         // returns to when the episode settles.
                         if primary.is_none() {
-                            *primary = Some(match self.armed_image_route() {
+                            let armed = self.armed_image_route();
+                            let (target, next_model, thinking) = match armed {
                                 Some(route) => (
                                     route.target,
                                     model.clone(),
@@ -2969,7 +2969,8 @@ impl AgentSessionEngine {
                                         map_thinking_level(self.effective_thinking()),
                                     )
                                 }
-                            });
+                            };
+                            *primary = Some((target, next_model, thinking));
                         }
                     }
                     let next = next.clone();
