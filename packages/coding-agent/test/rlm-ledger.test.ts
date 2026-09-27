@@ -578,6 +578,7 @@ function subagentRuntimeOptions(
 		parentSession: parentState.runtime.session,
 		prompt: "do the work",
 		sessionName: overrides.id,
+		cwd: parentState.runtime.session.sessionManager.getCwd(),
 		model: { provider: "test", id: "model" } as Model<Api>,
 		thinkingLevel: "off",
 		serviceTier: null,

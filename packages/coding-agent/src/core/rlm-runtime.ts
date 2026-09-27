@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession, RlmChildAgentStatus } from "./agent-session.js";
@@ -166,6 +168,18 @@ export function normalizeRequestedRlmSubagentThinkingLevel(
 		throw new Error(`${operation} thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
 	}
 	return level as ThinkingLevel;
+}
+
+export function resolveRequestedRlmSubagentCwd(value: unknown, parentCwd: string, operation = "rlm.spawn"): string {
+	if (value === undefined) return parentCwd;
+	if (typeof value !== "string" || !value.trim()) {
+		throw new Error(`${operation} cwd must be a non-empty string`);
+	}
+	const cwd = resolve(parentCwd, value.trim());
+	if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+		throw new Error(`${operation} cwd is not a directory: ${cwd}`);
+	}
+	return cwd;
 }
 
 export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.spawn"): string | undefined {
@@ -456,6 +470,7 @@ export interface CreateRlmSubagentRuntimeOptions {
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
+	cwd: string;
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;

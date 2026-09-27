@@ -692,6 +692,7 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => root.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText() !== undefined);
 		const child = root.getRlmChildSession(result.rlm_child_id);
 		expect(child?.getLastAssistantText()).toBe("child answer: summarize shard 1");
+		expect(child?.systemPrompt).toContain(`Working directory: ${tempDir}\n`);
 		expect(getMessageText(child?.messages[0])).toContain(
 			"The persistent memories produced across this session so far:",
 		);
@@ -707,6 +708,15 @@ describe("AgentSession rlm recursion", () => {
 				fromRelationship: "parent",
 			},
 		});
+	});
+
+	it("starts a spawned child in the requested cwd", async () => {
+		mkdirSync(join(tempDir, "child-project"));
+		const root = createSession();
+		const result = await root.runRlmChild("work elsewhere", { cwd: "child-project" });
+		await waitFor(() => root.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText() !== undefined);
+		const child = root.getRlmChildSession(result.rlm_child_id);
+		expect(child?.systemPrompt).toContain(`Working directory: ${join(tempDir, "child-project")}`);
 	});
 
 	it("wakes the agent with a follow-up when a detached bash handle completes", async () => {
@@ -1878,6 +1888,8 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 
+		mkdirSync(join(tempDir, "other-project"));
+
 		await expect(
 			root.createRlmSession("independent task", {
 				name: "researcher",
@@ -1939,6 +1951,7 @@ describe("AgentSession rlm recursion", () => {
 		{ label: "unsupported kwargs", options: { temperature: 0 }, error: "Unsupported rlm.spawn kwargs: temperature" },
 		{ label: "a non-string thinking kwarg", options: { thinking: 3 }, error: "rlm.spawn thinking must be a string" },
 		{ label: "an unknown thinking level", options: { thinking: "ultra" }, error: "must be one of" },
+		{ label: "a missing cwd", options: { cwd: "missing-dir" }, error: "rlm.spawn cwd is not a directory" },
 	])("rejects rlm.spawn for $label", async ({ options, depth, maxDepth, error }) => {
 		const root = createSession({ depth, maxDepth });
 
