@@ -1117,9 +1117,9 @@ mod menu_tests {
             SettingsMenuAction::SubmenuClosed
         );
         let text = render_text(&menu);
-        assert!(text.iter().any(|row| {
-            row.contains("Type to search · Enter/Space to change · Esc to cancel")
-        }));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
     }
 
     #[test]
