@@ -1,6 +1,18 @@
 #!/bin/sh
 # install-rust.sh — one-command installer for the Rust build of Prime Agent.
 #
+# THE KEYWORD TAKEOVER: the Rust port installs under the product keyword
+# PRIME-AGENT — the launcher lands at ~/.local/bin/prime-agent, the payload
+# at ~/.local/share/prime-agent/, and users type `prime-agent`. The old
+# prime-agent-rust layout (a TS-safe side-by-side name) is migrated: the
+# share tree moves to the new name with a one-generation .old rollback, and
+# this script's own launcher replaces the prime-agent-rust one it wrote in
+# past installs. The FILENAME stays install-rust.sh deliberately: the
+# curl|sh URL and the update entry points (`prime-agent update`, the TUI
+# /update — both exec this script with --update) already point at it, and
+# the filename is invisible to users; the command they type is what
+# changed.
+#
 # SOURCE: the `continuous` workflow's build artifacts (every push to the
 # `rust` branch builds the matrix; this script installs the latest
 # successful run's platform tarball). No tags, no GitHub releases: the
@@ -8,34 +20,70 @@
 # port's versioned releases come when it graduates
 # (prime-agent-design/RELEASE_SECURITY.md).
 #
-# What it installs: one continuous build's payload (the prime-agent
-# binary, prime-agent-runtime/ kernel sidecar, skills/, docs/, LICENSE,
-# README.md, and the commit-stamped package.json) under
-# $PRIME_AGENT_RUST_PREFIX/share/prime-agent-rust/, plus a
-# prime-agent-rust launcher in $PRIME_AGENT_RUST_PREFIX/bin/. The
-# installed binary answers its exact source commit via --version
-# (<workspace-version>-continuous.<commit-sha>).
+# THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
+# TS product — one installer owns the keyword's lifecycle):
+#   1. THE TS DAEMON IS STOPPED CLEANLY, NEVER KILLED. The TS daemon's
+#      default socket is ${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock;
+#      the installer probes it (and its own rust socket) the same way the
+#      schema-id check does: the daemon's hello line carries a schemaId,
+#      and only a daemon whose hello answers the TypeScript schema id
+#      (protocol-7-schema-29-...) is treated as the TS daemon. Such a
+#      daemon gets the product's own stop-when-idle semantics — a session
+#      count over `list`, a `shutdown` request ONLY when it is idle, then
+#      a 5s confirm poll. A busy daemon is LEFT RUNNING (never signaled;
+#      it stops itself when idle), an unknown schema is skipped, and no
+#      signal is ever sent to any pid from this script.
+#   2. THE TS FILES ARE PRESERVED, NOT DELETED (the pi_agent_rust
+#      `legacy-pi` precedent: rollback stays possible). What the TS
+#      installer actually created, researched from its install.sh: a
+#      managed root at ${XDG_DATA_HOME:-~/.local/share}/prime-agent
+#      (marked by .managed = prime-agent-native-v1, holding releases/<v>/
+#      trees and its own bin/prime-agent symlink), a public
+#      ~/.local/bin/prime-agent symlink into it, an optional global npm
+#      package, and an optional standalone node at
+#      ~/.local/share/prime-agent-node. The takeover:
+#        - a TS managed root occupying THIS script's target
+#          ($PREFIX/share/prime-agent) moves to
+#          $PREFIX/share/prime-agent-legacy (kept verbatim; rollback =
+#          rename back and re-link the public bin symlink);
+#        - the public ~/.local/bin/prime-agent is REPLACED by this
+#          script's launcher (the keyword is ours now);
+#        - the TS npm package is uninstalled (exact package `prime-agent`
+#          only; the restore command is printed with the recorded version);
+#        - the standalone node dir is LEFT in place (it is a runtime, not
+#          the product binary/package — the user can remove it by hand).
+#   3. WHY DAEMON CONFLICTS ARE IMPOSSIBLE AFTER THIS INSTALL: the
+#      launcher pins a rust-only daemon socket
+#      (${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock) — a
+#      different path than the TS daemon's own — so this CLI can never
+#      attach to, replace, or be confused with the TS daemon at runtime;
+#      and the install-time stop-when-idle above retires a TS daemon
+#      cleanly instead of orphaning one. Pin + clean stop together mean
+#      the two daemons can never fight over a socket again after install.
 #
-# It never writes any path the TypeScript product owns: no ~/.local/bin/prime-agent,
-# no ~/.local/share/prime-agent/ — every path it creates carries the
-# prime-agent-rust name, so a TS install on the same machine is untouched
-# and the two products run side by side.
+# THE SHARED STORE IS NEVER TOUCHED: ~/.prime/agent/ (sessions, leases,
+# config) is read and written by BOTH products by design — the same
+# sessions appear in either — and this installer never creates, renames,
+# migrates, or deletes anything under it. guard_preserved() aborts the
+# install if any computed path (prefix, bin, share, stage, rollback)
+# falls under the store.
 #
-# Both products share the session store BY DESIGN (both read and write
-# ~/.prime/agent — the sessions dir and its session leases — so the same
-# sessions appear in either), but they never share a daemon: the launcher
-# pins a rust-only daemon socket so this CLI can never attach to, shut
-# down, or replace the TypeScript daemon (the products' daemon schema ids
-# differ — over a shared socket, each side treats the other as a stale
-# daemon to stop when idle; see docs/RUST_QUICKSTART.md).
-#
-# Config (env with defaults):
+# Config (env with defaults; the PRIME_AGENT_RUST_* names are unchanged
+# from previous releases so existing users' env keeps working — they now
+# address the prime-agent bin/dir names):
 #   PRIME_AGENT_RUST_REPO    the <org>/<repo> to install from
 #                            (default: PrimeIntellect-ai/prime-agent)
 #   PRIME_AGENT_RUST_RUN     the continuous workflow run id to install
 #                            (default: "latest" — the newest successful
 #                            run on the `rust` branch)
-#   PRIME_AGENT_RUST_PREFIX  install prefix (default: ~/.local)
+#   PRIME_AGENT_RUST_PREFIX  install prefix (default: ~/.local; the
+#                            launcher lands at $PREFIX/bin/prime-agent,
+#                            the payload at $PREFIX/share/prime-agent/)
+#
+# Usage: install-rust.sh [--update] — both entry points install the newest
+# successful continuous run; the script is idempotent (a re-run replaces
+# the payload, keeps one .old rollback generation, and re-runs the
+# takeover steps as no-ops when there is nothing left to take over).
 #
 # Authentication is mandatory even though the repo is public: GitHub's
 # workflow-artifact DOWNLOAD API requires an authenticated principal (an
@@ -53,6 +101,76 @@ WORKFLOW="continuous"
 BRANCH="rust"
 
 die() { echo "install-rust.sh: $1" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+install-rust.sh — install the Rust build of Prime Agent under the prime-agent keyword.
+
+The launcher lands at $PRIME_AGENT_RUST_PREFIX/bin/prime-agent and the payload at
+$PRIME_AGENT_RUST_PREFIX/share/prime-agent/ (default prefix ~/.local). The installed
+TypeScript product is taken over: its daemon is stopped cleanly when idle, its native
+install is preserved under share/prime-agent-legacy, and its npm package is uninstalled
+(the restore command is printed). ~/.prime/agent (the shared session store) is never
+touched. Both the default and --update install the newest successful `continuous`
+workflow run on the `rust` branch.
+
+Environment:
+  PRIME_AGENT_RUST_REPO     <org>/<repo> to install from
+  PRIME_AGENT_RUST_RUN      continuous workflow run id ("latest" by default)
+  PRIME_AGENT_RUST_PREFIX   install prefix (~/.local by default)
+  GITHUB_TOKEN              artifact authentication when gh is not on PATH
+USAGE
+}
+
+# --- arguments ---------------------------------------------------------------
+# No positional arguments. --update is the documented alias the update entry
+# points (`prime-agent update`, the TUI /update) exec — identical to the default
+# run because the flow is idempotent by construction.
+case "${1:-}" in
+  "") ;;
+  --update) ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; die "unknown argument: ${1}" ;;
+esac
+
+# --- the preserve invariant: guard the shared store ---------------------------
+# ~/.prime/agent is shared by both products BY DESIGN (sessions, leases,
+# config). No step of this installer may write, rename, or delete under it.
+# guard_preserved aborts when a target path resolves under the store —
+# the realistic trigger is a mis-set PRIME_AGENT_RUST_PREFIX.
+PRESERVED_STORE="${HOME}/.prime/agent"
+guard_preserved() {
+  for guarded_path in "$@"; do
+    case "$guarded_path" in
+      "$PRESERVED_STORE"|"$PRESERVED_STORE"/*)
+        die "refusing to touch ${guarded_path}: the shared session store
+${PRESERVED_STORE} (sessions, leases, config — shared with the TypeScript
+product by design) must never be created, migrated, or deleted"
+        ;;
+    esac
+  done
+}
+
+case "$PREFIX" in
+  /*) ;;
+  *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}" ;;
+esac
+PREFIX="$(python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$PREFIX")"
+guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
+mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
+# Resolve symlinks and '.'/'..' after creating the roots (the TS installer's
+# own prepare-root pattern) and re-check the guard against the resolved value.
+PREFIX="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
+guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
+
+share_dir="${PREFIX}/share/prime-agent"
+bin_dir="${PREFIX}/bin"
+launcher="${bin_dir}/prime-agent"
+old_layout_dir="${PREFIX}/share/prime-agent-rust"
+legacy_dir="${PREFIX}/share/prime-agent-legacy"
+lock_link="${PREFIX}/share/.prime-agent-install.lock"
+legacy_lock="${PREFIX}/share/.prime-agent-rust-install.lock"
+guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_link"
 
 # --- platform detection ----------------------------------------------------
 # uname -m maps directly to the built target: an Apple-Silicon Mac whose
@@ -142,7 +260,7 @@ echo "installing the ${WORKFLOW} run ${RUN} ${TARGET} artifact from ${REPO}"
 # The artifact zip is flat (the build job uploads the assembled dist tree),
 # so the download carries the platform tarball, its SHA256SUMS line, and
 # the run's manifest.json (with the exact commit).
-dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-rust-download.XXXXXX")"
+dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
 if [ "$HAVE_GH" = 1 ]; then
   gh run download "$RUN" --repo "$REPO" \
     --name "artifacts-${TARGET}" --dir "$dl" \
@@ -194,29 +312,236 @@ fi
 commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
 echo "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 
-# --- install ---------------------------------------------------------------------
-share_dir="${PREFIX}/share/prime-agent-rust"
-bin_dir="${PREFIX}/bin"
-launcher="${bin_dir}/prime-agent-rust"
-mkdir -p "${PREFIX}/share" "${bin_dir}"
+# --- the TypeScript takeover, step 1: stop the TS daemon CLEANLY ---------------
+# Probe the TS daemon's own socket and this product's pinned socket with the
+# same schema-id check the CLI uses: the daemon hello line carries a
+# schemaId; only the TypeScript schema id identifies the TS daemon. A TS
+# daemon is asked to stop ONLY when idle (the stop-when-idle semantics — a
+# `shutdown` request the daemon handles cleanly, closing its sessions with
+# resume entries kept); a busy one is left running to drain on its own.
+# NOTHING IS EVER KILLED from here: no signal is sent to any pid; an
+# unknown schema, a dead socket file, or an unreadable session count all
+# skip the stop (the launcher's socket pin already makes conflicts
+# impossible, so a skip is safe).
+ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
+rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+stop_ts_daemon() {
+  socket_path="$1"
+  [ -e "$socket_path" ] || return 0
+  verdict="$(python3 - "$socket_path" <<'PY'
+import json, select, socket, sys, time
 
+path = sys.argv[1]
+TS_SCHEMA_ID = "protocol-7-schema-29-a5c9d20f8b13"
+HELLO_TIMEOUT_S = 1.5
+PROBE_TIMEOUT_S = 5.0
+STOP_CONFIRM_TIMEOUT_S = 5.0
+
+def read_line(sock, deadline):
+    chunks = []
+    while time.monotonic() < deadline:
+        if select.select([sock], [], [], 0.05)[0]:
+            part = sock.recv(4096)
+            if not part:
+                return None
+            chunks.append(part)
+            data = b"".join(chunks)
+            if b"\n" in data:
+                return data.split(b"\n", 1)[0].decode("utf-8", "replace")
+    return None
+
+try:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(HELLO_TIMEOUT_S)
+    sock.connect(path)
+except OSError:
+    print("stale")
+    sys.exit(0)
+
+hello = None
+deadline = time.monotonic() + HELLO_TIMEOUT_S
+while time.monotonic() < deadline:
+    line = read_line(sock, deadline)
+    if line is None:
+        break
+    try:
+        value = json.loads(line)
+    except ValueError:
+        continue
+    if value.get("type") == "daemon_hello":
+        hello = value
+        break
+if hello is None:
+    print("no-hello")
+    sys.exit(0)
+schema = hello.get("schemaId")
+if not isinstance(schema, str):
+    print("no-schema")
+    sys.exit(0)
+if schema != TS_SCHEMA_ID:
+    print("foreign:" + schema)
+    sys.exit(0)
+
+# TS daemon identified: confirm it is idle before asking it to stop.
+sock.sendall(b'{"id":"installer-probe","type":"list"}\n')
+deadline = time.monotonic() + PROBE_TIMEOUT_S
+count = None
+while time.monotonic() < deadline:
+    line = read_line(sock, deadline)
+    if line is None:
+        break
+    try:
+        value = json.loads(line)
+    except ValueError:
+        continue
+    if value.get("type") == "response" and value.get("id") == "installer-probe":
+        sessions = (value.get("data") or {}).get("sessions")
+        count = len(sessions) if isinstance(sessions, list) else None
+        break
+if count is None:
+    print("ts:probe-failed")
+    sys.exit(0)
+if count != 0:
+    print("ts:busy:%d" % count)
+    sys.exit(0)
+
+# Idle: ask for a clean stop (force:false — the graceful path, never a kill),
+# let the daemon ack, then confirm it stopped listening.
+sock.sendall(b'{"id":"installer-stop","type":"shutdown","force":false}\n')
+ack_deadline = time.monotonic() + PROBE_TIMEOUT_S
+while time.monotonic() < ack_deadline:
+    line = read_line(sock, ack_deadline)
+    if line is None:
+        break
+    try:
+        value = json.loads(line)
+    except ValueError:
+        continue
+    if value.get("type") == "response" and value.get("id") == "installer-stop":
+        break
+sock.close()
+end = time.monotonic() + STOP_CONFIRM_TIMEOUT_S
+while time.monotonic() < end:
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        probe.connect(path)
+        probe.close()
+    except OSError:
+        print("ts:stopped")
+        sys.exit(0)
+    time.sleep(0.05)
+print("ts:stop-failed")
+PY
+)" || verdict="probe-error"
+  case "$verdict" in
+    ts:stopped)
+      echo "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
+      ;;
+    ts:busy:*)
+      sessions="${verdict#ts:busy:}"
+      echo "note: the TypeScript daemon on ${socket_path} is serving ${sessions} session(s);"
+      echo "  it was left running (never killed) and stops itself when idle. The Rust"
+      echo "  launcher pins its own socket, so the two daemons cannot conflict."
+      ;;
+    ts:probe-failed)
+      echo "note: the TypeScript daemon on ${socket_path} did not answer the idle probe;"
+      echo "  it was left running (never killed)."
+      ;;
+    ts:stop-failed)
+      echo "note: the TypeScript daemon on ${socket_path} was asked to stop cleanly but is"
+      echo "  still listening after 5s; it was NOT killed — it will drain on its own,"
+      echo "  or run 'prime-agent shutdown --force' (the shared-state-root sweep) to stop it."
+      ;;
+    foreign:*)
+      echo "note: a daemon is listening on ${socket_path} but its hello schema"
+      echo "  (${verdict#foreign:}) is not the TypeScript daemon's; nothing was done."
+      ;;
+    stale)
+      echo "note: no daemon answers on ${socket_path} (a stale socket file was left alone)"
+      ;;
+    no-hello|no-schema)
+      echo "note: whatever listens on ${socket_path} did not greet with a schema id;"
+      echo "  nothing was done (the installer only stops what identifies itself)."
+      ;;
+    probe-error|"")
+      echo "note: could not probe ${socket_path}; nothing was done (never killed blind)."
+      ;;
+  esac
+}
+stop_ts_daemon "$ts_socket"
+stop_ts_daemon "$rust_socket"
+
+# --- the TypeScript takeover, step 2: the files -------------------------------
+# ts_managed_root: the directory the TS installer owns (its .managed marker).
+ts_managed_root="${XDG_DATA_HOME:-${HOME}/.local/share}/prime-agent"
+ts_managed() {
+  [ -f "$1/.managed" ] && [ "$(cat "$1/.managed" 2>/dev/null)" = "prime-agent-native-v1" ]
+}
+
+# A TS managed root elsewhere (XDG_DATA_HOME) does not block this install and
+# is left in place — only the keyword is taken over.
+if [ "$ts_managed_root" != "$share_dir" ] && [ -d "$ts_managed_root" ] && ts_managed "$ts_managed_root"; then
+  echo "note: a TypeScript native install also lives at ${ts_managed_root}"
+  echo "  (XDG_DATA_HOME); it does not occupy ${share_dir} and was left in place."
+fi
+
+# The TS npm package: uninstalled (operator directive — the Rust port owns the
+# keyword), with the restore command printed. Exact package `prime-agent`
+# only; best-effort — an npm failure warns and moves on.
+if command -v npm >/dev/null 2>&1; then
+  npm_root="$(npm root -g 2>/dev/null || true)"
+  if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
+    ts_version="$(python3 -c 'import json, sys
+try:
+    package = json.load(open(sys.argv[1]))
+    if package.get("name") == "prime-agent":
+        print(package.get("version", ""))
+except Exception:
+    print("")' "${npm_root}/prime-agent/package.json")"
+    if [ -n "$ts_version" ]; then
+      if npm uninstall -g prime-agent >/dev/null 2>&1; then
+        echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
+        echo "  restore with: npm install -g prime-agent@${ts_version}"
+      else
+        echo "warning: npm uninstall -g prime-agent failed; run it by hand — the"
+        echo "  npm-installed TS command can shadow ${launcher} on PATH"
+      fi
+    fi
+  fi
+fi
+
+# --- install ---------------------------------------------------------------------
 # Extract to a staging dir inside the prefix (same filesystem, so the final
 # swap is a rename, not a cross-device copy). Publication is SERIALIZED
-# behind an atomic symlink lock: the claim is `ln -s <pid>` - ONE
-# operation that carries the holder's identity, and the ln itself is the
-# single winner (every other waiter fails against the existing link), so
-# two installers can never both enter the publish section. A lock whose
-# holder is DEAD (a crashed install - the cleanup trap cannot run under
-# SIGKILL) is never auto-stolen: a waiter that dropped a dead lock would
-# race other waiters into a double publish, so it dies with the one-line
-# manual recovery instead. The old tree is renamed ASIDE first and
-# removed only after the new stage is in place, so the live tree is
-# never rm'd while the launcher still points into it.
-stage="$(mktemp -d "${PREFIX}/share/prime-agent-rust.stage.XXXXXX")"
+# behind an atomic symlink lock: the claim is `ln -s <pid>` - ONE operation
+# that carries the holder's identity, and the ln itself is the single winner
+# (every other waiter fails against the existing link), so two installers
+# can never both enter the publish section. A lock whose holder is DEAD (a
+# crashed install - the cleanup trap cannot run under SIGKILL) is never
+# auto-stolen: a waiter that dropped a dead lock would race other waiters
+# into a double publish, so it dies with the one-line manual recovery
+# instead. The old tree is renamed ASIDE first and removed only after the
+# new stage is in place, so the live tree is never rm'd while the launcher
+# still points into it. The renamed-aside tree is KEPT as a one-generation
+# rollback (prime-agent.old.<pid>); the next successful install sweeps it.
+stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
+guard_preserved "$stage"
 tar -xzf "$asset" -C "$stage"
 [ -x "${stage}/prime-agent" ] \
   || die "the tarball did not contain an executable prime-agent payload"
-lock_link="${PREFIX}/share/.prime-agent-rust-install.lock"
+
+# A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
+# a live holder still owns the publish, a dead one can never publish again —
+# remove it and take the new-name lock (this run is serialized against every
+# other new installer by the lock below).
+if [ -e "$legacy_lock" ]; then
+  held_by="$(readlink "$legacy_lock" 2>/dev/null || true)"
+  if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
+    die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+  fi
+  rm -f "$legacy_lock"
+fi
 until ln -s $$ "$lock_link" 2>/dev/null; do
   held_by="$(readlink "$lock_link" 2>/dev/null || true)"
   if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
@@ -226,31 +551,98 @@ until ln -s $$ "$lock_link" 2>/dev/null; do
   rm -f ${lock_link}"
 done
 trap 'rm -f "$lock_link"' EXIT
-old="${PREFIX}/share/prime-agent-rust.old.$$"
+
+# Sweep rollback generations from PREVIOUS installs (both name eras) before
+# this run creates its own — exactly one .old generation survives each install.
+rm -rf "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.* 2>/dev/null || true
+
+# The TypeScript takeover, inside the lock: preserve a TS managed root that
+# occupies this installer's share dir under a legacy name (Pi's legacy-pi
+# precedent), never delete it. Rollback = rename back and re-link the
+# public bin symlink. The keyword changes hands either way: the launcher
+# write below replaces the TS public symlink.
+if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
+  preserved_to="$legacy_dir"
+  if [ -e "$preserved_to" ]; then preserved_to="${legacy_dir}.$$"; fi
+  guard_preserved "$preserved_to"
+  mv "$share_dir" "$preserved_to" \
+    || die "could not preserve the TypeScript install at ${share_dir}; nothing was deleted — resolve and re-run"
+  echo "the TypeScript native install at ${share_dir} was preserved at:"
+  echo "  ${preserved_to}"
+  echo "  rollback: mv '${preserved_to}' '${share_dir}' &&"
+  echo "            ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
+fi
+
+# Refuse to take ownership of a share dir that is neither this installer's
+# flat payload tree nor the TS managed root (the TS installer's own rule:
+# never adopt a nonempty directory you do not own).
 if [ -d "$share_dir" ]; then
+  if [ -e "${share_dir}/prime-agent" ] || [ -L "${share_dir}/prime-agent" ]; then
+    :   # this installer's own previous tree: the normal update path below
+  elif [ -z "$(ls -A "$share_dir" 2>/dev/null)" ]; then
+    rmdir "$share_dir"
+  else
+    die "refusing to take ownership of ${share_dir}: it is neither this
+installer's payload tree nor the TypeScript installer's managed root; move
+it aside and re-run"
+  fi
+fi
+
+old="${PREFIX}/share/prime-agent.old.$$"
+guard_preserved "$old"
+had_share_dir=0
+had_old_layout=0
+# Migration from the pre-takeover layout: an old share/prime-agent-rust tree
+# becomes this run's rollback (the install migrates to the new name).
+if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
+  if [ ! -x "${old_layout_dir}/prime-agent" ] || ts_managed "$old_layout_dir"; then
+    die "refusing to move ${old_layout_dir}: it is not this installer's payload tree"
+  fi
+  had_old_layout=1
+  mv "$old_layout_dir" "$old"
+  echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
+fi
+if [ -d "$share_dir" ]; then
+  had_share_dir=1
   mv "$share_dir" "$old"
 fi
 if ! mv "$stage" "$share_dir"; then
-  if [ -d "$old" ]; then mv "$old" "$share_dir"; fi   # put the old tree back
+  if [ "$had_share_dir" = 1 ]; then
+    mv "$old" "$share_dir"      # put the old tree back
+  elif [ "$had_old_layout" = 1 ]; then
+    mv "$old" "$old_layout_dir"  # put the migrated old layout back
+  fi
   die "could not publish ${share_dir}"
 fi
-rm -rf "$old"
-rm -rf "${PREFIX}"/share/prime-agent-rust.old.* 2>/dev/null || true
+# A leftover old-layout tree when a new-layout tree also existed: it is
+# superseded by the fresh publish — sweep it (shape-checked: ours is a flat
+# executable payload tree, never a TS managed root).
+if [ -d "$old_layout_dir" ] && [ -x "${old_layout_dir}/prime-agent" ] && ! ts_managed "$old_layout_dir"; then
+  rm -rf "$old_layout_dir"
+  echo "removed the superseded ${old_layout_dir} tree (its payload now lives under ${share_dir})"
+fi
 
-# --- the launcher (the cohabitation contract lives here) -------------------------
+# --- the launcher (the takeover lives here) -----------------------------------
 # Every line is load-bearing. The heredoc is QUOTED ('EOF'): the launcher
 # is written literally, with NOTHING expanded at install time - the exec
 # path resolves from the launcher's own location at launch (the payload
 # rides ../share/ from wherever the prefix placed the binary), the
 # per-user socket suffix runs at launch, and a prefix containing shell
 # syntax can never end up reparsed inside this generated script.
-# The launcher is written to a temp file in bin_dir and renamed into place:
-# an interrupted write leaves the PREVIOUS launcher intact instead of a
-# truncated one (the payload is already published by this point).
-launcher_tmp="$(mktemp "${bin_dir}/.prime-agent-rust.XXXXXX")"
+# The launcher REPLACES whatever occupied ~/.local/bin/prime-agent — on a
+# TS machine that path was the TS installer's public symlink; the keyword
+# is the Rust port's now (the TS tree itself was preserved above).
+if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+  if [ -L "$launcher" ]; then
+    echo "replacing the existing prime-agent command (was a symlink to: $(readlink "$launcher" 2>/dev/null || true))"
+  else
+    echo "replacing the existing prime-agent command at ${launcher}"
+  fi
+fi
+launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
 cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
-# prime-agent-rust — launcher written by install-rust.sh.
+# prime-agent — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
 # read and write the same $HOME/.prime/agent (sessions and their leases),
 # so the same sessions appear in both products. The env keeps the TS
@@ -260,12 +652,22 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 # their daemon schema ids differ, so without this pin the Rust CLI would
 # treat the TypeScript daemon as stale and shut it down when idle. This
 # build honors the env (flag > env > default). The default is per-user
-# (the uid suffix), like the product's own per-user default socket.
+# (the uid suffix) and rust-only: it never collides with the TypeScript
+# daemon's own ${TMPDIR}/prime-agent-$(id -u) socket, so after the
+# installer's clean TS-daemon stop the two daemons cannot fight again.
 export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
-exec "$(dirname "$0")/../share/prime-agent-rust/prime-agent" "$@"
+exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
 chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
+
+# Retire the launcher's own pre-takeover name (marker-checked: only ever
+# remove the shim this script wrote, never a user's file).
+old_launcher="${bin_dir}/prime-agent-rust"
+if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old_launcher" 2>/dev/null; then
+  rm -f "$old_launcher"
+  echo "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
+fi
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
 case ":$PATH:" in
@@ -291,13 +693,10 @@ else
 fi
 echo "launcher:  ${launcher}"
 echo "payload:   ${share_dir}"
-echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
-
-# --- cohabitation note --------------------------------------------------------------
-if command -v prime-agent >/dev/null 2>&1; then
-  echo "note: a 'prime-agent' (TypeScript) binary is on PATH — it was NOT touched;"
-  echo "both products run side by side and share the session store."
+if [ -d "$old" ]; then
+  echo "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
 fi
+echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
 
 echo "next steps: docs/RUST_QUICKSTART.md ships inside the payload"
 echo "  ${share_dir}/docs/RUST_QUICKSTART.md"

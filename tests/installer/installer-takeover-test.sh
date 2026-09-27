@@ -1,0 +1,429 @@
+#!/bin/sh
+# The install-rust.sh takeover sandbox test.
+#
+# Runs the REAL installer in a sandboxed HOME with a faked TypeScript
+# product on disk (its native install tree, its public bin symlink, its
+# npm package, a live mock TS daemon speaking the real hello protocol on
+# the TS socket) and asserts the takeover contract:
+#   (a) the launcher lands at $PREFIX/bin/prime-agent,
+#   (b) ~/.prime/agent (the shared session store) is byte-identical,
+#   (c) the TS daemon was stopped cleanly via the schema-id stop-when-idle
+#       path (a `shutdown` request with force:false — never a kill), and a
+#       BUSY TS daemon is left running untouched,
+#   (d) an existing share/prime-agent-rust install migrates to the new name
+#       with a .old rollback, and the TS native tree is preserved under
+#       share/prime-agent-legacy,
+#   (e) the TS npm package is uninstalled via npm (exact package),
+#   (f) the guard: PRIME_AGENT_RUST_PREFIX pointing into ~/.prime/agent
+#       aborts the install before anything is written,
+#   (g) --update re-runs idempotently (one .old generation, same result).
+#
+# Everything is offline: a mock `gh` serves a fixture artifact, a mock `npm`
+# records the uninstall, and the mock daemon speaks the daemon wire protocol
+# (daemon_hello with the TS schemaId, `list`, `shutdown`) exactly like the
+# TypeScript product.
+set -u
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$TEST_DIR/../.." && pwd)"
+INSTALLER="${REPO_ROOT}/install-rust.sh"
+
+# The installer reads these; keep the sandbox hermetic regardless of the
+# environment this test itself runs under.
+unset PRIME_AGENT_RUST_REPO PRIME_AGENT_RUST_RUN PRIME_AGENT_RUST_PREFIX
+unset GITHUB_TOKEN
+
+REAL_UID="$(id -u)"
+
+failures=0
+passed=0
+fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+ok() { echo "ok:   $1"; passed=$((passed + 1)); }
+assert_eq() { # label expected actual
+  if [ "$2" = "$3" ]; then ok "$1"; else fail "$1: expected [$2], got [$3]"; fi
+}
+assert_contains() { # label haystack-file needle
+  if grep -q -- "$3" "$2" 2>/dev/null; then ok "$1"; else fail "$1: [$(basename "$2")] does not contain: $3"; fi
+}
+assert_not_contains() { # label haystack-file needle
+  if grep -q -- "$3" "$2" 2>/dev/null; then fail "$1: [$(basename "$2")] unexpectedly contains: $3"; else ok "$1"; fi
+}
+
+MOCK_PIDS=""
+cleanup() {
+  for pid in $MOCK_PIDS; do
+    kill "$pid" 2>/dev/null || true
+  done
+  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"
+}
+trap cleanup EXIT INT TERM
+
+# --- the mock TS daemon (the real wire shapes from daemon-supervisor.ts) ------
+write_daemon_mock() { # path
+  cat > "$1" <<'PY'
+import json, os, socket, sys, time
+
+socket_path, log_path, ready_path, active_count = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+count = int(active_count) if active_count.isdigit() else 0
+
+os.makedirs(os.path.dirname(socket_path), exist_ok=True)
+if os.path.exists(socket_path):
+    os.unlink(socket_path)
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(socket_path)
+srv.listen(4)
+with open(ready_path, "w") as ready:
+    ready.write("ready")
+log = open(log_path, "a", buffering=1)
+log.write("LISTENING sessions=%d\n" % count)
+while True:
+    try:
+        conn, _ = srv.accept()
+    except OSError:
+        break
+    hello = {
+        "type": "daemon_hello",
+        "socketPath": socket_path,
+        "protocol": {"name": "prime-agent-daemon", "version": 7},
+        "schemaId": "protocol-7-schema-29-a5c9d20f8b13",
+        "appVersion": "9.9.9",
+        "supervisorPid": os.getpid(),
+    }
+    conn.sendall((json.dumps(hello) + "\n").encode())
+    conn.settimeout(2.0)
+    shutting_down = False
+    buf = b""
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            buf += data
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                log.write("RECV " + line.decode("utf-8", "replace") + "\n")
+                try:
+                    command = json.loads(line)
+                except ValueError:
+                    continue
+                if command.get("type") == "list":
+                    response = {
+                        "type": "response",
+                        "id": command.get("id"),
+                        "success": True,
+                        "data": {"sessions": [
+                            {"activeSessionId": "sess-active-%d" % i}
+                            for i in range(count)
+                        ]},
+                    }
+                    conn.sendall((json.dumps(response) + "\n").encode())
+                elif command.get("type") == "shutdown":
+                    response = {
+                        "type": "response",
+                        "id": command.get("id"),
+                        "success": True,
+                        "data": "shutdown",
+                    }
+                    conn.sendall((json.dumps(response) + "\n").encode())
+                    shutting_down = True
+    except OSError:
+        pass
+    conn.close()
+    if shutting_down:
+        log.write("SHUTDOWN\n")
+        break
+srv.close()
+try:
+    os.unlink(socket_path)
+except OSError:
+    pass
+log.write("EXIT\n")
+PY
+}
+
+# --- the mock gh (offline artifact serving) -----------------------------------
+write_gh_mock() { # path
+  cat > "$1" <<'MOCK'
+#!/bin/sh
+# mock gh for the installer sandbox test: run list -> a fake run id;
+# run download -> copy the fixture artifact into the requested --dir.
+case "$1 $2" in
+  "run list") echo "424242" ;;
+  "run download")
+    dir=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dir) dir="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ -z "$dir" ]; then
+      echo "mock gh: run download without --dir" >&2
+      exit 1
+    fi
+    mkdir -p "$dir"
+    cp "$GH_FIXTURE_DIR/SHA256SUMS" "$GH_FIXTURE_DIR/manifest.json" "$dir/"
+    cp "$GH_FIXTURE_DIR"/*.tar.gz "$dir/"
+    ;;
+  *) echo "mock gh: unexpected call: $*" >&2; exit 1 ;;
+esac
+MOCK
+  chmod 0755 "$1"
+}
+
+# --- the mock npm (records the uninstall) --------------------------------------
+write_npm_mock() { # path
+  cat > "$1" <<'MOCK'
+#!/bin/sh
+# mock npm for the installer sandbox test: root -g -> the fake global root;
+# uninstall -g prime-agent -> remove the package and record the call.
+echo "npm $*" >> "$NPM_MOCK_LOG"
+case "$1 $2" in
+  "root -g") echo "$NPM_MOCK_ROOT" ;;
+  "uninstall -g")
+    if [ "$3" = "prime-agent" ]; then
+      rm -rf "$NPM_MOCK_ROOT/prime-agent"
+    fi
+    ;;
+esac
+MOCK
+  chmod 0755 "$1"
+}
+
+# --- the fixture artifact -------------------------------------------------------
+build_fixture() { # sandbox-dir target-triple
+  fixture="$1/fixture"
+  mkdir -p "$fixture/payload/docs"
+  cat > "$fixture/payload/prime-agent" <<'BIN'
+#!/bin/sh
+# fake payload binary for the installer sandbox test
+printf '0.1.2-continuous.0000042\n'
+BIN
+  chmod 0755 "$fixture/payload/prime-agent"
+  printf '{"name":"prime-agent","version":"0.1.2-continuous.0000042"}\n' \
+    > "$fixture/payload/package.json"
+  printf '# quickstart stub\n' > "$fixture/payload/docs/RUST_QUICKSTART.md"
+  printf 'LICENSE stub\n' > "$fixture/payload/LICENSE"
+  tarball="prime-agent-0.1.2-$2.tar.gz"
+  tar -czf "$fixture/$tarball" -C "$fixture/payload" .
+  ( cd "$fixture" && sha256sum "$tarball" > SHA256SUMS )
+  printf '{"commit":"0000042000420042000420042000420042000420"}\n' > "$fixture/manifest.json"
+}
+
+# --- one sandboxed machine -----------------------------------------------------
+new_machine() { # name
+  base="$(mktemp -d "${TMPDIR:-/tmp}/installtest-home.XXXXXX")"
+  mach="$base/$1"
+  mkdir -p "$mach/home" "$mach/tmp" "$mach/mocks" "$mach/npm-global/prime-agent" \
+           "$mach/logs"
+  echo "$mach"
+}
+
+seed_ts_native() { # mach  — the TS product's own install.sh layout
+  home="$1/home"
+  root="$home/.local/share/prime-agent"
+  release="9.9.9-linux-x64-0000000000000000000000000000000000000000000000000000000000000000"
+  mkdir -p "$root/releases/$release" "$root/bin" "$home/.local/bin"
+  printf 'prime-agent-native-v1\n' > "$root/.managed"
+  printf '#!/bin/sh\necho ts-binary\n' > "$root/releases/$release/prime-agent"
+  chmod 0755 "$root/releases/$release/prime-agent"
+  ln -s "../releases/$release/prime-agent" "$root/bin/prime-agent"
+  ln -s "$root/bin/prime-agent" "$home/.local/bin/prime-agent"
+  printf '{"name":"prime-agent","version":"9.9.9"}\n' \
+    > "$1/npm-global/prime-agent/package.json"
+}
+
+seed_store() { # mach  — ~/.prime/agent with one session file
+  sessions="$1/home/.prime/agent/sessions"
+  mkdir -p "$sessions"
+  printf '{"type":"session_info","name":"sandbox session"}\n{"type":"message"}\n' \
+    > "$sessions/sess-0001.jsonl"
+}
+
+seed_old_rust_layout() { # mach  — a pre-takeover install-rust.sh machine
+  home="$1/home"
+  old="$home/.local/share/prime-agent-rust"
+  mkdir -p "$old" "$home/.local/bin"
+  printf '#!/bin/sh\necho old-rust-binary\n' > "$old/prime-agent"
+  chmod 0755 "$old/prime-agent"
+  printf 'old tree marker\n' > "$old/old-tree-marker.txt"
+  cat > "$home/.local/bin/prime-agent-rust" <<'LAUNCHER'
+#!/bin/sh
+# prime-agent-rust — launcher written by install-rust.sh.
+exec "$(dirname "$0")/../share/prime-agent-rust/prime-agent" "$@"
+LAUNCHER
+  chmod 0755 "$home/.local/bin/prime-agent-rust"
+}
+
+store_snapshot() { # mach -> "file-list-hash:content-hash"
+  store="$1/home/.prime/agent"
+  listing="$(cd "$store" && find . | LC_ALL=C sort)"
+  content="$(cd "$store" && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum)"
+  echo "${listing}|${content}"
+}
+
+start_daemon() { # mach active-session-count  — boots the mock TS daemon on the TS socket
+  mach="$1"; count="$2"
+  sockdir="$mach/tmp/prime-agent-${REAL_UID}"
+  mkdir -p "$sockdir"
+  python3 "$mach/ts-daemon-mock.py" \
+    "$sockdir/daemon.sock" "$mach/logs/daemon-mock.log" "$mach/logs/daemon-ready" \
+    "$count" &
+  pid=$!
+  MOCK_PIDS="$MOCK_PIDS $pid"
+  i=0
+  while [ ! -f "$mach/logs/daemon-ready" ] && [ $i -lt 100 ]; do
+    i=$((i + 1))
+    sleep 0.05
+  done
+  [ -f "$mach/logs/daemon-ready" ] || fail "mock TS daemon never became ready"
+}
+
+run_installer() { # mach extra-args...  -> runs the installer, returns its exit code
+  mach="$1"; shift
+  HOME="$mach/home" TMPDIR="$mach/tmp" \
+  GH_FIXTURE_DIR="$mach/fixture" NPM_MOCK_LOG="$mach/logs/npm-mock.log" \
+  NPM_MOCK_ROOT="$mach/npm-global" \
+  PATH="$mach/mocks:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    sh "$INSTALLER" "$@" > "$mach/install.log" 2>&1
+}
+
+echo "== fixture =="
+FIXTURE_TRIPLE=x86_64-unknown-linux-gnu
+[ "$(uname -m)" = "aarch64" ] && FIXTURE_TRIPLE=aarch64-unknown-linux-gnu
+
+# ==============================================================================
+echo "== case 1: the full takeover (idle TS daemon, TS native tree, npm TS, old rust layout) =="
+mach="$(new_machine main)"
+write_daemon_mock "$mach/ts-daemon-mock.py"
+write_gh_mock "$mach/mocks/gh"
+write_npm_mock "$mach/mocks/npm" "$mach/npm-global" "$mach/logs/npm-mock.log"
+build_fixture "$mach" "$FIXTURE_TRIPLE"
+seed_ts_native "$mach"
+seed_store "$mach"
+seed_old_rust_layout "$mach"
+start_daemon "$mach" 0
+store_before="$(store_snapshot "$mach")"
+session_hash_before="$(sha256sum "$mach/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)"
+
+run_installer "$mach"
+rc=$?
+assert_eq "case 1 installer exits 0" 0 "$rc"
+assert_contains "case 1 install log mentions the clean TS daemon stop" "$mach/install.log" "stopped cleanly (idle; no signal sent)"
+
+# (a) the launcher lands at bin/prime-agent and is ours
+assert_eq "case 1 (a) launcher at bin/prime-agent" "yes" \
+  "$([ -f "$mach/home/.local/bin/prime-agent" ] && [ ! -L "$mach/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_contains "case 1 (a) launcher is this installer's shim" "$mach/home/.local/bin/prime-agent" "launcher written by install-rust.sh"
+assert_contains "case 1 (a) launcher execs the new share dir" "$mach/home/.local/bin/prime-agent" "share/prime-agent/prime-agent"
+
+# (b) the shared store is byte-identical
+store_after="$(store_snapshot "$mach")"
+assert_eq "case 1 (b) ~/.prime/agent untouched (tree+bytes)" "$store_before" "$store_after"
+session_hash_after="$(sha256sum "$mach/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)"
+assert_eq "case 1 (b) session file byte-identical" "$session_hash_before" "$session_hash_after"
+
+# (c) the TS daemon was stopped cleanly, via the schema-id stop-when-idle path
+assert_contains "case 1 (c) idle probe sent a list request" "$mach/logs/daemon-mock.log" '"type":"list"'
+assert_contains "case 1 (c) clean shutdown requested (force:false)" "$mach/logs/daemon-mock.log" '"type":"shutdown","force":false'
+assert_contains "case 1 (c) mock daemon shut itself down" "$mach/logs/daemon-mock.log" "SHUTDOWN"
+assert_contains "case 1 (c) mock daemon exited on its own (never killed)" "$mach/logs/daemon-mock.log" "EXIT"
+assert_not_contains "case 1 (c) no force-kill request" "$mach/logs/daemon-mock.log" '"force":true'
+
+# (d) migration + rollback + legacy preservation
+assert_eq "case 1 (d) old share dir migrated away" "gone" \
+  "$([ -e "$mach/home/.local/share/prime-agent-rust" ] && echo here || echo gone)"
+old_count=0
+for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  [ -e "$d" ] && old_count=$((old_count + 1))
+done
+assert_eq "case 1 (d) exactly one .old rollback generation" 1 "$old_count"
+for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  [ -e "$d/old-tree-marker.txt" ] && ok "case 1 (d) .old rollback holds the old install" \
+    || fail "case 1 (d) .old rollback lost the old install tree"
+done
+assert_eq "case 1 (d) new payload published" "yes" \
+  "$([ -x "$mach/home/.local/share/prime-agent/prime-agent" ] && echo yes || echo no)"
+assert_contains "case 1 (d) payload is the fixture binary" "$mach/home/.local/share/prime-agent/package.json" "0.1.2-continuous.0000042"
+assert_eq "case 1 (d) TS native tree preserved under legacy name" "yes" \
+  "$([ -f "$mach/home/.local/share/prime-agent-legacy/.managed" ] && echo yes || echo no)"
+assert_contains "case 1 (d) legacy tree keeps the TS marker" "$mach/home/.local/share/prime-agent-legacy/.managed" "prime-agent-native-v1"
+legacy_release=no
+for legacy_bin in "$mach"/home/.local/share/prime-agent-legacy/releases/*/prime-agent; do
+  [ -x "$legacy_bin" ] && legacy_release=yes
+done
+assert_eq "case 1 (d) legacy tree keeps the TS release binary" "yes" "$legacy_release"
+assert_eq "case 1 (d) old prime-agent-rust launcher retired" "gone" \
+  "$([ -e "$mach/home/.local/bin/prime-agent-rust" ] && echo here || echo gone)"
+
+# (e) the TS npm package was uninstalled via npm
+assert_contains "case 1 (e) npm uninstall -g prime-agent was called" "$mach/logs/npm-mock.log" "uninstall -g prime-agent"
+assert_eq "case 1 (e) npm global package removed" "gone" \
+  "$([ -f "$mach/npm-global/prime-agent/package.json" ] && echo here || echo gone)"
+
+# the publication lock is cleaned up
+assert_eq "case 1 lock released" "gone" \
+  "$([ -e "$mach/home/.local/share/.prime-agent-install.lock" ] && echo here || echo gone)"
+assert_contains "case 1 install log names the source commit" "$mach/install.log" "0000042"
+
+# (g) idempotent re-run via --update
+store_before2="$(store_snapshot "$mach")"
+run_installer "$mach" --update
+rc2=$?
+assert_eq "case 1 (g) --update re-run exits 0" 0 "$rc2"
+store_after2="$(store_snapshot "$mach")"
+assert_eq "case 1 (g) ~/.prime/agent still untouched" "$store_before2" "$store_after2"
+old_count2=0
+for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  [ -e "$d" ] && old_count2=$((old_count2 + 1))
+done
+assert_eq "case 1 (g) still exactly one .old generation" 1 "$old_count2"
+assert_eq "case 1 (g) launcher still ours after --update" "yes" \
+  "$([ -f "$mach/home/.local/bin/prime-agent" ] && [ ! -L "$mach/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+uninstalls=$(grep -c "uninstall -g prime-agent" "$mach/logs/npm-mock.log" || true)
+assert_eq "case 1 (g) exactly one npm uninstall across both runs" 1 "$uninstalls"
+
+# ==============================================================================
+echo "== case 2: a BUSY TS daemon is left running (stop-when-idle, never a kill) =="
+mach2="$(new_machine busy)"
+write_daemon_mock "$mach2/ts-daemon-mock.py"
+write_gh_mock "$mach2/mocks/gh"
+write_npm_mock "$mach2/mocks/npm" "$mach2/npm-global" "$mach2/logs/npm-mock.log"
+build_fixture "$mach2" "$FIXTURE_TRIPLE"
+seed_store "$mach2"
+start_daemon "$mach2" 1
+store_before_b="$(store_snapshot "$mach2")"
+run_installer "$mach2"
+rcb=$?
+assert_eq "case 2 installer still exits 0" 0 "$rcb"
+assert_contains "case 2 installer reports the busy daemon was left running" "$mach2/install.log" "left running (never killed)"
+assert_not_contains "case 2 no shutdown request to the busy daemon" "$mach2/logs/daemon-mock.log" '"type":"shutdown"'
+assert_not_contains "case 2 busy mock daemon was not stopped" "$mach2/logs/daemon-mock.log" "SHUTDOWN"
+assert_eq "case 2 launcher installed anyway" "yes" \
+  "$([ -f "$mach2/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_eq "case 2 ~/.prime/agent untouched" "$store_before_b" "$(store_snapshot "$mach2")"
+
+# ==============================================================================
+echo "== case 3: the guard refuses PRIME_AGENT_RUST_PREFIX inside the shared store =="
+mach3="$(new_machine guard)"
+write_daemon_mock "$mach3/ts-daemon-mock.py"
+write_gh_mock "$mach3/mocks/gh"
+build_fixture "$mach3" "$FIXTURE_TRIPLE"
+seed_store "$mach3"
+HOME="$mach3/home" TMPDIR="$mach3/tmp" GH_FIXTURE_DIR="$mach3/fixture" \
+PRIME_AGENT_RUST_PREFIX="$mach3/home/.prime/agent" \
+PATH="$mach3/mocks:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+  sh "$INSTALLER" > "$mach3/install.log" 2>&1
+rcg=$?
+assert_eq "case 3 installer aborts" 1 "$rcg"
+assert_contains "case 3 refusal names the shared store" "$mach3/install.log" "refusing to touch"
+assert_contains "case 3 refusal explains the invariant" "$mach3/install.log" "must never be created, migrated, or deleted"
+assert_eq "case 3 nothing was written under the store" "yes" \
+  "$([ ! -e "$mach3/home/.prime/agent/share" ] && [ ! -e "$mach3/home/.prime/agent/bin" ] && echo yes || echo no)"
+assert_eq "case 3 session file intact" "$(sha256sum "$mach3/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)" \
+  "$(sha256sum "$mach3/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)"
+
+echo
+echo "passed: $passed  failed: $failures"
+[ "$failures" -eq 0 ] || exit 1
+exit 0

@@ -63,8 +63,9 @@ impl HoldIdentity {
 /// executable cannot be resolved or does not match a known shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HolderFlavor {
-    /// This Rust build (another window or daemon of the same binary, a
-    /// `prime-agent-rust` install, or a cargo dev build).
+    /// This Rust build (another window or daemon of the same binary, an
+    /// install under the `prime-agent` keyword's share dir or the
+    /// pre-takeover `prime-agent-rust` dir, or a cargo dev build).
     ThisBuild,
     /// The TypeScript product: its release binary is named `prime-agent`
     /// (the Mach-O and npm installs both), and source/dev installs run
@@ -115,6 +116,26 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
         .any(|component| component == "prime-agent-rust")
     {
         return HolderFlavor::ThisBuild;
+    }
+    // The keyword-takeover install layout (install-rust.sh): the payload
+    // sits DIRECTLY inside the share dir — `.../share/prime-agent/prime-agent`
+    // — while a TS release binary always sits one level deeper
+    // (`.../releases/<name>/prime-agent`), so the parent component plus the
+    // absence of `releases` claims this product without ever claiming the
+    // TS tree (including the preserved `prime-agent-legacy` tree). The
+    // publish byproducts — `prime-agent.old.<pid>/` and
+    // `prime-agent.stage.<...>/` (a daemon still running from the renamed
+    // rollback or stage tree) — carry the same claim.
+    if components.len() >= 2 {
+        let parent = components[components.len() - 2].as_str();
+        let under_releases = components[..components.len() - 2]
+            .iter()
+            .any(|component| component == "releases");
+        let is_publish_byproduct =
+            parent.starts_with("prime-agent.old.") || parent.starts_with("prime-agent.stage.");
+        if (parent == "prime-agent" && !under_releases) || is_publish_byproduct {
+            return HolderFlavor::ThisBuild;
+        }
     }
     if let Some(index) = components
         .iter()
@@ -333,7 +354,7 @@ runtime lease."
             lines.push("• Continue where you left off:".to_string());
             if let Some(id) = id {
                 lines.push(format!(
-                    "  prime-agent-rust --daemon-socket <socket> --resume {}",
+                    "  prime-agent --daemon-socket <socket> --resume {}",
                     shell_quote(&single_line(id))
                 ));
                 lines.push(
@@ -342,7 +363,7 @@ you started it — that daemon owns this session)"
                         .to_string(),
                 );
             } else {
-                lines.push("  prime-agent-rust --resume".to_string());
+                lines.push("  prime-agent --resume".to_string());
                 lines.push(
                     "  (switch to the window or shell where that instance is running — its \
 daemon owns this session)"
@@ -350,7 +371,7 @@ daemon owns this session)"
                 );
             }
             lines.push(String::new());
-            lines.extend(take_over_lines(hold, "prime-agent-rust", holder_exe));
+            lines.extend(take_over_lines(hold, "prime-agent", holder_exe));
         }
         HolderFlavor::AnotherProcess => {
             lines.push(format!(
@@ -359,7 +380,7 @@ daemon owns this session)"
 runtime lease."
             ));
             lines.push(String::new());
-            lines.extend(take_over_lines(hold, "prime-agent-rust", holder_exe));
+            lines.extend(take_over_lines(hold, "prime-agent", holder_exe));
         }
     }
     lines.push(String::new());
@@ -473,7 +494,7 @@ Session: ts01ab";
         };
         let message = refusal_for_flavor(HolderFlavor::ThisBuild, &hold, None, None);
         assert!(
-            message.contains("prime-agent-rust --daemon-socket <socket> --resume 'rs01cd'"),
+            message.contains("prime-agent --daemon-socket <socket> --resume 'rs01cd'"),
             "the attach command names the flag and the session: {message}"
         );
         assert!(
@@ -495,7 +516,7 @@ Session: ts01ab";
             "the anonymous holder id renders: {message}"
         );
         assert!(
-            message.contains("prime-agent-rust shutdown --force"),
+            message.contains("prime-agent shutdown --force"),
             "without a pid the sweep command is the take-over path: {message}"
         );
     }
@@ -558,19 +579,42 @@ Session: ts01ab";
         );
     }
 
-    /// The classification matrix: this build's own exe, a
-    /// `prime-agent-rust` install, a cargo dev build under `/target/`,
-    /// the deployed TS Mach-O binary, a node-run TS install, and the
-    /// shapes that stay anonymous. The rust shapes contain the
+    /// The classification matrix: this build's own exe, the takeover and
+    /// pre-takeover install layouts (plus the publish-byproduct trees), a
+    /// cargo dev build under `/target/`, the deployed TS Mach-O binary
+    /// (including the preserved legacy tree), a node-run TS install, and
+    /// the shapes that stay anonymous. The rust shapes contain the
     /// `prime-agent` substring family, so their checks must win first.
     #[test]
     fn the_holder_classification_matrix() {
-        let own = Path::new("/Users/k/.local/share/prime-agent-rust/prime-agent");
+        let own = Path::new("/Users/k/.local/share/prime-agent/prime-agent");
         // This build's own exe: another window of it.
         assert_eq!(classify_from(Some(own), Some(own)), HolderFlavor::ThisBuild);
-        // A prime-agent-rust install elsewhere: still this product.
+        // The takeover install layout (install-rust.sh): the payload sits
+        // directly inside the share dir.
         assert_eq!(
-            classify_from(Some(Path::new("/opt/pa/prime-agent-rust")), Some(own)),
+            classify_from(
+                Some(Path::new("/Users/k/.local/share/prime-agent/prime-agent")),
+                Some(Path::new("/opt/pa/prime-agent"))
+            ),
+            HolderFlavor::ThisBuild
+        );
+        // A daemon still running from the renamed rollback tree.
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/Users/k/.local/share/prime-agent.old.123/prime-agent"
+                )),
+                Some(Path::new("/opt/pa/prime-agent"))
+            ),
+            HolderFlavor::ThisBuild
+        );
+        // The pre-takeover install dir: still this product.
+        assert_eq!(
+            classify_from(
+                Some(Path::new("/opt/pa/prime-agent-rust")),
+                Some(Path::new("/opt/pa/prime-agent"))
+            ),
             HolderFlavor::ThisBuild
         );
         // A cargo dev build: the /target/ shape names this product.
@@ -581,7 +625,30 @@ Session: ts01ab";
             ),
             HolderFlavor::ThisBuild
         );
-        // The deployed TS release binary: the Mach-O named `prime-agent`.
+        // The deployed TS release binary: the Mach-O named `prime-agent`,
+        // resolved through its managed root — and the preserved
+        // `prime-agent-legacy` tree after the takeover reads the same.
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/Users/k/.local/share/prime-agent/releases/9.9.9-darwin-arm64-deadbeef/prime-agent"
+                )),
+                Some(own)
+            ),
+            HolderFlavor::TypeScriptProduct
+        );
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/Users/k/.local/share/prime-agent-legacy/releases/9.9.9-darwin-arm64-deadbeef/prime-agent"
+                )),
+                Some(own)
+            ),
+            HolderFlavor::TypeScriptProduct
+        );
+        // The TS public-bin symlink shape inside a dir NAMED prime-agent
+        // (a pre-takeover TS root): still the TS product, never ours —
+        // only the payload DIRECTLY inside the share dir is this product.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -594,6 +661,17 @@ Session: ts01ab";
         // An npm-style TS bin.
         assert_eq!(
             classify_from(Some(Path::new("/usr/local/bin/prime-agent")), Some(own)),
+            HolderFlavor::TypeScriptProduct
+        );
+        // A TS binary one level deeper than the takeover layout (a release
+        // dir) never claims this product even without the managed root.
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/opt/other/prime-agent/9.9.9-release/prime-agent"
+                )),
+                Some(own)
+            ),
             HolderFlavor::TypeScriptProduct
         );
         // A source-run TS install: node (and bun/deno) runtimes.
