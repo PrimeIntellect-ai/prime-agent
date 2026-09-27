@@ -16,6 +16,8 @@ pub const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const KERNEL_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_DEBOUNCE_MS: u64 = 1_500;
 pub const SNAPSHOT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
+/// Restore deserializes everything a snapshot serializes: bounded like the repair step.
+pub const RESTORE_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 pub const KERNEL_ABORT_GRACE_MS: u64 = 1_000;
 pub const KERNEL_BUSY_REUSE_WAIT_MS: u64 = 5_000;
 pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;

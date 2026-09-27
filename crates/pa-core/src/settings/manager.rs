@@ -790,6 +790,36 @@ impl SettingsManager {
         }
     }
 
+    /// The quota-park policy from settings
+    /// (`retry.provider.waitForUsage`; TS #2375): whether resets beyond
+    /// the bounded wait park the session, the per-park ceiling (clamped
+    /// to one week), and the per-episode park budget. Only the park keys
+    /// have a consumer until a wait-for-usage port lands.
+    pub fn get_provider_park_policy(
+        &self,
+    ) -> crate::session_engine::provider_park::ProviderParkPolicy {
+        let defaults = crate::session_engine::provider_park::DEFAULT_PROVIDER_PARK_POLICY;
+        let wait = self
+            .merged
+            .retry
+            .as_ref()
+            .and_then(|retry| retry.provider.as_ref())
+            .and_then(|provider| provider.wait_for_usage.as_ref());
+        crate::session_engine::provider_park::ProviderParkPolicy {
+            pause_until_reset: wait
+                .and_then(|wait| wait.pause_until_reset)
+                .unwrap_or(defaults.pause_until_reset),
+            max_pause_ms: wait
+                .and_then(|wait| wait.max_pause_ms)
+                .unwrap_or(defaults.max_pause_ms),
+            max_parks: wait
+                .and_then(|wait| wait.max_parks)
+                .map_or(defaults.max_parks, |parks| {
+                    parks.min(u32::MAX as u64) as u32
+                }),
+        }
+    }
+
     pub fn get_rlm_max_depth(&self) -> Option<u64> {
         self.global.rlm_max_depth
     }
@@ -934,19 +964,20 @@ fn load_scope(
     scope: SettingsScope,
     errors: &mut Vec<SettingsError>,
 ) -> (Settings, Option<serde_json::Value>, Option<String>) {
-    let mut content: Option<String> = None;
     let mut load_error: Option<String> = None;
-    let result = storage.with_lock(scope, &mut |current| {
-        content = current;
-        None
-    });
-    if let Err(error) = result {
-        errors.push(SettingsError {
-            scope,
-            message: error.to_string(),
-        });
-        return (Settings::default(), None, Some(error.to_string()));
-    }
+    // The pure-read arm: a locked protocol read on any cache miss, the
+    // process-cached copy on a hit (see `SettingsStorage::read`).
+    let content = match storage.read(scope) {
+        Ok(content) => content,
+        Err(error) => {
+            let message = error.to_string();
+            errors.push(SettingsError {
+                scope,
+                message: message.clone(),
+            });
+            return (Settings::default(), None, Some(message));
+        }
+    };
     let Some(content) = content else {
         return (Settings::default(), None, None);
     };

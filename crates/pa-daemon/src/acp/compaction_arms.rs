@@ -179,23 +179,35 @@ impl AcpSession {
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> (CompactionCheckRun, Option<pa_types::session::CustomMessage>) {
-        let Some(model) = mode.model.clone() else {
+        // The boundary reads the model and its request key as ONE pair
+        // through the config queue: a concurrent picker switch holds the
+        // same queue while it swaps the slots, so no arm can pair the
+        // pre-switch model with the switched provider's key.
+        let (model, api_key) = mode.model_and_api_key().await;
+        let Some(model) = model else {
             // TS reads `this.model?.contextWindow ?? 0`: a session
             // without a resolvable model never crosses a threshold.
             return (CompactionCheckRun::Proceed, None);
         };
-        match self.overflow_attempt(mode, assistant).await {
+        match self
+            .overflow_attempt(mode, assistant, &model, api_key.clone())
+            .await
+        {
             OverflowAttempt::Retry => return (CompactionCheckRun::OverflowRetry, None),
             // A matched case is done (TS `return false`): the requested
             // and threshold arms never fire after it.
             OverflowAttempt::Done => return (CompactionCheckRun::Proceed, None),
             OverflowAttempt::Continue => {}
         }
-        if self.requested_arm(mode, &model).await.was_consumed() {
+        if self
+            .requested_arm(mode, &model, api_key.clone())
+            .await
+            .was_consumed()
+        {
             return (CompactionCheckRun::RequestedStop, None);
         }
         let held = self
-            .threshold_arm(mode, &model, assistant, goal_queue)
+            .threshold_arm(mode, &model, api_key, assistant, goal_queue)
             .await;
         (CompactionCheckRun::Proceed, held)
     }
@@ -231,14 +243,17 @@ impl AcpSession {
     /// so a failed run is not silently re-run on the next boundary. The
     /// outcomes publish like the `/refine` command events.
     pub(super) async fn consume_requested_refine(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        // The config queue serializes the round against picker switches
+        // (the review runs on the model the session reports).
+        let _guard = mode.config_queue.lock().await;
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let Some(refinement) = mode
             .engine
             .consume_pending_refinement(
                 &model,
-                mode.api_key.clone(),
+                mode.current_api_key().await,
                 mode.agent_dir.as_path().to_path_buf(),
             )
             .await
@@ -293,6 +308,7 @@ impl AcpSession {
         &self,
         mode: &AcpModeState,
         model: &Model,
+        api_key: Option<String>,
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> Option<pa_types::session::CustomMessage> {
@@ -312,7 +328,7 @@ impl AcpSession {
             }
             _ => None,
         };
-        let outcome = run_compaction(self, engine, model, mode.api_key.clone(), None).await;
+        let outcome = run_compaction(self, engine, model, api_key, None).await;
         let cancelled = outcome
             .as_ref()
             .err()
@@ -331,7 +347,12 @@ impl AcpSession {
     /// The TS `_checkCompaction` requested arm: a pending `compact.run`
     /// request consumed at the boundary (any outcome consumed it; the
     /// run stops the turn loop on purpose).
-    async fn requested_arm(&self, mode: &AcpModeState, model: &Model) -> RequestedArmRun {
+    async fn requested_arm(
+        &self,
+        mode: &AcpModeState,
+        model: &Model,
+        api_key: Option<String>,
+    ) -> RequestedArmRun {
         let engine = &mode.engine;
         if !engine.turn_boundary.compaction_scheduled().await {
             return RequestedArmRun::None;
@@ -341,14 +362,7 @@ impl AcpSession {
             .take_compaction()
             .await
             .and_then(|pending| pending.instructions);
-        let outcome = run_compaction(
-            self,
-            engine,
-            model,
-            mode.api_key.clone(),
-            instructions.as_deref(),
-        )
-        .await;
+        let outcome = run_compaction(self, engine, model, api_key, instructions.as_deref()).await;
         self.finish_compaction(engine, CompactionOutcomeReason::Requested, outcome)
             .await;
         RequestedArmRun::Consumed
@@ -435,11 +449,10 @@ impl AcpSession {
         &self,
         mode: &AcpModeState,
         assistant: &AssistantMessage,
+        model: &Model,
+        api_key: Option<String>,
     ) -> OverflowAttempt {
         let engine = &mode.engine;
-        let Some(model) = mode.model.clone() else {
-            return OverflowAttempt::Continue;
-        };
         // TS `sameModel`: a model switch must not compact for the old
         // model's overflow.
         if assistant.provider != model.provider || assistant.model != model.id {
@@ -511,14 +524,7 @@ impl AcpSession {
             .take_compaction()
             .await
             .and_then(|pending| pending.instructions);
-        let outcome = run_compaction(
-            self,
-            engine,
-            &model,
-            mode.api_key.clone(),
-            instructions.as_deref(),
-        )
-        .await;
+        let outcome = run_compaction(self, engine, model, api_key, instructions.as_deref()).await;
         match outcome {
             Ok(CompactOutcome::Ran(run)) => {
                 if let Some(telemetry) = &engine.telemetry {
@@ -792,6 +798,11 @@ mod tests {
             session: Some(SessionEntry {
                 session,
                 prompt_task: None,
+                config: std::sync::Arc::new(super::super::InProcessConfig {
+                    published: tokio::sync::Mutex::new(Vec::new()),
+                    models: tokio::sync::Mutex::new(Vec::new()),
+                }),
+                config_refresh: None,
             }),
             session_new_in_flight: false,
             session_close_in_flight: false,
@@ -800,9 +811,11 @@ mod tests {
             engine: engine.clone(),
             actual_cwd: std::sync::Arc::new(dir.path().to_path_buf()),
             product_version: std::sync::Arc::new("test".to_string()),
-            model: Some(model),
-            api_key: None,
+            model: std::sync::Arc::new(Mutex::new(Some(model))),
+            api_key: std::sync::Arc::new(Mutex::new(None)),
+            config_queue: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             agent_dir: std::sync::Arc::new(agent_dir),
+            provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             autonomous_config: None,
             mcp: engine.mcp_manager.clone(),
             mcp_owner_id: std::sync::Arc::new("acp-test-owner".to_string()),

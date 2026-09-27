@@ -141,6 +141,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 retained_message_count: None,
                 custom_instructions: payload.custom_instructions.clone(),
                 harness_digest: payload.harness_digest.clone(),
+                harness_state_fingerprint: payload.harness_state_fingerprint.clone(),
                 timestamp: super::super::session::timestamp_to_millis(entry.timestamp()),
             }))
         }
@@ -379,14 +380,16 @@ pub async fn generate_branch_summary(
             };
             // A JoinError (the closure panicked) degrades to the session
             // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning.
-            let routed =
-                join.await
-                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
-                        model: model.clone(),
-                        api_key: api_key.clone(),
-                        headers: None,
-                    });
+            // selector resolves to the fallback with the warning. The
+            // fallback keeps the merged headers (the registry's single
+            // owner of the team header).
+            let routed = join.await.unwrap_or_else(|_| {
+                super::auxiliary_model::session_fallback_with_headers(
+                    context,
+                    model,
+                    api_key.clone(),
+                )
+            });
             (routed.model, routed.api_key, routed.headers)
         }
         None => (model.clone(), api_key.clone(), None),
@@ -583,6 +586,7 @@ mod tests {
                 custom_instructions: None,
                 usage: None,
                 harness_digest: None,
+                harness_state_fingerprint: None,
             },
             base: EntryBase {
                 id: Some("c0".to_string()),

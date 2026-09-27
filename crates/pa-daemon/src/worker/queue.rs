@@ -347,19 +347,20 @@ pub(crate) fn checkpoint_queue_recovery(
     // The verdict never publishes over a snapshot that did not persist:
     // busy=true evidence must not promise a queue the journal cannot
     // replay (a skipped settled verdict keeps the previous record — the
-    // worst case parks like any uncheckpointed session).
-    if journal
-        .record_queue_snapshot(&active_session_id, &lanes.steering, &lanes.follow_up)
-        .is_err()
-    {
-        return;
-    }
-    let _ = journal.record(
+    // worst case parks like any uncheckpointed session). The pair rides
+    // ONE durable append — the snapshot line and the verdict line share a
+    // single journal flush, landing together or not at all (the unchanged
+    // verdict keeps appending the snapshot alone, exactly like the
+    // sequential form); a failed batch lands neither record, so the
+    // checkpoint is simply skipped.
+    let _ = journal.record_queue_checkpoint(
         &active_session_id,
         &session_id,
         session_file.as_deref(),
         busy,
         operation,
+        &lanes.steering,
+        &lanes.follow_up,
     );
 }
 

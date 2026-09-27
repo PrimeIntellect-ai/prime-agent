@@ -2006,8 +2006,14 @@ impl AgentView {
 
 /// The encoded flush rows leave the process in slices of at most this
 /// many bytes: big enough that each PTY write stays one syscall, small
-/// enough that the flush buffer never holds the transcript.
-const CHUNK_BYTES: usize = 256 * 1024;
+/// enough that the flush buffer never holds the transcript. 32KiB also
+/// bounds the exit guard's blind window on a slow terminal: a completed
+/// chunk write is the guard's progress proof (the writer blocks inside a
+/// chunk while the terminal drains, invisible from userspace), and at
+/// this size a drain of at least ~65KB/s completes chunks within the
+/// guard's grace window — the flush rides out a slow drain instead of
+/// tripping the 1500ms force-quit deadline mid-write.
+const CHUNK_BYTES: usize = 32 * 1024;
 
 /// The streaming main-screen flush state: feeds the inline frame's rows
 /// section by section, routes them between the append stream and the
@@ -2044,6 +2050,11 @@ impl FlushSink {
                 if self.chunk.len() >= CHUNK_BYTES {
                     out.write_all(self.chunk.as_bytes())?;
                     self.chunk.clear();
+                    // A completed chunk write is exit-path progress: the
+                    // exit guard holds its force-quit while these keep
+                    // landing, so a slow terminal drains the flush
+                    // instead of dying mid-write.
+                    crate::exit_guard::note_exit_progress();
                 }
             } else if self.repaint || index >= self.flushed.len() {
                 // Rows inside the flushed frame landed in the ring while
@@ -2086,6 +2097,7 @@ impl FlushSink {
             if !self.chunk.is_empty() {
                 out.write_all(self.chunk.as_bytes())?;
                 self.chunk.clear();
+                crate::exit_guard::note_exit_progress();
             }
         } else if self.repaint || self.texts.len() < self.flushed.len() {
             // A frame that shrank never rewinds into a rewrite of
@@ -2095,6 +2107,7 @@ impl FlushSink {
             crate::interactive::write_flush_rows(&mut buffer, &ring);
             out.write_all(buffer.as_bytes())?;
             self.chunk.clear();
+            crate::exit_guard::note_exit_progress();
         }
         Ok(())
     }
