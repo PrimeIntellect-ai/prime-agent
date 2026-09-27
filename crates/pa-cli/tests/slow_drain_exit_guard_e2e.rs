@@ -50,7 +50,12 @@ const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
 /// reset) — the boundary between the flushed rows and the restore.
 const TAIL_MARK: &[u8] = b"\x1b[?2026l\x1b[0m";
 /// The watchdog's user-visible line, printed only on a genuine forced
-/// exit.
+/// exit. The re-executed test binary's libtest harness captures stderr
+/// per test, so the line never reaches the pty in this harness — the
+/// fire is asserted structurally (see `a_stalled_drain_still_fires`),
+/// and the line itself is asserted on the real product binary by the
+/// lane's VM bench legs.
+#[allow(dead_code)]
 const STALL_MSG: &[u8] = b"shutdown stalled; forced exit.";
 /// The transcript rows this harness seeds: `row <index>` text, the same
 /// needle family the kitty-release e2e drives. The startup paint shows
@@ -72,6 +77,9 @@ const SEED_MESSAGES: usize = 1_600;
 /// so this is the mount needle; the first row only ever appears in the
 /// exit flush (the completeness assertion).
 const LAST_ROW: &[u8] = b"row 1599";
+/// The dock's exit-hint row (rendered after every transcript row in the
+/// flush): the flush-completeness anchor for the stream's tail.
+const EXIT_HINT_ROW: &[u8] = b"Press Ctrl+C again to exit";
 
 #[test]
 fn slow_drain_child_mode() {
@@ -136,6 +144,10 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
         Some(0),
         "the child exits cleanly through its own exit path"
     );
+    // The terminal keeps draining after the process died: the kernel
+    // still holds every byte it accepted, and the assertions read the
+    // terminal's whole byte stream.
+    harness.settle();
     let output = harness.output();
     let _ = mark;
 
@@ -151,18 +163,25 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
         !find_subsequence(&output, STALL_MSG).is_some(),
         "a draining terminal must never read as a stalled shutdown"
     );
-    // The whole transcript flushed: the first and last seeded rows are
-    // both in the post-exit stream (the frozen scrollback contract).
-    let first_row_at = find_subsequence(&output, FIRST_ROW)
+    // The whole transcript flushed (the frozen scrollback contract). The
+    // LAST occurrence is the flush's copy: the startup viewport also
+    // paints the transcript tail before the exit. The needles use the
+    // user-message rows (rendered as contiguous text; assistant rows
+    // carry per-word SGR spans) and the dock's exit hint, which the
+    // dock renders after every chat row.
+    let first_row_at = find_subsequence_last(&output, FIRST_ROW)
         .expect("the flush wrote the transcript's first row");
-    let last_row = format!("row {}", SEED_MESSAGES - 1).into_bytes();
-    let last_row_at = find_subsequence(&output, &last_row)
-        .expect("the flush wrote the transcript's last row");
+    let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
+    let last_row_at = find_subsequence_last(&output, &last_user_row)
+        .expect("the flush wrote the transcript's last user row");
+    let dock_at = find_subsequence_last(&output, EXIT_HINT_ROW)
+        .expect("the flush wrote the dock rows");
     let leave_at = find_subsequence(&output, ALT_SCREEN_LEAVE)
         .expect("the exit left the alternate screen");
     assert!(
-        leave_at < first_row_at && first_row_at < last_row_at,
-        "the flushed rows follow the alt-screen leave"
+        leave_at < first_row_at && first_row_at < last_row_at && last_row_at < dock_at,
+        "the flushed rows follow the alt-screen leave (output {}B, leave_at {leave_at}, first_row_at {first_row_at}, last_row_at {last_row_at}, dock_at {dock_at})",
+        output.len()
     );
     // The restore tail lands after the flushed rows: the terminal is
     // handed back whole, not mid-transcript.
@@ -204,8 +223,12 @@ fn a_stalled_drain_still_fires_the_force_quit() {
         "the force-quit's restore writes block on the full pty until the drain resumes"
     );
 
-    // Resume the drain: the queued restore bytes and the forced-exit
-    // line land, and the process dies with the guard's exit code.
+    // Resume the drain: the watchdog has fired (the stall outlasted the
+    // deadline and the grace window), and its forced restore is queued
+    // behind the writer's blocked chunk write on the stdout lock — the
+    // restore bytes land as soon as the drain frees space, and the
+    // process dies with the guard's exit code, the flush truncated at
+    // the stall point exactly as the forced exit defines it.
     let _ = harness.pump_until_exit(READ_RATE_BYTES_PER_S, Duration::from_secs(60));
     let exit_wall = keys_sent.elapsed();
     assert_eq!(
@@ -213,9 +236,39 @@ fn a_stalled_drain_still_fires_the_force_quit() {
         Some(0),
         "the forced exit ends the process with the guard's exit code"
     );
+    harness.settle();
+    let output2 = harness.output();
+    // The forced-exit line itself goes to stderr, which the re-executed
+    // test binary's libtest harness captures per test (never reaching
+    // the pty); the REAL binary's message is asserted by the lane's VM
+    // bench legs. Here the fire is asserted structurally: the forced
+    // restore writes its own alt-screen leave on top of the exit path's
+    // (a clean leg leaves the alternate screen exactly once), and the
+    // flush never reaches the transcript tail the drain would have
+    // needed seconds more to consume.
+    let leave_count = output2
+        .windows(ALT_SCREEN_LEAVE.len())
+        .filter(|w| *w == ALT_SCREEN_LEAVE)
+        .count();
     assert!(
-        find_subsequence(&harness.output(), STALL_MSG).is_some(),
-        "a stalled drain is a stalled shutdown: the watchdog must still fire (wall {exit_wall:?})"
+        leave_count >= 2,
+        "the forced restore ran after the exit path's own leave (leaves {leave_count}, wall {exit_wall:?})"
+    );
+    // The last user row appears exactly once: the startup viewport's
+    // copy. A healthy drain (the slow leg) flushes a second copy into
+    // the stream; the forced exit cuts the flush before it.
+    let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
+    let last_user_copies = output2
+        .windows(last_user_row.len())
+        .filter(|w| *w == last_user_row.as_slice())
+        .count();
+    assert_eq!(
+        last_user_copies, 1,
+        "the stalled drain must not read as a healthy one: the flush is cut at the stall (wall {exit_wall:?})"
+    );
+    assert!(
+        exit_wall < Duration::from_secs(8),
+        "the forced exit lands inside the stall window plus the grace (wall {exit_wall:?})"
     );
 }
 
