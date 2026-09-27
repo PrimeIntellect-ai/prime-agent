@@ -64,14 +64,26 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     Ok(())
 }
 
-/// How the temp journal lands on its path.
+/// How the temp journal lands on its path, and whether its data rides a
+/// full sync before the swap: the two are one seam — each variant is the
+/// sync class its TS counterpart (or Rust-native owner) carries.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
     /// Rename through `rename_onto`: the bounded win32 destination-busy
-    /// retry (TS `writeFileAtomicSync` -> `renameOntoSync`).
+    /// retry (TS `writeFileAtomicSync` -> `renameOntoSync`), with the
+    /// temp file synced before the swap (TS `fsync: true`).
     RetryBusy,
-    /// Bare rename; every failure surfaces immediately (TS
-    /// `worker-recovery-journal.ts` uses plain `renameSync` - no retry).
+    /// Bare rename with the temp file synced before the swap: every
+    /// failure surfaces immediately. The Rust-native terminal-compaction
+    /// journal (no TS counterpart) keeps its belt.
+    Synced,
+    /// Bare rename with an UNSYNCED temp (TS
+    /// `worker-recovery-journal.ts` compact: `writeFileSync` + plain
+    /// `renameSync` — no retry, no temp fsync): the OS carries the temp
+    /// data to the rename. Durability is owned by the append path — the
+    /// compacted form holds only records the append path already made
+    /// durable, so a lost compact falls back to the append-only history,
+    /// which replays identically.
     Bare,
 }
 
@@ -86,11 +98,13 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.write_all(line.as_bytes())?;
         }
         writer.flush()?;
-        writer.get_ref().sync_all()?;
+        if !matches!(finalize, Finalize::Bare) {
+            writer.get_ref().sync_all()?;
+        }
     }
     let rename = match finalize {
         Finalize::RetryBusy => pa_core::platform::rename_onto(&temp, path),
-        Finalize::Bare => fs::rename(&temp, path),
+        Finalize::Synced | Finalize::Bare => fs::rename(&temp, path),
     };
     rename.with_context(|| format!("persist {}", path.display()))?;
     Ok(())
@@ -529,9 +543,15 @@ impl WorkerRecoveryJournal {
             recorded_at: crate::util::now_iso(),
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
-        let all_idle = self.latest.values().all(|entry| !entry.busy) && !busy;
         self.latest.insert(active_session_id.to_string(), record);
-        if all_idle {
+        // TS parity: the all-idle check includes the just-landed record
+        // (TS `record` runs `[...this.latest.values()].every(!busy)`
+        // AFTER `set`). Checking before the insert let the session's own
+        // busy admission record block its settle's compaction, so a
+        // single-session journal never compacted and grew append-only
+        // for the session's lifetime; the compaction now fires at every
+        // changed-idle record like TS, keeping the file bounded.
+        if self.latest.values().all(|entry| !entry.busy) {
             self.compact()?;
         }
         Ok(())
@@ -627,9 +647,12 @@ impl WorkerRecoveryJournal {
         self.queue_snapshots
             .insert(active_session_id.to_string(), snapshot);
         if let Some(record) = record {
-            let all_idle = self.latest.values().all(|entry| !entry.busy) && !busy;
             self.latest.insert(active_session_id.to_string(), record);
-            if all_idle {
+            // TS parity (the same post-insert check as `record`): the
+            // settle's compaction fires on the all-idle map that includes
+            // the just-landed verdict, never blocked by the session's own
+            // busy admission record.
+            if self.latest.values().all(|entry| !entry.busy) {
                 self.compact()?;
             }
         }
@@ -928,6 +951,153 @@ mod tests {
         assert!(result.is_err());
         // The in-memory verdict did not advance over the failed append.
         assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// TS parity oracle: a single session's settle compacts (the post-
+    /// insert all-idle check). The OLD pre-insert check let the session's
+    /// own busy admission record block the compaction, so a single-session
+    /// journal grew append-only forever; TS compacts at every changed-idle
+    /// record and so does the port now.
+    #[test]
+    fn worker_journal_settle_compacts_single_session() {
+        let path = temp_path("settle-compacts.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        // Two busy/idle cycles through the plain `record` path: the first
+        // settle compacts to one line, so the second admission starts from
+        // a one-line file (two lines mid-flight, one after the settle) —
+        // without the settle compaction the file would grow 2 lines per
+        // cycle.
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "the first settle compacted to the latest record"
+        );
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap().lines().count(),
+            2,
+            "the second admission grows the compacted file"
+        );
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
+            .unwrap();
+        // The settle compacted: the file holds exactly the latest record.
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "the settle compacts to the latest record");
+        let record: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(record["busy"], false);
+        assert_eq!(record["operation"], "turn_end");
+        // The compacted journal replays the same latest state.
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        let latest = reopened.get_latest();
+        assert_eq!(latest.len(), 1);
+        assert!(!latest[0].busy);
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The settle through the batched checkpoint compacts to the same
+    /// two lines (idle verdict + latest snapshot) and restores the same
+    /// queue lanes a pre-compact append-only history would.
+    #[test]
+    fn worker_journal_batched_settle_compacts_and_restores() {
+        let path = temp_path("batched-settle.recovery.jsonl");
+        let item = WorkerQueueItemRecord {
+            message: "steer me".to_string(),
+            priority: Some(crate::worker::QueuePriority::Human),
+            preview: Some("preview".to_string()),
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+            policy: queue_policy_default(),
+        };
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        // Two turns: each admission batch grows the file; each settle
+        // compacts it back — without the compaction the second admission
+        // would stack on the first turn's history (6 lines by the end).
+        journal
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
+            )
+            .unwrap();
+        journal
+            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .unwrap();
+        let after_first_settle = fs::read_to_string(&path).unwrap().lines().count();
+        journal
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
+            )
+            .unwrap();
+        let after_second_admission = fs::read_to_string(&path).unwrap().lines().count();
+        journal
+            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "the settle compacts to verdict + snapshot");
+        assert_eq!(after_first_settle, 2, "the first settle compacted");
+        assert_eq!(after_second_admission, 4, "the second admission grew the file");
+        let verdict: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(verdict["busy"], false);
+        assert_eq!(verdict["operation"], "turn_end");
+        let snapshot: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(snapshot["type"], "queue_snapshot");
+        // the compact keeps the LATEST snapshot per session: the settle's
+        // (empty) lanes, not the admission's parked row.
+        assert_eq!(snapshot["steering"].as_array().map(Vec::len), Some(0));
+        // The reopened journal restores the settled verdict and the
+        // settle's (empty) lanes exactly like the append-only history.
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        let restored = reopened.latest_queue_snapshot("s1").unwrap();
+        assert_eq!(restored.0, Vec::new());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// An unchanged verdict appends the snapshot alone and never compacts
+    /// (TS `record` early-returns before its compaction check): the
+    /// compaction belongs to changed-idle records only.
+    #[test]
+    fn worker_journal_unchanged_verdict_does_not_compact() {
+        let path = temp_path("unchanged-nocompact.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[])
+            .unwrap();
+        journal
+            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
+            .unwrap();
+        let lines_after_settle = fs::read_to_string(&path).unwrap().lines().count();
+        // The unchanged settle: the snapshot lands, the verdict does not,
+        // and no compaction runs (the map never changed).
+        journal
+            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
+            .unwrap();
+        let lines_after_unchanged = fs::read_to_string(&path).unwrap().lines().count();
+        assert_eq!(lines_after_unchanged, lines_after_settle + 1);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
