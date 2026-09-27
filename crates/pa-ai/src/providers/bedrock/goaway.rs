@@ -31,7 +31,7 @@ struct GoAwayTracker {
     payload_remaining: usize,
     /// The current frame is a connection-level GOAWAY.
     tracking_goaway: bool,
-    /// First bytes of a GOAWAY payload (last_stream_id + error code prefix).
+    /// First bytes of a GOAWAY payload (`last_stream_id` + error code prefix).
     goaway_prefix: Vec<u8>,
     /// The last GOAWAY error code received from the peer.
     last_goaway_code: Option<u32>,
@@ -104,8 +104,7 @@ impl GoAwayObserver {
     fn last_goaway_code(&self) -> Option<u32> {
         self.inner
             .lock()
-            .map(|tracker| tracker.last_goaway_code)
-            .unwrap_or(None)
+            .map_or(None, |tracker| tracker.last_goaway_code)
     }
 
     /// The mid-body failure detail behind an `h2` error, preferring a

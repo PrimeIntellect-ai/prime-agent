@@ -29,8 +29,10 @@ pub use stream::stream_anthropic;
 
 pub const API_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 
-/// Claude Code version mimicked in OAuth mode.
-const CLAUDE_CODE_VERSION: &str = "2.1.261";
+/// Claude Code version mimicked in OAuth mode. The API gates newer models
+/// on the claimed client version (e.g. claude-opus-5.5 requires >= 2.280),
+/// so keep this at or above the latest released Claude Code.
+const CLAUDE_CODE_VERSION: &str = "2.1.281";
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
@@ -58,8 +60,7 @@ pub(crate) fn to_claude_code_name(name: &str) -> String {
     CLAUDE_CODE_TOOLS
         .iter()
         .find(|tool| tool.eq_ignore_ascii_case(name))
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| name.to_string())
+        .map_or_else(|| name.to_string(), std::string::ToString::to_string)
 }
 
 pub(crate) fn from_claude_code_name(name: &str, tools: Option<&[Tool]>) -> String {
@@ -263,7 +264,6 @@ fn map_thinking_level_to_effort(
         return match mapped.as_str() {
             "low" => AnthropicEffort::Low,
             "medium" => AnthropicEffort::Medium,
-            "high" => AnthropicEffort::High,
             "xhigh" => AnthropicEffort::Xhigh,
             "max" => AnthropicEffort::Max,
             _ => AnthropicEffort::High,
@@ -274,7 +274,6 @@ fn map_thinking_level_to_effort(
         Some(ModelThinkingLevel::Medium) => AnthropicEffort::Medium,
         Some(ModelThinkingLevel::Xhigh) => AnthropicEffort::Xhigh,
         Some(ModelThinkingLevel::Max) => AnthropicEffort::Max,
-        Some(ModelThinkingLevel::High) => AnthropicEffort::High,
         _ => AnthropicEffort::High,
     }
 }
@@ -290,8 +289,7 @@ pub(crate) fn should_use_fine_grained_tool_streaming_beta(
     context
         .tools
         .as_ref()
-        .map(|tools| !tools.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|tools| !tools.is_empty())
         && !get_anthropic_compat(model).supports_eager_tool_input_streaming
 }
 
@@ -310,7 +308,6 @@ pub(crate) fn headers_to_pairs(headers: &Map<String, Value>) -> Vec<(String, Str
         .iter()
         .filter_map(|(key, value)| match value {
             Value::String(text) => Some((key.clone(), text.clone())),
-            Value::Null => None,
             _ => None,
         })
         .collect()
@@ -399,7 +396,7 @@ pub(crate) fn build_request_headers(
                     json!(["claude-code-20250219", "oauth-2025-04-20"]
                         .iter()
                         .chain(beta_features.iter())
-                        .cloned()
+                        .copied()
                         .collect::<Vec<_>>()
                         .join(",")),
                 );
@@ -457,7 +454,7 @@ pub fn stream_simple_anthropic(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
@@ -507,7 +504,7 @@ pub fn stream_simple_anthropic(
                 stop_reason_raw: None,
                 error_message: Some(message),
                 timestamp: now_ms(),
-                rest: Default::default(),
+                rest: Map::default(),
             };
             writer.push(AssistantMessageEvent::Error {
                 reason: crate::types::ErrorStopReason::Error,
@@ -584,5 +581,52 @@ mod always_on_adaptive_thinking_tests {
     fn optional_thinking_models_still_accept_disabled() {
         assert!(!is_always_on_adaptive_thinking_model("claude-opus-5"));
         assert!(!is_always_on_adaptive_thinking_model("claude-sonnet-5"));
+    }
+}
+
+#[cfg(test)]
+mod subscription_identity_tests {
+    use super::build_request_headers;
+    use crate::types::{zero_model_cost, Model, ModelInput};
+
+    // TS #2645's wire-contract assertions (anthropic-thinking-disable.test.ts):
+    // subscription requests claim the Claude Code client identity, and the
+    // claimed version must stay at or above what the API's model gates require
+    // (the opus-5.5 family rejects anything below 2.280).
+    fn test_model() -> Model {
+        Model {
+            id: "claude-opus-5-5".into(),
+            name: "Claude Opus 5.5".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 32_000,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn oauth_requests_claim_the_claude_code_identity() {
+        let (headers, is_oauth) =
+            build_request_headers(&test_model(), "sk-ant-oat-test", false, false, None, None);
+        assert!(is_oauth);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        let user_agent = header("user-agent").expect("the OAuth request sends a user-agent");
+        assert!(user_agent.starts_with("claude-cli/"), "got {user_agent}");
+        assert_eq!(header("x-app"), Some("cli"));
+        let beta = header("anthropic-beta").expect("the OAuth request sends the claude-code beta");
+        assert!(beta.contains("claude-code-20250219"));
     }
 }

@@ -142,8 +142,7 @@ pub(super) fn terminate_verified_residuals(
         let listeners = super::scan_listening_daemons(root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |elapsed| elapsed.as_millis());
         if listeners.is_empty() {
             previous_signature = None;
             quiet_since = quiet_since.or(Some(now));
@@ -186,9 +185,10 @@ pub(super) fn record_residuals(
     reason: &str,
 ) {
     for listener in listeners {
-        let identity = process_start_id(listener.pid)
-            .map(|start_id| format!("pid {}, start {start_id}", listener.pid))
-            .unwrap_or_else(|| format!("pid {}, process identity unavailable", listener.pid));
+        let identity = process_start_id(listener.pid).map_or_else(
+            || format!("pid {}, process identity unavailable", listener.pid),
+            |start_id| format!("pid {}, start {start_id}", listener.pid),
+        );
         failed.push((
             listener.socket_path.display().to_string(),
             format!("daemon {reason} ({identity})"),

@@ -14,7 +14,7 @@ use std::io::Write;
 
 use anyhow::anyhow;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Notify};
 
 use crate::kernel::cancellation::{merge_signals, AbortSignal};
@@ -29,6 +29,10 @@ use crate::kernel::state_snapshot::{
 
 const READY_TIMEOUT_MS: u64 = 30_000;
 const REPAIR_STEP_TIMEOUT_MS: u64 = 30_000;
+/// Largest legit frame is an attachment display event, base64 capped at
+/// `MAX_ATTACHMENT_DATA_CHARS`; a line that cannot complete within this ceiling
+/// is corruption the protocol repair owns, not output worth buffering until OOM.
+const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
 /// Runtime-minted host-request ids never repeat; the bound only guards a
 /// misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS: usize = 1024;
@@ -95,7 +99,7 @@ pub(crate) struct ActiveExecution {
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
 }
 
-/// ExecuteResult plus the raw fields of the request's `done` event (state ops).
+/// `ExecuteResult` plus the raw fields of the request's `done` event (state ops).
 pub(crate) struct InternalExecuteResult {
     result: ExecuteResult,
     done_fields: Option<Value>,
@@ -169,7 +173,7 @@ impl MemoSlot {
                 let wait = self.wait();
                 tokio::select! {
                     r = wait => r,
-                    _ = signal.cancelled() => Err(anyhow!("{message}")),
+                    () = signal.cancelled() => Err(anyhow!("{message}")),
                 }
             }
         }
@@ -193,10 +197,26 @@ struct RepairHandle {
     slot: Arc<MemoSlot>,
 }
 
+/// File-stat identity of a snapshot manifest (TS `manifestStatOf`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestStat {
+    mtime: std::time::SystemTime,
+    size: u64,
+}
+
+/// One-shot post-restore snapshot skip: the debounced auto-snapshot that
+/// follows a successful bootstrap would rewrite identical content — or, after
+/// a failed restore, clobber the healthy on-disk payload with a skills-only
+/// namespace — so it is skipped while the namespace is unchanged.
+struct RestoredNamespaceSkip {
+    manifest_stat: Option<ManifestStat>,
+    completed_executions: u64,
+}
+
 struct Guarded {
     state: KernelState,
     start_generation: u64,
-    /// Generation whose graceful shutdown() owns the teardown, so the exit
+    /// Generation whose graceful `shutdown()` owns the teardown, so the exit
     /// handler must not run it.
     graceful_shutdown_generation: Option<u64>,
     teardown_in_flight: u32,
@@ -204,8 +224,29 @@ struct Guarded {
     /// A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap.
     pending_rebootstrap: bool,
     /// Restore the saved namespace on that fresh start too (false when the
-    /// snapshot itself is the declared culprit).
+    /// snapshot itself is the declared culprit). A failed non-repair restore
+    /// re-arms it: the namespace never got the saved state, so the on-disk
+    /// payload must stay the fresher copy (dispose flush skips it).
     pending_restore: bool,
+    /// Settled-execution counter: the post-restore skip arm and the debounced
+    /// snapshot compare it to spot a real cell in between.
+    completed_executions: u64,
+    /// A restore attempt failed outright or revived only part of the saved
+    /// namespace: the on-disk payload stays the fresher copy, so the dispose
+    /// flush must not overwrite it. Unlike `pending_restore`, the reprovision
+    /// retry does not clear it — only a fully-successful restore does.
+    restore_incomplete: bool,
+    /// The restore settle's execution count: the debounced auto-snapshot the
+    /// bootstrap schedules stays suppressed until a third execution (any user
+    /// cell) settles, so a zero/near-zero debounce cannot fire before the
+    /// post-restore skip arm is installed (production order: bootstrap, then
+    /// the arm).
+    restore_boot_hold: Option<u64>,
+    /// Tri-state manifest stat of the last non-repair restore ATTEMPT:
+    /// `None` = no attempt yet, `Some(None)` = manifest was missing at it.
+    restored_manifest_stat: Option<Option<ManifestStat>>,
+    /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
+    restored_namespace_skip: Option<RestoredNamespaceSkip>,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -258,7 +299,7 @@ pub(crate) struct Inner {
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
     busy_notify: Notify,
-    /// Serializes execute() calls — the runtime runs one request at a time.
+    /// Serializes `execute()` calls — the runtime runs one request at a time.
     execution_queue: tokio::sync::Mutex<()>,
     start_memo: Mutex<Option<Arc<MemoSlot>>>,
     shutdown_memo: Mutex<Option<Arc<MemoSlot>>>,
@@ -274,6 +315,29 @@ pub(crate) struct Inner {
 struct StderrLog {
     file: std::fs::File,
     budget: u64,
+}
+
+impl Inner {
+    /// Fire the embedding's background-work settlement notice (TS
+    /// `ReplKernelManager`'s `onBackgroundWorkSettled`): the settlement is
+    /// already recorded on the activity map, so a host-callback panic
+    /// neither breaks the kernel event path nor aborts the teardown — it
+    /// lands in the diagnostics tail.
+    fn notify_background_work_settled(&self) {
+        let Some(callback) = self.options.on_background_work_settled.clone() else {
+            return;
+        };
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback())) {
+            let reason = panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            self.append_diagnostic(&format!(
+                "background work settled callback failed: {reason}"
+            ));
+        }
+    }
 }
 
 impl Drop for Inner {
@@ -317,6 +381,11 @@ impl ReplKernelManager {
                 startup_protocol_error: None,
                 pending_rebootstrap: false,
                 pending_restore: false,
+                completed_executions: 0,
+                restore_incomplete: false,
+                restore_boot_hold: None,
+                restored_manifest_stat: None,
+                restored_namespace_skip: None,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,
@@ -381,6 +450,12 @@ impl ReplKernelManager {
     /// Start the kernel, memoizing concurrent callers onto one startup.
     /// An aborted signal abandons the wait without stopping the underlying
     /// startup, mirroring the TS `raceStartupWithAbort`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the abort signal is already cancelled or fires
+    /// during the wait, when the kernel process fails to spawn or bootstrap,
+    /// or when the startup task itself fails to join.
     pub async fn start(&self, options: KernelStartOptions) -> anyhow::Result<()> {
         if let Some(signal) = &options.signal {
             if signal.is_aborted() {
@@ -434,7 +509,7 @@ impl ReplKernelManager {
                         let _ = task.await;
                         r
                     }
-                    _ = signal.cancelled() => {
+                    () = signal.cancelled() => {
                         // The startup keeps running for other callers.
                         Err(anyhow!("Kernel startup aborted"))
                     }
@@ -448,6 +523,11 @@ impl ReplKernelManager {
     /// Execute one cell. Refreshes the on-disk snapshot after real work so a
     /// later resume (or a crash before graceful shutdown) revives the most
     /// recent namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the in-flight protocol repair fails, or when the
+    /// enqueued execution fails (kernel error, timeout, or aborted request).
     pub async fn execute(&self, code: &str, opts: ExecuteOptions) -> anyhow::Result<ExecuteResult> {
         self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
         let result = self.enqueue_execute(code, opts, None).await?;
@@ -477,6 +557,13 @@ impl ReplKernelManager {
 
     /// Inspect or stop a kernel-owned bash handle without waiting behind a cell.
     /// Does not boot an idle kernel. The caller scopes this manager to its session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel is not running, the action is
+    /// unknown, `tail`/`kill` is missing its activity id, the `tail` line
+    /// count is out of the 1..=200 range, or the request to the kernel
+    /// fails.
     pub async fn bash_activity(
         &self,
         action: &str,
@@ -492,7 +579,7 @@ impl ReplKernelManager {
         if !matches!(action, "list" | "tail" | "kill") {
             return Err(anyhow!("unknown bash activity action"));
         }
-        let requires_id = action != "list" && activity_id.map(str::trim).unwrap_or("").is_empty();
+        let requires_id = action != "list" && activity_id.map_or("", str::trim).is_empty();
         if requires_id {
             return Err(anyhow!(
                 "bash activity tail/kill requires string activityId"
@@ -514,14 +601,11 @@ impl ReplKernelManager {
                 .remove(&request_id);
             return Err(error);
         }
-        let fields = match tokio::time::timeout(Duration::from_secs(3), rx).await {
-            Ok(Ok(fields)) => fields,
-            _ => {
-                lock(&self.inner.guarded)
-                    .bash_activity_waiters
-                    .remove(&request_id);
-                return Err(anyhow!("Kernel bash activity request did not settle"));
-            }
+        let Ok(Ok(fields)) = tokio::time::timeout(Duration::from_secs(3), rx).await else {
+            lock(&self.inner.guarded)
+                .bash_activity_waiters
+                .remove(&request_id);
+            return Err(anyhow!("Kernel bash activity request did not settle"));
         };
         if fields.get("status").and_then(Value::as_str) != Some("ok") {
             return Err(anyhow!(
@@ -551,10 +635,20 @@ impl ReplKernelManager {
     }
 
     /// Revive a previously snapshotted namespace into the kernel. Call right
-    /// after start() and before the runtime bootstrap, which then refreshes
+    /// after `start()` and before the runtime bootstrap, which then refreshes
     /// live handles (rlm, skills) over anything restored.
     pub async fn restore_state(&self) -> Option<RestoreResult> {
         self.perform_restore(false).await
+    }
+
+    /// Arm the one-shot post-restore snapshot skip: the debounced auto-snapshot
+    /// the bootstrap scheduled would rewrite identical content — or, after a
+    /// failed restore, clobber the healthy on-disk payload with a skills-only
+    /// namespace — so it is skipped while the namespace is unchanged. Call
+    /// after the bootstrap succeeds; its own settled execution must not
+    /// defeat the arm. No-op when no non-repair restore was attempted.
+    pub fn mark_restored_namespace_fresh(&self) {
+        self.inner.mark_restored_namespace_fresh();
     }
 
     /// Live user-defined top-level names, or `None` if the kernel isn\'t running.
@@ -658,6 +752,11 @@ impl ReplKernelManager {
     /// Resolves `true` when this call performed the cleanup (false: a
     /// concurrent teardown won; a joiner\'s options are ignored — the first
     /// caller\'s policy wins).
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`: a failed teardown
+    /// task is swallowed and reported as `Ok(false)`.
     pub async fn shutdown(&self, opts: KernelShutdownOptions) -> anyhow::Result<bool> {
         let existing = lock(&self.inner.shutdown_memo).as_ref().cloned();
         if let Some(existing) = existing {
@@ -688,6 +787,13 @@ impl ReplKernelManager {
         Ok(result)
     }
 
+    /// Restart the kernel: shut it down with the default options, then start
+    /// it again. Does nothing when a concurrent teardown wins the shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a final dispose flush owns the queue tail, or
+    /// when the underlying shutdown or start fails.
     pub async fn restart(&self) -> anyhow::Result<()> {
         // A final dispose flush owns the queue tail. Taking a slot now and
         // joining the in-flight shutdown would deadlock: the flush\'s snapshot

@@ -1,16 +1,14 @@
 //! `/compact` execution: resolve the cut over session entries, run the
 //! summarizer, persist the compaction entry, and rebuild the agent context.
 
-use pa_types::ai::Message;
 use pa_types::session::{AgentMessage, FileEntry};
 
 use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult};
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
     complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
-    CompactionDetails, CompactionResult, SummarySlice, NO_PRIOR_HISTORY,
+    CompactionDetails, CompactionResult, SummaryDeltaSink, SummarySlice, NO_PRIOR_HISTORY,
 };
-use super::messages::convert_to_llm;
 use crate::session::manager::SessionManager;
 
 /// Options for `execute_compaction`.
@@ -41,6 +39,18 @@ pub struct CompactOptions<'a> {
     /// `auxiliaryModel` setting with a context-window fit check, falling
     /// back to the caller's session model. `None` keeps the session model.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
+    /// The live summary-delta sink ([`SummaryDeltaSink`]): the history
+    /// summarizer call streams its text deltas through it live, in
+    /// arrival order, and the run flushes the parts the live stream
+    /// cannot carry in order — a split turn's marker with its completed
+    /// turn-prefix summary (the concurrent call's raw chunks would
+    /// interleave out of final order) and the file-operations suffix —
+    /// so a client accumulating every delta holds exactly the summary
+    /// the run commits (the daemon's `compaction_summary_delta`
+    /// broadcast for the expanded TUI's live block). `None` keeps the
+    /// one-shot completion — the summarizer call itself is identical
+    /// either way; only the stream consumption differs.
+    pub summary_delta: Option<SummaryDeltaSink>,
 }
 
 /// The history summary's completion budget (TS `generateSummary`:
@@ -79,11 +89,17 @@ pub(crate) fn summarizer_request_tokens(request: &[AgentMessage]) -> u64 {
 /// completion budget — the largest slice wins, because routing must fit
 /// every request the compaction will issue. `history` and `turn_prefix`
 /// are the messages the run will summarize (see [`execute_compaction`]).
+/// `recent_state_anchor` mirrors the anchor block the history wire request
+/// always carries when the kept tail has assistant text (TS follow-up
+/// 771611b14): an estimate without it would accept an auxiliary model
+/// whose window fits the underestimate while the real request goes
+/// over-limit.
 pub fn estimate_summary_request_tokens(
     history: &[AgentMessage],
     turn_prefix: &[AgentMessage],
     is_split_turn: bool,
     previous_summary: Option<&str>,
+    recent_state_anchor: Option<&str>,
     custom_instructions: Option<&str>,
     reserve_tokens: u64,
 ) -> u64 {
@@ -95,12 +111,13 @@ pub fn estimate_summary_request_tokens(
     // The history slice runs for every compaction except a split turn
     // whose kept cut leaves no history ("No prior history." is a literal
     // stand-in, no wire call).
-    let issues_history_call = !history.is_empty() || !(is_split_turn && !turn_prefix.is_empty());
+    let issues_history_call = !history.is_empty() || !is_split_turn || turn_prefix.is_empty();
     if issues_history_call {
         let request = super::compaction_exec::build_summarization_request(
             history,
             custom_instructions,
             previous_summary,
+            recent_state_anchor,
             reserve_tokens,
         );
         required = required.max(
@@ -140,7 +157,7 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 display: payload.display,
                 details: payload.details.clone(),
                 timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
@@ -152,7 +169,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         )),
         // Prior compactions are kept context, not summarizer input; the new
         // compaction covers their retained span.
-        FileEntry::Compaction { .. } => None,
         _ => None,
     }
 }
@@ -168,19 +184,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
     let context = crate::session::build_session_context(entries, leaf_id);
     estimate_context_tokens(&context.messages).tokens
-}
-
-/// Session AgentMessage -> LLM Message (post convertToLlm).
-fn to_llm_messages(messages: &[AgentMessage]) -> Vec<Message> {
-    convert_to_llm(messages)
-        .into_iter()
-        .filter_map(|message| match message {
-            AgentMessage::User(user) => Some(Message::User(user)),
-            AgentMessage::Assistant(assistant) => Some(Message::Assistant(assistant)),
-            AgentMessage::ToolResult(result) => Some(Message::ToolResult(result)),
-            _ => None,
-        })
-        .collect()
 }
 
 /// One completed compaction run: the result plus the entry to persist.
@@ -247,14 +250,26 @@ pub struct CompactionPreparation {
     pub boundary_start: usize,
     /// TS `previousSummary`: the prior compaction's summary, wired into the
     /// history summarizer request so it updates the existing summary instead
-    /// of re-summarizing from scratch.
+    /// of re-summarizing from scratch. File-list blocks never ride it (TS
+    /// #2385 `stripFileListBlocks`): they strip before the update prompt,
+    /// and a summary that contained only file blocks leaves no
+    /// `previous_summary` at all (the initial-prompt path).
     pub previous_summary: Option<String>,
+    /// TS #2385 `recentStateAnchor`: the newest kept-tail assistant text
+    /// (tail-truncated), wired into the history summarizer request so the
+    /// update summary cannot lag behind the retained tail it merges into.
+    pub recent_state_anchor: Option<String>,
 }
 
 /// Resolve the compaction cut and the skip guards without a model call
 /// (TS `prepareCompaction`): a branch that already ends in a compaction has
 /// nothing new to summarize, and a branch with no summarizable history has
 /// no compaction to run.
+///
+/// # Errors
+///
+/// Returns the TS `CompactionSkippedError` case as `Err`: the branch
+/// already ends in a compaction, or it carries no summarizable history.
 pub fn prepare_compaction(
     entries: &[FileEntry],
     keep_recent_tokens: u64,
@@ -286,7 +301,14 @@ pub fn prepare_compaction(
             // TS boundaryStart: the retained entry when it still exists,
             // else the entry after the compaction (session migration).
             let boundary_start = first_kept_index.unwrap_or(index + 1);
-            (boundary_start, Some(payload.summary.clone()))
+            // File-list blocks never reach the update prompt (TS #2385):
+            // they are re-appended mechanically below and compound when
+            // the model re-summarizes them. A previous summary that
+            // contained only file blocks falls back to the initial-prompt
+            // path.
+            let stripped = super::compaction_utils::strip_file_list_blocks(&payload.summary);
+            let previous_summary = (!stripped.is_empty()).then_some(stripped);
+            (boundary_start, previous_summary)
         }
         None => (start, None),
     };
@@ -306,6 +328,13 @@ pub fn prepare_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    // The recency anchor (TS #2385): the summarizer sees only messages
+    // before the cut, so its summary would describe pre-tail state. The
+    // newest retained assistant text is the state the next turn actually
+    // sees; it anchors the history summary to the kept tail.
+    let recent_state_anchor =
+        extract_recent_state_anchor(entries, cut.first_kept_entry_index, entries.len());
+
     // Avoid a compaction that would summarize no history (TS prepareCompaction
     // — a prior summary alone is enough to run: the update merges it).
     if messages.is_empty() && turn_prefix_messages.is_empty() && previous_summary.is_none() {
@@ -315,11 +344,66 @@ pub fn prepare_compaction(
         cut,
         boundary_start,
         previous_summary,
+        recent_state_anchor,
     })
+}
+
+/// Maximum characters kept from the retained tail for the recency anchor
+/// (TS #2385 `RECENT_STATE_ANCHOR_MAX_CHARS`). The end of a message holds
+/// the newest state, so long text keeps its tail.
+const RECENT_STATE_ANCHOR_MAX_CHARS: usize = 2_000;
+
+/// Extract the newest retained assistant text — the recency anchor (TS
+/// #2385 `extractRecentStateAnchor`) — from the kept tail
+/// `[kept_start, kept_end)`: scanning newest-first, the first assistant
+/// message whose text blocks join to non-empty trimmed text wins; a longer
+/// text keeps its tail. Compaction entries and harness digests are never
+/// anchor candidates ([`message_from_entry`] drops them, mirroring TS
+/// `getMessageFromEntryForCompaction`); assistants without text (tool-call
+/// or thinking-only) skip until a text-bearing one is found.
+fn extract_recent_state_anchor(
+    entries: &[FileEntry],
+    kept_start: usize,
+    kept_end: usize,
+) -> Option<String> {
+    for entry in entries[kept_start..kept_end].iter().rev() {
+        let Some(AgentMessage::Assistant(assistant)) = message_from_entry(entry) else {
+            continue;
+        };
+        let text = assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let chars = text.chars().count();
+        return Some(if chars > RECENT_STATE_ANCHOR_MAX_CHARS {
+            text.chars()
+                .skip(chars - RECENT_STATE_ANCHOR_MAX_CHARS)
+                .collect()
+        } else {
+            text
+        });
+    }
+    None
 }
 
 /// Run compaction over the session: summarize the pre-cut prefix, persist the
 /// entry, and return the rebuilt post-compaction context messages.
+///
+/// # Errors
+///
+/// Returns an error when the compaction preparation or the summarizer call
+/// fails, or when the compaction entry cannot be persisted. A skipped
+/// compaction is a normal `Ok` outcome carrying the skip message.
 pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
@@ -331,6 +415,7 @@ pub async fn execute_compaction(
     };
     let cut = preparation.cut;
     let previous_summary = preparation.previous_summary;
+    let recent_state_anchor = preparation.recent_state_anchor;
     let first_kept_entry = entries
         .get(cut.first_kept_entry_index)
         .and_then(|entry| entry.id())
@@ -353,7 +438,21 @@ pub async fn execute_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    super::compaction_trace::trace(
+        "compact.cut_prepared",
+        serde_json::json!({
+            "entries": entries.len(),
+            "firstKeptEntryIndex": cut.first_kept_entry_index,
+            "isSplitTurn": cut.is_split_turn,
+            "historyMessages": history.len(),
+            "turnPrefixMessages": turn_prefix_messages.len(),
+        }),
+    );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    super::compaction_trace::trace(
+        "compact.tokens_before_computed",
+        serde_json::json!({ "tokensBefore": tokens_before }),
+    );
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
         .rposition(|entry| matches!(entry, FileEntry::Compaction { .. }));
@@ -396,6 +495,7 @@ pub async fn execute_compaction(
                 &turn_prefix_messages,
                 cut.is_split_turn,
                 previous_summary.as_deref(),
+                recent_state_anchor.as_deref(),
                 options.custom_instructions,
                 options.settings.reserve_tokens,
             );
@@ -415,14 +515,16 @@ pub async fn execute_compaction(
             };
             // A JoinError (the closure panicked) degrades to the session
             // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning.
-            let routed =
-                join.await
-                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
-                        model: options.model.clone(),
-                        api_key: options.api_key.clone(),
-                        headers: None,
-                    });
+            // selector resolves to the fallback with the warning. The
+            // fallback keeps the merged headers (the registry's single
+            // owner of the team header).
+            let routed = join.await.unwrap_or_else(|_| {
+                super::auxiliary_model::session_fallback_with_headers(
+                    context,
+                    &options.model,
+                    options.api_key.clone(),
+                )
+            });
             (routed.model, routed.api_key, routed.headers)
         }
         None => (options.model.clone(), options.api_key.clone(), None),
@@ -430,12 +532,29 @@ pub async fn execute_compaction(
     let history_max_tokens = history_summary_completion_budget(options.settings.reserve_tokens);
     let turn_prefix_max_tokens =
         turn_prefix_summary_completion_budget(options.settings.reserve_tokens);
+    super::compaction_trace::trace(
+        "compact.summarizer_request",
+        serde_json::json!({
+            "historyMaxTokens": history_max_tokens,
+            "turnPrefixMaxTokens": turn_prefix_max_tokens,
+        }),
+    );
     let history_call = async {
         // The stand-in applies only inside the split arm (TS
         // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
         // prior history."` — the arm runs when a turn prefix exists); a
         // cut without a turn prefix makes the history call below.
         if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+            // The literal stand-in is the history slice the live block
+            // carries too (the flush below appends the split marker and
+            // the prefix behind it, exactly like the committed summary).
+            if let Some(sink) = options.summary_delta.as_ref() {
+                sink(NO_PRIOR_HISTORY);
+            }
+            super::compaction_trace::trace(
+                "compact.summarizer_no_history",
+                serde_json::Value::Null,
+            );
             return Ok(SummarySlice {
                 summary: NO_PRIOR_HISTORY.to_string(),
                 usage: None,
@@ -445,6 +564,7 @@ pub async fn execute_compaction(
             &history,
             options.custom_instructions,
             previous_summary.as_deref(),
+            recent_state_anchor.as_deref(),
             options.settings.reserve_tokens,
         );
         complete_summary_call(
@@ -453,12 +573,13 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             history_max_tokens,
             request,
+            options.summary_delta.clone(),
             "Summarization failed",
         )
         .await
     };
     let turn_prefix_call = async {
-        if !(cut.is_split_turn && !turn_prefix_messages.is_empty()) {
+        if !cut.is_split_turn || turn_prefix_messages.is_empty() {
             return Ok::<Option<SummarySlice>, anyhow::Error>(None);
         }
         let request = build_turn_prefix_request(&turn_prefix_messages);
@@ -468,6 +589,14 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             turn_prefix_max_tokens,
             request,
+            // The turn-prefix call never streams live: the split join
+            // runs it concurrently with the history call, and its chunks
+            // interleaved into the live sink would land out of the
+            // final order (the committed summary is history, split
+            // marker, prefix). The completed prefix flushes through the
+            // sink after the join, so the live block converges to the
+            // exact committed summary.
+            None,
             "Turn prefix summarization failed",
         )
         .await?;
@@ -476,6 +605,15 @@ pub async fn execute_compaction(
     let (history_slice, turn_prefix_slice) = tokio::join!(history_call, turn_prefix_call);
     let history_slice = history_slice?;
     let turn_prefix_slice = turn_prefix_slice?;
+    super::compaction_trace::trace(
+        "compact.summarizer_resolved",
+        serde_json::json!({
+            "summaryBytes": history_slice.summary.len()
+                + turn_prefix_slice
+                    .as_ref()
+                    .map_or(0, |slice| slice.summary.len()),
+        }),
+    );
 
     // The summarizer resolved while the run was aborted: the compaction is
     // cancelled before it commits (TS `_performCompaction`'s
@@ -487,6 +625,28 @@ pub async fn execute_compaction(
         return Err(pa_agent::abort::aborted_error());
     }
 
+    // The live block converges to the exact committed summary: the
+    // history streamed live above (its own call, in order), and the
+    // parts the live stream has not carried — the split marker with the
+    // completed turn-prefix summary (kept off the concurrent call so its
+    // chunks never interleave out of final order) and the
+    // file-operations suffix (which never flows through the summarizer)
+    // flush through the sink here, in the final summary's own order. A
+    // client accumulating every delta therefore holds precisely the text
+    // the settled `compaction_end` carries.
+    if let Some(sink) = options.summary_delta.as_ref() {
+        let mut remainder = match &turn_prefix_slice {
+            Some(prefix) => split_summary("", &prefix.summary),
+            None => String::new(),
+        };
+        remainder.push_str(&file_ops_block(
+            &details.read_files,
+            &details.modified_files,
+        ));
+        if !remainder.is_empty() {
+            sink(&remainder);
+        }
+    }
     // Result + persistence (TS `compact`): the split join carries the
     // turn-prefix summary behind the history summary under the TS marker,
     // and the file-operation block rides the summary on both paths.
@@ -508,26 +668,45 @@ pub async fn execute_compaction(
         tokens_before,
         usage: summed_usage(&slices),
     };
-    // TS `_performCompaction` passes `this._harnessDigest()` into
-    // `appendCompaction`: the snapshot is attached mechanically at the
-    // commit and never flows through the summarizer. The harness-state
-    // read happens here, after the summarizer resolved, so harness state
-    // written during the run is a fresh read.
-    let harness_digest = options
+    // TS `_performCompaction` passes `this._harnessDigestWithFingerprint()`
+    // into `appendCompaction`: the snapshot plus the fingerprint of the
+    // state behind it are attached mechanically at the commit and never
+    // flow through the summarizer. The harness-state read happens here,
+    // after the summarizer resolved, so harness state written during the
+    // run is a fresh read — one read feeds the digest and its
+    // fingerprint.
+    let (harness_digest, harness_state_fingerprint) = options
         .harness_digest
         .as_ref()
-        .map(super::harness_digest::HarnessDigestInputs::render);
+        .map(|inputs| {
+            let render =
+                super::harness_digest::HarnessDigestInputs::render_with_fingerprint(inputs);
+            (Some(render.digest), Some(render.state_fingerprint))
+        })
+        .unwrap_or_default();
+    super::compaction_trace::trace(
+        "compact.digest_rendered",
+        serde_json::json!({ "digest": harness_digest.is_some() }),
+    );
     let entry = compaction_entry_for(
         &result,
         &details,
         options.custom_instructions,
         harness_digest,
+        harness_state_fingerprint,
     );
     // TS `appendCompaction` persists the full record: `details`,
     // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
     // snapshot ride on the durable row alongside the summary, boundary,
     // and token count.
     session.append_compaction(entry.clone())?;
+    super::compaction_trace::trace(
+        "compact.entry_appended",
+        serde_json::json!({
+            "firstKeptEntryId": first_kept_entry,
+            "persisted": session.is_persisted(),
+        }),
+    );
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
@@ -535,10 +714,10 @@ pub async fn execute_compaction(
     })))
 }
 
-/// Rebuild the agent's message list after compaction (summary-first context).
-pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<Message> {
-    let context = session.active_context();
-    to_llm_messages(&context.messages)
+/// Rebuild the live agent context after compaction. Keep session-only roles
+/// (especially the compaction boundary) until the provider conversion seam.
+pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<AgentMessage> {
+    session.active_context().messages
 }
 
 /// The cut computed for a session (test seam for decision verification).
@@ -555,6 +734,7 @@ mod tests {
     use super::*;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
+    use serde_json::Map;
 
     fn session_with_turns(cwd: &std::path::Path, turns: usize) -> SessionManager {
         let mut session = SessionManager::in_memory(cwd);
@@ -563,7 +743,7 @@ mod tests {
                 .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                     content: UserContent::Text(format!("turn {i} message with some words")),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }))
                 .unwrap();
             session
@@ -572,7 +752,7 @@ mod tests {
                         pa_types::ai::TextContent {
                             text: format!("reply {i}"),
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: serde_json::Map::default(),
                         },
                     )],
                     api: "openai-completions".to_string(),
@@ -587,13 +767,13 @@ mod tests {
                         cache_read: 0,
                         cache_write: 0,
                         total_tokens: 120,
-                        cost: Default::default(),
+                        cost: pa_types::ai::UsageCost::default(),
                     },
                     stop_reason: pa_types::ai::StopReason::Stop,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }))
                 .unwrap();
         }
@@ -622,12 +802,13 @@ mod tests {
                 custom_instructions: None,
                 usage: None,
                 harness_digest: None,
+                harness_state_fingerprint: None,
             },
             base: EntryBase {
                 id: Some("c".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         let _ = &mut compaction;
@@ -640,13 +821,13 @@ mod tests {
                 details: None,
                 is_error: false,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some("t".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         assert!(message_from_entry(&tool_result).is_none());
@@ -692,7 +873,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -701,7 +882,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -715,7 +896,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn one")).unwrap();
@@ -742,7 +923,8 @@ mod tests {
         // Scripted summaries: each factory call records its request and
         // answers with its scripted response, so both wire calls are
         // captured regardless of issue order.
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -779,6 +961,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -831,7 +1014,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: input + output,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             }
         };
         let mut expected = usage_of(history_request, history_response);
@@ -876,7 +1059,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -885,7 +1068,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -899,7 +1082,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let goal_row = |session: &mut SessionManager| {
@@ -910,7 +1093,7 @@ mod tests {
                 Some(serde_json::json!({ "kind": "continuation" })),
             )
         };
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let record_summary = |recorder: std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
                 move |context: &pa_types::ai::Context,
@@ -951,6 +1134,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1007,6 +1191,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1042,7 +1227,7 @@ mod tests {
     async fn split_turn_without_history_makes_only_the_prefix_call() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -1068,7 +1253,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1077,7 +1262,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1091,7 +1276,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         // One big turn only: the cut splits it, and nothing precedes the
@@ -1124,6 +1309,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1160,7 +1346,7 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: input + output,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             })
         );
         registration.unregister();
@@ -1177,7 +1363,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session
@@ -1189,7 +1375,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: format!("reply {}", "y".repeat(4_000)),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1203,7 +1389,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         session.append_message(user("small")).unwrap();
@@ -1229,13 +1415,13 @@ mod tests {
             message: AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             base: EntryBase {
                 id: Some(id.to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -1252,9 +1438,178 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
+    }
+
+    fn raw_assistant_text_entry(id: &str, text: &str) -> FileEntry {
+        FileEntry::Message {
+            message: AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: text.to_string(),
+                        text_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "p".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            base: EntryBase {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                rest: serde_json::Map::default(),
+            },
+        }
+    }
+
+    /// The recency anchor pins to the newest kept-tail assistant text (TS
+    /// #2385 `extractRecentStateAnchor`): the newest-first scan means a
+    /// direction flip fails this test (an older assistant sits in the
+    /// same kept tail), thinking-only assistants skip (text blocks only),
+    /// long text keeps its tail within the anchor budget, and a tail
+    /// without assistant text carries no anchor — compaction entries are
+    /// never candidates.
+    #[test]
+    fn prepare_compaction_anchors_on_the_newest_kept_tail_assistant_text() {
+        // 400-char texts (100 tokens at the chars/4 heuristic) keep the
+        // cuts deterministic: a 250-token keep budget cuts at the second
+        // entry, so the kept tail holds BOTH assistants.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_assistant_text_entry("a1", &"older tail text ".repeat(25)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_assistant_text_entry("a2", &"newest tail text ".repeat(25)),
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        assert_eq!(preparation.cut.first_kept_entry_index, 1);
+        // The anchor text trims like the TS scan (`.join("\n").trim()`).
+        assert_eq!(
+            preparation.recent_state_anchor.as_deref(),
+            Some("newest tail text ".repeat(25).trim())
+        );
+
+        // A newest assistant with thinking but no text skips; the older
+        // text-bearing assistant wins.
+        let thinking_only = FileEntry::Message {
+            message: AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Thinking(
+                    pa_types::ai::ThinkingContent {
+                        thinking: "2".repeat(400),
+                        thinking_signature: None,
+                        redacted: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "p".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            base: EntryBase {
+                id: Some("a2".to_string()),
+                parent_id: None,
+                timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                rest: serde_json::Map::default(),
+            },
+        };
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_assistant_text_entry("a1", &"older tail text ".repeat(25)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            thinking_only,
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        assert_eq!(
+            preparation.recent_state_anchor.as_deref(),
+            Some("older tail text ".repeat(25).trim())
+        );
+
+        // A 3000-char text tail-truncates to the anchor budget: the END
+        // of the message holds the newest state.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_assistant_text_entry("a2", &"z".repeat(3_000)),
+        ];
+        let preparation = prepare_compaction(&entries, 250).expect("anchored compaction prepares");
+        let anchor = preparation
+            .recent_state_anchor
+            .expect("tail-truncated anchor");
+        assert_eq!(anchor.chars().count(), 2_000);
+        assert_eq!(anchor, "z".repeat(2_000));
+
+        // A tail with no assistant text carries no anchor; the prior
+        // summary alone keeps the compaction runnable.
+        let entries = vec![
+            raw_user_entry("m0", &"0".repeat(400)),
+            raw_compaction_entry("c1", "m0", "the prior summary"),
+            raw_user_entry("m1", &"1".repeat(400)),
+            raw_user_entry("m2", "small"),
+        ];
+        let preparation =
+            prepare_compaction(&entries, 250).expect("prior-summary compaction prepares");
+        assert_eq!(preparation.recent_state_anchor, None);
+        assert_eq!(
+            preparation.previous_summary.as_deref(),
+            Some("the prior summary")
+        );
+    }
+
+    /// File-list blocks never reach the update prompt (TS #2385
+    /// `stripFileListBlocks`): the stored summary's blocks strip before it
+    /// becomes `previousSummary`, and a summary that contained only file
+    /// blocks leaves no update anchor at all — the initial-prompt path.
+    #[test]
+    fn prepare_compaction_strips_file_blocks_from_the_previous_summary() {
+        let entries = vec![
+            raw_user_entry("m0", "turn zero"),
+            raw_compaction_entry(
+                "c1",
+                "m0",
+                "the prior summary\n\n<read-files>\na.rs\nb.rs\n</read-files>\n\n<modified-files>\nc.rs\n</modified-files>",
+            ),
+            raw_user_entry("m1", "turn one"),
+            raw_user_entry("m2", "turn two"),
+        ];
+        let preparation = prepare_compaction(&entries, 2).expect("update compaction prepares");
+        assert_eq!(
+            preparation.previous_summary,
+            Some("the prior summary".to_string())
+        );
+        // Only-file-block summaries drop entirely.
+        let entries = vec![
+            raw_user_entry("m0", "turn zero"),
+            raw_compaction_entry(
+                "c1",
+                "m0",
+                "<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\n</modified-files>",
+            ),
+            raw_user_entry("m1", "turn one"),
+            raw_user_entry("m2", "turn two"),
+        ];
+        let preparation = prepare_compaction(&entries, 2).expect("update compaction prepares");
+        assert_eq!(preparation.previous_summary, None);
     }
 
     /// The iterative update mode activates from a prior compaction (TS
@@ -1334,7 +1689,7 @@ mod tests {
     async fn second_compaction_updates_the_prior_summary_over_new_history() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -1364,7 +1719,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn zero")).unwrap();
@@ -1386,6 +1741,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1413,6 +1769,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1458,6 +1815,191 @@ mod tests {
         registration.unregister();
     }
 
+    /// The second compaction anchors on the kept tail and never
+    /// re-summarizes the file lists (TS #2385's end-to-end wiring): the
+    /// stored first summary ends with its mechanically appended file
+    /// block, but the update request carries a STRIPPED
+    /// `<previous-summary>` plus the newest retained assistant text in a
+    /// `<recent-state-anchor>` block, and the fresh file block still
+    /// appends to the new stored summary — the entry details plus the
+    /// mechanical append stay the single source of truth.
+    #[tokio::test]
+    async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+        let make_step = |response: &'static str| {
+            let seen = seen.clone();
+            pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
+                move |context: &pa_types::ai::Context,
+                      _options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      _model: &pa_types::ai::Model| {
+                    let text = match &context.messages[0] {
+                        pa_types::ai::Message::User(user) => user.content.text(),
+                        _ => panic!("expected a user request"),
+                    };
+                    seen.lock().unwrap().push(text);
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        response,
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ))
+        };
+        registration.set_responses(vec![
+            make_step("the first summary"),
+            make_step("the second summary"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(tmp.path());
+        let user = |text: &str| {
+            AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text(text.to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            })
+        };
+        session.append_message(user("turn zero")).unwrap();
+        let mut edit_arguments = serde_json::Map::new();
+        edit_arguments.insert("path".to_string(), serde_json::json!("a.rs"));
+        session
+            .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::ToolCall(
+                    pa_types::ai::ToolCall {
+                        id: "tc1".to_string(),
+                        name: "edit".to_string(),
+                        arguments: edit_arguments,
+                        thought_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::ToolUse,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }))
+            .unwrap();
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(user("turn two")).unwrap();
+        // First compaction (keep 2: the cut keeps turn two): the edit rides
+        // the summarized history, so the stored summary ends with the
+        // mechanically appended file block.
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model: model.clone(),
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 2,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: None,
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(first) = outcome else {
+            panic!("expected the first compaction to run")
+        };
+        assert_eq!(
+            first.result.summary,
+            "the first summary\n\n<modified-files>\na.rs\n</modified-files>"
+        );
+        // The initial-prompt path: no previous summary, no anchor.
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].contains("<previous-summary>"));
+        assert!(!requests[0].contains("<recent-state-anchor>"));
+
+        // New history after the first compaction, ending with an
+        // assistant reply in the kept tail.
+        session.append_message(user("turn three")).unwrap();
+        session
+            .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "the newest kept reply".to_string(),
+                        text_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }))
+            .unwrap();
+        session.append_message(user("turn four")).unwrap();
+        // Second compaction (keep 10: the cut keeps turn three, the reply,
+        // and turn four, so the reply is the newest retained assistant
+        // text).
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 10,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: None,
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(second) = outcome else {
+            panic!("expected the second compaction to run")
+        };
+        assert_eq!(registration.call_count(), 2);
+        let request = seen.lock().unwrap().clone()[1].clone();
+        // The previous summary strips its file blocks before the update
+        // prompt: the lists stop compounding across compactions.
+        assert!(request.contains("<previous-summary>\nthe first summary\n</previous-summary>"));
+        assert!(!request.contains("<modified-files>"));
+        assert!(!request.contains("<read-files>"));
+        // The newest retained assistant text anchors the update after the
+        // previous summary (the turn-prefix arm never carries one).
+        let previous_end = request
+            .find("</previous-summary>")
+            .expect("previous summary block");
+        let anchor_start = request.find("<recent-state-anchor>").expect("anchor block");
+        assert!(anchor_start > previous_end);
+        assert!(request.contains("\n\nthe newest kept reply\n</recent-state-anchor>\n\n"));
+        // The fresh file block still rides the NEW stored summary: the
+        // entry details plus the mechanical append are the single source
+        // of truth for file lists.
+        assert_eq!(
+            second.result.summary,
+            "the second summary\n\n<modified-files>\na.rs\n</modified-files>"
+        );
+        registration.unregister();
+    }
+
     /// A split-turn cut after a prior compaction (the iterative update
     /// mode on the split path, #225's note): the history call runs in
     /// update mode over the conversation since the boundary, while the
@@ -1467,7 +2009,7 @@ mod tests {
     async fn second_compaction_split_turn_history_updates_prefix_does_not() {
         let registration = faux_registration();
         let model = registration.get_model();
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let make_step = |response: &'static str| {
             let seen = seen.clone();
             pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
@@ -1498,7 +2040,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let reply = |text: &str| {
@@ -1507,7 +2049,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: text.to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "faux".to_string(),
@@ -1521,7 +2063,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(user("turn zero")).unwrap();
@@ -1540,6 +2082,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1573,6 +2116,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1633,6 +2177,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1652,13 +2197,323 @@ mod tests {
             .get_entries()
             .iter()
             .any(|entry| matches!(entry, FileEntry::Compaction { .. })));
-        // The rebuilt context starts with the summary message.
+        // The live context keeps the summary role; provider conversion
+        // still formats it as a user turn.
         let rebuilt = rebuilt_context_after_compaction(&session);
         assert!(!rebuilt.is_empty());
-        match &rebuilt[0] {
-            Message::User(user) => assert!(user.content.text().contains("[compaction-summary]")),
+        assert!(matches!(&rebuilt[0], AgentMessage::CompactionSummary(_)));
+        let provider_messages = super::super::messages::convert_to_llm(&rebuilt);
+        match &provider_messages[0] {
+            AgentMessage::User(user) => {
+                assert!(user.content.text().contains("[compaction-summary]"));
+            }
             other => panic!("expected summary user message, got {other:?}"),
         }
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() {
+        let registration = faux_registration();
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Goal\nsummarized goal",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Turn Context\nsummarized prefix",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+        ]);
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
+        let mut assistant = match session.active_context().messages.last().unwrap() {
+            AgentMessage::Assistant(assistant) => assistant.clone(),
+            other => panic!("expected last assistant, got {other:?}"),
+        };
+        assistant.usage.input = 126_010;
+        assistant.usage.total_tokens = 126_010;
+        assistant.timestamp = 1;
+        session
+            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text("threshold crossing turn".to_string()),
+                timestamp: 0,
+                rest: Map::default(),
+            }))
+            .unwrap();
+        session
+            .append_message(AgentMessage::Assistant(assistant.clone()))
+            .unwrap();
+        let settings = super::super::compaction::CompactionSettings {
+            reserve_tokens: 127_500,
+            keep_recent_tokens: 20,
+            ..Default::default()
+        };
+        assert!(super::super::compaction::threshold_compaction_due(
+            &session.active_context().messages,
+            128_000,
+            0,
+            &settings
+        ));
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings,
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        let mut live = rebuilt_context_after_compaction(&session);
+        let summary_timestamp = match &live[0] {
+            AgentMessage::CompactionSummary(summary) => summary.timestamp,
+            other => panic!("expected live compaction boundary, got {other:?}"),
+        };
+        assert!(live.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
+        )));
+        // Cross the same session/agent wire boundary as `set_messages` and
+        // `auto_compaction_due`: the live role must survive both round trips.
+        let loop_messages: Vec<pa_agent::types::AgentMessage> = live
+            .iter()
+            .map(|message| {
+                super::super::session_message_to_loop(message)
+                    .expect("session message must convert to loop message")
+            })
+            .collect();
+        live = loop_messages
+            .iter()
+            .map(|message| serde_json::to_value(message).expect("loop message must serialize"))
+            .map(|value| serde_json::from_value(value).expect("loop message must deserialize"))
+            .collect();
+        assert!(matches!(&live[0], AgentMessage::CompactionSummary(_)));
+        assert!(live.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
+        )));
+        for (custom_type, text) in [
+            ("agent_message", "message from agent"),
+            ("ipython_state", "kernel survived compaction"),
+        ] {
+            live.push(AgentMessage::Custom(pa_types::session::CustomMessage {
+                custom_type: custom_type.to_string(),
+                content: UserContent::Text(text.to_string()),
+                display: true,
+                details: None,
+                timestamp: summary_timestamp + 1,
+                rest: Map::default(),
+            }));
+        }
+        assert!(!super::super::compaction::threshold_compaction_due(
+            &live, 128_000, 0, &settings
+        ));
+        assistant.timestamp = summary_timestamp + 2;
+        live.push(AgentMessage::Assistant(assistant));
+        assert!(super::super::compaction::threshold_compaction_due(
+            &live, 128_000, 0, &settings
+        ));
+        registration.unregister();
+    }
+
+    /// The live summary-delta sink receives every summarizer text delta
+    /// as the model generates it (the daemon's `compaction_summary_delta`
+    /// broadcast): the deltas arrive in order, their concatenation is the
+    /// generated summary, and the final result still comes from the
+    /// terminal assistant message — the sink never gates the run, and
+    /// `None` keeps the one-shot completion untouched.
+    #[tokio::test]
+    async fn execute_compaction_streams_summary_deltas_to_the_sink() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+        let sink_deltas = std::sync::Arc::clone(&deltas);
+        let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
+            sink_deltas.lock().unwrap().push(delta.to_string());
+        });
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 20,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: Some(sink),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        let deltas = deltas.lock().unwrap().join("");
+        // The streamed deltas concatenate to exactly the generated
+        // summary text (the faux provider chunks the scripted response
+        // into provider-sized pieces; the sink receives each chunk).
+        assert!(!deltas.is_empty(), "the sink saw at least one delta");
+        assert_eq!(deltas, "## Goal\nsummarized goal");
+        // The convergence invariant: a client accumulating every delta
+        // holds exactly the committed summary the settled end carries.
+        assert_eq!(deltas, run.result.summary);
+        registration.unregister();
+    }
+
+    /// A split-turn compaction keeps the live stream in final order: the
+    /// history summary streams live (its own wire call, in order), the
+    /// concurrent turn-prefix call never streams its raw chunks (they
+    /// would interleave out of final order), and the split marker with
+    /// the completed prefix flushes through the sink as the final chunk —
+    /// so the accumulated stream converges to exactly the committed
+    /// summary (history, split marker, turn prefix), never a garbled
+    /// mixture.
+    #[tokio::test]
+    async fn split_turn_compaction_streams_in_final_order_and_converges() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(tmp.path());
+        let user = |text: &str| {
+            AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text(text.to_string()),
+                timestamp: 0,
+                rest: Map::default(),
+            })
+        };
+        let reply = |text: &str| {
+            AgentMessage::Assistant(AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: text.to_string(),
+                        text_signature: None,
+                        rest: Map::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Map::default(),
+            })
+        };
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(reply("reply one")).unwrap();
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(reply(&format!("reply {}", "y".repeat(4_000))))
+            .unwrap();
+        session.append_message(user("turn three")).unwrap();
+        session.append_message(reply("reply three")).unwrap();
+        // The tiny keep-recent budget lands the cut on the big turn's
+        // assistant reply — a mid-turn (split) cut.
+        let (cut, _) = compute_cut(&session, 10);
+        assert!(cut.is_split_turn);
+
+        // Two scripted summaries (the factories answer in issue order,
+        // whichever call reaches the faux provider first).
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "the history summary",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "the turn prefix summary",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+        ]);
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+        let sink_deltas = std::sync::Arc::clone(&deltas);
+        let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
+            sink_deltas.lock().unwrap().push(delta.to_string());
+        });
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 10,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: Some(sink),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        assert_eq!(registration.call_count(), 2, "both wire calls ran");
+        // The committed summary decides which scripted response became
+        // the history and which the prefix (the factories answer in
+        // issue order, so the split marker's two halves identify them).
+        let summary = &run.result.summary;
+        let marker = "\n\n---\n\n**Turn Context (split turn):**\n\n";
+        let split = summary.split_once(marker).unwrap_or_else(|| {
+            panic!("the committed summary carries the split marker: {summary:?}")
+        });
+        let (history_text, prefix_text) = (split.0, split.1);
+        // The factories answer in issue order, so whichever scripted
+        // response the concurrent calls took is decided by the committed
+        // summary itself — the two halves are the two scripted texts.
+        let mut scripted = vec!["the history summary", "the turn prefix summary"];
+        scripted.sort_unstable();
+        let mut committed = vec![history_text, prefix_text];
+        committed.sort_unstable();
+        assert_eq!(committed, scripted);
+
+        let deltas = deltas.lock().unwrap().clone();
+        // Only the flush carries the split marker, and it is the final
+        // chunk (the prefix call's raw chunks never hit the sink).
+        let marker_positions: Vec<usize> = deltas
+            .iter()
+            .enumerate()
+            .filter(|(_, delta)| delta.contains(marker))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            marker_positions,
+            vec![deltas.len() - 1],
+            "the split marker rides exactly one chunk, the final flush: {deltas:?}"
+        );
+        // Everything before the flush is pure history summary — the
+        // live view reads as the history generating, in order.
+        let live_history = deltas[..deltas.len() - 1].concat();
+        // The live view reads as the history summary generating, in
+        // order: a raw prefix chunk interleaving here would break the
+        // equality (the scripted texts differ).
+        assert_eq!(live_history, history_text, "deltas: {deltas:?}");
+        // The convergence invariant: the accumulated stream IS the
+        // committed summary (history, split marker, turn prefix).
+        assert_eq!(deltas.concat(), *summary);
         registration.unregister();
     }
 
@@ -1709,9 +2564,9 @@ mod tests {
                     content: "Written before compaction.".to_string(),
                     path: "general".to_string(),
                     scope: Some(crate::refinement::HarnessScope::Local),
-                    reference: Default::default(),
-                    arguments: Default::default(),
-                    metadata: Default::default(),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
                     source: "refine".to_string(),
                     created_at: "2026-09-07T00:00:00.000Z".to_string(),
                     updated_at: "2026-09-07T00:00:00.000Z".to_string(),
@@ -1732,6 +2587,7 @@ mod tests {
                 abort: None,
                 harness_digest: Some(inputs),
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1747,7 +2603,9 @@ mod tests {
         assert!(digest.contains("Compaction test memory"));
         // Mechanical attachment: the digest never flows through the summarizer.
         assert!(!run.entry.summary.contains("# Continual Harness State"));
-        // The durable row carries the TS wire shape (`harnessDigest`).
+        // The durable row carries the TS wire shape (`harnessDigest`) plus
+        // the fingerprint of the state behind it (`harnessStateFingerprint`,
+        // TS #2400): one state read feeds the digest and the fingerprint.
         let serialized = serde_json::to_value(&run.entry).unwrap();
         assert_eq!(
             serialized
@@ -1755,10 +2613,49 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some(digest)
         );
-        // The rebuilt context leads with the digest block before the
-        // compaction summary (TS `convertToLlm` on the compaction head).
+        let fingerprint = run
+            .entry
+            .harness_state_fingerprint
+            .as_deref()
+            .expect("digest state fingerprint");
+        assert_eq!(
+            serialized
+                .get("harnessStateFingerprint")
+                .and_then(|value| value.as_str()),
+            Some(fingerprint)
+        );
+        // The fingerprint is the merged-state fingerprint the digest
+        // rendered: rewriting the state (same content, new timestamps)
+        // must not move it, and a real content change must.
+        let inputs = super::super::harness_digest::HarnessDigestInputs {
+            context: super::super::harness_digest::HarnessDigestContext {
+                global_dir,
+                local_dir: Some(local_dir.clone()),
+                include_ipython: true,
+                include_shell_examples: true,
+                include_refine: true,
+            },
+            terms: super::super::harness_digest::digest_query_terms(Some("fresh terms"), &[]),
+        };
+        let re_rendered = inputs.render_with_fingerprint();
+        assert_eq!(re_rendered.state_fingerprint, fingerprint);
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .get_mut("compaction_test_memory")
+            .unwrap()
+            .content
+            .push_str(" changed");
+        crate::refinement::save_harness_state(&local_dir, &state).unwrap();
+        let changed = inputs.render_with_fingerprint();
+        assert_ne!(changed.state_fingerprint, fingerprint);
+        // Provider conversion leads with the digest block before the
+        // compaction summary; the live context keeps the summary marker.
         let rebuilt = rebuilt_context_after_compaction(&session);
-        let Message::User(user) = &rebuilt[0] else {
+        assert!(matches!(&rebuilt[0], AgentMessage::CompactionSummary(_)));
+        let provider_messages = super::super::messages::convert_to_llm(&rebuilt);
+        let AgentMessage::User(user) = &provider_messages[0] else {
             panic!("expected compaction head user message");
         };
         let text = user.content.text();
@@ -1804,6 +2701,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1845,6 +2743,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1899,6 +2798,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1933,6 +2833,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1975,6 +2876,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -2000,7 +2902,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "seed reply".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )]
             };
@@ -2021,7 +2923,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2032,13 +2934,13 @@ mod tests {
             cache_read: 80,
             cache_write: 0,
             total_tokens: 110,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         let probe = |text: &str| {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })
         };
         session.append_message(probe("seed turn")).unwrap();
@@ -2049,7 +2951,7 @@ mod tests {
         // The overflow error turn: stopReason "error" with zeroed usage
         // (what the provider returns for a failed request).
         session
-            .append_message(reply(Default::default(), true))
+            .append_message(reply(pa_types::ai::Usage::default(), true))
             .unwrap();
         // TS: 110 (last valid usage) + ceil(415/4) (the probe turn) = 214.
         assert_eq!(
@@ -2081,6 +2983,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -2134,7 +3037,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("faux/compact-m"));
         let mut session = session_with_turns(tmp.path(), 3);
-        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -2163,6 +3066,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await
@@ -2181,7 +3085,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("testaux/missing-model"));
         let mut session = session_with_turns(tmp.path(), 3);
-        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
@@ -2210,6 +3114,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await
@@ -2233,31 +3138,46 @@ mod tests {
         let history = vec![user_message("some history to summarize")];
         let turn_prefix = vec![user_message(&"a very long turn prefix ".repeat(2_000))];
         let full =
-            estimate_summary_request_tokens(&history, &turn_prefix, true, None, None, 10_000);
+            estimate_summary_request_tokens(&history, &turn_prefix, true, None, None, None, 10_000);
         let history_only =
-            estimate_summary_request_tokens(&history, &[], false, None, None, 10_000);
+            estimate_summary_request_tokens(&history, &[], false, None, None, None, 10_000);
         let prefix_only =
-            estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, 10_000);
+            estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, None, 10_000);
         // A split turn must fit every request it will issue: the estimate
         // is the larger of the two arms' estimates (each with the shared
         // system prompt and its own completion budget).
         assert_eq!(full, history_only.max(prefix_only));
         assert!(full > history_only);
-        // The previous summary and the custom instructions grow the
-        // history request, so they grow the estimate.
+        // The previous summary, the recency anchor, and the custom
+        // instructions grow the history request, so they grow the
+        // estimate.
         let with_anchors = estimate_summary_request_tokens(
             &history,
             &[],
             false,
             Some("the previous summary text"),
+            Some("the newest kept-tail assistant text"),
             Some("focus on the goal"),
             10_000,
         );
         assert!(with_anchors > history_only);
+        // The recency anchor alone grows the estimate (TS follow-up
+        // 771611b14: the estimator mirrors the anchor block the wire
+        // request carries).
+        let with_anchor = estimate_summary_request_tokens(
+            &history,
+            &[],
+            false,
+            None,
+            Some("the newest kept-tail assistant text"),
+            None,
+            10_000,
+        );
+        assert!(with_anchor > history_only);
         // The completion budgets draw on the reserve: a larger reserve
         // grows the estimate.
         let bigger_reserve =
-            estimate_summary_request_tokens(&history, &[], false, None, None, 100_000);
+            estimate_summary_request_tokens(&history, &[], false, None, None, None, 100_000);
         assert!(bigger_reserve > history_only);
     }
 
@@ -2265,7 +3185,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 }

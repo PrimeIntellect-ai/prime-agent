@@ -34,13 +34,17 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
             .get("supervisorOwnerToken")
             .and_then(Value::as_str)
             .map(str::to_string),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
 /// Spawn the successor supervisor detached (the TS launcher deletes the
 /// worker role env from the inherited environment; the roster path is the
 /// one addition, spec §6).
+///
+/// # Errors
+/// Returns an error when the successor supervisor process cannot be
+/// spawned.
 pub fn spawn_supervisor(
     exe: &Path,
     socket_path: &Path,
@@ -151,7 +155,7 @@ mod tests {
             process_start_id: None,
             supervisor_generation: None,
             supervisor_owner_token: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         assert!(wait_for_exit(&identity, 1_000).await);
     }

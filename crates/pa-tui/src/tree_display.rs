@@ -72,8 +72,7 @@ pub fn assistant_text(message: &pa_types::ai::AssistantMessage) -> String {
             pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .collect::<String>()
 }
 
 /// Whether an assistant message carries text (the default filter keeps it).
@@ -254,11 +253,7 @@ pub fn entry_display_text(
             ThemeColor::Dim,
             format!(
                 "[service tier: {}]",
-                payload
-                    .service_tier
-                    .as_ref()
-                    .map(tier_name)
-                    .unwrap_or("default")
+                payload.service_tier.as_ref().map_or("default", tier_name)
             ),
         )],
         FileEntry::Custom { payload, .. } => vec![color(
@@ -295,7 +290,6 @@ pub fn entry_display_text(
         }
         FileEntry::Header { .. }
         | FileEntry::SessionState { .. }
-        | FileEntry::AgentStatus { .. }
         | FileEntry::GitState { .. }
         | FileEntry::Unknown { .. } => Vec::new(),
     };
@@ -365,8 +359,7 @@ pub fn searchable_text(node: &TreeNodeData) -> String {
                 payload
                     .service_tier
                     .as_ref()
-                    .map(tier_name)
-                    .unwrap_or("default")
+                    .map_or("default", tier_name)
                     .to_string(),
             );
         }

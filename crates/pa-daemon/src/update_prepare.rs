@@ -431,8 +431,10 @@ fn take_locked(
     })
 }
 
-/// TS message for a mutating command refused by the admission gate.
-pub(crate) const UPDATE_PREPARING_MESSAGE: &str = "Daemon is preparing an update restart";
+/// TS message for a mutating command refused by the admission gate (now
+/// owned by `pa_types::daemon`, so the TUI's exact-message fallback for
+/// older daemons reads the same constant).
+pub(crate) use pa_types::daemon::UPDATE_RESTART_PREPARING_MESSAGE as UPDATE_PREPARING_MESSAGE;
 
 /// The admission gate verdict (spec §5): mutating commands are refused while
 /// the transaction is `Draining..Prepared` - except the abort-family drain
@@ -557,6 +559,7 @@ mod tests {
 
     use super::*;
     use pa_types::daemon::{update_marker_path, update_roster_path, UpdateSupervisorIdentity};
+    use serde_json::Map;
 
     fn budget() -> UpdateTimeoutBudget {
         // CI-scale budgets keep every test sub-second.
@@ -889,7 +892,7 @@ mod tests {
                 process_start_id: Some(String::from("42/7")),
                 generation: String::from("gen-1"),
             },
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let roster = UpdateRoster {
             format_version: pa_types::daemon::UPDATE_ROSTER_FORMAT_VERSION,
@@ -905,7 +908,7 @@ mod tests {
             workers: Vec::new(),
             subagents: Vec::new(),
             heartbeats: Vec::new(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         write_prepared_artifacts(&prepared, &roster, &marker).expect("write artifacts");
         assert!(update_roster_path(&prepared).is_file());

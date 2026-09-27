@@ -194,7 +194,7 @@ pub(crate) fn segment_with_markers(
     result
 }
 
-/// `[image #N]` (the TS IMAGE_MARKER_REGEX grammar): the byte length of
+/// `[image #N]` (the TS `IMAGE_MARKER_REGEX` grammar): the byte length of
 /// the marker, or `None` when the head is malformed.
 fn parse_image_marker(s: &str) -> Option<usize> {
     let rest = s.strip_prefix("[image #")?;
@@ -310,7 +310,7 @@ pub fn word_wrap_line(
             // chunk instead of recursing forever.
             let sub_chunks = if graphemes(grapheme).len() == 1 {
                 vec![TextChunk {
-                    text: grapheme.to_string(),
+                    text: grapheme.clone(),
                     start_index: 0,
                     end_index: grapheme.chars().count(),
                 }]
@@ -367,11 +367,7 @@ mod tests {
         for c in &chunks {
             assert!(str_width(&c.text) <= 10, "chunk too wide: {:?}", c.text);
         }
-        let joined: String = chunks
-            .iter()
-            .map(|c| c.text.clone())
-            .collect::<Vec<_>>()
-            .join("");
+        let joined: String = chunks.iter().map(|c| c.text.clone()).collect::<String>();
         assert_eq!(joined, "hello world this wraps");
     }
 
@@ -752,7 +748,7 @@ mod tests {
 
     /// The marker scan matches the TS regex grammars exactly (editor.ts:44
     /// segmentWithMarkers): a loose `[paste #1 junk]` head with a VALID id
-    /// is NOT atomic (PASTE_MARKER_REGEX rejects it), and a miss advances
+    /// is NOT atomic (`PASTE_MARKER_REGEX` rejects it), and a miss advances
     /// one char so `[[paste #1]]` keeps the INNER marker (matchAll
     /// semantics), never skipping to the first `]`.
     #[test]

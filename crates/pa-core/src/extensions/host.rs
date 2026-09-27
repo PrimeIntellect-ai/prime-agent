@@ -118,6 +118,14 @@ impl ExtensionHost {
     /// Spawn the sidecar and complete the protocol-1 `hello` handshake.
     /// On handshake failure the freshly spawned child is killed before
     /// the error propagates (nothing leaks a live sidecar).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the host script cannot be materialized or is
+    /// missing, the sidecar cannot be spawned (e.g. the Node binary is not
+    /// found), its stdio cannot be piped, the `hello` params or reply cannot
+    /// be (de)serialized, the handshake request fails, or the sidecar speaks
+    /// a different protocol version.
     #[tracing::instrument(
         skip_all,
         fields(cwd = %spec.cwd.display(), agent_dir = %spec.agent_dir.display())
@@ -249,6 +257,10 @@ impl ExtensionHost {
     /// Sidecar notifications (`extension_error`, registration changes) in
     /// arrival order. Dropping this receiver makes the sidecar's
     /// notifications fall on the floor; hold it for the session lifetime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called more than once.
     pub fn take_notifications(&mut self) -> mpsc::Receiver<SidecarNotification> {
         self.notifications
             .take()
@@ -256,6 +268,11 @@ impl ExtensionHost {
     }
 
     /// Liveness probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sidecar is not running, the ping request
+    /// fails or times out, or the reply is invalid.
     pub async fn ping(&self) -> Result<Value> {
         self.client
             .request(METHOD_PING, Value::Null, self.timeouts.rpc)
@@ -264,6 +281,11 @@ impl ExtensionHost {
 
     /// Dispatch one extension event; the reply carries the accumulated
     /// handler result (stage-1 scripts have no handlers, so `null`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event params cannot be serialized or the
+    /// RPC request fails (sidecar dead, RPC error, or timeout).
     pub async fn emit_event(&self, event_type: &str, payload: Value) -> Result<Value> {
         let params = serde_json::to_value(EventParams {
             event_id: uuid::Uuid::new_v4().to_string(),
@@ -279,6 +301,11 @@ impl ExtensionHost {
     /// Execute one registered extension tool over the RPC (design doc §2.3
     /// `tool_execute`); the sidecar streams `tool_update` notifications while
     /// the tool runs, then replies with the final result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool params cannot be serialized, the RPC
+    /// request fails, or the reply cannot be parsed as a tool result.
     pub async fn execute_tool(
         &self,
         tool_call_id: &str,
@@ -301,6 +328,18 @@ impl ExtensionHost {
 
     /// Orderly shutdown (§2.4): send `shutdown`, wait briefly, then kill the
     /// process group. Returns when the child is reaped, however it died.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when waiting for the child fails: reaping its
+    /// exit status after a natural exit or after the kill times out. A
+    /// sidecar that ignores or rejects the `shutdown` request is killed and
+    /// reported as success.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called more than once (the child handle is taken only by
+    /// shutdown).
     #[tracing::instrument(skip_all, fields(pid = self.pid()))]
     pub async fn shutdown(mut self, reason: &str) -> Result<()> {
         let request = self

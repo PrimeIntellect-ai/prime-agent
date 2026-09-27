@@ -91,25 +91,28 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live RLM children replacement e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live RLM children replacement e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -166,7 +169,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(

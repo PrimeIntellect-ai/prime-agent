@@ -47,15 +47,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
@@ -173,7 +171,7 @@ use std::sync::{Arc, Mutex};
 use pa_tui::provider_auth::{
     AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
-    PRIME_INFERENCE_PROVIDER_ID,
+    ProviderWarningFuture, PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_tui::traces::{
     TraceLoginOutcome, TracePreviewInfo, TracePreviewOutcome, TraceUploadAllNote,
@@ -196,8 +194,8 @@ impl ScriptedTraces {
             credential: Mutex::new(credential),
             enabled: Mutex::new(vec![false]),
             set_calls: Mutex::new(Vec::new()),
-            logins: Mutex::new(Default::default()),
-            uploads: Mutex::new(Default::default()),
+            logins: Mutex::new(std::collections::VecDeque::default()),
+            uploads: Mutex::new(std::collections::VecDeque::default()),
         }
     }
 
@@ -311,12 +309,13 @@ impl TracesCommands for ScriptedTraces {
         // The scripted login flow: the queued outcomes answer in order,
         // defaulting to the credential's resolution.
         let outcome = self.logins.lock().unwrap().pop_front().unwrap_or_else(|| {
-            match self.credential.lock().unwrap().is_some() {
-                true => TraceLoginOutcome::Status(
+            if self.credential.lock().unwrap().is_some() {
+                TraceLoginOutcome::Status(
                     "Saved API key for Prime Agent Traces. Credentials saved to /agent/auth.json."
                         .to_string(),
-                ),
-                false => TraceLoginOutcome::Cancelled,
+                )
+            } else {
+                TraceLoginOutcome::Cancelled
             }
         });
         Box::pin(async move { outcome })
@@ -336,7 +335,7 @@ struct ScriptedProviderAuth {
 impl ScriptedProviderAuth {
     fn new() -> Self {
         ScriptedProviderAuth {
-            stored_keys: Mutex::new(Default::default()),
+            stored_keys: Mutex::new(std::collections::HashMap::default()),
             calls: Mutex::new(Vec::new()),
             prime_row: false,
         }
@@ -364,6 +363,8 @@ impl ScriptedProviderAuth {
                 label: "unconfigured".to_string(),
             }),
             flow: AuthFlow::ApiKeyPrompt,
+            configured,
+            available: true,
         }
     }
 
@@ -379,6 +380,8 @@ impl ScriptedProviderAuth {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::TerminalFlow,
+            configured: true,
+            available: true,
         }
     }
 }
@@ -409,6 +412,8 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                     }),
                     id,
                     flow: AuthFlow::ApiKeyPrompt,
+                    configured: true,
+                    available: true,
                 })
                 .collect()
         })
@@ -442,6 +447,11 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 "Removed stored API key for {name}. Environment variables and models.json config are unchanged."
             ))
         })
+    }
+
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
+        // The clipboard e2e drives no Anthropic subscription auth.
+        Box::pin(async move { None })
     }
 
     /// The panel-driven flow (the Prime Inference login): one progress
@@ -478,10 +488,8 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 pa_tui::auth_panel::PrimeTeamPick::Team(team) => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using team \"{}\".", team.name),
                 ),
-                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount => ProviderAuthOutcome::Status(
-                    format!("Saved API key for {name}. Using personal account."),
-                ),
-                pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
+                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount
+                | pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
                     format!("Saved API key for {name}. Using personal account."),
                 ),
             }
@@ -528,9 +536,9 @@ fn command_options(
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
         script_path: Some(script_path.to_path_buf()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -553,8 +561,9 @@ fn command_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     }
 }
 
@@ -588,7 +597,7 @@ async fn create_session_via_daemon(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -621,6 +630,7 @@ fn enter() -> pa_tui::interactive::HeadlessStep {
 /// headless capture holds the exact TS sequence).
 #[tokio::test]
 async fn tui_copy_emits_the_ts_osc52_sequence() {
+    use base64::Engine;
     // No platform clipboard tools in the verifier: the copy chain falls to
     // OSC 52 (the TS fallback when no tool copied).
     for var in [
@@ -695,12 +705,138 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
         "the usage error renders:\n{rendered}"
     );
     // The exact TS OSC 52 sequence for the scripted assistant text.
-    use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
     assert_eq!(
         outcome.clipboard_emissions,
         vec![format!("\x1b]52;c;{encoded}\x07")],
         "the OSC 52 emission holds the TS byte shape"
+    );
+}
+
+/// Three consecutive `/copy` commands COALESCE into one toast (the count
+/// bump `(x3)`): every copy still registers (three OSC 52 emissions), but
+/// the frames never stack duplicate toast rows and no frame shows the
+/// label more than once — the toast is the compact ephemeral overlay, and
+/// once its TTL passes the acknowledgment is gone from the settled frame
+/// (never a durable transcript row).
+#[tokio::test]
+async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
+    use base64::Engine;
+    // No platform clipboard tools in the verifier: the copy chain falls to
+    // OSC 52 (the TS fallback when no tool copied).
+    for var in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "MOSH_CONNECTION",
+    ] {
+        std::env::remove_var(var);
+    }
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "hello from scripted" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let options = command_options(
+        &supervisor.socket,
+        dir.path(),
+        &session_dir,
+        &script_path,
+        &session_id,
+        None,
+        None,
+        None,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // Three consecutive copies inside the toast's TTL.
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            // The coalesced count-bump toast renders (observed, not
+            // slept-for): the third copy's ack is the (x3) label.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Copied last agent message to clipboard (x3)".to_string(),
+                timeout_ms: 10_000,
+            },
+            // Past the toast's TTL: the overlay dismisses (the newest
+            // frame stops carrying the ack).
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "Copied last agent message to clipboard".to_string(),
+                timeout_ms: 10_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    // Verification seam: dump the captured frames for manual frame-diffing
+    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
+    if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
+        for (index, frame) in outcome.frames.iter().enumerate() {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("frame-{index:03}.txt")),
+                frame,
+            );
+        }
+    }
+    let label = "Copied last agent message to clipboard";
+    // Every copy registered: the headless OSC 52 sink is one buffer for
+    // the whole run, so the exact TS sequence appears three times
+    // concatenated - one emission per copy.
+    let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
+    let emission = format!("\x1b]52;c;{encoded}\x07");
+    let joined = outcome.clipboard_emissions.join("");
+    assert_eq!(
+        joined,
+        emission.repeat(3),
+        "every copy ran the OSC 52 chain"
+    );
+    // The coalesced toast acknowledges the count: three consecutive copies
+    // read as one "(x3)" toast, never stacked duplicate rows (the plan's
+    // WaitRender observed the label land; the run's frames confirm).
+    let coalesced_label = format!("{label} (x3)");
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains(&coalesced_label)),
+        "the coalesced count-bump toast renders"
+    );
+    for (index, frame) in outcome.frames.iter().enumerate() {
+        let rows = frame.lines().filter(|row| row.contains(label)).count();
+        assert!(
+            rows <= 1,
+            "frame {index} shows the copy toast at most once, got {rows}"
+        );
+    }
+    // The toast is ephemeral: past its TTL the settled frame no longer
+    // carries the acknowledgment (a durable status row would persist).
+    let last = outcome.frames.last().expect("the settled frame");
+    assert!(
+        !last.contains(label),
+        "the expired toast auto-dismisses:\n{last}"
     );
 }
 
@@ -1081,7 +1217,7 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: fresh_id.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get last assistant text");
@@ -1559,8 +1695,8 @@ async fn tui_login_and_logout_run_the_provider_flows() {
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
     assert!(
-        rendered.contains("Providers"),
-        "the selector panel renders:\n{rendered}"
+        rendered.contains("Search providers"),
+        "the login menu's search bar renders (the picker grammar, no title):\n{rendered}"
     );
     assert!(
         rendered.contains("OpenAI · api key"),

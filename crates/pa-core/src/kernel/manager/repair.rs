@@ -48,7 +48,11 @@ impl Inner {
             let snapshot_suspect = lock(&self.guarded).pending_restore;
             self.kill_child_to_idle();
             if snapshot_suspect {
-                lock(&self.guarded).pending_restore = false;
+                // Same declared-culprit ruling as the repair-restore failure:
+                // the dispose flush should replace the suspect payload.
+                let mut g = lock(&self.guarded);
+                g.pending_restore = false;
+                g.restore_incomplete = false;
             }
             return;
         }
@@ -111,8 +115,20 @@ impl Inner {
             }
             self.append_diagnostic("protocol repair restore failed; discarding replacement kernel");
             self.kill_child_to_idle();
-            // The snapshot is the declared culprit; the lazy path must not retry it.
+            // The snapshot is the declared suspect, never the proven
+            // culprit: the restore may have failed transiently (a
+            // transport hiccup in the replacement kernel, the repair step
+            // timeout) with the on-disk payload perfectly good. Only the
+            // retry guard drops — the lazy path must not spin on it. The
+            // dispose-flush protection is ARMED: the namespace the
+            // replacement kernel carries was never restored from the
+            // payload, so the next shutdown must not overwrite the
+            // fresher on-disk payload with it (Macroscope PR #2744:
+            // a failed repair restore must keep the guard, and ARM it
+            // even after a successful earlier restore — the payload is
+            // still the fresher copy the next boot needs).
             lock(&self.guarded).pending_restore = false;
+            lock(&self.guarded).restore_incomplete = true;
             return;
         }
 
@@ -169,12 +185,10 @@ impl Inner {
                 true
             }
             Ok(r) => {
-                let detail = r
-                    .result
-                    .error
-                    .as_ref()
-                    .map(|e| e.evalue.clone())
-                    .unwrap_or_else(|| r.result.stderr.trim_end().to_string());
+                let detail = r.result.error.as_ref().map_or_else(
+                    || r.result.stderr.trim_end().to_string(),
+                    |e| e.evalue.clone(),
+                );
                 self.append_diagnostic(&format!("protocol repair bootstrap failed: {detail}"));
                 false
             }
@@ -206,21 +220,20 @@ impl Inner {
         }
         let task = {
             let mut memo = lock(&self.rebootstrap_memo);
-            match memo.as_ref() {
-                Some(existing) => existing.clone(),
-                None => {
-                    let inner = Arc::clone(self);
-                    let slot = MemoSlot::new();
-                    let run_slot = slot.clone();
-                    tokio::spawn(async move {
-                        let ok = inner.reprovision_fresh_kernel().await;
-                        run_slot.finish(
-                            (!ok).then(|| anyhow!("Kernel bootstrap failed after protocol repair")),
-                        );
-                    });
-                    *memo = Some(slot.clone());
-                    slot
-                }
+            if let Some(existing) = memo.as_ref() {
+                existing.clone()
+            } else {
+                let inner = Arc::clone(self);
+                let slot = MemoSlot::new();
+                let run_slot = slot.clone();
+                tokio::spawn(async move {
+                    let ok = inner.reprovision_fresh_kernel().await;
+                    run_slot.finish(
+                        (!ok).then(|| anyhow!("Kernel bootstrap failed after protocol repair")),
+                    );
+                });
+                *memo = Some(slot.clone());
+                slot
             }
         };
         // An aborted request never executes, so it may skip the wait; race
@@ -233,7 +246,7 @@ impl Inner {
                 }
                 tokio::select! {
                     result = task.wait() => result,
-                    _ = signal.cancelled() => Ok(()),
+                    () = signal.cancelled() => Ok(()),
                 }
             }
         }
@@ -321,7 +334,7 @@ impl Inner {
                     }
                     tokio::select! {
                         result = repair.slot.wait() => result?,
-                        _ = signal.cancelled() => return Ok(()),
+                        () = signal.cancelled() => return Ok(()),
                     }
                 }
             }

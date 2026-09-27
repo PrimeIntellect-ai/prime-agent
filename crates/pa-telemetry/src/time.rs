@@ -1,7 +1,7 @@
 //! Millisecond-epoch to ISO-8601 (UTC) formatting, no time crate.
 //!
 //! Telemetry timestamps are stored as epoch milliseconds and rendered as
-//! `YYYY-MM-DDTHH:MM:SS.mmmZ` for the PostHog `timestamp` field and the local
+//! `YYYY-MM-DDTHH:MM:SS.mmmZ` for the `PostHog` `timestamp` field and the local
 //! JSONL mirror. Civil-date math per Howard Hinnant's `civil_from_days`.
 
 /// Milliseconds since the Unix epoch.
@@ -13,8 +13,7 @@ impl EpochMs {
     pub fn now() -> Self {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
         Self(millis)
     }
 

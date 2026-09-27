@@ -320,10 +320,10 @@ impl SearchInput {
     /// grapheme that ends at the cursor and a mid-cluster cursor
     /// classifies the partial cluster the same way TS does.
     fn move_word_backward(&mut self) {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return;
         }
-        use unicode_segmentation::UnicodeSegmentation;
         let before: String = self.chars()[..self.cursor].iter().collect();
         let mut graphemes: Vec<&str> = before.graphemes(true).collect();
         while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {

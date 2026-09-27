@@ -50,11 +50,7 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     let env_vars = get_api_key_env_vars(provider)?;
     let found: Vec<String> = env_vars
         .into_iter()
-        .filter(|env_var| {
-            std::env::var_os(env_var)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-        })
+        .filter(|env_var| std::env::var_os(env_var).is_some_and(|v| !v.is_empty()))
         .map(std::string::ToString::to_string)
         .collect();
     if found.is_empty() {
@@ -82,17 +78,15 @@ pub fn get_env_api_key(provider: &str) -> Option<String> {
         let has_credentials = has_vertex_adc_credentials();
         let has_project = ["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"]
             .iter()
-            .any(|var| std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false));
-        let has_location = std::env::var("GOOGLE_CLOUD_LOCATION")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
+            .any(|var| std::env::var(var).is_ok_and(|v| !v.is_empty()));
+        let has_location = std::env::var("GOOGLE_CLOUD_LOCATION").is_ok_and(|v| !v.is_empty());
         if has_credentials && has_project && has_location {
             return Some("<authenticated>".to_string());
         }
     }
 
     if provider == "amazon-bedrock" {
-        let env = |name: &str| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false);
+        let env = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty());
         if env("AWS_PROFILE")
             || (env("AWS_ACCESS_KEY_ID") && env("AWS_SECRET_ACCESS_KEY"))
             || env("AWS_BEARER_TOKEN_BEDROCK")
@@ -121,25 +115,6 @@ fn default_adc_path() -> PathBuf {
     home.join(".config")
         .join("gcloud")
         .join("application_default_credentials.json")
-}
-
-/// Prime team id from PRIME_TEAM_ID or ~/.prime/config.json.
-pub fn get_prime_team_id() -> Option<String> {
-    if let Ok(from_env) = std::env::var("PRIME_TEAM_ID") {
-        let trimmed = from_env.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    let home = pa_types::platform::home_dir()?;
-    let config_path = home.join(".prime").join("config.json");
-    let text = std::fs::read_to_string(config_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
-    parsed
-        .get("team_id")
-        .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

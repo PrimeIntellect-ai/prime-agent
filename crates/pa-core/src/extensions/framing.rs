@@ -26,6 +26,11 @@ impl Default for LineLimits {
 }
 
 /// Serialize one protocol message as an NDJSON line (trailing `\n` included).
+///
+/// # Errors
+///
+/// Returns an error when the message cannot be serialized as JSON or the
+/// encoded line exceeds `limits.max_line_bytes`.
 pub fn encode_line<T: Serialize + ?Sized>(message: &T, limits: LineLimits) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(message).context("serialize extension RPC message")?;
     if bytes.len() + 1 > limits.max_line_bytes {
@@ -61,6 +66,11 @@ impl LineDecoder {
 
     /// Feed one chunk and return every complete line it produced (plus any
     /// completed by previously buffered bytes). Empty lines are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a completed line is not valid UTF-8, or when the
+    /// unterminated buffered bytes exceed `limits.max_line_bytes`.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();

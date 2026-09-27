@@ -39,7 +39,7 @@ pub(crate) async fn settle_post_turn<T>(
     match operation.await {
         Ok(value) => Ok(PostTurnResult::Completed(value)),
         Err(error) => {
-            if signal.map(AbortSignal::is_aborted).unwrap_or(false) && is_abort_error(&error) {
+            if signal.is_some_and(AbortSignal::is_aborted) && is_abort_error(&error) {
                 Ok(PostTurnResult::Aborted)
             } else {
                 Err(error)
@@ -56,7 +56,7 @@ pub(crate) async fn poll_messages_unless_aborted(
     let Some(poll) = poll else {
         return Ok(Vec::new());
     };
-    if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
+    if signal.is_some_and(AbortSignal::is_aborted) {
         return Ok(Vec::new());
     }
     race_with_abort(poll(), signal).await
@@ -85,29 +85,23 @@ pub(crate) fn create_aborted_assistant_message(
     partial_message: Option<&AssistantMessage>,
 ) -> AssistantMessage {
     AssistantMessage {
-        content: partial_message
-            .map(|partial| clone_assistant_content(&partial.content))
-            .unwrap_or_else(|| {
+        content: partial_message.map_or_else(
+            || {
                 vec![AssistantContent::Text(crate::types::TextContent {
                     text: String::new(),
                     text_signature: None,
                 })]
-            }),
-        api: partial_message
-            .map(|p| p.api.clone())
-            .unwrap_or_else(|| config.model.api.clone()),
+            },
+            |partial| clone_assistant_content(&partial.content),
+        ),
+        api: partial_message.map_or_else(|| config.model.api.clone(), |p| p.api.clone()),
         provider: partial_message
-            .map(|p| p.provider.clone())
-            .unwrap_or_else(|| config.model.provider.clone()),
-        model: partial_message
-            .map(|p| p.model.clone())
-            .unwrap_or_else(|| config.model.id.clone()),
+            .map_or_else(|| config.model.provider.clone(), |p| p.provider.clone()),
+        model: partial_message.map_or_else(|| config.model.id.clone(), |p| p.model.clone()),
         response_model: None,
         response_id: None,
         diagnostics: None,
-        usage: partial_message
-            .map(|p| p.usage.clone())
-            .unwrap_or_else(crate::types::Usage::zero),
+        usage: partial_message.map_or_else(crate::types::Usage::zero, |p| p.usage.clone()),
         stop_reason: StopReason::Aborted,
         stop_reason_raw: None,
         error_message: Some(ABORT_ERROR_MESSAGE.to_string()),

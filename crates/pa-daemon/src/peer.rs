@@ -78,10 +78,9 @@ impl ConnectionRole {
     /// Whether event fan-out may stream to this connection.
     pub(crate) fn streams_events(&self) -> bool {
         match self {
-            ConnectionRole::Unauthenticated => false,
             ConnectionRole::Supervisor { .. } => true,
             ConnectionRole::SessionClient { session } => session.is_attached(),
-            ConnectionRole::PeerWorker { .. } => false,
+            ConnectionRole::Unauthenticated | ConnectionRole::PeerWorker { .. } => false,
         }
     }
 }
@@ -294,7 +293,7 @@ impl Worker {
             Ok(presentation) => presentation,
             Err(reason) => {
                 let failure = response_failure(Some(request_id), "peer_auth", reason, None);
-                self.write_response_frame(sink, request_id, &failure).await;
+                self.write_response_frame(sink, request_id, failure).await;
                 return AuthOutcome::Failed;
             }
         };
@@ -319,12 +318,12 @@ impl Worker {
                     "peer_auth",
                     Some(peer_auth_success_data(&grant)),
                 );
-                self.write_response_frame(sink, request_id, &success).await;
+                self.write_response_frame(sink, request_id, success).await;
                 AuthOutcome::Authenticated
             }
             Err(reason) => {
                 let failure = response_failure(Some(request_id), "peer_auth", reason, None);
-                self.write_response_frame(sink, request_id, &failure).await;
+                self.write_response_frame(sink, request_id, failure).await;
                 AuthOutcome::Failed
             }
         }
@@ -375,6 +374,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn grant_context() -> GrantContext {
         GrantContext {
@@ -403,7 +403,7 @@ mod tests {
             token: token.to_string(),
             worker_instance_id: "inst-1".to_string(),
             purpose: "session_client".to_string(),
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 

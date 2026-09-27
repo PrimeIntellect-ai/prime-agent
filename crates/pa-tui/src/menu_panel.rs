@@ -13,6 +13,7 @@
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
+use ratatui::style::Color;
 
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
@@ -218,10 +219,22 @@ pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
     (content_width + HUG_TRAILING).max(MIN_HUG_WIDTH).min(width)
 }
 
+/// The wash every selected inline-picker row paints with: the theme's
+/// shared selection band ([`crate::theme::Theme::soft_selection_style`]).
+/// A theme too partial to compute one (no `selectedBg`, or no RGB/palette
+/// slot either side of the blend) keeps the onboarding wash — a selected
+/// row must always read as selected, never fall back to no band at all.
+fn selection_wash(theme: &Theme) -> Color {
+    theme
+        .soft_selection_style()
+        .bg
+        .unwrap_or_else(|| crate::onboarding::highlight_wash(theme))
+}
+
 /// One hug row: the content truncated to the pane, the selected row
-/// padded to its wash width and washed over the hug only (the
-/// onboarding-highlight treatment — a little past the text, not the
-/// whole terminal width).
+/// padded to its wash width and washed over the hug only — the theme's
+/// shared selection wash (the same band the `›`-marker rows carry), a
+/// little past the text, not the whole terminal width.
 pub(crate) fn hug_row(
     theme: &Theme,
     row: Line,
@@ -238,10 +251,9 @@ pub(crate) fn hug_row(
     if used < hug {
         row.push(Span::raw(" ".repeat(hug - used)));
     }
-    let wash = crate::onboarding::highlight_wash(theme);
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(wash);
+            span.style = span.style.bg(selection_wash(theme));
             span
         })
         .collect()
@@ -261,10 +273,9 @@ pub(crate) fn fill_row(theme: &Theme, row: Line, selected: bool, width: usize) -
     if used < width {
         row.push(Span::raw(" ".repeat(width - used)));
     }
-    let wash = crate::onboarding::highlight_wash(theme);
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(wash);
+            span.style = span.style.bg(selection_wash(theme));
             span
         })
         .collect()
@@ -323,6 +334,61 @@ fn render_input_field(
     line
 }
 
+/// The login dialog's paste field (TS `MenuSearchInput("Paste value",
+/// true, true)` — inline + plain, the `> ` prompt kept): one full-width
+/// row with the prompt, no enclosing rules — the rules read as clutter
+/// inside the login panel.
+pub(crate) fn login_field_row(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) -> Line {
+    render_input_field(theme, width, value, cursor, focused, placeholder)
+}
+
+/// The prompt-less field row (TS `MenuSearchInput`'s inline + plain +
+/// hidePrompt call: `" "` + the field, no `> ` prompt — the onboarding
+/// picker marks selection with its own caret): one full-width line for
+/// surfaces that own their selection language.
+pub(crate) fn search_field_plain_row(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) -> Line {
+    let input_width = width.saturating_sub(2).max(1);
+    let mut line: Line = vec![Span::raw(" ")];
+    if value.is_empty() {
+        // TS puts the caret on the first placeholder character, so the
+        // field keeps the same left edge as the text above it.
+        let mut characters = placeholder.chars();
+        match characters.next() {
+            Some(first) if focused => {
+                line.push(Span::styled(
+                    first.to_string(),
+                    ratatui::style::Style::default()
+                        .add_modifier(ratatui::style::Modifier::REVERSED),
+                ));
+                line.push(theme.fg_span(ThemeColor::Dim, characters.as_str()));
+            }
+            _ => line.push(theme.fg_span(ThemeColor::Dim, placeholder)),
+        }
+    } else {
+        line.extend(input_render(theme, input_width, value, cursor, focused));
+    }
+    let mut line = truncate_line(&line, width, "");
+    let used = crate::width::spans_width(&line);
+    if used < width {
+        line.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
 /// One input render (TS `Input.render`): prompt, the visible slice with the
 /// caret (a reversed cell) at the cursor, and trailing padding.
 fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused: bool) -> Line {
@@ -351,9 +417,7 @@ fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused
         } else {
             cursor_col.saturating_sub(scroll_width / 2)
         };
-        let visible = slice_by_chars(value, start_col, scroll_width);
-        let before_cursor = slice_by_chars(value, start_col, cursor_col.saturating_sub(start_col));
-        (visible, before_cursor.chars().count())
+        scroll_window(value, start_col, scroll_width, cursor_col)
     };
     let chars: Vec<char> = visible.chars().collect();
     let before: String = chars[..cursor_display.min(chars.len())].iter().collect();
@@ -378,10 +442,39 @@ fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused
     line
 }
 
-/// Slice a string by character count (TS `String.prototype.slice` here is
-/// column-based in the reference; both agree for the ASCII field content).
-fn slice_by_chars(text: &str, start_chars: usize, count: usize) -> String {
-    text.chars().skip(start_chars).take(count).collect()
+/// The input's visible window (TS `String.prototype.slice`, which is
+/// column-based in the reference): the window starts at the first
+/// character reaching the display-column offset — a wide character
+/// straddling the left edge renders whole, never split — ends before the
+/// first that would cross the right edge, and returns the caret's
+/// character index inside the window (the boundary's position). ASCII
+/// content reduces to the plain character slice.
+fn scroll_window(
+    value: &str,
+    start_col: usize,
+    width_cols: usize,
+    cursor_col: usize,
+) -> (String, usize) {
+    let mut window = String::new();
+    let mut caret = 0usize;
+    let mut col = 0usize;
+    for character in value.chars() {
+        let character_width = str_width(&character.to_string());
+        if window.is_empty() {
+            if col + character_width <= start_col {
+                col += character_width;
+                continue;
+            }
+        } else if col >= start_col + width_cols {
+            break;
+        }
+        if col < cursor_col {
+            caret += 1;
+        }
+        window.push(character);
+        col += character_width;
+    }
+    (window, caret)
 }
 
 /// The inline list's visible-row count (TS `getMenuListLayout`, inline
@@ -443,6 +536,25 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
+/// One hint segment: the resolved bindings' labels joined with `/` plus the
+/// action (TS `keyHint`). An action whose binding is unconfigured is
+/// omitted — the hint never advertises a key the surface does not handle.
+pub(crate) fn key_hint(
+    kb: &crate::keybindings::KeybindingsManager,
+    bindings: &[&str],
+    action: &str,
+) -> Option<String> {
+    let labels: Vec<String> = bindings
+        .iter()
+        .filter_map(|binding| kb.first_key(binding))
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    Some(format!("{} {action}", labels.join("/")))
+}
+
 /// One detail-block row: the selected item's metadata under the list,
 /// truncated to the frame width (marked) and padded to the full row; the
 /// content's own spans carry the color and leading indent.
@@ -459,6 +571,7 @@ pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::KeybindingsManager;
     use crate::theme::{ColorMode, Theme};
 
     fn theme() -> Theme {
@@ -467,6 +580,26 @@ mod tests {
 
     fn row_text(line: &Line) -> String {
         line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    /// The hint segment resolves the bound keys and omits an unbound
+    /// action entirely — a hint must never advertise a key the surface
+    /// does not handle (an empty user binding disables the action).
+    #[test]
+    fn key_hint_omits_unbound_actions() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            key_hint(&kb, &["tui.select.confirm"], "select").as_deref(),
+            Some("Enter select")
+        );
+        let mut bindings = crate::keybindings::KeybindingsConfig::new();
+        bindings.insert("tui.select.cancel".to_string(), Vec::new());
+        let unbound = KeybindingsManager::with_user_bindings(bindings);
+        assert_eq!(key_hint(&unbound, &["tui.select.cancel"], "close"), None);
+        assert_eq!(
+            key_hint(&unbound, &["tui.select.up", "tui.select.down"], "navigate").as_deref(),
+            Some("\u{2191}/\u{2193} navigate")
+        );
     }
 
     /// The table cell pads by GRAPHEME width: a multi-codepoint cluster
@@ -502,6 +635,88 @@ mod tests {
         let text = row_text(&row);
         assert!(text.starts_with("\u{203a}"));
         assert!(text.ends_with("connected"));
+    }
+
+    /// Every selected picker row carries the theme's ONE selection wash
+    /// (the operator's 2026-09-26 directive: the panel redesign's
+    /// selection must be unmistakable) — the `›`-marker menu rows, the
+    /// full-width table rows, and the hug rows all patch the same
+    /// [`crate::theme::Theme::soft_selection_style`], and the wash clears
+    /// the theme's visibility bar over the editor surface, so the
+    /// selected row reads at a glance.
+    #[test]
+    fn selected_rows_carry_the_shared_selection_wash() {
+        let theme = theme();
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        let menu = menu_row(&theme, 40, vec![Span::raw("label")], &[], true);
+        assert!(
+            menu.iter().all(|span| span.style.bg == Some(wash)),
+            "the menu row washes with the shared selection: {menu:?}"
+        );
+        let filled = fill_row(&theme, vec![Span::raw("label")], true, 40);
+        assert!(
+            filled.iter().all(|span| span.style.bg == Some(wash)),
+            "the fill row washes with the shared selection: {filled:?}"
+        );
+        let hugged = hug_row(&theme, vec![Span::raw("label")], 6, true, 40);
+        assert!(
+            hugged.iter().all(|span| span.style.bg == Some(wash)),
+            "the hug row washes with the shared selection: {hugged:?}"
+        );
+        // The wash is unmistakable: its rendered luminance clears the
+        // theme's visibility bar over the editor surface.
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the wash reads off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
+        // Unselected rows keep the surface: no wash at all.
+        for plain in [
+            menu_row(&theme, 40, vec![Span::raw("label")], &[], false),
+            fill_row(&theme, vec![Span::raw("label")], false, 40),
+            hug_row(&theme, vec![Span::raw("label")], 6, false, 40),
+        ] {
+            assert!(
+                plain.iter().all(|span| span.style.bg.is_none()),
+                "an unselected row carries no wash: {plain:?}"
+            );
+        }
+    }
+
+    /// A theme too partial to compute a selection (no `selectedBg`, no
+    /// RGB on either side) still paints a wash — the onboarding wash —
+    /// so a selected heartbeat/shell row never reads as unselected
+    /// (Macroscope PR #2908: the `highlight_wash` fallback must survive
+    /// the shared-wash switch).
+    #[test]
+    fn partial_themes_keep_the_onboarding_wash_on_selected_rows() {
+        let json = serde_json::from_str::<crate::theme::ThemeJson>(
+            r##"{
+                "name": "partial",
+                "colors": { "text": "#f4f4f5" }
+            }"##,
+        )
+        .expect("valid theme json");
+        let theme = crate::theme::Theme::from_json(&json, crate::theme::ColorMode::TrueColor);
+        assert!(
+            theme.soft_selection_style().bg.is_none(),
+            "the partial theme computes no selection"
+        );
+        let fallback = crate::onboarding::highlight_wash(&theme);
+        for washed in [
+            fill_row(&theme, vec![Span::raw("label")], true, 40),
+            hug_row(&theme, vec![Span::raw("label")], 6, true, 40),
+        ] {
+            assert!(
+                washed.iter().all(|span| span.style.bg == Some(fallback)),
+                "the selected row keeps a wash: {washed:?}"
+            );
+        }
     }
 
     #[test]

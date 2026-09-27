@@ -5,7 +5,7 @@
 //! same session. Also verifies the peer gate (single-use grants, session-plane
 //! command allowlist) at the socket level.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -112,7 +112,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(

@@ -124,6 +124,11 @@ impl SettingsManager {
     }
 
     /// Reload both scopes from storage.
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`; scope load problems
+    /// are recorded as load errors on the manager instead.
     pub fn reload(&mut self) -> Result<()> {
         let mut errors = std::mem::take(&mut self.errors);
         let (global, global_raw, global_load_error) =
@@ -153,22 +158,42 @@ impl SettingsManager {
     }
 
     /// Persist the global scope (sibling-module setters share this).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub(crate) fn save_global_scope(&mut self) -> Result<()> {
         self.save_global()
     }
 
     // -- persisted setters --------------------------------------------------
 
+    /// `defaultProvider` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_provider(&mut self, provider: String) -> Result<()> {
         self.global.default_provider = Some(provider);
         self.save_global()
     }
 
+    /// `defaultModel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_model(&mut self, model: String) -> Result<()> {
         self.global.default_model = Some(model);
         self.save_global()
     }
 
+    /// `defaultModel` + `defaultProvider` setter (the model switch's
+    /// combined write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_model_and_provider(
         &mut self,
         provider: String,
@@ -226,6 +251,18 @@ impl SettingsManager {
         }
     }
 
+    /// `chatDetail` (TS #2709 `getChatDetail`): the conversation-detail
+    /// level the chat starts at; an unset or invalid value falls back to
+    /// `details` (the TS #2447 startup level).
+    pub fn get_chat_detail(&self) -> String {
+        match self.settings().chat_detail.as_deref() {
+            Some("overview") => "overview",
+            Some("all") => "all",
+            _ => "details",
+        }
+        .to_string()
+    }
+
     /// `branchSummary.skipPrompt` (TS `getBranchSummarySkipPrompt`).
     pub fn get_branch_summary_skip_prompt(&self) -> bool {
         self.settings()
@@ -248,26 +285,51 @@ impl SettingsManager {
         self.global.recent_models = Some(recent);
     }
 
+    /// `steeringMode` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_steering_mode(&mut self, mode: QueueModeSetting) -> Result<()> {
         self.global.steering_mode = Some(mode);
         self.save_global()
     }
 
+    /// `followUpMode` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_follow_up_mode(&mut self, mode: QueueModeSetting) -> Result<()> {
         self.global.follow_up_mode = Some(mode);
         self.save_global()
     }
 
+    /// `theme` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_theme(&mut self, theme: String) -> Result<()> {
         self.global.theme = Some(theme);
         self.save_global()
     }
 
+    /// `updateChannel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_update_channel(&mut self, channel: UpdateChannel) -> Result<()> {
         self.global.update_channel = Some(channel);
         self.save_global()
     }
 
+    /// `defaultThinkingLevel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_thinking_level(&mut self, level: ThinkingLevelSetting) -> Result<()> {
         self.global.default_thinking_level = Some(level);
         self.save_global()
@@ -275,6 +337,10 @@ impl SettingsManager {
 
     /// TS `setRetryEnabled`: the auto-retry toggle the provider retry
     /// policy reads (`retry.enabled`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_retry_enabled(&mut self, enabled: bool) -> Result<()> {
         self.global
             .retry
@@ -287,6 +353,10 @@ impl SettingsManager {
     /// (`compaction.enabled` in the global settings file). The connection
     /// state's `autoCompactionEnabled` is this value in TS, so a daemon
     /// restart re-seeds the flag from the persisted setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_compaction_enabled(&mut self, enabled: bool) -> Result<()> {
         self.global
             .compaction
@@ -295,33 +365,63 @@ impl SettingsManager {
         self.save_global()
     }
 
+    /// `transport` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_transport(&mut self, transport: TransportSetting) -> Result<()> {
         self.global.transport = Some(transport);
         self.save_global()
     }
 
+    /// `rlmMaxDepth` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_rlm_max_depth(&mut self, depth: u64) -> Result<()> {
         self.global.rlm_max_depth = Some(depth);
         self.save_global()
     }
 
+    /// `telemetry.enabled` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_telemetry_enabled(&mut self, enabled: bool) -> Result<()> {
         let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
         telemetry.enabled = Some(enabled);
         self.save_global()
     }
 
+    /// `telemetry.noticeShown` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_telemetry_notice_shown(&mut self, shown: bool) -> Result<()> {
         let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
         telemetry.notice_shown = Some(shown);
         self.save_global()
     }
 
+    /// `onboardingShown` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_onboarding_shown(&mut self, shown: bool) -> Result<()> {
         self.global.onboarding_shown = Some(shown);
         self.save_global()
     }
 
+    /// `onboardingCompleted` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_onboarding_completed(&mut self, completed: bool) -> Result<()> {
         self.global.onboarding_completed = Some(completed);
         self.save_global()
@@ -372,6 +472,11 @@ impl SettingsManager {
             .is_some()
     }
 
+    /// `agentTraces.enabled` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_agent_traces_enabled(&mut self, enabled: bool) -> Result<()> {
         let traces = self
             .global
@@ -530,6 +635,10 @@ impl SettingsManager {
     /// TS `setDefaultServiceTier`: the persisted default a fresh session
     /// starts from; the stored string is the same vocabulary
     /// `get_default_service_tier` parses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_service_tier(&mut self, tier: pa_types::ai::ServiceTier) -> Result<()> {
         use pa_types::ai::ServiceTier;
         let name = match tier {
@@ -613,10 +722,10 @@ impl SettingsManager {
                 .retry
                 .as_ref()
                 .and_then(|retry| retry.max_retries)
-                .map(|retries| retries.min(u32::MAX as u64) as u32)
-                .unwrap_or(
+                .map_or(
                     crate::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY
                         .max_retries,
+                    |retries| retries.min(u32::MAX as u64) as u32,
                 ),
             base_delay_ms: self
                 .merged
@@ -657,8 +766,9 @@ impl SettingsManager {
                 .unwrap_or(defaults.enabled),
             max_retries: failover
                 .and_then(|failover| failover.max_retries)
-                .map(|retries| retries.min(u32::MAX as u64) as u32)
-                .unwrap_or(defaults.max_retries),
+                .map_or(defaults.max_retries, |retries| {
+                    retries.min(u32::MAX as u64) as u32
+                }),
             base_delay_ms: failover
                 .and_then(|failover| failover.base_delay_ms)
                 .unwrap_or(defaults.base_delay_ms),
@@ -744,6 +854,12 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
+    /// `requestTiming`: unset means OFF — the per-request timing timeline
+    /// is opt-in, exactly the TS default (`getRequestTiming`).
+    pub fn get_request_timing(&self) -> bool {
+        self.merged.request_timing.unwrap_or(false)
+    }
+
     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
         let session_dir = self.merged.session_dir.as_ref()?;
         let home = pa_types::platform::home_dir()?;
@@ -806,19 +922,20 @@ fn load_scope(
     scope: SettingsScope,
     errors: &mut Vec<SettingsError>,
 ) -> (Settings, Option<serde_json::Value>, Option<String>) {
-    let mut content: Option<String> = None;
     let mut load_error: Option<String> = None;
-    let result = storage.with_lock(scope, &mut |current| {
-        content = current;
-        None
-    });
-    if let Err(error) = result {
-        errors.push(SettingsError {
-            scope,
-            message: error.to_string(),
-        });
-        return (Settings::default(), None, Some(error.to_string()));
-    }
+    // The pure-read arm: a locked protocol read on any cache miss, the
+    // process-cached copy on a hit (see `SettingsStorage::read`).
+    let content = match storage.read(scope) {
+        Ok(content) => content,
+        Err(error) => {
+            let message = error.to_string();
+            errors.push(SettingsError {
+                scope,
+                message: message.clone(),
+            });
+            return (Settings::default(), None, Some(message));
+        }
+    };
     let Some(content) = content else {
         return (Settings::default(), None, None);
     };
@@ -884,6 +1001,29 @@ mod tests {
         };
         let manager = SettingsManager::in_memory(settings);
         assert_eq!(manager.get_code_block_indent(), "    ");
+    }
+
+    /// TS #2709: the Ctrl+O level persists as the global `chatDetail`
+    /// setting — a later run reads it back — and anything but the three
+    /// TS levels reads as the `details` startup default.
+    #[test]
+    fn chat_detail_persists_the_chosen_level_with_ts_fallback() {
+        let mut manager = SettingsManager::in_memory(Settings::default());
+        assert_eq!(manager.get_chat_detail(), "details");
+        manager.set_chat_detail("all").unwrap();
+        assert_eq!(manager.get_chat_detail(), "all");
+        manager.reload().unwrap();
+        assert_eq!(
+            manager.get_chat_detail(),
+            "all",
+            "the saved level survives a reload (a later chat re-reads it)"
+        );
+        manager.set_chat_detail("verbose").unwrap();
+        assert_eq!(
+            manager.get_chat_detail(),
+            "details",
+            "an invalid value falls back to the TS startup default"
+        );
     }
 
     /// The steering default is "all" (every queued steer co-delivers as

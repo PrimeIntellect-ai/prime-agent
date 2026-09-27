@@ -756,7 +756,7 @@ mod tests {
         (frames, sink)
     }
 
-    /// The goal frame kinds, in order (goal_update statuses and the
+    /// The goal frame kinds, in order (`goal_update` statuses and the
     /// session-action phases).
     fn frame_kinds(frames: &Frames) -> Vec<String> {
         frames
@@ -794,7 +794,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -824,7 +824,7 @@ mod tests {
             .collect()
     }
 
-    /// Count the agent runs (agent_end events) a live subscription
+    /// Count the agent runs (`agent_end` events) a live subscription
     /// observes: the counter handle reads after the driver settles.
     async fn agent_run_counter(
         engine: &Arc<SessionEngine>,
@@ -871,6 +871,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
@@ -908,6 +909,7 @@ mod tests {
                     cli_extension_sources: Vec::new(),
                     extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
+                    on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
                     steering_mode: None,
@@ -978,7 +980,7 @@ mod tests {
                 .unwrap();
             self.engine
                 .session
-                .prompt(text, Default::default())
+                .prompt(text, pa_core::session_engine::PromptOptions::default())
                 .await
                 .unwrap();
             self.engine.session.agent().wait_for_idle().await;
@@ -1017,7 +1019,7 @@ mod tests {
     /// The `--goal` seed rides the first turn: the goal context row lands
     /// ahead of the user row (its slot still zero), and the seed itself
     /// never announces (the baseline swallows the construction state; the
-    /// first goal_update is the first turn's own accounting).
+    /// first `goal_update` is the first turn's own accounting).
     #[tokio::test]
     async fn seed_rides_the_first_turn_and_stays_silent() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1051,7 +1053,7 @@ mod tests {
         // it lands ahead of the user row in the transcript.
         let entries = bed.engine.session.entries().await;
         let mut kinds: Vec<String> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 pa_types::session::FileEntry::CustomMessage { payload, .. }
                     if payload.custom_type == pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE =>
@@ -1130,7 +1132,7 @@ mod tests {
 
     /// The natural continuation loop: an unbounded-budget goal mints one
     /// continuation context per settled turn INSIDE the one agent run (no
-    /// agent_start/agent_end between continuation turns), each mint
+    /// `agent_start/agent_end` between continuation turns), each mint
     /// publishing its continuationsUsed bump before the turn starts.
     #[tokio::test]
     async fn natural_loop_mints_continuations_inside_one_run() {
@@ -1183,8 +1185,8 @@ mod tests {
     }
 
     /// The budget-limit wrap-up steer: the crossing turn's usage flips the
-    /// goal to budget_limited (a goal_update plus the queued steering
-    /// preview between its message_end and turn_end), the run ends, and
+    /// goal to `budget_limited` (a `goal_update` plus the queued steering
+    /// preview between its `message_end` and `turn_end`), the run ends, and
     /// the steer drains as its own run (preparing/committing/running phase
     /// frames) before the queue empties.
     #[tokio::test]
@@ -1294,7 +1296,7 @@ mod tests {
         // the compaction as the post-compaction turn's leading row.
         let entries = bed.engine.session.entries().await;
         let mut marks: Vec<(String, u64)> = Vec::new();
-        for entry in entries.iter() {
+        for entry in &entries {
             match entry {
                 // The goal-state rows are `Custom` entries (their `data` is
                 // the serialized state); the context rows are
@@ -1332,15 +1334,18 @@ mod tests {
             (pa_core::goals::GOAL_STATE_CUSTOM_TYPE.to_string(), 1),
             "the mint's slot bump immediately precedes the compaction"
         );
+        // The live CompactionSummary prevents a second threshold check from
+        // writing a spurious skipped `compaction_outcome` before this turn.
         assert_eq!(
-            marks[compaction + 1].0,
-            "compaction_outcome",
-            "the compaction's durable outcome row follows the entry"
-        );
-        assert_eq!(
-            marks[compaction + 2],
+            marks[compaction + 1],
             (pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE.to_string(), 1),
             "the held context row follows the compaction as the next turn"
+        );
+        assert!(
+            marks[compaction + 1..]
+                .iter()
+                .all(|(kind, _)| kind != "compaction_outcome"),
+            "no repeat compaction outcome follows the live summary boundary"
         );
         // The stream: the crossing turn's usage bump, the mint's bump, the
         // held follow-up queue frame, the drain's phase frames (the held
@@ -1385,6 +1390,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
@@ -1409,7 +1415,7 @@ mod tests {
                         String::from("a resumed history turn ") + &"x".repeat(60000),
                     ),
                     timestamp: 1,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .expect("the resumed user turn appends");
@@ -1466,6 +1472,7 @@ mod tests {
                     cli_extension_sources: Vec::new(),
                     extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
+                    on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
                     steering_mode: None,

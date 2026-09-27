@@ -16,7 +16,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Mutex;
 
@@ -36,7 +36,7 @@ const SPILL_PREFIX: &str = "pa-bash";
 /// plus the per-invocation abort controllers), with a kill switch the
 /// `abort_bash` command pulls.
 pub(crate) struct UserBash {
-    /// The user-bash claim (execute_bash only; TS `runUserBash` guard).
+    /// The user-bash claim (`execute_bash` only; TS `runUserBash` guard).
     running: AtomicBool,
     /// Awaited bash runs in flight (TS `_bashAbortControllers.size`:
     /// `execute_bash_and_wait` runs count toward `isBashRunning` without
@@ -80,7 +80,7 @@ impl UserBash {
 
     /// Whether a user bash or an awaited bash run is in flight (TS
     /// `isBashRunning`: `_bashAbortControllers.size > 0 ||
-    /// `_userBashRunning`).
+    /// _userBashRunning`).
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst) || self.awaited.load(Ordering::SeqCst) > 0
     }
@@ -313,7 +313,7 @@ impl Worker {
         // for its whole duration); it owns no exclusive slot, so a streamed
         // user bash is not blocked by it. The bracket releases the count on
         // drop, so a dropped run future cannot leave the flag stuck on.
-        let _awaited = user_bash.begin_awaited();
+        let awaited = user_bash.begin_awaited();
         let end = run_bash(RunBash {
             command: &command,
             cwd: &cwd,
@@ -324,7 +324,7 @@ impl Worker {
             on_chunk: None,
         })
         .await;
-        drop(_awaited);
+        drop(awaited);
         // The awaited path emits no session events, so the live roster
         // feed has no trigger of its own — TS's `execute_bash_and_wait`
         // flushes in the command's `finally`; the port enqueues the same
@@ -845,7 +845,7 @@ pub(crate) fn emit_session_event_frame(
         active_session_id,
         event,
         meta: Some(meta),
-        rest: Default::default(),
+        rest: Map::default(),
     };
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
     drop(core);

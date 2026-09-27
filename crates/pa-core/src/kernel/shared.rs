@@ -16,6 +16,8 @@ pub const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const KERNEL_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_DEBOUNCE_MS: u64 = 1_500;
 pub const SNAPSHOT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
+/// Restore deserializes everything a snapshot serializes: bounded like the repair step.
+pub const RESTORE_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 pub const KERNEL_ABORT_GRACE_MS: u64 = 1_000;
 pub const KERNEL_BUSY_REUSE_WAIT_MS: u64 = 5_000;
 pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;
@@ -76,6 +78,11 @@ pub enum StreamName {
 
 /// Callback receiving streamed output chunks as they arrive.
 pub type StreamCallback = Arc<dyn Fn(&str, StreamName) + Send + Sync>;
+
+/// Fires when the kernel's last live background `bash()` handle settles
+/// (its activity track empties or the kernel tears down), so owed
+/// continuations can resume (TS `KernelManagerOptions.onBackgroundWorkSettled`).
+pub type BackgroundWorkSettledCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Callback receiving an agent message sent late by the kernel.
 pub type LateSentAgentMessageCallback = Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>;
@@ -295,6 +302,10 @@ pub struct KernelManagerOptions {
     pub session_id: Option<String>,
     pub host_handlers: HostRequestHandlers,
     pub python_skills: Vec<KernelPythonSkill>,
+    /// Fires when the last live background `bash()` handle settles (its
+    /// activity track empties or the kernel tears down), so owed
+    /// continuations can resume.
+    pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
     /// Persist/revive the user namespace across kernel restarts and session resume.
     pub snapshot: Option<KernelSnapshotConfig>,
     /// Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again.

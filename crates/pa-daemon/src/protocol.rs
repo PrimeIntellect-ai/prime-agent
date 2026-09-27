@@ -179,6 +179,13 @@ impl EnvelopeParseError {
 /// Parse one JSONL command line into an envelope. Non-envelope lines are
 /// treated as bare commands (TS backward compat). Unknown command types are
 /// preserved as an error so callers can reply with the exact TS wire error.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, the envelope is
+/// malformed (missing id, a non-string clientId, a bad command payload),
+/// the protocol is too old, or the command type is unknown
+/// (`EnvelopeParseError`).
 pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| EnvelopeParseError::Invalid(format!("invalid JSON: {e}")))?;
@@ -247,16 +254,13 @@ fn parse_daemon_command_value(
         .unwrap_or("unknown");
     // Keep the tag for the error after deserialization consumes the command value.
     let type_name = type_name.to_string();
-    let command = match serde_json::from_value::<DaemonCommand>(command_value) {
-        Ok(command) => command,
-        Err(_) => {
-            if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
-                return Err(EnvelopeParseError::UnknownCommand(type_name));
-            }
-            return Err(EnvelopeParseError::Invalid(format!(
-                "malformed {type_name} command"
-            )));
+    let Ok(command) = serde_json::from_value::<DaemonCommand>(command_value) else {
+        if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
+            return Err(EnvelopeParseError::UnknownCommand(type_name));
         }
+        return Err(EnvelopeParseError::Invalid(format!(
+            "malformed {type_name} command"
+        )));
     };
     Ok(DaemonCommandEnvelope {
         id: envelope_id,
@@ -333,6 +337,13 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
 /// Parse a client command line the way the TS supervisor does: only
 /// `type: "command"` envelopes are accepted; bare commands fail with the
 /// protocol error, because the supervisor has no pre-envelope clients.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, is not a
+/// `type: "command"` envelope (bare commands fail as protocol-too-old),
+/// the envelope is malformed, the protocol is too old, or the command
+/// type is unknown (`EnvelopeParseError`).
 pub fn parse_supervisor_command_line(
     line: &str,
 ) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
@@ -516,6 +527,59 @@ pub fn response_line(response: &DaemonResponse) -> Value {
         );
     }
     Value::Object(obj)
+}
+
+/// Serialize a standalone response line (`type: "response"`) straight to
+/// bytes.
+///
+/// Byte-identical to `serde_json::to_vec(&response_line(response))` — the
+/// same keys in the same TS wire order — but the data tree is borrowed, not
+/// cloned: [`response_line`] inserts `data.clone()` into a fresh map, which
+/// the caller immediately serializes, so every response line paid a
+/// full-payload deep clone on the way to the wire. The worker writes one
+/// response line per command; at MB-class payloads (attach snapshots,
+/// `get_messages` histories) the clone dominated the response path's
+/// transient allocations.
+pub fn response_line_bytes(response: &DaemonResponse) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(256);
+    if write_response_line(&mut buf, response).is_err() {
+        return Vec::new();
+    }
+    buf
+}
+
+/// Write the response line's wire bytes into `buf`: the TS key order from
+/// [`response_line`], each value serialized in place instead of being
+/// cloned into an intermediate tree first.
+fn write_response_line(buf: &mut Vec<u8>, response: &DaemonResponse) -> serde_json::Result<()> {
+    buf.push(b'{');
+    if let Some(id) = &response.id {
+        buf.extend_from_slice(b"\"id\":");
+        serde_json::to_writer(&mut *buf, id)?;
+        buf.push(b',');
+    }
+    buf.extend_from_slice(b"\"type\":\"response\",\"command\":");
+    serde_json::to_writer(&mut *buf, &response.command)?;
+    buf.extend_from_slice(b",\"success\":");
+    serde_json::to_writer(&mut *buf, &response.success)?;
+    match (&response.data, &response.error) {
+        (Some(data), _) => {
+            buf.extend_from_slice(b",\"data\":");
+            serde_json::to_writer(&mut *buf, data)?;
+        }
+        (None, Some(error)) => {
+            buf.extend_from_slice(b",\"error\":");
+            serde_json::to_writer(&mut *buf, error)?;
+        }
+        (None, None) => {}
+    }
+    if let Some(error_info) = &response.error_info {
+        buf.extend_from_slice(b",\"errorInfo\":");
+        let error_info = serde_json::to_value(error_info).unwrap_or(Value::Null);
+        serde_json::to_writer(&mut *buf, &error_info)?;
+    }
+    buf.push(b'}');
+    Ok(())
 }
 
 /// Session selector carried by a command, when it has one.
@@ -805,32 +869,32 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         } => Some(active_session_id),
         DaemonCommand::ListSavedSessions {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::Detach {
+        }
+        | DaemonCommand::Detach {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesStatus {
+        }
+        | DaemonCommand::AgentMessagesStatus {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesPause {
+        }
+        | DaemonCommand::AgentMessagesPause {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesResume {
+        }
+        | DaemonCommand::AgentMessagesResume {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronList {
+        }
+        | DaemonCommand::CronList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::HeartbeatsList {
+        }
+        | DaemonCommand::HeartbeatsList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronCancel {
+        }
+        | DaemonCommand::CronCancel {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::RenameSavedSession {
+        }
+        | DaemonCommand::RenameSavedSession {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::DeleteSavedSession {
+        }
+        | DaemonCommand::DeleteSavedSession {
             active_session_id, ..
         } => active_session_id.as_deref(),
         // Control-plane commands carry no session selector.
@@ -1099,6 +1163,24 @@ mod tests {
         );
     }
 
+    /// TS #2391: the admission gate's preparing-restart refusal keeps the
+    /// TS plain message for old clients and carries the typed
+    /// `update_restarting` info for clients that wait through the
+    /// restart.
+    #[test]
+    fn update_preparing_refusal_carries_the_typed_error_info() {
+        let failure = response_failure(
+            Some("k3"),
+            "create",
+            crate::update_prepare::UPDATE_PREPARING_MESSAGE,
+            Some(DaemonErrorInfo::UpdateRestarting),
+        );
+        assert_eq!(
+            serde_json::to_string(&response_line(&failure)).unwrap(),
+            "{\"id\":\"k3\",\"type\":\"response\",\"command\":\"create\",\"success\":false,\"error\":\"Daemon is preparing an update restart\",\"errorInfo\":{\"code\":\"update_restarting\"}}"
+        );
+    }
+
     /// The standalone response line byte-orders its keys exactly like the
     /// TS daemon wire bytes (`daemon-protocol.ts` `success`/`failure`):
     /// id?, type, command, success, then data or error/errorInfo.
@@ -1113,6 +1195,69 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&response_line(&failure)).unwrap(),
             "{\"id\":\"k2\",\"type\":\"response\",\"command\":\"compact\",\"success\":false,\"error\":\"boom\"}"
+        );
+    }
+
+    /// The zero-copy response-line serializer must be byte-identical to the
+    /// reference `response_line` + `to_vec` path over every response
+    /// shape: the worker's wire bytes (and the supervisor's client-line
+    /// splice riding on them) depend on it.
+    #[test]
+    fn response_line_bytes_matches_the_reference_tree_path() {
+        let shapes: Vec<DaemonResponse> = vec![
+            response_success(Some("k1"), "compact", Some(json!({"x": 1}))),
+            response_success(None, "append_custom_message", None),
+            response_failure(Some("k2"), "compact", "boom", None),
+            response_failure(
+                None,
+                "attach",
+                "refused",
+                Some(DaemonErrorInfo::MissingSessionCwd {
+                    issue: json!({"sessionId": "s1"}),
+                }),
+            ),
+            response_success(
+                Some("u1"),
+                "get_messages",
+                Some(json!({
+                    "messages": [
+                        {"role": "user", "content": "quotes \" backslash \\ newline \n tab \t emoji 🚀"},
+                        {"role": "assistant", "content": ["part one", "part two"]},
+                        {"role": "custom", "n": 3, "nested": {"deep": [1, 2, {"x": null}]}}
+                    ],
+                    "count": 3,
+                })),
+            ),
+            // data wins over error, exactly like the reference match arms
+            DaemonResponse {
+                id: Some("both".to_string()),
+                command: "attach".to_string(),
+                success: false,
+                data: Some(json!({"a": [1, 2, 3]})),
+                error: Some("ignored".to_string()),
+                error_info: Some(DaemonErrorInfo::SessionImportFileNotFound {
+                    file_path: "/tmp/gone.jsonl".to_string(),
+                }),
+            },
+            // a large tree: the size class the clone removal targets
+            response_success(
+                Some("big"),
+                "get_messages",
+                Some(json!({
+                    "messages": (0..10_000)
+                        .map(|i| json!({"seq": i, "text": "payload line of text", "tags": ["a", "b"]}))
+                        .collect::<Vec<_>>(),
+                })),
+            ),
+        ];
+        for response in &shapes {
+            let reference = serde_json::to_vec(&response_line(response)).unwrap();
+            assert_eq!(response_line_bytes(response), reference);
+        }
+        // and the exact TS key order for the canonical success form
+        assert_eq!(
+            String::from_utf8(response_line_bytes(&shapes[0])).unwrap(),
+            "{\"id\":\"k1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"x\":1}}"
         );
     }
 }

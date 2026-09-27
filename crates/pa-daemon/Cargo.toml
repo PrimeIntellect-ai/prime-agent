@@ -14,11 +14,11 @@ pa-telemetry = { path = "../pa-telemetry" }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = "0.7"
 sha2 = "0.10"
-regex = "1"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]

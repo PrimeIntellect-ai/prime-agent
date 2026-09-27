@@ -7,6 +7,47 @@
 //! restarted supervisor can adopt or relaunch live sessions, and routes
 //! commands and events between clients and workers (private-framed channel).
 
+mod accept_loop;
+mod adoption;
+mod clients;
+mod launch_budget;
+mod options;
+mod routing;
+mod sessions;
+pub(crate) mod subscribers;
+mod update_restart;
+
+use adoption::AdoptionBoot;
+use launch_budget::{
+    DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS, WORKER_CONNECT_BACKOFF_MS,
+    WORKER_CONNECT_PROBE_MS, WORKER_CONNECT_TIMEOUT_ENV,
+};
+mod supervision;
+
+// STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
+// pub(super) const); the lib-target import is flagged unused since only tests use it.
+#[allow(unused_imports)]
+use supervision::STABLE_LIFETIME_MS;
+
+// The saved-session row builders are read only by this facade's in-file test
+// modules (via the module's pub(super) fns); the lib-target import is flagged
+// unused since only tests use it.
+#[allow(unused_imports)]
+use sessions::{saved_session_row, saved_session_summary};
+
+pub(crate) use options::ClientRouting;
+pub use options::SupervisorOptions;
+
+// The salvage/streaming helpers are called only by the routing and clients sibling modules (through their `use super::*` globs); the facade's own dispatch arm moved with the clients concern (SS2-R2), so the lib-target import is flagged unused without the allow.
+#[allow(unused_imports)]
+use update_restart::{salvage_command_type, salvage_id, streamed_attach_lines};
+
+pub(crate) use clients::client_command_payload;
+
+// The routing consts and refusal string keep their crate::supervisor::* paths stable
+// (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
+pub(crate) use routing::{LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,11 +61,12 @@ use pa_types::daemon::{
     UpdatePreparedMarker, UpdateTimeoutBudget,
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
     PersistedSupervisorConfig, SUPERVISOR_CONFIG_FILE_NAME,
@@ -40,102 +82,22 @@ use crate::protocol::{
     response_success, DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError,
     TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
-use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
+use crate::registry::{
+    ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,
+};
 use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
 use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
-    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, UPDATE_PREPARING_MESSAGE,
+    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, PrepareState,
+    UPDATE_PREPARING_MESSAGE,
 };
 use crate::update_roster::{
     build_update_roster, supervisor_identity, UpdateRosterInputs, WorkerSnapshot,
 };
 use crate::update_stop::{stop_workers_gracefully, WorkerStopVerdict, WORKER_REQUEST_TIMEOUT_MS};
 use crate::{socket, util};
-
-/// Worker connect budget: socket probes, connect, and the auth handshake
-/// all share this deadline from spawn time (TS `WORKER_CONNECT_TIMEOUT_MS`:
-/// 30s on Unix, 90s on Windows). A worker that never comes up fails the
-/// launch within this budget instead of hanging. The budget is
-/// env-overridable (`WORKER_CONNECT_TIMEOUT_ENV`, ms) for environments
-/// whose worker boots need more headroom (e.g. parallel e2e runs on
-/// shared vCPUs); the default keeps the TS wire behavior.
-#[cfg(unix)]
-const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 30_000;
-#[cfg(not(unix))]
-const DEFAULT_WORKER_CONNECT_TIMEOUT_MS: u64 = 90_000;
-/// The auth handshake's minimum budget. Probes, connect, and auth share the
-/// connect deadline, but a probe phase that ate nearly all of it (a
-/// slow-booting worker under load) must not leave the auth route with
-/// crumbs: a worker that just proved life (the probe connected) gets at
-/// least this long to answer the handshake, so the launch fails with the
-/// connect-budget error only when the worker is genuinely wedged.
-const WORKER_AUTH_FLOOR_MS: u64 = 10_000;
-/// Overrides [`DEFAULT_WORKER_CONNECT_TIMEOUT_MS`] when set to a positive
-/// number of milliseconds (tests under parallel load use this seam).
-const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS";
-/// One socket probe attempt (TS `WORKER_CONNECT_PROBE_MS`).
-#[cfg(unix)]
-const WORKER_CONNECT_PROBE_MS: u64 = 500;
-#[cfg(not(unix))]
-const WORKER_CONNECT_PROBE_MS: u64 = 2_000;
-/// Pause between probe attempts (TS backoff min = max on Unix).
-#[cfg(unix)]
-const WORKER_CONNECT_BACKOFF_MS: u64 = 25;
-#[cfg(not(unix))]
-const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
-pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
-/// The route failure for a worker whose command channel is gone (never
-/// connected, or the writer pump broke on a dead socket): the request did
-/// not leave the supervisor, so the replacement-aware route may retry it
-/// against the next connection without risking a duplicate landing.
-pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
-
-/// Resolve a pending request whose frame provably never reached the worker
-/// (a failed frame write, or a request still queued when the writer pump
-/// ended) with the not-connected failure: `route_command` surfaces it as
-/// the unambiguous retryable error, never as an ambiguous timeout.
-async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
-    if let Some(reply) = resident.pending.lock().await.remove(request_id) {
-        let _ = reply.send(response_failure(
-            Some(request_id),
-            "route",
-            WORKER_NOT_CONNECTED,
-            None,
-        ));
-    }
-}
-pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
-const MAX_CONSECUTIVE_FAILURES: u32 = 5;
-/// A crash-path child that lived at least this long proved health: its death
-/// resets the failure count (a fresh count) instead of accumulating toward
-/// the give-up cap. Below it, a spawn-dies-fast child counts as another
-/// consecutive failure - the restart storm's counter could never grow.
-const STABLE_LIFETIME_MS: u64 = 30_000;
-const BASE_BACKOFF_MS: u64 = 250;
-const MAX_BACKOFF_MS: u64 = 30_000;
-
-#[derive(Debug, Clone)]
-pub struct SupervisorOptions {
-    pub socket_path: PathBuf,
-    pub agent_dir: PathBuf,
-}
-
-/// Which clients a worker outbound frame reaches.
-#[derive(Debug, Clone)]
-pub(crate) enum ClientRouting {
-    /// Every connected client (e.g. `daemon_closing`).
-    Broadcast,
-    /// Every connected client except one (the shutdown initiator receives its
-    /// `daemon_closing` through the command response instead, so the
-    /// broadcast cannot overtake that response or duplicate the frame).
-    BroadcastExcept { connection_id: String },
-    /// Clients attached to the session.
-    AttachedSession { active_session_id: String },
-    /// Clients holding a roster subscription (`roster_subscribe`).
-    RosterSubscribers,
-}
 
 pub struct Supervisor {
     pub(crate) options: SupervisorOptions,
@@ -157,8 +119,19 @@ pub struct Supervisor {
     /// run start (None = opted out); never blocks supervision paths.
     telemetry: std::sync::Mutex<Option<pa_telemetry::TelemetryClient>>,
     pub(crate) registry: SessionRegistry,
-    /// Worker outbound frames, with their client routing.
-    pub(crate) events: broadcast::Sender<(ClientRouting, Value)>,
+    /// Worker outbound frames, with their client routing. The payload is
+    /// shared (`Arc`): every connected client's event arm receives every
+    /// frame to decide delivery, and a per-receiver deep `Value` clone
+    /// would multiply the frame's heap by the connection count on every
+    /// event — the refcount bump is the whole cost for non-matching
+    /// connections.
+    pub(crate) events: broadcast::Sender<(ClientRouting, std::sync::Arc<Value>)>,
+    /// Session-event subscribers: the send-time routing index (TS parity —
+    /// `handleWorkerFrame` evaluates the attached set in the same pass that
+    /// writes the socket). Session events enqueue to the attached
+    /// connections' per-connection queues here instead of waking every
+    /// connection's ring arm; broadcast-class events keep the ring above.
+    pub(crate) session_subscribers: subscribers::SessionSubscribers,
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
@@ -226,71 +199,17 @@ pub struct Supervisor {
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
 }
 
-/// The boot the descriptor-adoption pass runs under. An update boot
-/// relaunches kept workers from their descriptors before the roster
-/// restore walks the rows (spec §6 step 2's create-or-adopt order). A
-/// plain startup adopts live workers and revives only genuinely
-/// interrupted ones: a supervisor restart must not mass-revive the
-/// historical idle/completed sessions a TS daemon leaves down (their
-/// clients reopen them lazily through a fresh create).
-#[derive(Clone, PartialEq, Eq)]
-enum AdoptionBoot {
-    /// Update boot: the roster's kept workers (by worker id) relaunch
-    /// eagerly ahead of the restore pass; busy-at-crash workers revive
-    /// too. Descriptors the update does not keep stay down — the update
-    /// must not revive the sessions a plain boot parked (a reopened
-    /// session file may already have a newer worker). The kept set is
-    /// shared (an `Arc`): one clone per descriptor task, not a deep
-    /// copy of every kept id per task.
-    UpdateRoster {
-        kept: Arc<std::collections::HashSet<String>>,
-    },
-    /// Plain startup: only journal-proven live work revives.
-    PlainStartup,
-}
-
-/// One descriptor's boot-adoption decision, reported as a count in the
-/// pass's `worker_adoption` event (telemetry: counts only, never session
-/// payload).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AdoptionOutcome {
-    /// Live socket adopted (incl. a worker that re-registered before the
-    /// descriptor scan reached it).
-    AdoptedLive,
-    /// Dead descriptor relaunched (busy evidence on a plain boot, kept
-    /// worker on an update boot).
-    Revived,
-    /// Dead descriptor with no durable busy evidence: stayed down.
-    SkippedIdle,
-    /// The descriptor carried a durable stop tombstone: the boot re-ran
-    /// the stop's finalization instead of adopting or reviving.
-    Stopped,
-    /// Adoption or relaunch failed.
-    Failed,
-}
-
-/// One spawn-name reservation held across a fresh-launch create (TS
-/// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the
-/// reservation is the only cross-create serializer for a same-name
-/// admission (the per-file single-flight below cannot see a different
-/// session file), and the guard releases the key when the create ends,
-/// whatever its outcome.
-struct CreateNameReservation {
-    supervisor: Arc<Supervisor>,
-    key: String,
-}
-
-impl Drop for CreateNameReservation {
-    fn drop(&mut self) {
-        self.supervisor
-            .pending_session_names
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.key);
-    }
-}
-
 impl Supervisor {
+    /// Build the supervisor: the descriptor dir, the persisted config,
+    /// the event channel, the log, and the compaction-supervision
+    /// journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor directory cannot be created,
+    /// the sessions dir cannot be resolved, the supervisor config
+    /// cannot be persisted, or the compaction-supervision journal cannot
+    /// be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
@@ -307,7 +226,7 @@ impl Supervisor {
                 ),
             },
         )?;
-        let (events, _) = broadcast::channel(4096);
+        let (events, _) = broadcast::channel(crate::backpressure::EVENT_RING_CAPACITY);
         let log = paths::RotatingLog::new(paths::daemon_log_path(
             &options.socket_path,
             &options.agent_dir,
@@ -323,6 +242,7 @@ impl Supervisor {
             telemetry: std::sync::Mutex::new(None),
             registry: SessionRegistry::new(),
             events,
+            session_subscribers: subscribers::SessionSubscribers::new(),
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -363,32 +283,6 @@ impl Supervisor {
         }
     }
 
-    /// Emit the boot descriptor-adoption pass's `daemon event` (schema v1,
-    /// kind `worker_adoption`): the boot kind and per-outcome counts,
-    /// primitives only — never session payload.
-    #[allow(clippy::too_many_arguments)]
-    fn note_worker_adoption(
-        &self,
-        boot: &str,
-        adopted_live: usize,
-        revived: usize,
-        skipped_idle: usize,
-        stopped: usize,
-        failed: usize,
-    ) {
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_worker_adoption(
-                client,
-                boot,
-                adopted_live,
-                revived,
-                skipped_idle,
-                stopped,
-                failed,
-            );
-        }
-    }
-
     /// Emit the live-catalog warm-up settle's `daemon event` (schema v1,
     /// kind `catalog_refresh`): the served model count, primitives only.
     fn note_catalog_refresh(&self, count: usize) {
@@ -416,141 +310,19 @@ impl Supervisor {
         }
     }
 
-    /// Record one session binding (the stale-id rebind table). A supersede
-    /// (a new worker taking over a session file another id was bound to)
-    /// notifies the clients still attached to the superseded id through the
-    /// `session_binding` event, so they re-attach to the session's current
-    /// id and keep receiving its events.
-    fn record_session_binding(
-        &self,
-        active_session_id: &str,
-        session_id: Option<&str>,
-        session_file: Option<&str>,
-    ) {
-        if let Some((previous_ids, binding)) =
-            self.session_bindings
-                .record(active_session_id, session_id, session_file)
-        {
-            for previous in previous_ids {
-                self.log_line(&format!(
-                    "session binding superseded: {previous} -> {} (file {:?})",
-                    binding.active_session_id, binding.session_file
-                ));
-                let event = json!({
-                    "type": "session_binding",
-                    "previousActiveSessionId": previous,
-                    "activeSessionId": binding.active_session_id,
-                    "sessionId": binding.session_id,
-                    "sessionFile": binding.session_file,
-                });
-                let _ = self.events.send((
-                    ClientRouting::AttachedSession {
-                        active_session_id: previous,
-                    },
-                    event,
-                ));
-            }
-        }
-    }
-
-    /// Retarget one connection at a session's current resident after its
-    /// selector was superseded (the stale-active-id rebind seam shared by
-    /// the generic route and the admission route). The connection keeps
-    /// exactly its prior attached-ness under the current id, and a
-    /// previously-attached client is told where it now points through a
-    /// `session_binding` frame routed to the id it now holds - the
-    /// supersede-time notice raced the attach roster, so this one cannot
-    /// be dropped. A Detach never reaches the rebind: the seam answers it
-    /// supervisor-side (the stale worker is gone, and the replacement's
-    /// attach must not be dropped). Returns the current id the routed
-    /// frame must carry.
-    pub(crate) async fn rebind_connection(
-        &self,
-        selector: &str,
-        resident: &Arc<ResidentWorker>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> String {
-        let current = resident.worker_id.clone();
-        self.log_line(&format!(
-            "rebinding stale session id {selector} -> {current}"
-        ));
-        self.note_daemon_event("session_rebound", None);
-        let was_attached = {
-            let mut attached = attached.lock().unwrap();
-            let was = attached.iter().any(|id| id == selector);
-            if was {
-                attached.retain(|id| id != selector);
-                if !attached.iter().any(|id| id == &current) {
-                    attached.push(current.clone());
-                }
-            }
-            was
-        };
-        if was_attached {
-            let (session_id, session_file) = {
-                let descriptor = resident.descriptor.lock().await;
-                (
-                    descriptor.root_session_id.clone(),
-                    descriptor.session_file.clone(),
-                )
-            };
-            let _ = self.events.send((
-                ClientRouting::AttachedSession {
-                    active_session_id: current.clone(),
-                },
-                json!({
-                    "type": "session_binding",
-                    "previousActiveSessionId": selector,
-                    "activeSessionId": current,
-                    "sessionId": session_id,
-                    "sessionFile": session_file,
-                }),
+    /// Publish one session event to the session's attached connections
+    /// (the send-time delivery pass — TS `handleWorkerFrame`'s fan-out
+    /// evaluates the attached set in the same pass that writes). A full
+    /// queue drops the frame and the stall-cycle transition lands in the
+    /// daemon log (finding 4a visibility).
+    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
+        let outcome = self.session_subscribers.publish(active_session_id, payload);
+        if !outcome.lagged.is_empty() {
+            self.log_line(&format!(
+                "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",
+                outcome.lagged.join(", ")
             ));
         }
-        current
-    }
-
-    /// The current resident a superseded selector rebinds to (the
-    /// stale-id rebind seam): the binding table maps the selector to its
-    /// session's durable identity, the registry's live roster holds the
-    /// resident that identity currently belongs to. `None` keeps the
-    /// unknown-selector failure - only a binding whose session has a live
-    /// resident rebinds.
-    pub(crate) async fn binding_target(&self, selector: &str) -> Option<Arc<ResidentWorker>> {
-        let binding = self.session_bindings.binding_for(selector)?;
-        // A binding without a session id identifies no durable session:
-        // its create never completed, and whatever later owns the file
-        // path is a different session (or none at all) - rebinding into
-        // it is the foreign-session hazard, not a recovery.
-        let binding_session_id = binding.session_id.as_deref()?.to_string();
-        let session_file = binding.session_file.as_deref()?.to_string();
-        let resident = self.registry.find_by_session_file(&session_file).await?;
-        // The resident must BE the binding's session, not merely hold its
-        // file: a reused path must not let one session's stale ids
-        // rebind into the different session that now owns the path - the
-        // durable id is the identity the rebind follows.
-        let resident_session = resident.descriptor.lock().await.root_session_id.clone();
-        if resident_session.as_deref() != Some(binding_session_id.as_str()) {
-            return None;
-        }
-        // Only a connected resident rebinds: a worker mid-teardown or one
-        // left by a failed launch would answer `Session worker is not
-        // connected` instead of the unknown-session failure the client can
-        // act on.
-        if resident.cmd_tx.lock().await.is_none() {
-            return None;
-        }
-        // Only a session-ready resident rebinds: a replacement's command
-        // channel exists before its create replay finishes, so a command
-        // routed mid-replay would bounce off the worker's require-created
-        // gate instead of waiting out the replacement. `None` keeps the
-        // unknown-session failure - the client's own retry (the TUI
-        // re-attaches by the durable session id) rides the
-        // replacement-aware route and lands once the replay answers.
-        if !resident.route_state().session_ready {
-            return None;
-        }
-        Some(resident)
     }
 
     /// The abort supervision's declaration event (`daemon event` schema v1,
@@ -562,6 +334,18 @@ impl Supervisor {
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket path cannot be prepared (already
+    /// in use), the supervisor socket cannot be bound, or the accept
+    /// loop exhausts its give-up budget on a permanently broken
+    /// listener (transient accept errors are retried; see `accept_loop`).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the telemetry mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
         // Daemon telemetry: same env/settings posture as the sessions
         // (the supervisor is the `daemon` execution mode).
@@ -587,6 +371,13 @@ impl Supervisor {
         // refresh only adds live pricing and catalog-repo/new entries.
         pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
+        // The plugins service catalog's keep-warm (the `/mcp` view's remote
+        // catalog): the same supervisor-owned cadence — a forced startup
+        // refresh plus the hourly loop, fire-and-forget, failures keep the
+        // last-good disk cache (the packaged bundled snapshot serves
+        // until the first fetch lands).
+        pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
+        pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
         // Adoption telemetry for the wiring: one `daemon event` (kind
         // `catalog_refresh`) when the startup refresh settles — the
         // served model count, primitives only. The awaited refresh is
@@ -617,6 +408,14 @@ impl Supervisor {
         socket::restrict_socket_path(&self.options.socket_path);
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
+
+        // The OS-signal drain (SIGTERM/SIGINT; the loop lives in
+        // `crate::signal_drain`): `install` registers the handlers
+        // synchronously here - before the boot passes below and their
+        // first await - so no signal can land with the default disposition
+        // still active. From here on, the first signal drains (new work
+        // refused, running turns settled) and a later signal force-exits.
+        tokio::spawn(crate::signal_drain::install(Arc::clone(&self)));
 
         // The boot reap (the operator's same-socket predecessor rule): this
         // daemon now owns the socket's lineage, so leftover worker processes
@@ -691,27 +490,7 @@ impl Supervisor {
             });
         }
 
-        while !self.accept_exit.load(Ordering::SeqCst) {
-            let stream = tokio::select! {
-                accepted = listener.accept() => match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        if self.shutting_down.load(Ordering::SeqCst) {
-                            continue;
-                        }
-                        return Err(anyhow!("supervisor accept: {error}"));
-                    }
-                },
-                // begin_shutdown fired: loop back and fall out of the loop.
-                _ = self.shutdown_notify.notified() => continue,
-            };
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                if let Err(error) = supervisor.handle_client(stream).await {
-                    eprintln!("pa-daemon client connection error: {error:#}");
-                }
-            });
-        }
+        accept_loop::serve(&self, &*listener).await?;
         socket::cleanup_socket_path(
             &self.options.socket_path,
             socket::socket_identity(&self.options.socket_path),
@@ -767,1144 +546,86 @@ impl Supervisor {
         Ok(ledger)
     }
 
-    /// Adopt or relaunch persisted workers, concurrently: one dead worker's
-    /// relaunch (create replay) must not delay adopting live sessions. The
-    /// fan-out is capped ([`crate::recovery_pacing::ADOPTION_CONCURRENCY`]):
-    /// a large sessions dir must not turn the pass into a relaunch storm
-    /// that starves the control plane for its whole duration. The pass
-    /// reports its decisions as one `worker_adoption` event (counts only,
-    /// never session payload).
-    async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
-        let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
-        let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let revived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let skipped_idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let jobs: Vec<_> = descriptors
-            .into_iter()
-            .map(|(path, descriptor)| {
-                let supervisor = Arc::clone(self);
-                let boot = boot.clone();
-                let adopted_live = Arc::clone(&adopted_live);
-                let revived = Arc::clone(&revived);
-                let skipped_idle = Arc::clone(&skipped_idle);
-                let stopped = Arc::clone(&stopped);
-                let failed = Arc::clone(&failed);
-                move || async move {
-                    let outcome = supervisor
-                        .adopt_persisted_worker(path, descriptor, boot)
-                        .await;
-                    let counter = match outcome {
-                        AdoptionOutcome::AdoptedLive => adopted_live,
-                        AdoptionOutcome::Revived => revived,
-                        AdoptionOutcome::SkippedIdle => skipped_idle,
-                        AdoptionOutcome::Stopped => stopped,
-                        AdoptionOutcome::Failed => failed,
-                    };
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            })
-            .collect();
-        crate::recovery_pacing::run_bounded(jobs, crate::recovery_pacing::ADOPTION_CONCURRENCY)
-            .await;
-        let adopted_live = adopted_live.load(std::sync::atomic::Ordering::Relaxed);
-        let revived = revived.load(std::sync::atomic::Ordering::Relaxed);
-        let skipped_idle = skipped_idle.load(std::sync::atomic::Ordering::Relaxed);
-        let stopped = stopped.load(std::sync::atomic::Ordering::Relaxed);
-        let failed = failed.load(std::sync::atomic::Ordering::Relaxed);
-        if adopted_live + revived + skipped_idle + stopped + failed > 0 {
-            let boot_label = match boot {
-                AdoptionBoot::UpdateRoster { .. } => "update",
-                AdoptionBoot::PlainStartup => "plain",
-            };
-            self.note_worker_adoption(
-                boot_label,
-                adopted_live,
-                revived,
-                skipped_idle,
-                stopped,
-                failed,
-            );
-        }
-        // The boot roster seed runs exactly once, in the background, now
-        // that adoption settled: the registry's residents are the seed
-        // roots. TS awaits its seed before adoption; the Rust daemon
-        // deliberately accepts before and during adoption, so the seed
-        // follows the pass and its one `roster_update` publish carries
-        // the rows to early subscribers. Tests drain the pending-seed
-        // barrier for completion.
-        self.spawn_roster_boot_seed();
-    }
-
-    /// Adopt one persisted worker descriptor. Serialized against worker
-    /// self-registration by the per-worker adoption gate: whichever path
-    /// arrives first (descriptor scan or live re-registration) builds the
-    /// roster entry; the other one finds it present.
-    async fn adopt_persisted_worker(
-        self: &Arc<Self>,
-        path: PathBuf,
-        descriptor: crate::descriptor::WorkerDescriptor,
-        boot: AdoptionBoot,
-    ) -> AdoptionOutcome {
-        let worker_id = descriptor.worker_id.clone();
-        let guard = self.registry.adoption_guard(&worker_id).await;
-        if self.registry.get(&worker_id).await.is_some() {
-            // The worker re-registered before the descriptor scan reached it.
-            self.log_line(&format!(
-                "session worker {worker_id} already registered; skipping descriptor adoption"
-            ));
-            return AdoptionOutcome::AdoptedLive;
-        }
-        let socket_path = PathBuf::from(&descriptor.socket_path);
-        let alive = socket::can_connect(&socket_path, Duration::from_millis(500)).await;
-        let pid = descriptor.pid;
-        let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
-        let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
-        // The stop tombstone outranks liveness (TS's stop ownership: the
-        // kill was durable intent BEFORE the worker was told): a
-        // supervisor that died between `persist_stop_tombstone` and the
-        // worker's shutdown finishes the stop on the next boot — never
-        // adopts the still-reachable worker as healthy (that would drop
-        // the kill and leave the stopped session resident).
-        if resident.descriptor.lock().await.stop_requested_at.is_some() {
-            if alive {
-                // The worker outlived the crash and may never have received
-                // the kill (the crash window is between the tombstone and
-                // the forward): connect to it and forward the ORIGINAL
-                // kill — the killed close is the stop's intent (it cancels
-                // its jobs, archives its file, and cascades its children
-                // with the same killed reason; a shutdown would keep the
-                // resume entries of workers the stop was killing). A failed
-                // connect degrades to the dead-worker finalize below.
-                resident.intentional_stop.store(true, Ordering::SeqCst);
-                if self
-                    .connect_worker(&resident, worker_connect_deadline())
-                    .await
-                    .is_ok()
-                {
-                    let _ = self
-                        .route_command(&resident, "kill", json!({}), ROUTE_TIMEOUT_MS)
-                        .await;
-                }
-            }
-            // TS `scheduleWorkerStopFinalization`: the interrupted stop's
-            // cleanup re-runs instead of a relaunch. The descriptor
-            // survives an unsettled finalize (a later boot retries the
-            // archived-state belt); a settled stop deletes it.
-            let settled = self.finalize_worker_stop(&resident, None).await;
-            if settled {
-                let _ = std::fs::remove_file(&resident.descriptor_path);
-                self.log_line(&format!(
-                    "finished the tombstoned stop of session worker {worker_id}"
-                ));
-            } else {
-                self.log_line(&format!(
-                    "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
-                ));
-            }
-            return AdoptionOutcome::Stopped;
-        }
-        // The adoption answer plus the revival's spawned child, when one
-        // was launched: the monitor must watch the process that actually
-        // runs, never the descriptor's stale pre-restart pid (the
-        // zombie-holder incident: a revived worker was alive and serving
-        // while the monitor polled the dead pid the supervisor replaced,
-        // counted six phantom exits, gave up on the id, and left the live
-        // holder - lease and all - orphaned with every create refused).
-        let (result, revived_child) = if alive {
-            let adopted = self
-                .connect_worker(&resident, worker_connect_deadline())
-                .await;
-            if adopted.is_ok() {
-                // The adopted worker's session already exists (its create
-                // ran before the supervisor restart): routed client
-                // commands may reach it immediately.
-                resident.note_session_ready();
-            }
-            (adopted, None)
-        } else {
-            let interrupted =
-                crate::journal::WorkerRecoveryJournal::read_interrupted(&journal_path);
-            let kept = match &boot {
-                AdoptionBoot::UpdateRoster { kept } => kept.contains(&worker_id),
-                AdoptionBoot::PlainStartup => false,
-            };
-            if !interrupted && !kept {
-                // Dead worker with no durable busy state — and, on an
-                // update boot, not kept by the update's roster: not
-                // interrupted work. Leave it down (the descriptor stays
-                // on disk, inert) — the session reopens lazily through
-                // the next client create, like a TS supervisor that
-                // parks dead workers instead of reviving them; an
-                // update that did not keep it must not revive it either.
-                self.log_line(&format!(
-                    "session worker {worker_id} was idle at exit; not revived (reopens on the next client open)"
-                ));
-                return AdoptionOutcome::SkippedIdle;
-            }
-            // The revival ownership gate: the busy-evidence filter above
-            // answered "did the journal ever prove live work?"; this gate
-            // answers "is that proof still a genuine interruption THIS
-            // boot must heal?" A give-up verdict (lifecycle `failed`), a
-            // stopped session (the #2592 archived belt), a live session
-            // lease held by another worker (this daemon's or another
-            // daemon's, on a shared agent dir), or busy evidence older
-            // than the freshness bound each vetoes the relaunch: the
-            // descriptor stays down and the session reopens through the
-            // next client create. Without the gate a boot re-storms the
-            // same dead slots (stale journals outliving their era) and
-            // resurrects stopped sessions as active workers.
-            let busy_recorded_at =
-                crate::journal::WorkerRecoveryJournal::latest_busy_recorded_at(&journal_path);
-            let gated = resident.descriptor.lock().await;
-            let veto = crate::revival_gate::revival_veto(
-                &self.options.agent_dir,
-                &gated,
-                kept,
-                busy_recorded_at.as_deref(),
-            );
-            drop(gated);
-            if let Some(veto) = veto {
-                self.log_line(&format!(
-                    "session worker {worker_id} not revived: {}",
-                    veto.log_reason()
-                ));
-                return AdoptionOutcome::SkippedIdle;
-            }
-            // Dead worker with journal-proven live work (or a kept
-            // worker on an update boot): relaunch from the durable
-            // create command. The worker rehydrates the session store,
-            // restoring history and the persisted queue snapshot. The
-            // spawned child rides out to the monitor arming below: the
-            // descriptor's pid is the DEAD pre-restart holder, and a
-            // monitor parked on it reports a phantom exit of a process
-            // this very adoption just launched.
-            match self.relaunch_worker(&resident).await {
-                Ok(child) => (Ok(()), Some(child)),
-                Err(error) => (Err(error), None),
-            }
-        };
-        let outcome = match result {
-            Ok(()) => {
-                self.registry.insert(Arc::clone(&resident)).await;
-                // A live leftover keeps its real pid; a revived worker is
-                // watched through the child handle itself (the pid the
-                // spawn recorded in the descriptor, never the stale one).
-                match revived_child {
-                    Some(child) => {
-                        let child_pid = child.id().unwrap_or(0);
-                        self.spawn_monitor(Arc::clone(&resident), Some(child), child_pid as u64);
-                    }
-                    None => self.spawn_monitor(Arc::clone(&resident), None, pid),
-                }
-                // The adopted worker joins the roster from its live state.
-                self.refresh_roster_entry(&resident).await;
-                // A restore pass that owns this session's roster row can
-                // settle it now (spec §10.4): the per-target waiters attach
-                // to the live worker instead of queueing behind the rest
-                // of the recovery — unless the row still needs its
-                // continuation prompt (§10.5): those waiters wake only
-                // when the pass routes it. No pass, no roster row: a no-op.
-                if let Some(session_file) = resident.descriptor.lock().await.session_file.clone() {
-                    if let Some(stem) = Path::new(&session_file)
-                        .file_stem()
-                        .map(|stem| stem.to_string_lossy().to_string())
-                    {
-                        self.restore.settle_adopted(&stem);
-                    }
-                }
-                self.log_line(&format!(
-                    "adopted session worker {worker_id} (was alive: {alive})"
-                ));
-                if alive {
-                    AdoptionOutcome::AdoptedLive
-                } else {
-                    AdoptionOutcome::Revived
-                }
-            }
-            Err(error) => {
-                self.log_line(&format!("could not adopt worker {worker_id}: {error:#}"));
-                AdoptionOutcome::Failed
-            }
-        };
-        drop(guard);
-        outcome
-    }
-
-    /// Watch a worker process: on unexpected exit, restart with backoff.
-    /// The crash path's failure-count update: a child that lived past the
-    /// stable window was healthy, so its death starts a fresh count; a
-    /// spawn-dies-fast child (or an adopted pid with no spawn time of our
-    /// own) accumulates toward the give-up cap - the storm's counter could
-    /// never grow while relaunch-spawns kept resetting it.
-    fn next_failure_count(resident: &ResidentWorker, now_ms: u64) -> u32 {
-        let spawned_at = resident.spawned_at_ms.load(Ordering::SeqCst);
-        let stable = spawned_at > 0 && now_ms.saturating_sub(spawned_at) >= STABLE_LIFETIME_MS;
-        if stable {
-            resident.consecutive_failures.store(1, Ordering::SeqCst);
-            1
-        } else {
-            resident.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1
-        }
-    }
-
-    fn spawn_monitor(
-        self: &Arc<Self>,
-        resident: Arc<ResidentWorker>,
-        child: Option<Child>,
-        pid: u64,
-    ) {
-        let supervisor = Arc::clone(self);
-        tokio::spawn(async move {
-            supervisor.watch_worker(resident, child, pid).await;
-        });
-    }
-
-    async fn watch_worker(
-        self: Arc<Self>,
-        resident: Arc<ResidentWorker>,
-        mut child: Option<Child>,
-        mut adopted_pid: u64,
-    ) {
-        loop {
-            if let Some(mut child) = child.take() {
-                let status = child.wait().await;
-                if resident.intentional_stop.load(Ordering::SeqCst)
-                    || self.shutting_down.load(Ordering::SeqCst)
-                {
-                    self.log_line(&format!(
-                        "session worker {} stopped intentionally (status {status:?})",
-                        resident.worker_id
-                    ));
-                    self.note_daemon_event("worker_exited", Some("normal"));
-                    return;
-                }
-            } else if adopted_pid != 0 {
-                // Adopted worker: poll liveness (cannot wait on a foreign
-                // pid). A previous relaunch that produced no worker leaves
-                // pid 0 here - there is nothing to watch, and polling pid 0
-                // would report a phantom exit; fall straight to the
-                // failure/backoff/relaunch arm instead.
-                loop {
-                    if self.shutting_down.load(Ordering::SeqCst)
-                        || resident.intentional_stop.load(Ordering::SeqCst)
-                    {
-                        return;
-                    }
-                    if !matches!(is_process_alive(adopted_pid as u32), Ok(true)) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                if resident.intentional_stop.load(Ordering::SeqCst)
-                    || self.shutting_down.load(Ordering::SeqCst)
-                {
-                    return;
-                }
-            }
-            self.note_daemon_event("worker_exited", Some("crash"));
-            // A hard-killed parent bypasses every worker-side close (#246's
-            // teardowns never ran): the supervisor closes its resident RLM
-            // children here, before the restart, so a relaunched parent
-            // never resumes beside an orphaned child worker (TS children
-            // die with the in-process parent).
-            self.close_children_of_dead_parent(&resident).await;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(0);
-            let failures = Self::next_failure_count(&resident, now_ms);
-            if failures > MAX_CONSECUTIVE_FAILURES {
-                let mut descriptor = resident.descriptor.lock().await;
-                descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
-                descriptor.last_failure_at = Some(util::now_iso());
-                let journal_path = descriptor.recovery_journal_path.clone();
-                let _ = persist_worker(&resident.descriptor_path, &descriptor);
-                drop(descriptor);
-                // The give-up settles its own revival evidence (the storm
-                // cycle's breaker): the journal's busy records are what a
-                // later boot reads as "interrupted live work" — the
-                // verdict that gave up must outlive them, or every boot
-                // re-storms this same slot (the 12:00 → 17:07 recurrence).
-                if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
-                    std::path::Path::new(&journal_path),
-                    "worker_gave_up",
-                ) {
-                    self.log_line(&format!(
-                        "session worker {} give-up journal settle failed: {error:#}",
-                        resident.worker_id
-                    ));
-                }
-                // The give-up is final: routes waiting out this worker's
-                // replacement must fail fast instead of parking.
-                resident.note_retired();
-                self.registry.remove(&resident.worker_id).await;
-                self.registry.forget(&resident.worker_id).await;
-                // The give-up settles the dead worker's rows exactly like
-                // a stop (a subagent under a surviving root passivates and
-                // keeps its model/thinking/cwd; everything else is
-                // removed). No ledger reseed, no transcript read.
-                let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
-                self.passivate_roster_worker(&resident.worker_id, ephemeral)
+    /// Complete a tombstoned stop for a worker encountered at adoption —
+    /// the boot scan's descriptor pass and a live re-registration alike
+    /// (TS `adoptOrRecoverWorker`'s `stopRequestedAt` branch: adoption
+    /// finishes the stop, never adopts the worker as healthy). The
+    /// tombstone's variant rides `archive_on_stop`: the kill stop
+    /// (`Some(true)`) is irreversible — its killed close cancels jobs,
+    /// archives the file, and cascades children; the per-session stop
+    /// (`Some(false)`) keeps the session resumable — its graceful
+    /// shutdown close and its schedule-cancel belt are all it owns.
+    async fn finish_tombstoned_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>, alive: bool) {
+        let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
+        if alive {
+            // The worker outlived the stop (a crash between the tombstone
+            // and the forward, or a survivor of the escalation): connect
+            // to it and forward the ORIGINAL stop intent — kill for the
+            // kill stop, shutdown for the resumable per-session stop. A
+            // failed connect degrades to the dead-worker finalize below.
+            resident.intentional_stop.store(true, Ordering::SeqCst);
+            if self
+                .connect_worker(resident, worker_connect_deadline())
+                .await
+                .is_ok()
+            {
+                let command = if kill_stop { "kill" } else { "shutdown" };
+                let _ = self
+                    .route_command_typed(
+                        resident,
+                        command,
+                        json!({}),
+                        ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
+                    )
                     .await;
-                // The exhausted-failure state must release the session
-                // hold: a process this daemon spawned under the id that
-                // outlived the failure loop keeps the session's runtime
-                // lease and refuses every create for the file (the
-                // zombie-holder incident). The belt reaps the id's
-                // same-socket leftovers identity-gated; the last crashed
-                // child is provably gone, and a dead holder's lease
-                // self-heals on the next acquire.
-                crate::boot_reap::reap_abandoned_workers(&self, &resident.worker_id).await;
+            }
+        }
+        // TS `scheduleWorkerStopFinalization`: the interrupted stop's
+        // cleanup re-runs instead of a relaunch, honoring the variant.
+        if kill_stop {
+            // The descriptor survives an unsettled finalize (a later boot
+            // retries the archived-state belt); a settled stop still dies
+            // only with a provably-gone process. The forwarded kill
+            // releases the lease without exiting the worker, and the
+            // registration path's refused worker is not yet in the
+            // registry, so the finalize's registry-coverage checks cannot
+            // observe it — the settle is not a death certificate. The
+            // retire pass's escalation is: a survivor keeps its
+            // tombstoned descriptor for the next boot exactly like the
+            // per-session arm, and only a provable death removes it.
+            let settled = self.finalize_worker_stop(resident, None).await;
+            if settled {
+                self.retire_worker_after_stop(resident).await;
                 self.log_line(&format!(
-                    "session worker {} failed after {failures} consecutive failures",
+                    "finished the tombstoned stop of session worker {}",
                     resident.worker_id
                 ));
-                return;
-            }
-            let backoff_ms = (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS);
-            self.log_line(&format!(
-                "session worker {} exited unexpectedly; restarting in {backoff_ms}ms (failure {failures}/{MAX_CONSECUTIVE_FAILURES})",
-                resident.worker_id
-            ));
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            match self.relaunch_worker(&resident).await {
-                Ok(new_child) => {
-                    // No counter reset on a successful relaunch: a spawn
-                    // that dies fast must accumulate toward the give-up cap
-                    // (the reset now comes only from a stable lifetime on
-                    // the crash path).
-                    self.note_daemon_event("worker_restarted", None);
-                    child = Some(new_child);
-                }
-                Err(error) => {
-                    self.log_line(&format!(
-                        "worker {} relaunch failed: {error:#}",
-                        resident.worker_id
-                    ));
-                    child = None;
-                    adopted_pid = 0;
-                }
-            }
-        }
-    }
-
-    pub(crate) fn is_stopping(&self, resident: &Arc<ResidentWorker>) -> bool {
-        self.shutting_down.load(Ordering::SeqCst)
-            || resident.intentional_stop.load(Ordering::SeqCst)
-    }
-
-    /// Whether the supervisor is tearing down (long-lived daemon tasks
-    /// poll this instead of holding their own shutdown wiring).
-    pub(crate) fn is_shutting_down(&self) -> bool {
-        self.shutting_down.load(Ordering::SeqCst)
-    }
-
-    /// Spawn a fresh worker process, connect, and replay the durable create.
-    pub(crate) async fn relaunch_worker(
-        self: &Arc<Self>,
-        resident: &Arc<ResidentWorker>,
-    ) -> Result<Child> {
-        if self.is_stopping(resident) {
-            return Err(anyhow!("supervisor is shutting down"));
-        }
-        // The replacement's create replay is pending: routed client
-        // commands must wait for the replayed session (the replacement-
-        // aware route gates on this until the replay answers).
-        resident.note_session_replaying();
-        // The old worker is gone for good: a run with a pending abort is
-        // declared terminal HERE, before the create payload is built, so
-        // the journal record deterministically rides this replay even when
-        // the dead connection's EOF is late (a stale reader declares
-        // nothing).
-        self.declare_compaction_terminal(resident, || resident.compaction.observe_worker_gone())
-            .await;
-        let deadline = worker_connect_deadline();
-        let child = self.spawn_worker_process(resident, deadline).await?;
-        if let Err(error) = self.connect_worker(resident, deadline).await {
-            // Never leave a spawned-but-unwired worker process behind.
-            let mut child = child;
-            let _ = child.kill().await;
-            return Err(error);
-        }
-        let (payload, injected_compaction_abort) = {
-            let descriptor = resident.descriptor.lock().await;
-            let mut payload = create_command_payload(&descriptor.create_command);
-            // The abort supervision's pending terminal record rides the
-            // create replay: the replacement worker discloses the aborted
-            // run in the rebuilt transcript (the parity shape of its own
-            // auto-abort rows), and the record is consumed by the reply.
-            // A declaration whose durable write failed is retried here —
-            // the replay is the point the record is needed — and a
-            // still-failing write only logs: the replay proceeds without
-            // the disclosure and the record stays retryable for a later
-            // replacement.
-            let pending = {
-                let mut journal = self
-                    .compaction_journal
-                    .lock()
-                    .expect("compaction journal lock");
-                match journal.pending(&descriptor.root_active_session_id) {
-                    Ok(pending) => pending.cloned(),
-                    Err(error) => {
-                        self.log_line(&format!(
-                            "terminal compaction journal retry failed for {}: {error:#}",
-                            descriptor.root_active_session_id
-                        ));
-                        None
-                    }
-                }
-            };
-            if let Some(record) = pending {
-                // `declaredAt` is the disclosure row's identity: the
-                // replacement stamps its persisted entry with it, so a
-                // replay of the same declaration is idempotent even when
-                // the previous replacement died between persisting the
-                // row and the create reply that consumes the record.
-                payload["interruptedCompaction"] = serde_json::json!({
-                    "reason": record.reason,
-                    "sessionFile": record.session_file,
-                    "declaredAt": record.declared_at,
-                });
-                (payload, Some(descriptor.root_active_session_id.clone()))
-            } else {
-                (payload, None)
-            }
-        };
-        let response = match self
-            .route_command(resident, "create", payload, LONG_ROUTE_TIMEOUT_MS)
-            .await
-        {
-            Ok(response) => response,
-            // The replay never answered: the freshly spawned worker is not
-            // supervised by the monitor path that produced it, so it must
-            // die with the relaunch attempt instead of orphaning (and
-            // holding its socket path against the next one).
-            Err(error) => {
-                let mut child = child;
-                let _ = child.kill().await;
-                return Err(error);
-            }
-        };
-        if self.is_stopping(resident) {
-            // A shutdown raced the relaunch: stop the freshly spawned worker
-            // instead of leaving it running with nobody supervising it.
-            let _ = self
-                .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
-                .await;
-            let mut child = child;
-            let _ = child.kill().await;
-            return Err(anyhow!("supervisor is shutting down"));
-        }
-        if !response.success {
-            // Same rule as the route error above: a worker whose create
-            // replay failed must not be left running. A typed rejection
-            // relays verbatim and logs the conflict like the launch path.
-            let mut child = child;
-            let _ = child.kill().await;
-            return Err(match response.error_info {
-                Some(error_info) => {
-                    let message = response.error.clone().unwrap_or_default();
-                    let headline = message.lines().next().unwrap_or_default();
-                    self.log_line(&format!("relaunch create refused — {headline}"));
-                    TypedCreateRejection {
-                        message,
-                        error_info,
-                    }
-                    .into()
-                }
-                None => anyhow!(
-                    "worker create failed on relaunch: {}",
-                    response.error.unwrap_or_default()
-                ),
-            });
-        }
-        // The create replay consumed the terminal record when the
-        // disclosure it carried is durable (persisted by this replay, or
-        // already held by the rebuilt transcript): it never replays again
-        // (a later relaunch would duplicate the disclosure row). A replay
-        // whose persist failed keeps the record pending — the next
-        // replacement retries it, the same recovery the journal's
-        // retryable declarations use. A missing flag on the reply is
-        // treated as not-persisted: the record survives a worker that
-        // did not answer the question.
-        if let Some(root_active_session_id) = injected_compaction_abort {
-            let persisted = response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("interruptedCompactionPersisted"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            if persisted {
-                if let Err(error) = self
-                    .compaction_journal
-                    .lock()
-                    .expect("compaction journal lock")
-                    .consume(&root_active_session_id)
-                {
-                    self.log_line(&format!(
-                        "terminal compaction journal consume failed for {root_active_session_id}: {error:#}"
-                    ));
-                }
             } else {
                 self.log_line(&format!(
-                    "terminal compaction disclosure did not persist for {root_active_session_id}; the record stays pending for the next replacement"
+                    "tombstoned stop of session worker {} not settled; descriptor kept",
+                    resident.worker_id
                 ));
             }
-        }
-        let mut descriptor = resident.descriptor.lock().await;
-        descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-        // The persisted failure count stays: the give-up cap and any
-        // adoption decision read the real history, not a relaunch-blanked one.
-        let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        drop(descriptor);
-        // The replayed create restored the session: routed client commands
-        // may run against this worker again.
-        resident.note_session_ready();
-        // The replacement is identity-complete and its session replay
-        // answered: record the binding now. The replacement's boot
-        // registration carries no session id (it races the create), so its
-        // record supersedes nothing - this is the record that retargets
-        // every stale client id at the replacement, delivered exactly
-        // when the replacement can actually serve them.
-        {
-            let descriptor = resident.descriptor.lock().await;
-            self.record_session_binding(
-                &resident.worker_id,
-                descriptor.root_session_id.as_deref(),
-                descriptor.session_file.as_deref(),
-            );
-        }
-        Ok(child)
-    }
-
-    async fn spawn_worker_process(
-        self: &Arc<Self>,
-        resident: &Arc<ResidentWorker>,
-        connect_deadline: tokio::time::Instant,
-    ) -> Result<Child> {
-        // One env definition for spawn and for the update roster's
-        // `launch_env` row (spec §8: "env snapshot to respawn the worker
-        // identically").
-        let (worker_socket, cwd, launch_env) = {
-            let descriptor = resident.descriptor.lock().await;
-            (
-                PathBuf::from(&descriptor.socket_path),
-                descriptor
-                    .create_command
-                    .rest
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .unwrap_or("/")
-                    .to_string(),
-                crate::descriptor::worker_launch_env(
-                    &self.options.agent_dir,
-                    &self.options.socket_path.to_string_lossy(),
-                    &uuid::Uuid::new_v4().to_string(),
-                    &descriptor,
-                ),
-            )
-        };
-
-        let executable = std::env::current_exe().context("resolve pa-daemon executable")?;
-        let mut command = Command::new(&executable);
-        command
-            .arg("worker")
-            .envs(launch_env)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
-        if std::path::Path::new(&cwd).is_dir() {
-            command.current_dir(&cwd);
-        }
-        // Detached and window-hidden, the TS worker spawn
-        // (`spawnHidden(..., { detached: true })`): the worker leaves the
-        // supervisor's console group and shows no fresh console.
-        pa_core::platform::process::set_new_process_group(command.as_std_mut());
-        let child = command
-            .spawn()
-            .with_context(|| format!("spawn session worker {}", resident.worker_id))?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis() as u64)
-            .unwrap_or(0);
-        resident.spawned_at_ms.store(now_ms, Ordering::SeqCst);
-        if std::env::var("PA_DAEMON_DEBUG").is_ok() {
-            eprintln!("[supervisor] spawned worker pid {:?}", child.id());
-        }
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            // Capture the child's start identity alongside its pid (TS
-            // `getProcessStartId(childPid)` at spawn): the identity-aware
-            // holder checks can only recognize a recycled pid when the
-            // descriptor carries the start id the original holder had.
-            let child_pid = child.id().unwrap_or(0);
-            descriptor.pid = child_pid as u64;
-            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
-            descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        }
-
-        // Probe the worker socket until it accepts connections. A worker that
-        // never comes up inside the connect budget is killed here so a stuck
-        // child never outlives its failed launch (TS `connectWorker` throws
-        // `DaemonWorkerProbeTimeoutError` and the launch failure path stops
-        // the worker).
-        if let Err(error) =
-            probe_worker_socket(&resident.worker_id, &worker_socket, connect_deadline).await
-        {
-            let mut child = child;
-            let _ = child.kill().await;
-            return Err(error);
-        }
-        Ok(child)
-    }
-
-    /// Connect to the worker socket, authenticate, and wire the request pump.
-    /// The auth handshake must complete inside the remaining connect budget.
-    async fn connect_worker(
-        self: &Arc<Self>,
-        resident: &Arc<ResidentWorker>,
-        connect_deadline: tokio::time::Instant,
-    ) -> Result<()> {
-        let (socket_path, token) = {
-            let descriptor = resident.descriptor.lock().await;
-            (
-                PathBuf::from(&descriptor.socket_path),
-                descriptor.authentication_token.clone(),
-            )
-        };
-        let stream = connect_transport(&socket_path)
-            .await
-            .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
-        let (reader, mut writer) = stream.split();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<WorkerRequest>();
-        resident.pending.lock().await.clear();
-        let events = self.events.clone();
-        // The connection epoch ties both pumps to this connection: only they
-        // may retire it, and a superseded connection ending late cannot.
-        let connection_epoch = resident.note_connection_live();
-
-        // Writer pump: send command frames. It holds only a weak resident
-        // reference: a strong one would keep `cmd_tx` (inside the resident)
-        // alive and park this pump forever, leaking the worker socket after
-        // the resident is dropped (the pump exits via `recv() == None` when
-        // the last sender drops).
-        let writer_resident = Arc::downgrade(resident);
-        tokio::spawn(async move {
-            while let Some(request) = cmd_rx.recv().await {
-                let header = json!({
-                    "kind": "command",
-                    "requestId": request.request_id,
-                    "commandType": request.command_type,
-                });
-                let written = write_frame(
-                    &mut writer,
-                    &header,
-                    &serde_json::to_vec(&request.payload).unwrap_or_default(),
-                    DEFAULT_PRIVATE_FRAME_LIMITS,
-                )
-                .await;
-                if std::env::var("PA_DAEMON_DEBUG").is_ok() {
-                    eprintln!(
-                        "[supervisor] wrote worker frame {}: {:?}",
-                        request.command_type,
-                        written
-                            .as_ref()
-                            .map(|_| "ok")
-                            .map_err(std::string::ToString::to_string)
-                    );
-                }
-                if written.is_err() {
-                    // The frame never fully reached the worker (a dead or
-                    // mid-replacement socket): resolve the request with the
-                    // unambiguous not-connected failure so a
-                    // replacement-aware route may safely retry it.
-                    if let Some(resident) = writer_resident.upgrade() {
-                        fail_unsent_request(&resident, &request.request_id).await;
-                    }
-                    break;
-                }
+        } else {
+            // The per-session stop's durable half is the ephemeral
+            // schedule cancel (no archived-state belt — the session stays
+            // resumable), and the descriptor dies only with a
+            // provably-gone process: the retire pass removes it once the
+            // escalation confirms death and keeps a survivor's tombstone
+            // for the next boot (never orphaning a live lease holder
+            // behind a deleted descriptor). Only an owned (ephemeral)
+            // stop cancels its tree — `stop_worker`'s own gate: a
+            // resident RLM child's preserved jobs must survive a parent's
+            // stop-driven death.
+            if resident.descriptor.lock().await.owner_client_id.is_some() {
+                self.finalize_owned_stop(resident).await;
             }
-            // Requests still queued when the pump ends were never written:
-            // provably unsent, so they carry the same retryable failure.
-            cmd_rx.close();
-            if let Some(resident) = writer_resident.upgrade() {
-                while let Ok(request) = cmd_rx.try_recv() {
-                    fail_unsent_request(&resident, &request.request_id).await;
-                }
-                resident.note_connection_lost(connection_epoch);
-            }
-        });
-        // Reader: route responses to pending requests, forward session events.
-        {
-            let reader_resident = Arc::clone(resident);
-            let events = events.clone();
-            let reader_supervisor = Arc::clone(self);
-            tokio::spawn(async move {
-                let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
-                while let Ok(Some(frame)) = reader.read_frame().await {
-                    if std::env::var("PA_DAEMON_DEBUG").is_ok() {
-                        eprintln!(
-                            "[supervisor] worker frame: {:?}",
-                            frame.header.get("outboundType")
-                        );
-                    }
-                    let outbound_type = frame
-                        .header
-                        .get("outboundType")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let request_id = frame
-                        .header
-                        .get("requestId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let Ok(payload) = serde_json::from_slice::<Value>(&frame.payload) else {
-                        continue;
-                    };
-                    if outbound_type == "response" {
-                        if let Some(reply) =
-                            reader_resident.pending.lock().await.remove(&request_id)
-                        {
-                            let response: DaemonResponse = serde_json::from_value(payload)
-                                .unwrap_or_else(|_| {
-                                    response_failure(
-                                        Some(&request_id),
-                                        "parse",
-                                        "invalid worker response",
-                                        None,
-                                    )
-                                });
-                            let _ = reply.send(response);
-                        }
-                    } else if outbound_type == "session_event" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        // The abort supervision rides the forwarded events:
-                        // `compaction_start` arms the supervisor-visible
-                        // token, a settled `compaction_end` clears it (and
-                        // any pending terminal record — the worker landed
-                        // the outcome itself, so a replacement must never
-                        // replay it).
-                        // Only the live connection's frames may drive the
-                        // token: a superseded connection still draining
-                        // must not arm over — or settle — the replacement
-                        // connection's run. The journal lock spans the
-                        // token settle and the record clear, pairing with
-                        // `declare_compaction_terminal`'s take-then-write
-                        // under the same lock.
-                        if let Some(event) = payload
-                            .get("event")
-                            .filter(|_| reader_resident.connection_is_current(connection_epoch))
-                        {
-                            match event.get("type").and_then(Value::as_str) {
-                                Some("compaction_start") => {
-                                    let carried_abort = reader_resident.compaction.arm(
-                                        active_session_id.as_deref().unwrap_or_default(),
-                                        event
-                                            .get("reason")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default(),
-                                    );
-                                    // A pending fallback abort rode this
-                                    // start frame onto the run it
-                                    // reveals (the fallback armed before
-                                    // the delayed frame landed): the
-                                    // carried epoch needs its own watcher,
-                                    // the fallback's old epoch never
-                                    // matches again.
-                                    if let Some(epoch) = carried_abort {
-                                        let supervisor = Arc::clone(&reader_supervisor);
-                                        let resident = Arc::clone(&reader_resident);
-                                        tokio::spawn(async move {
-                                            supervisor
-                                                .watch_unresolved_compaction_abort(resident, epoch)
-                                                .await;
-                                        });
-                                    }
-                                }
-                                Some("compaction_end") => {
-                                    let clear_error = {
-                                        let mut journal = reader_supervisor
-                                            .compaction_journal
-                                            .lock()
-                                            .expect("compaction journal lock");
-                                        reader_resident.compaction.observe_end();
-                                        active_session_id.as_deref().and_then(|active_session_id| {
-                                            // A failed clear keeps the record
-                                            // pending (write-before-forget, so
-                                            // memory and disk agree) — surfaced
-                                            // here so the settled run's stale
-                                            // record is visible, and retried by
-                                            // the next forwarded end.
-                                            journal.clear(active_session_id).err()
-                                        })
-                                    };
-                                    if let Some(error) = clear_error {
-                                        reader_supervisor.log_line(&format!(
-                                            "terminal compaction journal clear failed for {active_session_id:?}: {error:#}"
-                                        ));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
-                        let _ = events.send((routing, payload));
-                    } else if outbound_type == "session_status" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
-                        let _ = events.send((routing, payload));
-                    } else if outbound_type == "side_question_event" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
-                        let _ = events.send((routing, payload));
-                    } else if outbound_type == "heartbeats_changed" {
-                        // The worker's own catalog changed: its last-good
-                        // snapshot can no longer be trusted as fresh (TS
-                        // `heartbeatSnapshotStale = true` + a queued re-read
-                        // for an in-flight pass; Rust bumps the generation,
-                        // so an in-flight read keeps an older generation
-                        // and can never publish itself as fresh over this
-                        // invalidation), and every client re-reads the
-                        // catalog (TS `broadcastHeartbeatsChanged`
-                        // re-broadcast).
-                        reader_resident
-                            .heartbeat_snapshot_generation
-                            .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((ClientRouting::Broadcast, payload));
-                    }
-                }
-                reader_resident.note_connection_lost(connection_epoch);
-                // The connection ended (EOF or frame error): a run without
-                // an abort request dies with the worker and rides the
-                // normal recovery flow; an abort-requested run is declared
-                // terminal immediately — the worker can never land its own
-                // end now, and the record must be durable before the
-                // relaunch replays the create. A stale reader (a newer
-                // connection already installed its own epoch) touches
-                // nothing.
-                if reader_resident.connection_is_current(connection_epoch) {
-                    reader_supervisor
-                        .declare_compaction_terminal(&reader_resident, || {
-                            reader_resident.compaction.observe_worker_gone()
-                        })
-                        .await;
-                }
-            });
-        }
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
-
-        // Authenticate against the worker within the remaining connect
-        // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
-        // deadline).
-        // A worker whose probes ate the whole connect budget still proved
-        // it is alive (the socket answered), so the handshake always gets
-        // at least the auth floor — the floor, never the budget's crumbs,
-        // and a fully-spent budget included. The launch's failure mode
-        // stays the connect-budget error instead of a misleading route
-        // timeout on a worker that just came up.
-        let auth_budget_ms = connect_deadline
-            .saturating_duration_since(tokio::time::Instant::now())
-            .as_millis()
-            .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
-        let response = self
-            .route_command(
-                resident,
-                "worker_auth",
-                json!({
-                    "token": token,
-                    "supervisorGeneration": format!("sup:{}", std::process::id()),
-                    "supervisorPid": std::process::id(),
-                    "supervisorProcessStartId": crate::protocol::process_start_id(std::process::id()),
-                    "supervisorSocketPath": self.options.socket_path.to_string_lossy(),
-                    "workerInstanceId": None::<String>,
-                }),
-                auth_budget_ms,
-            )
-            .await
-            .map_err(|error| {
-                // The handshake route's timeout is the connect budget
-                // running out, not a session command timing out: report the
-                // launch-budget failure so a loaded-box launch failure says
-                // what actually happened (never the generic route timeout
-                // text, which pointed triage at the wrong seam).
-                if error.to_string() == "Session worker timed out" {
-                    anyhow!("session worker {} did not come up in time", resident.worker_id)
-                } else {
-                    error
-                }
-            })?;
-        if !response.success {
-            return Err(anyhow!(
-                "worker authentication failed: {}",
-                response.error.unwrap_or_default()
+            self.retire_worker_after_stop(resident).await;
+            self.log_line(&format!(
+                "finished the tombstoned per-session stop of session worker {}",
+                resident.worker_id
             ));
-        }
-        // Peer-transport capability rides on the worker instance id (the TS
-        // worker only advertises `direct_peer_transport` with one).
-        let peer_transport_capable = response
-            .data
-            .as_ref()
-            .and_then(|data| data.get("capabilities"))
-            .and_then(Value::as_array)
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "direct_peer_transport")
-            })
-            .unwrap_or(false);
-        resident
-            .peer_transport_capable
-            .store(peer_transport_capable, Ordering::SeqCst);
-        Ok(())
-    }
-
-    pub(crate) async fn route_command(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        command_type: &str,
-        payload: Value,
-        timeout_ms: u64,
-    ) -> Result<DaemonResponse> {
-        let cmd_tx = {
-            let guard = resident.cmd_tx.lock().await;
-            guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
-        };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let request_id = uuid::Uuid::new_v4().to_string();
-        resident
-            .pending
-            .lock()
-            .await
-            .insert(request_id.clone(), reply_tx);
-        cmd_tx
-            .send(WorkerRequest {
-                request_id: request_id.clone(),
-                command_type: command_type.to_string(),
-                payload,
-            })
-            .map_err(|_| anyhow!(WORKER_NOT_CONNECTED))?;
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-            // The writer pump resolves provably-unsent requests with the
-            // not-connected failure: surface it as the retryable route
-            // error instead of a worker response.
-            Ok(Ok(response))
-                if !response.success && response.error.as_deref() == Some(WORKER_NOT_CONNECTED) =>
-            {
-                Err(anyhow!(WORKER_NOT_CONNECTED))
-            }
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
-            Err(_) => {
-                // A timed-out request's reply slot must not sit in the
-                // pending map forever (a wedged worker never answers, and
-                // repeated bounded-timeout routes would otherwise grow the
-                // map without bound).
-                resident.pending.lock().await.remove(&request_id);
-                Err(anyhow!("Session worker timed out"))
-            }
-        }
-    }
-
-    /// Route one client-facing command to a resident worker, waiting out an
-    /// in-flight worker replacement (crash backoff, relaunch, create
-    /// replay) inside the caller's own timeout budget instead of failing
-    /// into the dead window: a child's detached task prompt that fires while
-    /// its worker is being replaced must land exactly once, never bounce
-    /// off a dead socket and never overtake the replayed session into
-    /// existence. The wait ends only once the replacement's create replay
-    /// completed; a send that fails with the unambiguous not-connected
-    /// error (the request never left the supervisor) is retried against the
-    /// next connection, while ambiguous failures (timeouts, dropped
-    /// replies) are returned as-is so a possibly-processed command is
-    /// never duplicated.
-    pub(crate) async fn route_command_ready(
-        self: &Arc<Self>,
-        resident: &Arc<ResidentWorker>,
-        command_type: &str,
-        payload: Value,
-        timeout_ms: u64,
-    ) -> Result<DaemonResponse> {
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            self.await_route_ready(resident, deadline).await?;
-            let remaining_ms = deadline
-                .saturating_duration_since(tokio::time::Instant::now())
-                .as_millis() as u64;
-            match self
-                .route_command(resident, command_type, payload.clone(), remaining_ms)
-                .await
-            {
-                // The socket died between the liveness check and the send
-                // (or the writer pump broke on an earlier request): the
-                // command never reached a worker, so waiting for the
-                // replacement and sending again cannot duplicate it.
-                Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
-                    if tokio::time::Instant::now() >= deadline
-                        || resident.route_state().retired
-                        || self.is_stopping(resident)
-                    {
-                        return Err(error);
-                    }
-                }
-                other => return other,
-            }
-        }
-    }
-
-    /// Wait until the resident is route-ready (a live connection whose
-    /// session create completed), bailing fast on retired/stopping workers
-    /// and on the deadline otherwise.
-    async fn await_route_ready(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        deadline: tokio::time::Instant,
-    ) -> Result<()> {
-        let mut state = resident.route_state_watcher();
-        loop {
-            let current = *state.borrow_and_update();
-            if current.connected && current.session_ready {
-                return Ok(());
-            }
-            if current.retired || self.is_stopping(resident) {
-                bail!(WORKER_NOT_CONNECTED);
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                bail!("Session worker timed out");
-            }
-            // Sleep until the route state moves or the deadline passes.
-            match tokio::time::timeout_at(deadline, state.changed()).await {
-                Ok(Ok(())) => continue,
-                // The resident (and its watch sender) was dropped entirely.
-                Ok(Err(_)) => bail!(WORKER_NOT_CONNECTED),
-                Err(_) => bail!("Session worker timed out"),
-            }
         }
     }
 
@@ -2091,7 +812,7 @@ impl Supervisor {
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
@@ -2130,7 +851,13 @@ impl Supervisor {
         };
         let mut child = child;
         let response = match self
-            .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
+            .route_command_typed(
+                &resident,
+                "create",
+                create_payload,
+                LONG_ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await
         {
             Ok(response) => response,
@@ -2259,1824 +986,6 @@ impl Supervisor {
         Ok((resident, create_summary))
     }
 
-    // ------------------------------------------------------------------
-    // Client connections (JSONL transport)
-    // ------------------------------------------------------------------
-
-    async fn handle_client(self: Arc<Self>, stream: Box<dyn TransportStream>) -> Result<()> {
-        let (reader, mut writer) = stream.split();
-        let client_id = util::new_display_id();
-        let hello = DaemonOutbound::DaemonHello {
-            socket_path: self.options.socket_path.to_string_lossy().to_string(),
-            protocol: current_protocol_info(),
-            schema_id: Some(DAEMON_SCHEMA_ID.to_string()),
-            schema_revision: Some(DAEMON_SCHEMA_REVISION),
-            app_version: Some(DAEMON_APP_VERSION.to_string()),
-            runtime: Some(DaemonRuntimeIdentity {
-                build_id: concat!("pa-daemon-rs-", env!("CARGO_PKG_VERSION")).to_string(),
-                executable_path: std::env::current_exe()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                entrypoint_path: None,
-                launcher_path: None,
-            }),
-            supervisor_generation: Some(format!("sup:{}", std::process::id())),
-            supervisor_pid: Some(std::process::id() as u64),
-            supervisor_owner_token: Some(uuid::Uuid::new_v4().to_string()),
-            supervisor_process_start_id: crate::protocol::process_start_id(std::process::id()),
-            supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
-            update_resume: Some(self.restore.hello_resume()),
-            client_id: client_id.clone(),
-            server_capabilities: default_server_capabilities(),
-            rest: Default::default(),
-        };
-        write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
-
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        let mut events = self.events.subscribe();
-        let connection_id = client_id.clone();
-        // Connection state shared with the per-command dispatch tasks: the
-        // envelope-overridden client id and the attached-session list (the
-        // event arm reads the latter to route session events).
-        let attached: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let effective_client_id: Arc<std::sync::Mutex<String>> =
-            Arc::new(std::sync::Mutex::new(client_id.clone()));
-        // Roster subscription flag shared with the per-command dispatch
-        // tasks (`roster_subscribe` flips it; the event arm filters pushes).
-        let roster_subscribed: Arc<std::sync::atomic::AtomicBool> =
-            Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // Per-connection pause-lease state (wave b8): the connection id
-        // lease keys embed, the detach epoch, and the detaching sessions.
-        let connection = Arc::new(crate::input_pause_lease::ClientConnectionState::new());
-        // Completed dispatches flow back through this channel so the loop
-        // keeps writing: a long command (a turn, a compaction) must not
-        // block this client's events or its other commands, like the TS
-        // daemon's async command handlers.
-        let (dispatch_tx, mut dispatch_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Vec<Value>, bool)>();
-        loop {
-            line.clear();
-            tokio::select! {
-                read = reader.read_line(&mut line) => {
-                    let Ok(read) = read else { break };
-                    if read == 0 {
-                        break;
-                    }
-                    let trimmed = line.trim().to_string();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let supervisor = Arc::clone(&self);
-                    let effective_client_id = Arc::clone(&effective_client_id);
-                    let attached = Arc::clone(&attached);
-                    let roster_subscribed = Arc::clone(&roster_subscribed);
-                    let connection = Arc::clone(&connection);
-                    let dispatch_tx = dispatch_tx.clone();
-                    let connection_id = connection_id.clone();
-                    tokio::spawn(async move {
-                        let (lines, stop) = supervisor
-                            .dispatch_client(
-                                &trimmed,
-                                &effective_client_id,
-                                &attached,
-                                &roster_subscribed,
-                                &connection,
-                                &connection_id,
-                            )
-                            .await;
-                        if dispatch_tx.send((lines, stop)).is_err() && stop {
-                            // The initiating connection left before its response
-                            // was selected. Only a terminal shutdown owns the
-                            // descriptor-deleting stop pass; an update restart
-                            // must leave its descriptors for the successor.
-                            let is_shutdown_owner = supervisor
-                                .shutdown_owner
-                                .lock()
-                                .unwrap()
-                                .as_deref()
-                                == Some(connection_id.as_str());
-                            if is_shutdown_owner
-                                && supervisor.shutting_down.load(Ordering::SeqCst)
-                                && !supervisor.accept_exit.load(Ordering::SeqCst)
-                            {
-                                supervisor.ensure_shutdown_started().await;
-                            }
-                        }
-                    });
-                }
-                dispatched = dispatch_rx.recv() => {
-                    let Some((lines, stop)) = dispatched else { break };
-                    for outbound in lines {
-                        if let Err(error) = write_line(&mut writer, &outbound).await {
-                            // A failed response write must not strand the
-                            // shutdown: the stop pass still has to run.
-                            if stop {
-                                self.ensure_shutdown_started().await;
-                            }
-                            return Err(error);
-                        }
-                    }
-                    if stop {
-                        // The initiating client's response and daemon_closing
-                        // lines are flushed above; only now may the stop pass
-                        // end the runtime. The accept loop stays up until
-                        // begin_shutdown sets accept_exit, so worker stops
-                        // cannot be cut short by another inbound connection.
-                        self.ensure_shutdown_started().await;
-                        break;
-                    }
-                }
-                event = events.recv() => {
-                    match event {
-                        Ok((routing, payload)) => {
-                            let deliver = match &routing {
-                                ClientRouting::Broadcast => true,
-                                ClientRouting::BroadcastExcept {
-                                    connection_id: excluded,
-                                } => excluded.as_str() != connection_id.as_str(),
-                                ClientRouting::AttachedSession { active_session_id } => {
-                                    attached.lock().unwrap().iter().any(|id| id == active_session_id)
-                                }
-                                ClientRouting::RosterSubscribers => {
-                                    roster_subscribed.load(std::sync::atomic::Ordering::SeqCst)
-                                }
-                            };
-                            if deliver {
-                                if let Err(error) = write_line(&mut writer, &payload).await {
-                                    // An event-write failure must not strand an
-                                    // accepted shutdown: if this connection owns
-                                    // the stop, it still starts the pass.
-                                    let is_shutdown_owner = self
-                                        .shutdown_owner
-                                        .lock()
-                                        .unwrap()
-                                        .as_deref()
-                                        == Some(connection_id.as_str());
-                                    if is_shutdown_owner
-                                        && self.shutting_down.load(Ordering::SeqCst)
-                                        && !self.accept_exit.load(Ordering::SeqCst)
-                                    {
-                                        self.ensure_shutdown_started().await;
-                                    }
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            }
-        }
-        // A shutdown command may have been accepted just before this client
-        // disconnected (or its response write failed). Only the connection
-        // that accepted the shutdown may run the stop pass from this
-        // fallback: another client disconnecting in the response window
-        // must not preempt the acknowledgement or turn an update restart
-        // into a terminal descriptor sweep.
-        let is_shutdown_owner =
-            self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id.as_str());
-        if is_shutdown_owner
-            && self.shutting_down.load(Ordering::SeqCst)
-            && !self.accept_exit.load(Ordering::SeqCst)
-        {
-            self.ensure_shutdown_started().await;
-        }
-        // Detach from every attached session on disconnect (a TUI exit does
-        // not stop the session; the worker keeps running).
-        let attached_sessions = attached.lock().unwrap().clone();
-        for active_session_id in attached_sessions.iter() {
-            if let Ok(resident) = self.registry.resolve(active_session_id).await {
-                let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
-                let _ = self
-                    .route_command(&resident, "detach", payload, ROUTE_TIMEOUT_MS)
-                    .await;
-            }
-        }
-        // The disconnect's pause-lease cleanup (TS socket `cleanup`):
-        // in-flight acquisitions invalidate and every lease the
-        // connection held releases on its worker. Every waiting prompt
-        // admission cancels so its in-flight prompt fails with the TS
-        // cancellation error.
-        self.release_all_client_pauses(&connection).await;
-        connection.prompt_admissions.cancel_all_waiting();
-        Ok(())
-    }
-
-    /// Handle one client command line: returns outbound lines in order and
-    /// whether this client connection should stop.
-    async fn dispatch_client(
-        self: &Arc<Self>,
-        line: &str,
-        effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
-        roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
-        connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
-        connection_id: &str,
-    ) -> (Vec<Value>, bool) {
-        let envelope = match parse_supervisor_command_line(line) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                let id = salvage_id(line);
-                // TS has two failure spellings: envelope/protocol failures
-                // answer `command: "parse"` (`failure(salvageDaemonCommandId,
-                // "parse", ...)`), while a known envelope holding an unknown
-                // or malformed command type echoes that type
-                // (`failure(command.id, command.type, ...)`).
-                let salvaged_type = salvage_command_type(line);
-                let type_name = if matches!(
-                    error,
-                    EnvelopeParseError::UnknownCommand(_) | EnvelopeParseError::Invalid(_)
-                ) {
-                    salvaged_type.as_deref().unwrap_or("parse")
-                } else {
-                    "parse"
-                };
-                return (
-                    vec![response_line(&response_failure(
-                        id.as_deref(),
-                        type_name,
-                        &error.to_string(),
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        };
-        let command_id = envelope.id.clone();
-        if let Some(client_id) = envelope.client_id.clone() {
-            *effective_client_id.lock().unwrap() = client_id;
-        }
-        // The prompt-admission registration (wave b9, TS parse-time):
-        // a prompt/prompt_and_wait carrying an admissionId reserves it
-        // before dispatch; duplicates and empty ids answer the TS parse
-        // errors with `command: "parse"`.
-        if let Some(admission_id) = crate::prompt_admission::input_admission_id(&envelope.command) {
-            let active_session_id = crate::protocol::command_active_session_id(&envelope.command)
-                .unwrap_or_default()
-                .to_string();
-            if let Err(error) = connection
-                .prompt_admissions
-                .register(&active_session_id, admission_id)
-            {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        "parse",
-                        &error,
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
-        let type_name = command_type_name(&envelope.command).to_string();
-        // Terminal shutdown admission gate: once the shutdown command has
-        // flipped `shutting_down`, no later client command may reach a
-        // worker (the stop pass may already be retiring it). The command
-        // that started the shutdown passed this point before it set the
-        // gate, so its own response path is unaffected.
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    "Supervisor is shutting down",
-                    None,
-                ))],
-                false,
-            );
-        }
-        // Update-prepare watchdog on any later command (spec §5): a prepared
-        // transaction whose marker expired returns the supervisor to Serving
-        // before the command is served.
-        if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-            self.finish_update_abort(abort).await;
-        }
-        // Admission gate: mutating commands are refused while a prepare
-        // transaction is active (TS "Daemon is preparing an update restart"),
-        // except the drain commands during `Draining`. The transaction's own
-        // drivers never reach the gate.
-        let is_update_driver = matches!(
-            &envelope.command,
-            DaemonCommand::PrepareUpdateRestart { .. } | DaemonCommand::CommitUpdateRestart { .. }
-        );
-        if !is_update_driver {
-            if let Some(state) = self.update_prepare.active_state() {
-                if update_gate_refuses(state, &type_name) {
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            UPDATE_PREPARING_MESSAGE,
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-            }
-        }
-        // Mutating commands count against the prepare transaction's drain.
-        let mutating =
-            !is_update_driver && pa_types::daemon::is_daemon_mutating_command(&type_name);
-        if mutating {
-            self.mutation_drain.begin();
-        }
-        let outcome = self
-            .execute_parsed_command(
-                &envelope.command,
-                effective_client_id,
-                attached,
-                roster_subscribed,
-                connection,
-                connection_id,
-                command_id,
-                type_name,
-            )
-            .await;
-        if mutating {
-            self.mutation_drain.end();
-        }
-        outcome
-    }
-
-    /// The parsed-command match of [`Self::dispatch_client`], executed under
-    /// the mutation-drain latch by that wrapper.
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_parsed_command(
-        self: &Arc<Self>,
-        command: &DaemonCommand,
-        effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
-        roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
-        connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
-        connection_id: &str,
-        command_id: String,
-        type_name: String,
-    ) -> (Vec<Value>, bool) {
-        match command {
-            DaemonCommand::AckResult { .. } => (Vec::new(), false),
-            DaemonCommand::Restart { .. } | DaemonCommand::Shutdown { .. } => {
-                let response = response_success(Some(&command_id), &type_name, None);
-                let mut lines = vec![response_line(&response)];
-                // daemon_closing goes to every client before the exit.
-                let closing = json!({ "type": "daemon_closing", "reason": "shutdown" });
-                let _ = self.events.send((
-                    ClientRouting::BroadcastExcept {
-                        connection_id: connection_id.to_string(),
-                    },
-                    closing.clone(),
-                ));
-                lines.push(closing);
-                // Answer first, then shut down: the connection loop writes
-                // these lines before it awaits begin_shutdown, so the client
-                // always receives the response and daemon_closing before the
-                // stop pass can end the process. The shutdown gate flips
-                // synchronously here — before the response is written — so
-                // no create dispatched after the shutdown can slip past it
-                // and launch a worker the stop pass would miss.
-                *self.shutdown_owner.lock().unwrap() = Some(connection_id.to_string());
-                self.shutting_down.store(true, Ordering::SeqCst);
-                (lines, true)
-            }
-            DaemonCommand::List {
-                all,
-                cwd,
-                session_dir,
-                ..
-            } => {
-                let response = self
-                    .handle_list(
-                        command_id,
-                        type_name,
-                        *all,
-                        cwd.clone(),
-                        session_dir.clone(),
-                    )
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::ListSavedSessions { .. } => {
-                let lines = self.handle_saved_session_list(command, &command_id).await;
-                (lines, false)
-            }
-            DaemonCommand::RosterSubscribe { .. } => {
-                roster_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_subscribe(&command_id, &type_name).await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::RosterUnsubscribe { .. } => {
-                roster_subscribed.store(false, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_unsubscribe(&command_id, &type_name);
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::WorkerRosterDelta {
-                worker_token,
-                summary,
-                removed,
-                sequence,
-                worker_instance_id,
-                ..
-            } => {
-                let response = self
-                    .handle_worker_roster_delta(
-                        &command_id,
-                        &type_name,
-                        crate::supervisor_roster::WorkerRosterDelta {
-                            worker_token: worker_token.clone(),
-                            summary: summary.clone(),
-                            removed: removed.clone().unwrap_or_default(),
-                            sequence: *sequence,
-                            worker_instance_id: worker_instance_id.clone(),
-                        },
-                    )
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::Create { .. } => {
-                let client_id = effective_client_id.lock().unwrap().clone();
-                match self.handle_create(command, client_id).await {
-                    Ok(summary) => (
-                        vec![response_line(&response_success(
-                            Some(&command_id),
-                            &type_name,
-                            Some(summary),
-                        ))],
-                        false,
-                    ),
-                    Err(error) => {
-                        // A typed worker rejection carries its wire info to
-                        // the client (the TS `serializeDaemonError` shape);
-                        // untyped failures stay the bare string.
-                        let (message, error_info) =
-                            match error.downcast_ref::<TypedCreateRejection>() {
-                                Some(rejection) => (
-                                    rejection.message.clone(),
-                                    Some(rejection.error_info.clone()),
-                                ),
-                                None => (error.to_string(), None),
-                            };
-                        (
-                            vec![response_line(&response_failure(
-                                Some(&command_id),
-                                &type_name,
-                                &message,
-                                error_info,
-                            ))],
-                            false,
-                        )
-                    }
-                }
-            }
-            DaemonCommand::GetDirectWorkerTransport {
-                active_session_id, ..
-            } => {
-                // Direct-attach ticket: the supervisor issues a single-use
-                // grant for a registered session and hands the client the
-                // worker's own socket; it stays out of the streaming path.
-                let response = self
-                    .handle_get_direct_worker_transport(&command_id, &type_name, active_session_id)
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::SendMessage { .. } => {
-                let client_id = effective_client_id.lock().unwrap().clone();
-                let response = self
-                    .handle_send_message(&command_id, &client_id, command)
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::GetWorkerPeerTransport {
-                worker_token,
-                target_active_session_id,
-                ..
-            } => {
-                // Worker-to-worker peer ticket: a single-use `worker`
-                // grant pushed into the target worker's memory, so the
-                // delivery itself bypasses this route plane.
-                let response = self
-                    .handle_get_worker_peer_transport(
-                        &command_id,
-                        &type_name,
-                        worker_token,
-                        target_active_session_id,
-                    )
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::WorkerRegister { .. } => {
-                // Worker self-registration: rebuilds the roster entry from
-                // the worker's own identity instead of routing to a session.
-                let response = self
-                    .handle_worker_register(&command_id, &type_name, command)
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::CommitUpdateRestart { .. } => {
-                // The coordinator's commit (spec §5 `Prepared -> Stopping`):
-                // consume the prepared transaction, stop the workers
-                // gracefully in budget, and either exit for the update or
-                // abandon it (sessions untouched).
-                self.handle_commit_update_restart(&command_id, &type_name, command)
-                    .await
-            }
-            DaemonCommand::PrepareUpdateRestart { .. } => {
-                // The update-flow coordinator's prepare RPC: accepts (or
-                // idempotently polls) the supervisor-side prepare
-                // transaction (spec §5). Slice 2 drives it to `Fenced` -
-                // the worker snapshot that fills the roster and reaches
-                // `Prepared` is the graceful-stop slice.
-                let response = self
-                    .handle_prepare_update_restart(&command_id, &type_name, command)
-                    .await;
-                (vec![response_line(&response)], false)
-            }
-            DaemonCommand::UpdateRestoreStatus { .. } => {
-                // The boot restore pass's live snapshot (spec §6/§9): the
-                // successor coordinator's `Restoring` report polls this
-                // for real counts and per-session failures instead of
-                // inferring adoption from the session list.
-                let data = self.restore_status_body();
-                (
-                    vec![response_line(&response_success(
-                        Some(&command_id),
-                        &type_name,
-                        Some(data),
-                    ))],
-                    false,
-                )
-            }
-            DaemonCommand::Prompt {
-                active_session_id, ..
-            }
-            | DaemonCommand::PromptAndWait {
-                active_session_id, ..
-            } if input_admission_id(command).is_some_and(|id| !id.is_empty()) => {
-                // An admitted prompt (wave b9): the cancellation checks,
-                // the admission-id rewrite, and the owned commit around
-                // the routed prompt.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.route_prompt_with_admission(
-                    connection,
-                    command,
-                    &client_id,
-                    attached,
-                    command_id,
-                    type_name,
-                    active_session_id,
-                )
-                .await
-            }
-            DaemonCommand::CancelPromptAdmission { .. } => {
-                // `cancel_prompt_admission` (wave b9): the supervisor's
-                // status ladder over the admission registry.
-                self.handle_cancel_prompt_admission(connection, command, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::CompleteOwnedSession { .. } => {
-                // Wave b9: the owner stops its session worker (TS
-                // supervisor arm).
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_complete_owned_session(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::PromoteOwnedSession { .. } => {
-                // Wave b9: the owner clears the ownership (TS
-                // `promoteOwnedWorker`).
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_promote_owned_session(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::RetryWorker { .. } => {
-                // Wave b9 (the audit's retry_worker fix): the recovery is
-                // a supervisor arm - the worker never sees the command.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_retry_worker(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::AbortCompaction { .. } => {
-                // The abort supervision: the supervisor answers the abort
-                // itself. The TS daemon-mode `abortCompaction` is an
-                // in-process call that always replies instantly; a wedged
-                // worker must not turn the abort into its own 30s route
-                // timeout and a loader that never clears.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_abort_compaction(command, &client_id, attached, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::AcquireSessionInputPause { .. } => {
-                // The supervisor-owned lease path (wave b8, TS supervisor
-                // arm): resolve, rewrite the lease key, forward, record.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_acquire_session_input_pause(
-                    connection,
-                    command,
-                    &client_id,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::ReleaseSessionInputPause { .. } => {
-                // The supervisor-owned release (wave b8): the TS outcome
-                // ladder over the lease table.
-                self.handle_release_session_input_pause(
-                    connection,
-                    command,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::Detach {
-                active_session_id, ..
-            } => {
-                // Detach carries the pause-lease bookkeeping (wave b8):
-                // mark the detaching sessions and bump the epoch BEFORE the
-                // routed detach, then release the client's leases for the
-                // marked sessions once it answered (TS supervisor detach
-                // arm ordering).
-                let client_id = effective_client_id.lock().unwrap().clone();
-                let attached_ids = attached.lock().unwrap().clone();
-                let marked = self
-                    .begin_detach_pause_bookkeeping(
-                        connection,
-                        active_session_id.as_deref(),
-                        &attached_ids,
-                    )
-                    .await;
-                let outcome = self
-                    .route_client_command(
-                        command,
-                        &client_id,
-                        attached,
-                        command_id.clone(),
-                        type_name.clone(),
-                    )
-                    .await;
-                // A selector that resolves to nothing detaches nothing and
-                // still answers success (TS `detachClient` no-ops an id
-                // the client was never attached to).
-                if outcome.0.first().is_some_and(|line| {
-                    line.get("success").and_then(Value::as_bool) == Some(false)
-                        && line
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .is_some_and(|error| error.starts_with("Unknown active session:"))
-                }) {
-                    return (
-                        vec![response_line(&response_success(
-                            Some(&command_id),
-                            &type_name,
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-                let succeeded = outcome
-                    .0
-                    .first()
-                    .is_some_and(|line| line.get("success").and_then(Value::as_bool) == Some(true));
-                if succeeded {
-                    self.release_client_pauses_for_sessions(connection, &marked)
-                        .await;
-                }
-                outcome
-            }
-            DaemonCommand::Reattach {
-                active_session_id,
-                target_active_session_id,
-                ..
-            } => {
-                // Reattach clears the detach marks for the reattached
-                // sessions (TS reattach arm): a reattached session may
-                // acquire pauses again. The route itself stays the
-                // generic one (streamed attach included).
-                let client_id = effective_client_id.lock().unwrap().clone();
-                let outcome = self
-                    .route_client_command(command, &client_id, attached, command_id, type_name)
-                    .await;
-                let mut cleared = vec![active_session_id.clone(), target_active_session_id.clone()];
-                if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
-                    cleared.push(resident.worker_id.clone());
-                }
-                self.clear_detaching_after_reattach(connection, &cleared);
-                outcome
-            }
-            DaemonCommand::AgentMessagesStatus {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less `agent_messages_status` (TS supervisor
-                // arm): the first live worker answers, else the TS
-                // empty-status object.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_agent_messages_status_broadcast(
-                    command,
-                    &client_id,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::ListAgentPeers { .. } => {
-                // `list_agent_peers` (wave b11, TS supervisor arm): the
-                // worker-token-authenticated peer roster.
-                self.handle_list_agent_peers(command, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::RenameSavedSession { .. } => {
-                // `rename_saved_session` (wave b11): the reservation ladder
-                // plus the offline catalog rename or the worker forward.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_rename_saved_session(
-                    command,
-                    &client_id,
-                    attached,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::DeleteSavedSession {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less `delete_saved_session` (wave b11): the
-                // supervisor's catalog delete (a selector routes to the
-                // owning worker's arm).
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_delete_saved_session(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::CronList {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less `cron_list` (wave b10, TS supervisor arm):
-                // merge the live workers' jobs with the passive ones.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_cron_list_catalog(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::HeartbeatsList {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less `heartbeats_list` (wave b10): the merged
-                // heartbeat catalog.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_heartbeats_list_catalog(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::CronCancel {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less `cron_cancel` (wave b10): the owner-worker
-                // search, then the passive store, then the TS error.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_cron_cancel_catalog(command, &client_id, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::HeartbeatManage { .. } => {
-                // `heartbeat_manage` (wave b10, TS supervisor arm): passive
-                // jobs are managed against their durable store, live ones
-                // route to their worker.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_heartbeat_manage_catalog(
-                    command,
-                    &client_id,
-                    attached,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::CronAdd { .. } => {
-                // `cron_add` (wave b10): the routed add plus the
-                // ownership promotion the command may ask for.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_cron_add_catalog(command, &client_id, attached, &command_id, &type_name)
-                    .await
-            }
-            DaemonCommand::HeartbeatSet { .. } => {
-                // `heartbeat_set` (wave b10): the same
-                // forward-and-promote path as `cron_add`.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_heartbeat_set_catalog(
-                    command,
-                    &client_id,
-                    attached,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            DaemonCommand::AgentMessagesPause {
-                active_session_id, ..
-            }
-            | DaemonCommand::AgentMessagesResume {
-                active_session_id, ..
-            } if active_session_id.is_none() => {
-                // Selector-less pause/resume (TS supervisor arm): the
-                // broadcast to every live worker.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_agent_messages_pause_resume_broadcast(
-                    command,
-                    &client_id,
-                    &command_id,
-                    &type_name,
-                )
-                .await
-            }
-            command => {
-                let client_id = effective_client_id.lock().unwrap().clone();
-                self.route_client_command(command, &client_id, attached, command_id, type_name)
-                    .await
-            }
-        }
-    }
-
-    /// `prepare_update_restart`: accept or poll the prepare transaction.
-    ///
-    /// The RPC contract: a new `updateId` starts the transaction and waits
-    /// for the mutation drain, then reports `fenced`; a repeat with the same
-    /// id reports the current state (the poll never extends the budget); a
-    /// different id is refused (the coordinator maps the refusal to `Join`).
-    /// Any failure aborts the transaction - rollback is the default, the
-    /// supervisor returns to `Serving`, and nothing is left half-prepared.
-    async fn handle_prepare_update_restart(
-        self: &Arc<Self>,
-        command_id: &str,
-        type_name: &str,
-        command: &DaemonCommand,
-    ) -> DaemonResponse {
-        let DaemonCommand::PrepareUpdateRestart { update_id, .. } = command else {
-            return response_failure(
-                Some(command_id),
-                type_name,
-                "not a prepare_update_restart command",
-                None,
-            );
-        };
-        let Some(update_id) = update_id.clone().map(UpdateId::from) else {
-            return response_failure(
-                Some(command_id),
-                type_name,
-                "prepare_update_restart requires an updateId",
-                None,
-            );
-        };
-        let now = util::now_ms();
-        match self
-            .update_prepare
-            .begin(update_id.clone(), now, &self.update_budget)
-        {
-            BeginOutcome::Refused { active_update_id } => response_failure(
-                Some(command_id),
-                type_name,
-                "Daemon is already preparing an update restart",
-                Some(DaemonErrorInfo::UpdatePrepareRefused {
-                    active_update_id: active_update_id.0,
-                }),
-            ),
-            BeginOutcome::AlreadyActive {
-                state,
-                accepted_at_ms,
-            } => response_success(
-                Some(command_id),
-                type_name,
-                Some(json!({
-                    "updateId": update_id,
-                    "state": state.wire_name(),
-                    "acceptedAt": util::iso_from_unix_ms(accepted_at_ms),
-                })),
-            ),
-            BeginOutcome::Started {
-                accepted_at_ms,
-                prepare_deadline_ms,
-            } => {
-                // Draining: wait for in-flight mutations within the hard
-                // deadline, then report the fenced state.
-                let deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(prepare_deadline_ms.saturating_sub(now));
-                if let Err(error) = self.mutation_drain.wait_for_drain(0, deadline).await {
-                    if let Some(abort) = self.update_prepare.abort(&update_id) {
-                        self.finish_update_abort(abort).await;
-                    }
-                    return response_failure(Some(command_id), type_name, &error.to_string(), None);
-                }
-                match self.update_prepare.drain_complete(&update_id) {
-                    PrepareOp::Applied(_) => {
-                        // Fenced: snapshot every resident worker, assemble
-                        // the roster, write the prepared artifacts (fsync),
-                        // and reach Prepared - all inside the remaining
-                        // prepare budget (spec §5, slice 3).
-                        match self
-                            .complete_update_prepare(
-                                &update_id,
-                                command,
-                                accepted_at_ms,
-                                prepare_deadline_ms,
-                            )
-                            .await
-                        {
-                            Ok(data) => response_success(Some(command_id), type_name, Some(data)),
-                            Err(error) => {
-                                // Rollback is the default on any failure:
-                                // abort, delete the artifacts, Serving.
-                                if let Some(abort) = self.update_prepare.abort(&update_id) {
-                                    self.finish_update_abort(abort).await;
-                                }
-                                response_failure(
-                                    Some(command_id),
-                                    type_name,
-                                    &format!("{error:#}"),
-                                    None,
-                                )
-                            }
-                        }
-                    }
-                    // The watchdog aborted the transaction while we drained
-                    // (the same deadline) - the supervisor is Serving again.
-                    PrepareOp::NotActive => response_failure(
-                        Some(command_id),
-                        type_name,
-                        "Timed out draining daemon mutations for update restart",
-                        None,
-                    ),
-                }
-            }
-        }
-    }
-
-    /// The snapshot phase of the prepare transaction (spec §5
-    /// `Fenced -> Snapshotted -> Prepared`): collect every resident
-    /// worker's `update_snapshot`, assemble the roster (spec §8), write
-    /// `prepared/<update-id>/{roster,marker}.json` durably, and arm the
-    /// marker self-expiry. Runs within the remaining hard prepare budget;
-    /// any failure aborts the whole transaction (the caller rolls back).
-    async fn complete_update_prepare(
-        self: &Arc<Self>,
-        update_id: &UpdateId,
-        command: &DaemonCommand,
-        accepted_at_ms: u64,
-        prepare_deadline_ms: u64,
-    ) -> Result<Value> {
-        let residents = self.registry.list().await;
-        // TS parity: refuse to snapshot over a worker that is stopping or
-        // disconnected - its state is not collectible.
-        for resident in &residents {
-            let state = if self.is_stopping(resident) {
-                "stopping"
-            } else {
-                "disconnected"
-            };
-            let connected = resident.cmd_tx.lock().await.is_some();
-            if self.is_stopping(resident) || !connected {
-                anyhow::bail!(
-                    "Cannot prepare update restart while resident worker {} is {state}",
-                    resident.worker_id
-                );
-            }
-        }
-        let remaining = prepare_deadline_ms.saturating_sub(util::now_ms());
-        let rpc_timeout = WORKER_REQUEST_TIMEOUT_MS.min(remaining).max(1);
-        let snapshots = join_all(residents.iter().map(|resident| {
-            let resident = Arc::clone(resident);
-            async move {
-                let response = self
-                    .route_command(&resident, "update_snapshot", json!({}), rpc_timeout)
-                    .await?;
-                if !response.success {
-                    anyhow::bail!(
-                        "worker {} refused its snapshot: {}",
-                        resident.worker_id,
-                        response.error.unwrap_or_default()
-                    );
-                }
-                let data = response
-                    .data
-                    .clone()
-                    .ok_or_else(|| anyhow!("worker {} returned no snapshot", resident.worker_id))?;
-                let descriptor = resident.descriptor.lock().await.clone();
-                Ok(WorkerSnapshot {
-                    worker_id: resident.worker_id.clone(),
-                    descriptor,
-                    snapshot: data,
-                })
-            }
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<WorkerSnapshot>>>()?;
-
-        let to_version = match command {
-            DaemonCommand::PrepareUpdateRestart { rest, .. } => rest
-                .get("toVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(DAEMON_APP_VERSION),
-            _ => DAEMON_APP_VERSION,
-        };
-        let ledger = self.rlm_spawn_ledger_for(None).await?;
-        let now = util::now_ms();
-        let identity = supervisor_identity(format!("sup:{}", std::process::id()));
-        let roster = build_update_roster(
-            UpdateRosterInputs {
-                update_id,
-                socket_path: self.options.socket_path.to_str().unwrap_or_default(),
-                agent_dir: &self.options.agent_dir,
-                supervisor: identity.clone(),
-                from_version: DAEMON_APP_VERSION,
-                to_version,
-                created_at_ms: now,
-                ledger: &ledger,
-            },
-            snapshots,
-        )?;
-        let marker = UpdatePreparedMarker {
-            update_id: update_id.clone(),
-            expires_at: marker_expires_at_iso(now, &self.update_budget),
-            supervisor: identity,
-            rest: Default::default(),
-        };
-        write_prepared_artifacts(&self.update_prepared_dir(update_id), &roster, &marker)?;
-        match self
-            .update_prepare
-            .snapshot_written(update_id, now, &self.update_budget)
-        {
-            PrepareOp::Applied(_) => {}
-            PrepareOp::NotActive => anyhow::bail!("update prepare aborted during the snapshot"),
-        }
-        match self.update_prepare.prepare_acked(update_id) {
-            PrepareOp::Applied(_) => {}
-            PrepareOp::NotActive => anyhow::bail!("update prepare aborted before the ack"),
-        }
-        Ok(json!({
-            "updateId": update_id,
-            "state": "prepared",
-            "acceptedAt": util::iso_from_unix_ms(accepted_at_ms),
-            "expiresAt": marker.expires_at,
-        }))
-    }
-
-    /// `commit_update_restart` (spec §5 `Prepared -> Stopping`): consume the
-    /// prepared transaction and stop every worker gracefully within its
-    /// budget. All workers stopped - the supervisor exits for the update
-    /// (slice 4's coordinator takes over; descriptors survive on disk for
-    /// the new supervisor's create-or-adopt restore). Any refusal
-    /// ABANDONS the update: the supervisor returns to `Serving`, refused
-    /// sessions keep running untouched, and the already-stopped workers
-    /// relaunch (invariant I3 - never a kill).
-    async fn handle_commit_update_restart(
-        self: &Arc<Self>,
-        command_id: &str,
-        type_name: &str,
-        command: &DaemonCommand,
-    ) -> (Vec<Value>, bool) {
-        let DaemonCommand::CommitUpdateRestart { update_id, .. } = command else {
-            return (
-                vec![response_line(&response_failure(
-                    Some(command_id),
-                    type_name,
-                    "not a commit_update_restart command",
-                    None,
-                ))],
-                false,
-            );
-        };
-        let Some(update_id) = update_id.clone().map(UpdateId::from) else {
-            return (
-                vec![response_line(&response_failure(
-                    Some(command_id),
-                    type_name,
-                    "commit_update_restart requires an updateId",
-                    None,
-                ))],
-                false,
-            );
-        };
-        match self.update_prepare.commit(&update_id) {
-            PrepareOp::NotActive => (
-                vec![response_line(&response_failure(
-                    Some(command_id),
-                    type_name,
-                    "No prepared update restart is active for that update id",
-                    None,
-                ))],
-                false,
-            ),
-            PrepareOp::Applied(_) => {
-                let residents = self.registry.list().await;
-                let verdicts = stop_workers_gracefully(self, &residents, &self.update_budget).await;
-                let refused: Vec<&str> = verdicts
-                    .iter()
-                    .filter(|(_, verdict)| *verdict == WorkerStopVerdict::Refused)
-                    .map(|(worker_id, _)| worker_id.as_str())
-                    .collect();
-                if !refused.is_empty() {
-                    // Abandon (I3): the sessions that refused keep running;
-                    // the ones that already stopped relaunch over their own
-                    // session files.
-                    if let Some(abort) = self.update_prepare.abandon_stopping(&update_id) {
-                        self.finish_update_abort(abort).await;
-                    }
-                    for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
-                        match verdict {
-                            WorkerStopVerdict::Stopped => {
-                                resident.intentional_stop.store(false, Ordering::SeqCst);
-                                match self.relaunch_worker(resident).await {
-                                    Ok(child) => {
-                                        resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                        self.spawn_monitor(Arc::clone(resident), Some(child), 0);
-                                    }
-                                    Err(error) => {
-                                        self.log_line(&format!(
-                                            "worker {} abandon relaunch failed: {error:#}",
-                                            resident.worker_id
-                                        ));
-                                    }
-                                }
-                            }
-                            WorkerStopVerdict::Refused => {
-                                // Restore normal supervision: the stop
-                                // request may still land late, in which case
-                                // the monitor treats the exit as a crash
-                                // and relaunches with backoff - the session
-                                // file is the truth either way.
-                                resident.intentional_stop.store(false, Ordering::SeqCst);
-                            }
-                        }
-                    }
-                    self.log_line(&format!(
-                        "update {update_id} abandoned: worker(s) {refused:?} did not stop in budget; sessions untouched"
-                    ));
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(command_id),
-                            type_name,
-                            &format!(
-                                "Update abandoned: session worker(s) {refused:?} did not stop within the budget; sessions are untouched and the daemon keeps serving"
-                            ),
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-                let stopped = verdicts.len();
-                self.log_line(&format!(
-                    "update {update_id}: all {stopped} worker(s) stopped; exiting for the update"
-                ));
-                // Spec §10.1: every client learns the update resume
-                // contract BEFORE the sockets close - the close frame is an
-                // instruction (reattach by durable id after the restart),
-                // not an error. `estSeconds` is the successor boot + restore
-                // window from the update budget.
-                let mut sessions: Vec<Value> = Vec::new();
-                for resident in &residents {
-                    let descriptor = resident.descriptor.lock().await;
-                    let session_id = descriptor
-                        .root_session_id
-                        .clone()
-                        .or_else(|| {
-                            descriptor.session_file.as_deref().and_then(|file| {
-                                Path::new(file)
-                                    .file_stem()
-                                    .map(|stem| stem.to_string_lossy().to_string())
-                            })
-                        })
-                        .unwrap_or_else(|| resident.worker_id.clone());
-                    sessions.push(json!({
-                        "sessionId": session_id,
-                        "name": descriptor
-                            .create_command
-                            .rest
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    }));
-                }
-                let est_seconds =
-                    (self.update_budget.boot_ms + self.update_budget.restore_overall_ms) / 1000;
-                let closing = json!({
-                    "type": "daemon_closing",
-                    "reason": "update",
-                    "payload": {
-                        "updateId": update_id.to_string(),
-                        "resume": true,
-                        "estSeconds": est_seconds,
-                        "sessions": sessions,
-                    }
-                });
-                let _ = self.events.send((ClientRouting::Broadcast, closing));
-                // The response is written before the accept loop exits (the
-                // write path is the dispatch channel; the 100ms drain only
-                // orders the exit behind it - the coordinator's Booting
-                // phase recovers a lost ack by design).
-                let supervisor = Arc::clone(self);
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    supervisor.exit_for_update();
-                });
-                (
-                    vec![response_line(&response_success(
-                        Some(command_id),
-                        type_name,
-                        Some(json!({
-                            "updateId": update_id,
-                            "state": "stopping",
-                            "stopped": stopped,
-                        })),
-                    ))],
-                    true,
-                )
-            }
-        }
-    }
-
-    /// The update's exit path (spec §5 Stopping, all workers exited): set
-    /// the shutdown flag so the monitors stand down and the accept loop
-    /// falls out, but KEEP the worker descriptors on disk - the new
-    /// supervisor's create-or-adopt restore (spec §6/§8) relaunches the
-    /// workers from them. Contrast `begin_shutdown`, which deletes
-    /// descriptors for a terminal stop.
-    fn exit_for_update(self: &Arc<Self>) {
-        // The update exit is already complete: publish the accept-loop exit
-        // before the general shutdown gate, so a client disconnect can never
-        // observe the transient `shutting_down && !accept_exit` window and
-        // mistake the update restart for a terminal stop pass.
-        self.accept_exit.store(true, Ordering::SeqCst);
-        self.shutting_down.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_one();
-    }
-
-    /// Apply one abort outcome: delete the prepared artifacts if any, and
-    /// log the return to `Serving` (clients are notified through the
-    /// aborting RPC response; the per-phase banner event is the UX slice).
-    async fn finish_update_abort(self: &Arc<Self>, abort: AbortOutcome) {
-        if abort.delete_prepared {
-            let prepared_dir = self.update_prepared_dir(&abort.update_id);
-            if let Err(error) = crate::update_prepare::delete_prepared_dir(&prepared_dir) {
-                self.log_line(&format!(
-                    "update prepare cleanup failed for {}: {error:#}",
-                    abort.update_id
-                ));
-            }
-        }
-        self.log_line(&format!(
-            "update prepare aborted ({}): {}",
-            abort.update_id,
-            abort.reason.as_str()
-        ));
-    }
-
-    /// The prepared-artifact directory of one update under this socket's
-    /// scratch dir (swept at boot; created only by the prepare transaction).
-    fn update_prepared_dir(&self, update_id: &UpdateId) -> PathBuf {
-        let socket_hash = paths::hash_key(&self.options.socket_path.to_string_lossy(), 64);
-        crate::update_prepare::prepared_dir(&self.options.agent_dir, &socket_hash, update_id)
-    }
-
-    /// Update-prepare watchdog (spec §5): the deadline and the marker
-    /// self-expiry are re-checked on a timer, so a coordinator that dies
-    /// mid-prepare can never wedge the supervisor - every state has a
-    /// watchdog exit (invariant I1).
-    async fn update_prepare_watchdog(self: Arc<Self>) {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-                self.finish_update_abort(abort).await;
-            }
-        }
-    }
-
-    /// `worker_register`: a session worker presenting its identity (boot
-    /// registration or re-registration after this supervisor restarted).
-    /// The token was issued when the supervisor spawned or adopted the
-    /// worker, so an unknown worker id or a token mismatch is rejected.
-    async fn handle_worker_register(
-        self: &Arc<Self>,
-        command_id: &str,
-        type_name: &str,
-        command: &DaemonCommand,
-    ) -> DaemonResponse {
-        let DaemonCommand::WorkerRegister {
-            active_session_id,
-            session_id,
-            socket_path,
-            worker_instance_id,
-            token,
-            pid,
-            ..
-        } = command
-        else {
-            return response_failure(Some(command_id), type_name, "not a registration", None);
-        };
-        let fail = |error: &str| response_failure(Some(command_id), type_name, error, None);
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return fail("Supervisor is shutting down");
-        }
-        if active_session_id.is_empty() || socket_path.is_empty() || *pid == 0 {
-            return fail("Session worker registration is missing identity fields");
-        }
-        let worker_instance_id =
-            (!worker_instance_id.is_empty()).then(|| worker_instance_id.clone());
-        let registration = WorkerRegistration {
-            active_session_id: active_session_id.clone(),
-            session_id: session_id
-                .clone()
-                .filter(|value: &String| !value.is_empty()),
-            socket_path: socket_path.clone(),
-            worker_instance_id: worker_instance_id.clone(),
-            pid: *pid,
-        };
-        // Serialize against descriptor adoption for the same worker.
-        let guard = self.registry.adoption_guard(active_session_id).await;
-        let resident = match self.registry.get(active_session_id).await {
-            Some(resident) => resident,
-            None => match self.adopt_registered_worker(&registration, token).await {
-                Ok(resident) => resident,
-                Err(error) => return fail(&format!("{error:#}")),
-            },
-        };
-        // Refresh the durable identity from the live worker (the token was
-        // issued by this supervisor; a mismatch is a rogue registration).
-        // The registration's durable id is optional on the wire: a
-        // re-registering worker that does not report it still owns its
-        // persisted descriptor, whose session-file stem addresses the same
-        // roster row (a fresh create's registration lands before the
-        // create replay assigns the session, so this reads the persisted
-        // path). Both reads share this one lock acquisition - the
-        // create path holds this mutex around its own replay steps, and a
-        // second acquisition here let the two race into a stall.
-        let durable_session_id = {
-            let mut descriptor = resident.descriptor.lock().await;
-            if token.as_str() != descriptor.authentication_token {
-                return fail("Session worker authentication failed");
-            }
-            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
-            // A REPLACEMENT registration flips the roster's stale-delta
-            // slot to the replacement BEFORE the replacement is exposed
-            // anywhere — the descriptor update below, the persisted
-            // record, the recorded registration: a predecessor's pull or
-            // frame still in flight must already meet the slot naming the
-            // replacement (its own stamp mismatches and drops), never the
-            // predecessor it carries. A same-process re-register (a
-            // dropped supervisor link, a create replay) keeps the slot
-            // untouched — the counter did not restart.
-            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
-                let replacement = worker_instance_id.clone().unwrap_or_default();
-                let mut roster = self.roster.lock().unwrap();
-                roster.note_worker_generation(&resident.worker_id, &replacement);
-            }
-            descriptor.pid = *pid;
-            // Refresh the identity from the live registrant (TS captures
-            // an identity while the process is known alive): a supervisor
-            // restart re-adopts the worker, and a pid that was recycled in
-            // between must not keep the old holder's identity. An
-            // unobservable start id keeps the previous value (a possibly
-            // live worker is never orphaned on a transient lookup failure).
-            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
-                descriptor.process_start_id = Some(start_id);
-            }
-            descriptor.socket_path.clone_from(socket_path);
-            descriptor
-                .worker_instance_id
-                .clone_from(&worker_instance_id);
-            if let Some(session_id) = &registration.session_id {
-                descriptor.root_session_id = Some(session_id.clone());
-            }
-            descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-            // A (re-)registered worker refreshes its binding: the id stays
-            // addressable with its current durable identity across supervisor
-            // restarts, and a session file this id newly owns supersedes any
-            // earlier binding to it.
-            self.record_session_binding(
-                active_session_id,
-                descriptor.root_session_id.as_deref(),
-                descriptor.session_file.as_deref(),
-            );
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
-            let durable_session_id = match registration.session_id.clone() {
-                Some(session_id) => Some(session_id),
-                None => descriptor
-                    .session_file
-                    .clone()
-                    .as_deref()
-                    .and_then(|file| Path::new(file).file_stem())
-                    .map(|stem| stem.to_string_lossy().to_string()),
-            };
-            durable_session_id
-        };
-        let record = self.registry.record_registration(registration).await;
-        // A restore pass that owns this session's roster row can settle it
-        // now (spec §10.4): the live worker serves the row's waiters
-        // without queueing behind the rest of the recovery. Covers the
-        // self-registration that beats the descriptor scan (the adoption
-        // early return) and `adopt_registered_worker` alike; a no-op when
-        // no pass owns the row, and never wakes a row still pending its
-        // §10.5 continuation prompt. The settle lands after the
-        // registration is recorded, so a woken waiter's re-resolve cannot
-        // miss it.
-        if let Some(session_id) = durable_session_id {
-            self.restore.settle_adopted(&session_id);
-        }
-        let verb = if record.epoch > 1 {
-            "re-registered"
-        } else {
-            "registered"
-        };
-        self.log_line(&format!(
-            "session worker {active_session_id} {verb} (epoch {}, pid {pid})",
-            record.epoch
-        ));
-        drop(guard);
-        // Registration rebuilt the resident: refresh its roster entry from
-        // the live worker so the roster reflects the re-registered state.
-        self.refresh_roster_entry(&resident).await;
-        // A worker that registers after the boot seed (a supervisor
-        // restart's re-registration, a mid-tree resume, a wakened ledger
-        // child) publishes its passive ledger family in the background:
-        // TS reseeds the family when the worker's first roster snapshot
-        // applies (`applyWorkerRosterSnapshot`), and this port's workers
-        // push only their own summary, so the daemon walks the family
-        // here instead. Registration answers on the client's open path -
-        // the seed never blocks it.
-        let family_root = {
-            let descriptor = resident.descriptor.lock().await;
-            descriptor
-                .session_file
-                .clone()
-                .or_else(|| descriptor.create_command.session_path.clone())
-        };
-        if let Some(root) = family_root {
-            self.spawn_roster_registration_seed(Path::new(&root));
-        }
-        response_success(
-            Some(command_id),
-            type_name,
-            Some(json!({
-                "workerId": active_session_id,
-                "sessionId": session_id,
-                "supervisorGeneration": format!("sup:{}", std::process::id()),
-                "supervisorPid": std::process::id(),
-                "epoch": record.epoch,
-            })),
-        )
-    }
-
-    /// A registration for a worker with no roster entry: adopt it from its
-    /// persisted descriptor (the durable fallback record). The registration
-    /// proves the worker process is alive; adoption connects it for routing.
-    async fn adopt_registered_worker(
-        self: &Arc<Self>,
-        registration: &WorkerRegistration,
-        token: &str,
-    ) -> Result<Arc<ResidentWorker>> {
-        let descriptor_path = self
-            .descriptor_dir
-            .join(format!("{}.json", registration.active_session_id));
-        let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
-            return Err(anyhow!(
-                "Unknown session worker: {}",
-                registration.active_session_id
-            ));
-        };
-        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
-            .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
-        crate::descriptor::validate_descriptor(&descriptor, &self.options.socket_path)?;
-        if token != descriptor.authentication_token.as_str() {
-            return Err(anyhow!("Session worker authentication failed"));
-        }
-        let worker_id = descriptor.worker_id.clone();
-        let resident = ResidentWorker::new(
-            registration.active_session_id.clone(),
-            descriptor,
-            descriptor_path,
-        );
-        self.connect_worker(&resident, worker_connect_deadline())
-            .await?;
-        // The self-registered worker's session already exists: routed
-        // client commands may reach it immediately.
-        resident.note_session_ready();
-        self.registry.insert(Arc::clone(&resident)).await;
-        self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
-        self.refresh_roster_entry(&resident).await;
-        self.log_line(&format!(
-            "adopted session worker {worker_id} via self-registration"
-        ));
-        Ok(resident)
-    }
-
-    /// `list_saved_sessions` (port of `handleSavedSessionList`): stream
-    /// `session_list_item`/`session_list_progress` events, then a final
-    /// response with the full saved-session rows.
-    async fn handle_saved_session_list(
-        self: &Arc<Self>,
-        command: &DaemonCommand,
-        command_id: &str,
-    ) -> Vec<Value> {
-        let DaemonCommand::ListSavedSessions {
-            cwd,
-            session_dir,
-            active_session_id,
-            scope,
-            ..
-        } = command
-        else {
-            return Vec::new();
-        };
-        // Session-addressed form: use the live worker's cwd and session dir.
-        let (cwd, session_dir) = match active_session_id {
-            Some(active_session_id) => {
-                let resident = self.registry.get(active_session_id).await;
-                match resident {
-                    Some(resident) => {
-                        let descriptor = resident.descriptor.lock().await;
-                        let cwd = descriptor
-                            .create_command
-                            .rest
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .unwrap_or("/")
-                            .to_string();
-                        let session_dir = descriptor
-                            .create_command
-                            .rest
-                            .get("sessionDir")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        (cwd, session_dir)
-                    }
-                    None => {
-                        return vec![response_line(&response_failure(
-                            Some(command_id),
-                            "list_saved_sessions",
-                            &format!("Unknown active session: {active_session_id}"),
-                            None,
-                        ))];
-                    }
-                }
-            }
-            None => {
-                let Some(cwd) = cwd else {
-                    // The TS supervisor runs Node's path.resolve on the
-                    // missing cwd; reproduce the observable error string.
-                    return vec![response_line(&response_failure(
-                        Some(command_id),
-                        "list_saved_sessions",
-                        "The \"paths[0]\" property must be of type string, got undefined",
-                        None,
-                    ))];
-                };
-                (cwd.clone(), session_dir.clone())
-            }
-        };
-        let dir = match session_dir.as_deref() {
-            Some(dir) => crate::paths::expand_tilde(dir),
-            None => crate::paths::sessions_dir(&self.options.agent_dir),
-        };
-        let dir = match dir {
-            Ok(dir) => dir,
-            Err(error) => {
-                return vec![response_line(&response_failure(
-                    Some(command_id),
-                    "list_saved_sessions",
-                    &error.to_string(),
-                    None,
-                ))];
-            }
-        };
-        let scope_current = scope.as_str() == Some("current");
-        let mut infos = crate::session_store::list_sessions(&dir);
-        if scope_current {
-            infos.retain(|info| info.cwd == cwd);
-        }
-        // The saved catalog scan never visits session-artifacts, where RLM
-        // children persist: merge the passive ledger walk so a passivated
-        // descendant stays catalog-visible (TS
-        // `withPassiveRlmDescendantInfos`; a broken ledger degrades to the
-        // saved rows alone, it never fails the catalog).
-        let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = infos
-            .iter()
-            .map(|info| crate::rlm_roster::RosterWalkRoot {
-                session_file: info.path.clone(),
-                active_session_id: None,
-            })
-            .collect();
-        for resident in self.registry.list().await {
-            let descriptor = resident.descriptor.lock().await;
-            if let Some(session_file) = &descriptor.session_file {
-                roots.push(crate::rlm_roster::RosterWalkRoot {
-                    session_file: crate::lease::canonical_session_path(Path::new(session_file)),
-                    active_session_id: Some(descriptor.root_active_session_id.clone()),
-                });
-            }
-        }
-        let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
-            Ok(ledger) => ledger,
-            Err(error) => {
-                return vec![response_line(&response_failure(
-                    Some(command_id),
-                    "list_saved_sessions",
-                    &error.to_string(),
-                    None,
-                ))];
-            }
-        };
-        let passive = match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
-            Ok(children) => children,
-            Err(error) => {
-                self.log_line(&format!(
-                    "Could not merge passive RLM descendants: {error:#}"
-                ));
-                Vec::new()
-            }
-        };
-        let mut merged = passive
-            .iter()
-            .map(crate::rlm_roster::passive_child_info)
-            .filter(|info| !scope_current || info.cwd == cwd)
-            .collect::<Vec<_>>();
-        infos.append(&mut merged);
-        // Every row - scanned or passive-merged - carries its tombstoned
-        // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
-        // deleted-usage half): one bucket read per list, attached by
-        // canonical parent path so the agents-view recursive rollup bills
-        // deleted subagents to the parent that spent them. A broken ledger
-        // degrades to bare rows, exactly like the passive merge above.
-        match ledger.deleted_descendant_usage_by_parent() {
-            Ok(bucket) => {
-                for info in infos.iter_mut() {
-                    let path = crate::lease::canonical_session_path(&info.path)
-                        .to_string_lossy()
-                        .to_string();
-                    info.deleted_descendant_usage = bucket.get(&path).cloned();
-                }
-            }
-            Err(error) => {
-                self.log_line(&format!(
-                    "Could not attach deleted-descendant usage: {error:#}"
-                ));
-            }
-        }
-        let total = infos.len();
-        let mut lines = Vec::new();
-        for (index, info) in infos.iter().enumerate() {
-            let row = saved_session_row(info);
-            let mut item = json!({
-                "id": command_id,
-                "type": "session_list_item",
-                "command": "list_saved_sessions",
-                "session": row,
-            });
-            if let Some(active_session_id) = active_session_id {
-                item["activeSessionId"] = json!(active_session_id);
-            }
-            lines.push(item);
-            let mut progress = json!({
-                "id": command_id,
-                "type": "session_list_progress",
-                "command": "list_saved_sessions",
-                "loaded": index + 1,
-                "total": total,
-            });
-            if let Some(active_session_id) = active_session_id {
-                progress["activeSessionId"] = json!(active_session_id);
-            }
-            lines.push(progress);
-        }
-        let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
-        lines.push(response_line(&response_success(
-            Some(command_id),
-            "list_saved_sessions",
-            Some(json!({ "sessions": sessions })),
-        )));
-        // Telemetry: how many served rows carry a usage summary — the
-        // agents-view spend columns' data (a count only, never session
-        // payload).
-        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_saved_sessions_usage(client, rows_with_usage);
-        }
-        lines
-    }
-
-    async fn handle_list(
-        self: &Arc<Self>,
-        command_id: String,
-        type_name: String,
-        all: Option<bool>,
-        cwd: Option<String>,
-        session_dir: Option<String>,
-    ) -> DaemonResponse {
-        let dir = match session_dir.as_deref() {
-            Some(dir) => paths::expand_tilde(dir),
-            None => paths::sessions_dir(&self.options.agent_dir),
-        };
-        let dir = match dir {
-            Ok(dir) => dir,
-            Err(error) => {
-                return response_failure(Some(&command_id), &type_name, &error.to_string(), None);
-            }
-        };
-        let summaries: Vec<Value> = match all {
-            Some(true) => {
-                // TS `buildSessionList` order: saved rows (resident ones
-                // replaced in place by their live summary), then passive
-                // ledger children, then resident-only rows.
-                let mut infos = list_sessions(&dir);
-                if let Some(cwd) = cwd {
-                    infos.retain(|info| info.cwd == cwd);
-                }
-                let residents = self.registry.list().await;
-                let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-                for resident in residents.iter() {
-                    let descriptor = resident.descriptor.lock().await;
-                    if let Some(session_file) = &descriptor.session_file {
-                        resident_by_file.push(ResidentRoot {
-                            session_file: crate::lease::canonical_session_path(Path::new(
-                                session_file,
-                            )),
-                            resident: Arc::clone(resident),
-                            // Resident roots carry their active session id
-                            // so passive children of a resident parent
-                            // report parentActiveSessionId.
-                            active_session_id: Some(descriptor.root_active_session_id.clone()),
-                        });
-                    }
-                }
-                let mut summaries = Vec::new();
-                let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
-                for info in &infos {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: info.path.clone(),
-                        active_session_id: None,
-                    });
-                    let canonical = crate::lease::canonical_session_path(&info.path);
-                    let resident = resident_by_file
-                        .iter()
-                        .position(|root| root.session_file == canonical)
-                        .map(|at| resident_by_file.swap_remove(at));
-                    match resident {
-                        Some(root) => {
-                            roots.last_mut().expect("saved root").active_session_id =
-                                root.active_session_id;
-                            summaries.push(self.worker_summary(&root.resident).await);
-                        }
-                        None => summaries.push(saved_session_summary(info)),
-                    }
-                }
-                let mut resident_only = Vec::new();
-                for root in resident_by_file {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: root.session_file,
-                        active_session_id: root.active_session_id,
-                    });
-                    resident_only.push(self.worker_summary(&root.resident).await);
-                }
-                let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
-                    Ok(ledger) => ledger,
-                    Err(error) => {
-                        return response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &error.to_string(),
-                            None,
-                        );
-                    }
-                };
-                match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
-                    Ok(children) => {
-                        for child in &children {
-                            summaries.push(crate::rlm_roster::passive_child_summary(child));
-                        }
-                    }
-                    Err(error) => {
-                        let message = format!("Could not walk passive RLM children: {error:#}");
-                        self.log_line(&message);
-                        return response_failure(Some(&command_id), &type_name, &message, None);
-                    }
-                }
-                // TS `buildSessionList` order: saved rows, passive children,
-                // then resident-only rows.
-                summaries.append(&mut resident_only);
-                summaries
-            }
-            _ => {
-                // Live residents of this supervisor.
-                let mut summaries = Vec::new();
-                for resident in self.registry.list().await {
-                    summaries.push(self.worker_summary(&resident).await);
-                }
-                summaries
-            }
-        };
-        response_success(
-            Some(&command_id),
-            &type_name,
-            Some(json!({ "sessions": summaries })),
-        )
-    }
-
     /// Persist one subagent deletion (TS `recordRlmSubagentDeletion`): the
     /// ledger delete record is the topology tombstone, the display file gets
     /// a status tombstone for hydration. The child's transcript stays (a
@@ -4100,13 +1009,15 @@ impl Supervisor {
                 .rest
                 .get("sessionDir")
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    Path::new(&session_file)
-                        .parent()
-                        .map(|dir| dir.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                });
+                .map_or_else(
+                    || {
+                        Path::new(&session_file)
+                            .parent()
+                            .map(|dir| dir.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    },
+                    str::to_string,
+                );
             (
                 session_file,
                 session_dir,
@@ -4144,8 +1055,7 @@ impl Supervisor {
             session_dir,
             session_file: display
                 .as_ref()
-                .map(|entry| entry.session_file.clone())
-                .unwrap_or_else(|| session_file.clone()),
+                .map_or_else(|| session_file.clone(), |entry| entry.session_file.clone()),
             rlm_parent_node_id: display
                 .as_ref()
                 .and_then(|entry| entry.rlm_parent_node_id.clone()),
@@ -4153,7 +1063,7 @@ impl Supervisor {
             spawn_code: display.as_ref().and_then(|entry| entry.spawn_code.clone()),
             model: display.as_ref().and_then(|entry| entry.model.clone()),
             status: "deleted".to_string(),
-            created_at: display.as_ref().map(|entry| entry.created_at).unwrap_or(0),
+            created_at: display.as_ref().map_or(0, |entry| entry.created_at),
         };
         if let Err(error) = crate::rlm_ledger::write_rlm_subagent_display(&tombstone) {
             self.log_line(&format!(
@@ -4163,777 +1073,93 @@ impl Supervisor {
         Ok(())
     }
 
-    /// One resident's live summary (`get_state`), with the recovering-row
-    /// fallback for an unreachable worker.
-    async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
-        let response = self
-            .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
-            .await;
-        match response {
-            Ok(response) if response.success => response
-                .data
-                .unwrap_or_else(|| offline_summary(&resident.worker_id)),
-            _ => offline_summary(&resident.worker_id),
-        }
-    }
-
-    pub(crate) async fn handle_create(
+    /// The plain kill's stop aftermath, run on every route outcome: TS's
+    /// root-kill block wraps the forward in a `finally`
+    /// (daemon-supervisor.ts: `try { response = await
+    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
+    /// so a kill a hung worker never answers still completes the stop —
+    /// the graceful `shutdown` route bounded by the route budget, then
+    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
+    /// hard-deadline escalation — and the stopped worker's session lease
+    /// frees through the dead-owner reclaim instead of outliving the
+    /// command behind a route that never answers.
+    ///
+    /// The stop runs first and its failure gates the belt: the only
+    /// `Err` [`Self::stop_worker`] takes is the stop tombstone's persist
+    /// (the stop never durably started — TS's `stopWorkerUntracked`
+    /// throws before any teardown), so the worker stays untouched and
+    /// the kill stays retryable. The belt below must never run against
+    /// a live worker: it cancels the session tree's jobs, archives the
+    /// root file, and sweeps a ledger delete's child artifacts while
+    /// the worker's resident is still serving and its transcript may
+    /// still grow.
+    async fn finish_plain_kill_stop(
         self: &Arc<Self>,
-        command: &DaemonCommand,
-        client_id: String,
-    ) -> Result<Value> {
-        // The per-file open single-flight (TS `openingWorkers`): one
-        // create at a time per session file. A concurrent open waits
-        // behind this one and then reuses the worker it launched — both
-        // reaching the launch would race the runtime session lease.
-        let _opening_guard = self.opening_guard(command).await?;
-        // TS `createOrReuseWorker`'s reuse seam: an open of a session file
-        // a live worker already serves answers the LIVE binding (the
-        // client attaches next) instead of launching a second worker over
-        // the same file — a launch the runtime session lease would reject
-        // with `Session is already active`. `None` keeps the launch path.
-        // The seam runs BEFORE the name check (TS reserves names only on
-        // the fresh-launch path): a named open of an already-active
-        // session reuses it — its own name is not a conflict.
-        if let Some(summary) = self
-            .reuse_live_worker_for_create(command, &client_id)
-            .await?
-        {
-            return Ok(summary);
-        }
-        // TS `createRlmSubagentRuntime` (#2396): the sibling name is held
-        // under a daemon-wide reservation for the whole fresh-launch
-        // admission and re-asserted at this boundary, so a same-name
-        // sibling that lands mid-admission fails closed before the durable
-        // ledger edge is appended. TS reserves names only on the subagent
-        // admission path (a named open of a live session reuses it above,
-        // and a root create keeps the plain live check), so only a
-        // `kind: "subagent"` create reserves.
-        // The binding owns the reservation guard: it releases the key
-        // only when `handle_create` returns (the RAII drop), holding the
-        // name across the whole launch and durable admission.
-        let _name_reservation = self.reserve_subagent_create_name(command)?;
-        if let DaemonCommand::Create {
-            name: Some(name), ..
-        } = command
-        {
-            self.assert_session_name_available(name).await?;
-        }
-        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
-        // is client-owned (`ownerClientId = command.lifecycle ===
-        // "client_owned" ? clientId : undefined`); unspecified and
-        // `Resident` lifecycles are unowned. Every RLM child spawn
-        // declares `Resident`, so a spawned child never inherits the
-        // spawning client's ownership: passivation deletes an owned
-        // worker's rows, and a stopped child under a surviving root must
-        // passivate instead (the walk e2e asserts the passive row
-        // survives the kill). A `None`-lifecycle create being owner-
-        // marked would hide its live session from every other client
-        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
-        let create_lifecycle = match command {
-            DaemonCommand::Create { lifecycle, .. } => *lifecycle,
-            _ => None,
-        };
-        let owner_client_id = match create_lifecycle {
-            Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
-            _ => None,
-        };
-        let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
-        // The launch registered its worker (the registry insert precedes
-        // the spawn). The single-flight stays held through the spawn
-        // admission below: an admission failure tears the resident down,
-        // and a concurrent open that had just reused it would hold a
-        // summary for a worker that no longer exists.
-        // Spawn admission is the moment the supervisor knows the child's
-        // edge firsthand. The ledger is the only topology store, so the
-        // append's outcome is load-bearing: admission fails if the spawn
-        // record cannot be made durable (a swallowed failure would admit a
-        // child that listing and hydration can never find after
-        // passivation). Admission reads the CREATE response: it is
-        // authoritative (launch_worker rejects a sessioned create without
-        // a durable non-empty session file). A fresh get_state here races
-        // worker replacement (a rebooting worker mid-replay answers
-        // without the session file yet) and would tear down a healthy
-        // child on a stale miss.
-        if let Err(error) = self
-            .record_rlm_child_admission(command, &create_summary)
-            .await
-        {
-            // Never leave an admitted-but-unrecorded child running: the
-            // ledger is the only topology store.
-            let _ = self.stop_worker(&resident).await;
-            return Err(error);
-        }
-        // The admission settled: the single-flight may release (a
-        // concurrent open's classification now finds a durable resident).
-        drop(_opening_guard);
-        // The response still matches attach/list rows exactly: prefer a
-        // fresh get_state, but a degraded one falls back to the
-        // authoritative create summary instead of failing the spawn (the
-        // session is durable at this point; the child is healthy).
-        let summary = match self
-            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
-            .await
-        {
-            Ok(response) if response.success => {
-                response.data.unwrap_or_else(|| create_summary.clone())
-            }
-            _ => create_summary.clone(),
-        };
-        // The new session joins the agent roster immediately (subscribers
-        // see the roster_update before their next list) — as an
-        // authoritative pull write, so its embedded counter raises the
-        // stale-delta watermark for the resident.
-        self.write_roster_summary_for_resident(&resident, &summary)
-            .await;
-        // The new root's passive family renders immediately from the
-        // ledger edges - no transcript read on the event path - then one
-        // bounded background hydration fills each newly seeded row's
-        // durable display fields (cwd, model, thinking level) and
-        // publishes them as one update. A fresh session has no family;
-        // the guards skip every row another surface already seeded. The
-        // root is the CREATE response's session file (the authoritative
-        // durable path, exactly what admission reads): a get_state that
-        // answers mid-replay without its session file must not skip a
-        // resume's family, and a live get_state file that differs is
-        // still the same session.
-        if let Some(root) = summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
-        {
-            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
-            if !seeded.is_empty() {
-                self.spawn_seeded_hydration(seeded);
-            }
-        }
-        Ok(summary)
-    }
-
-    /// Record one RLM child admission: the spawn edge in the daemon-owned
-    /// ledger (durable topology) and the child's display file (hydration
-    /// metadata). No-op for top-level sessions.
-    async fn record_rlm_child_admission(
-        self: &Arc<Self>,
-        command: &DaemonCommand,
-        summary: &Value,
-    ) -> Result<()> {
-        let DaemonCommand::Create {
-            name,
-            config,
-            runtime_metadata,
-            ..
-        } = command
-        else {
-            return Ok(());
-        };
-        let Some(metadata) = runtime_metadata else {
-            return Ok(());
-        };
-        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
-            return Ok(());
-        }
-        let child_id = metadata
-            .get("rlmChildId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("RLM child admission is missing rlmChildId"))?
-            .to_string();
-        let depth = metadata
-            .get("rlmDepth")
-            .and_then(Value::as_u64)
-            .unwrap_or(1) as u32;
-        let parent = metadata
-            .get("parentSessionFile")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("RLM child admission is missing parentSessionFile"))?;
-        let child = summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("RLM child admission is missing the child session file"))?;
-        let session_name = summary
-            .get("sessionName")
-            .and_then(Value::as_str)
-            .or(name.as_deref())
-            .unwrap_or_default()
-            .to_string();
-        let session_dir = config
-            .as_ref()
-            .and_then(|config| config.get("sessionDir"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                Path::new(child)
-                    .parent()
-                    .map(|dir| dir.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
-        let ledger = self.rlm_spawn_ledger_for(None).await?;
-        ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
-                child_id: child_id.clone(),
-                parent: parent.to_string(),
-                child: child.to_string(),
-                depth,
-                name: session_name.clone(),
-            })
-            .inspect_err(|error| {
-                self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"))
-            })?;
-        let display = crate::rlm_ledger::RlmSubagentDisplayEntry {
-            type_tag: "rlm_subagent".to_string(),
-            child_id,
-            session_name,
-            session_dir,
-            session_file: child.to_string(),
-            rlm_parent_node_id: metadata
-                .get("rlmParentNodeId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            prompt: metadata
-                .get("prompt")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            spawn_code: metadata
-                .get("spawnCode")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            model: metadata.get("model").cloned(),
-            status: "running".to_string(),
-            created_at: metadata
-                .get("createdAt")
-                .and_then(Value::as_u64)
-                .unwrap_or_else(crate::util::now_ms),
-        };
-        let written =
-            crate::rlm_ledger::write_rlm_subagent_display(&display).inspect_err(|error| {
-                self.log_line(&format!(
-                    "failed to persist RLM subagent display entry: {error:#}"
-                ))
-            })?;
-        if !written {
+        resident: &Arc<ResidentWorker>,
+        rest: &Map<String, Value>,
+    ) {
+        if let Err(error) = self.stop_worker(resident).await {
             self.log_line(&format!(
-                "skipped RLM subagent display entry for {}: deleted tombstone exists",
-                display.child_id
+                "session worker {} stop after kill failed: {error:#}; the stop never durably started and stays retryable",
+                resident.worker_id
             ));
+            return;
         }
-        Ok(())
-    }
-
-    async fn assert_session_name_available(self: &Arc<Self>, name: &str) -> Result<()> {
-        if name.trim().is_empty() {
-            return Err(anyhow!("Session name cannot be empty"));
-        }
-        for resident in self.registry.list().await {
-            let response = self
-                .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
-                .await;
-            if let Ok(response) = response {
-                if let Some(data) = &response.data {
-                    let session_name = data
-                        .get("sessionName")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if session_name == name {
-                        return Err(anyhow!(
-                            "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth 0 under this parent"
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Reserve a subagent spawn's name for the whole fresh-launch admission
-    /// (TS #2396 `createRlmSubagentRuntime`): the reservation spans the
-    /// availability re-assert, the worker launch, and the durable ledger
-    /// admission, and the guard releases the key when the create ends,
-    /// whatever its outcome. Creates that do not reserve - a root create,
-    /// or an open that reuses a live worker above - answer `None` and keep
-    /// the plain live check (TS reserves names only on the subagent
-    /// admission path); a racing same-name admission of the same parent
-    /// scope fails the create with the TS unavailability error.
-    fn reserve_subagent_create_name(
-        self: &Arc<Self>,
-        command: &DaemonCommand,
-    ) -> Result<Option<CreateNameReservation>> {
-        let DaemonCommand::Create {
-            name,
-            runtime_metadata,
-            ..
-        } = command
-        else {
-            return Ok(None);
-        };
-        let (Some(name), Some(metadata)) = (name, runtime_metadata) else {
-            return Ok(None);
-        };
-        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
-            return Ok(None);
-        }
-        // The child's scope keys the reservation exactly like a rename's
-        // (TS `sessionNameReservationKey`): `[depth, parent, name]`, the
-        // parent keyed by its session file when it has one.
-        let scope = NameScope {
-            id: String::new(),
-            name: name.clone(),
-            depth: metadata
-                .get("rlmDepth")
-                .and_then(Value::as_u64)
-                .unwrap_or(1) as u32,
-            parent_session_id: metadata
-                .get("parentSessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            parent_session_path: metadata
-                .get("parentSessionFile")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        };
-        let key = reservation_key(&scope);
-        let reserved = self
-            .pending_session_names
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone());
-        if !reserved {
-            bail!(name_unavailable_error(name, scope.depth));
-        }
-        Ok(Some(CreateNameReservation {
-            supervisor: Arc::clone(self),
-            key,
-        }))
-    }
-
-    pub(crate) async fn route_client_command(
-        self: &Arc<Self>,
-        command: &DaemonCommand,
-        client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
-        command_id: String,
-        type_name: String,
-    ) -> (Vec<Value>, bool) {
-        // TS routing gate: the generic forward requires the
-        // `activeSessionId` field (present-but-empty is an unknown session,
-        // the same error TS `findWorkerForClient` produces). A command that
-        // addresses no session and has no supervisor arm here cannot be
-        // routed - the TS arms for the optional-selector commands
-        // (agent_messages_*, cron_*, heartbeats_list, detach-all,
-        // saved-session renames/deletes) land with their breadth waves.
-        let Some(selector) = command_active_session_id(command) else {
-            return (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &format!("Supervisor cannot route daemon command: {type_name}"),
-                    None,
-                ))],
-                false,
-            );
-        };
-        let selector = selector.to_string();
-        // The rebind target when the selector addresses a superseded id: a
-        // binding whose session has a live resident again (a new worker took
-        // the session file over). The routed command is rewritten to the
-        // current id, so the rest of this route - and the response handling
-        // below - addresses the session's current worker.
-        let mut rebound_to: Option<String> = None;
-        let resident = match self.registry.resolve(&selector).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                // Spec §10.4: attach-by-durable-id at any time. A restore
-                // pass may still be bringing the rostered session up, so
-                // the command queues server-side behind the pass (no
-                // client-visible retry); a settled restore answers with the
-                // per-row failure (session file + manual-resume hint)
-                // instead of the plain unknown-session error.
-                self.await_restore_target(&selector).await;
-                match self.registry.resolve(&selector).await {
-                    Ok(resident) => resident,
-                    Err(_) => {
-                        // The stale-active-id rebind: the selector is a
-                        // superseded id the binding table still maps to the
-                        // session's durable identity, and a live resident
-                        // owns that identity now. The command failed before
-                        // it ever reached a worker, so routing it once to
-                        // the current resident delivers it exactly once.
-                        match self.binding_target(&selector).await {
-                            Some(resident) => {
-                                // A detach addressed to a superseded id has
-                                // no worker to reach: the stale worker is
-                                // gone (its client-side state died with it),
-                                // and forwarding the detach to the
-                                // replacement would drop the very attach
-                                // the client may have just established there
-                                // (the worker keys its detach by client). The
-                                // supervisor retires the stale address
-                                // itself and answers the detach.
-                                if matches!(command, DaemonCommand::Detach { .. }) {
-                                    attached.lock().unwrap().retain(|id| id != &selector);
-                                    return (
-                                        vec![response_line(&response_success(
-                                            Some(&command_id),
-                                            &type_name,
-                                            None,
-                                        ))],
-                                        false,
-                                    );
-                                }
-                                rebound_to = Some(
-                                    self.rebind_connection(&selector, &resident, attached).await,
-                                );
-                                resident
-                            }
-                            None => {
-                                let message =
-                                    self.restore_failure_for(&selector).unwrap_or_else(|| {
-                                        format!("Unknown active session: {selector}")
-                                    });
-                                return (
-                                    vec![response_line(&response_failure(
-                                        Some(&command_id),
-                                        &type_name,
-                                        &message,
-                                        None,
-                                    ))],
-                                    false,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        // A kill is the worker's own root kill (TS `isRootKill`) — a
-        // parent's child-close cascade carries the `rlmCloseReason` marker
-        // and is NOT one (TS forwards a child close without a supervisor
-        // stop): only the plain kill tombstones and finalizes. The stop
-        // tombstone persists BEFORE the worker is told (TS
-        // `persistWorkerStopTombstone(worker, true)`), so a supervisor that
-        // dies mid-stop adopts the tombstone instead of relaunching the
-        // killed worker, and the durable half of the stop (the session
-        // tree's scheduled-job cancel + the `archived` state belt) re-runs.
-        // The plain-kill gate (TS `isRootKill`): the `rlmCloseReason`
-        // marker is the parent's child-close cascade and only ever targets
-        // a subagent session — a top-level target is ALWAYS a plain kill
-        // regardless of the wire marker (a client cannot forge the softer
-        // close semantics for a root session; the finalize belt below
-        // cancels its jobs and archives its file either way).
-        let plain_kill = match command {
-            DaemonCommand::Kill { rest, .. } => {
-                let no_marker = !rest.contains_key("rlmCloseReason");
-                let target_depth = resident
-                    .descriptor
-                    .lock()
-                    .await
-                    .create_command
-                    .rest
-                    .get("rlmDepth")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                no_marker || target_depth == 0
-            }
-            _ => false,
-        };
-        if plain_kill {
-            if let Err(error) = self.persist_stop_tombstone(&resident).await {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &format!("Failed to persist the session stop: {error:#}"),
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
-        // A delete flows through the kill route with the `rlmLedgerDelete`
-        // marker (the parent-side `delete_subagent`). The deletion boundary
-        // is persisted BEFORE the teardown (TS `recordRlmSubagentDeletion`):
-        // a failed tombstone is a failed deletion with the child still
-        // alive and retryable; a plain stop carries no marker and must not
-        // tombstone the child - its passive row survives the stop.
-        if let DaemonCommand::Kill { rest, .. } = command {
-            if let Some(reason) = rest
-                .get("rlmLedgerDelete")
-                .and_then(Value::as_str)
-                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-            {
-                let child_id = rest
+        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
+        // kill's durable half): the killed session tree's scheduled jobs
+        // cancel durably and the root file carries the `archived` state,
+        // so no wake pass can revive the stopped session. A
+        // ledger-tombstoned delete also sweeps the deleted child's
+        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        let deleted_child = rest
+            .get("rlmLedgerDelete")
+            .and_then(Value::as_str)
+            .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+            .map(|_| crate::stop_cleanup::DeletedChild {
+                child_id: rest
                     .get("rlmChildId")
                     .and_then(Value::as_str)
-                    .map(str::to_string);
-                if let Err(error) = self
-                    .tombstone_rlm_child(&resident, child_id.as_deref(), reason)
-                    .await
-                {
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &format!("Failed to delete RLM subagent: {error:#}"),
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-            }
-        }
-        if let DaemonCommand::Attach {
-            telemetry_disabled: Some(true),
-            ..
-        }
-        | DaemonCommand::Reattach {
-            telemetry_disabled: Some(true),
-            ..
-        } = command
-        {
-            let worker_disabled = {
-                let descriptor = resident.descriptor.lock().await;
-                descriptor.telemetry_disabled
-            };
-            if worker_disabled != Some(true) {
-                // TS `assertTelemetryAttachAllowed`: a telemetry-disabled
-                // client may not attach to a worker running with telemetry
-                // enabled.
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
-        let timeout = if matches!(
-            command,
-            DaemonCommand::PromptAndWait { .. }
-                | DaemonCommand::WaitForIdle { .. }
-                // Headless completion settles a whole autonomous run.
-                | DaemonCommand::WaitForHeadlessCompletion { .. }
-                // Compaction runs a summarizer model call, like a turn.
-                | DaemonCommand::Compact { .. }
-                // A tree navigation may run a branch-summary model call.
-                | DaemonCommand::NavigateTree { .. }
-        ) {
-            LONG_ROUTE_TIMEOUT_MS
-        } else {
-            ROUTE_TIMEOUT_MS
-        };
-        let (worker_command, mut payload) = match client_command_payload(command, client_id) {
-            Ok(payload) => payload,
-            Err(error) => {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &error.to_string(),
-                        None,
-                    ))],
-                    false,
-                )
-            }
-        };
-        // A rebind retargets the routed frame: the worker reads the session
-        // selector the payload carries, and the superseded id is not one it
-        // knows. A rebound reattach routes as the worker's attach - the
-        // worker has no reattach arm; the reattach semantics (detach-mark
-        // clearing, replacement snapshot purpose) live supervisor-side.
-        let mut worker_command = worker_command;
-        if let Some(current) = &rebound_to {
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("activeSessionId".to_string(), json!(current));
-            }
-            if worker_command == "reattach" {
-                worker_command = "attach";
-            }
-        }
-        // Client-facing routes wait out an in-flight worker replacement
-        // inside the command's own budget: a command aimed at a worker that
-        // crashed and is being relaunched (crash backoff, relaunch, create
-        // replay) must not be lost to the dead window, and must never
-        // overtake the replayed session into existence.
-        let response = self
-            .route_command_ready(&resident, worker_command, payload, timeout)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        self.finalize_worker_stop(resident, deleted_child.as_ref())
             .await;
-        match response {
-            Ok(mut response) => {
-                // Worker replies carry no client request id; clients match
-                // responses by the id they sent, so stamp it back here.
-                response.id = Some(command_id.clone());
-                // A rebound reattach routed as the worker's attach still
-                // answers as the command the client sent.
-                if rebound_to.is_some() && type_name == "reattach" {
-                    response.command = type_name.clone();
-                }
-                if let DaemonCommand::Attach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                }
-                | DaemonCommand::Reattach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                } = command
-                {
-                    if response.success {
-                        if let Some(data) = response.data.as_mut() {
-                            let active_id = data
-                                .get("activeSessionId")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| resident.worker_id.clone());
-                            self.note_daemon_event(
-                                if matches!(command, DaemonCommand::Reattach { .. }) {
-                                    "reattach"
-                                } else {
-                                    "attach"
-                                },
-                                None,
-                            );
-                            // The binding table learns the id the worker
-                            // reports (a durable-id or file-stem attach
-                            // resolves to the worker's current id), keyed
-                            // by the session's durable identity.
-                            let (session_id, session_file) = {
-                                let descriptor = resident.descriptor.lock().await;
-                                (
-                                    descriptor.root_session_id.clone(),
-                                    descriptor.session_file.clone(),
-                                )
-                            };
-                            self.record_session_binding(
-                                &active_id,
-                                session_id.as_deref(),
-                                session_file.as_deref(),
-                            );
-                            let mut attached = attached.lock().unwrap();
-                            if !attached.iter().any(|id| id == &active_id) {
-                                attached.push(active_id.clone());
-                            }
-                            // The client's own capability set, not the
-                            // supervisor's worker-facing one, is echoed in
-                            // the attach result.
-                            let client_capabilities = attach_client_capabilities(
-                                capabilities.as_deref(),
-                                *supports_extension_ui,
-                            );
-                            if let Some(client) = data.get_mut("client") {
-                                client["capabilities"] = json!(client_capabilities);
-                            }
-                            if wants_chunked(&client_capabilities) {
-                                let purpose = if matches!(command, DaemonCommand::Reattach { .. }) {
-                                    SnapshotPurpose::Replacement
-                                } else {
-                                    SnapshotPurpose::Attach
-                                };
-                                return streamed_attach_lines(response, &active_id, purpose);
-                            }
-                            return (vec![response_line(&response)], false);
-                        }
-                    }
-                    return (vec![response_line(&response)], false);
-                }
-                if let DaemonCommand::Detach { .. } = command {
-                    if response.success {
-                        self.note_daemon_event("detach", None);
-                        // The retire removes the RESIDENT's active id - the
-                        // id the attached vec actually holds (the selector
-                        // may be a durable-id alias for the same session).
-                        // A rebound detach never reaches this handler; the
-                        // rebind seam retires its superseded address itself.
-                        attached
-                            .lock()
-                            .unwrap()
-                            .retain(|id| id != &resident.worker_id);
-                    }
-                }
-                if let DaemonCommand::Kill { rest, .. } = command {
-                    if response.success {
-                        self.stop_worker(&resident).await;
-                        // TS `stopWorkerUntracked`'s archived-stop finalize
-                        // (the plain kill's durable half): the killed
-                        // session tree's scheduled jobs cancel durably and
-                        // the root file carries the `archived` state, so no
-                        // wake pass can revive the stopped session. A
-                        // ledger-tombstoned delete also sweeps the deleted
-                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
-                        // A marker-carrying child close is a cascade, not a
-                        // stop: no finalize (the child's own close arms
-                        // already carried the parent's reason).
-                        if plain_kill {
-                            let deleted_child = rest
-                                .get("rlmLedgerDelete")
-                                .and_then(Value::as_str)
-                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-                                .map(|_| crate::stop_cleanup::DeletedChild {
-                                    child_id: rest
-                                        .get("rlmChildId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                });
-                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
-                                .await;
-                        }
-                    }
-                }
-                if let DaemonCommand::Rename { name, .. } = command {
-                    // A subagent rename is durable in the ledger, so the
-                    // passive roster keeps the new name after passivation.
-                    if response.success {
-                        let descriptor = resident.descriptor.lock().await;
-                        let is_child = descriptor
-                            .create_command
-                            .rest
-                            .get("rlmDepth")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            >= 1;
-                        let session_file = descriptor.session_file.clone();
-                        drop(descriptor);
-                        if is_child {
-                            if let Some(session_file) = session_file {
-                                if let Ok(ledger) = self.rlm_spawn_ledger_for(None).await {
-                                    if let Err(error) =
-                                        ledger.append_rename_by_child_path(&session_file, name)
-                                    {
-                                        self.log_line(&format!(
-                                            "failed to append RLM ledger rename: {error:#}"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                (vec![response_line(&response)], false)
-            }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
-        }
     }
 
-    pub(crate) async fn stop_worker(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    pub(crate) async fn stop_worker(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> anyhow::Result<()> {
+        // The stop's durable intent persists BEFORE the worker is told (TS
+        // `stopWorkerUntracked(removeDescriptor)` ->
+        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or
+        // a worker that survives the escalation below, must never be
+        // adopted as healthy by a later boot — the tombstoned descriptor
+        // routes the boot through the stop-finalization path instead. The
+        // per-session stop never archives (the plain kill's earlier
+        // tombstone keeps its archive intent); a persist failure fails the
+        // stop before the shutdown is forwarded, exactly like TS throws
+        // for non-direct-child stops, so the worker's crash-recovery
+        // contract stays intact.
+        self.persist_stop_tombstone_stop(resident).await?;
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
         resident.note_retired();
         let _ = self
-            .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command_typed(
+                resident,
+                "shutdown",
+                json!({}),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
             .await;
-        let _ = std::fs::remove_file(&resident.descriptor_path);
+        // The per-session stop shares the terminal-stop contract: the
+        // descriptor dies only with a provably-gone process, so a worker
+        // that missed the routed shutdown stays adoptable (or is
+        // escalated away) instead of becoming an invisible lease holder.
+        self.retire_worker_after_stop(resident).await;
         // TS `stopWorkerUntracked`: a client-owned (ephemeral) worker's
         // scheduled jobs die with the registration
         // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
@@ -4945,12 +1171,59 @@ impl Supervisor {
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
         // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
-        // settle in place (a subagent under a surviving root passivates
-        // and keeps its model/thinking/cwd; a tombstoned child, a queued
-        // child, an ephemeral worker's rows, and the top-level row
-        // itself are removed). No ledger reseed, no transcript read.
+        // settle in place (every owned non-ephemeral, non-queued row
+        // passivates and keeps its model/thinking/cwd, the top-level row
+        // included; a tombstoned child, a queued child, and an ephemeral
+        // worker's rows die with the stop). No ledger reseed, no
+        // transcript read.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
+        Ok(())
+    }
+
+    /// Delete one stopped worker's descriptor only after its process is
+    /// provably gone (TS `stopWorkerUntracked`'s contract; the shutdown
+    /// pass and the per-session stop share it). A worker that missed the
+    /// routed `shutdown` (a dead connection, a wedged socket, a flush
+    /// outlasting the route budget) gets the identity-gated
+    /// SIGTERM -> SIGKILL escalation; deleting the descriptor of a live
+    /// worker orphans it — nothing on any later daemon can adopt or reap
+    /// it through its identity, while it keeps holding its runtime
+    /// session lease, so every open of its session then refuses with
+    /// `Session is already active in <its id>`.
+    async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        let (pid, start_id) = {
+            let descriptor = resident.descriptor.lock().await;
+            (descriptor.pid as u32, descriptor.process_start_id.clone())
+        };
+        // An unobservable identity never receives the escalation's
+        // signals (a pid that cannot be proven ours stays untouched);
+        // a live process behind such a pid keeps its tombstoned
+        // descriptor too, exactly like a SIGKILL survivor - the next
+        // boot retries the stop. The unverifiable class covers BOTH a
+        // descriptor without a recorded id and a recorded id the
+        // platform cannot observe right now (the probe returns None
+        // while the process lives).
+        let alive_unverified = (start_id.is_none()
+            || crate::lease::get_process_start_id(pid).is_none())
+            && crate::lease::is_process_alive(pid).unwrap_or(false);
+        match crate::boot_reap::stop_process(pid, start_id).await {
+            crate::boot_reap::ReapOutcome::Survived => {
+                self.log_line(&format!(
+                    "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ if alive_unverified => {
+                self.log_line(&format!(
+                    "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ => {
+                let _ = std::fs::remove_file(&resident.descriptor_path);
+            }
+        }
     }
 
     /// Run the one terminal stop pass, whichever connection first reaches it.
@@ -4985,50 +1258,15 @@ impl Supervisor {
                 continue;
             }
             let _ = self
-                .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                .route_command_typed(
+                    &resident,
+                    "shutdown",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
                 .await;
-            // The terminal stop deletes the descriptor ONLY after the
-            // worker's process is provably gone (TS `stopWorkerUntracked`'s
-            // contract). A worker that missed the routed shutdown (a dead
-            // connection, a wedged socket, a flush outlasting the route
-            // budget) gets the identity-gated SIGTERM -> SIGKILL
-            // escalation. Deleting the descriptor of a live worker
-            // orphans it: nothing on any later daemon can adopt or reap it
-            // through its identity, while it keeps holding its runtime
-            // session lease - every open of its session then refuses with
-            // `Session is already active in <its id>`.
-            let (pid, start_id) = {
-                let descriptor = resident.descriptor.lock().await;
-                (descriptor.pid as u32, descriptor.process_start_id.clone())
-            };
-            // An unobservable identity never receives the escalation's
-            // signals (a pid that cannot be proven ours stays untouched);
-            // a live process behind such a pid keeps its tombstoned
-            // descriptor too, exactly like a SIGKILL survivor - the next
-            // boot retries the stop. The unverifiable class covers BOTH a
-            // descriptor without a recorded id and a recorded id the
-            // platform cannot observe right now (the probe returns None
-            // while the process lives).
-            let alive_unverified = (start_id.is_none()
-                || crate::lease::get_process_start_id(pid).is_none())
-                && crate::lease::is_process_alive(pid).unwrap_or(false);
-            match crate::boot_reap::stop_process(pid, start_id).await {
-                crate::boot_reap::ReapOutcome::Survived => {
-                    self.log_line(&format!(
-                        "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ if alive_unverified => {
-                    self.log_line(&format!(
-                        "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ => {
-                    let _ = std::fs::remove_file(&resident.descriptor_path);
-                }
-            }
+            self.retire_worker_after_stop(&resident).await;
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit;
@@ -5036,6 +1274,54 @@ impl Supervisor {
         // could otherwise fall the loop out mid-stop.
         self.accept_exit.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
+    }
+
+    /// The OS-signal drain step (SIGTERM/SIGINT; the loop in
+    /// `crate::signal_drain` runs this once per received signal): the
+    /// first signal enters the graceful drain, and any later signal - or
+    /// one that finds a client-command shutdown or an update restart
+    /// already committed to its exit - force-exits instead.
+    ///
+    /// The gate flips synchronously, so from this moment every later
+    /// client command is refused at the dispatch gate and every create
+    /// at the launch gate; the connected clients get the same
+    /// `daemon_closing` event the shutdown command broadcasts. The
+    /// terminal stop pass then runs in the background
+    /// ([`Self::ensure_shutdown_started`]): each resident worker gets its
+    /// routed `shutdown` - the worker's handler is the flush barrier, so
+    /// the in-flight turn aborts and settles before the worker exits -
+    /// and a worker that misses the route gets the identity-gated
+    /// SIGTERM → SIGKILL escalation instead of lingering in the
+    /// supervisor-lost window.
+    ///
+    /// Returns `true` when this call started the drain (the signal loop
+    /// keeps waiting for the force signal); `false` when a drain or exit
+    /// was already in flight (the caller is the forced exit). The update
+    /// restart's exit windows are guarded on both ends: a signal that
+    /// finds the coordinator in `Stopping` (workers already being stopped
+    /// with their descriptors kept for the successor) or `accept_exit`
+    /// already published never flips the shutdown gate, so it cannot
+    /// convert the descriptor-preserving update exit into a terminal
+    /// stop pass.
+    pub(crate) fn begin_signal_drain(self: &Arc<Self>) -> bool {
+        if self.update_prepare.active_state() == Some(PrepareState::Stopping)
+            || self.accept_exit.load(Ordering::SeqCst)
+            || self.shutting_down.swap(true, Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.log_line(
+            "received shutdown signal; entering graceful drain: new client commands refused, running turns settle through the workers' routed shutdown",
+        );
+        let _ = self.events.send((
+            ClientRouting::Broadcast,
+            std::sync::Arc::new(daemon_closing_shutdown_event()),
+        ));
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            supervisor.ensure_shutdown_started().await;
+        });
+        true
     }
 }
 
@@ -5082,228 +1368,33 @@ fn worker_connect_deadline() -> tokio::time::Instant {
         .unwrap_or_else(|| now + Duration::from_millis(DEFAULT_WORKER_CONNECT_TIMEOUT_MS))
 }
 
-fn streamed_attach_lines(
-    mut response: DaemonResponse,
-    active_session_id: &str,
-    purpose: SnapshotPurpose,
-) -> (Vec<Value>, bool) {
-    let Some(data) = response.data.take() else {
-        return (vec![response_line(&response)], false);
-    };
-    match stream_attach(data, active_session_id, purpose) {
-        Ok((streamed, events)) => {
-            response.data = Some(streamed);
-            let mut lines = vec![response_line(&response)];
-            lines.extend(events.lines());
-            (lines, false)
-        }
-        // The snapshot could not even be identified: the attach itself
-        // fails, before any snapshot record exists on the wire.
-        Err(error) => (
-            vec![response_line(&response_failure(
-                response.id.as_deref(),
-                &response.command,
-                &error.to_string(),
-                None,
-            ))],
-            false,
-        ),
-    }
-}
-
-/// The request id of an unparsable line, so the failure stays matchable by
-/// the client (TS `salvageDaemonCommandId`).
-fn salvage_id(line: &str) -> Option<String> {
-    serde_json::from_str::<Value>(line)
-        .ok()
-        .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_string))
-}
-
-/// The command type of an unparsable line, salvaged for the failure echo
-/// (bare commands carry the type at the top level; envelopes nest it).
-fn salvage_command_type(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(line).ok()?;
-    value
-        .get("command")
-        .unwrap_or(&value)
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
-    let mut line = serde_json::to_string(value)?;
-    line.push('\n');
-    writer.write_all(line.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-/// The worker-side command name plus payload for a routed client command.
-pub(crate) fn client_command_payload(
-    command: &DaemonCommand,
-    client_id: &str,
-) -> Result<(&'static str, Value)> {
-    let type_name = command_type_name(command);
-    let mut payload = serde_json::to_value(command)?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("clientId".to_string(), json!(client_id));
-        // The supervisor always attaches slim, like the TS supervisor's
-        // `attachClient`: summary and messages travel inside the snapshot.
-        if matches!(
-            command,
-            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. }
-        ) {
-            object.insert(
-                "capabilities".to_string(),
-                json!(["attach_snapshot", "event_sequence", "slim_attach"]),
-            );
-        }
-        // Create carries its fields under `config`; the worker reads them flat.
-        if let Some(config) = object.remove("config") {
-            if let Some(config) = config.as_object() {
-                for (key, value) in config {
-                    object.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    }
-    Ok((type_name, payload))
-}
-
-/// One resident's roster identity for the `list --all` merge.
-struct ResidentRoot {
-    session_file: PathBuf,
-    resident: Arc<ResidentWorker>,
-    active_session_id: Option<String>,
-}
-
-fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
-    let mut row = json!({
-        "id": info.id,
-        // TS `inactiveLifecycleForSession`: archived/crash markers stay
-        // archived; everything else is live once a message exists, draft
-        // otherwise.
-        "lifecycle": match info.state.as_deref() {
-            Some("archived" | "crash") => "archived",
-            _ if info.message_count > 0 => "live",
-            _ => "draft",
-        },
-        "activity": "idle",
-        "isSessionActive": false,
-        "activeSessionId": info.id,
-        "sessionId": info.id,
-        "sessionFile": info.path.to_string_lossy(),
-        "sessionName": info.name,
-        "cwd": info.cwd,
-        "isStreaming": false,
-        "isCompacting": false,
-        "attachedClients": 0,
-        "messageCount": info.message_count,
-        "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-        "created": info.created,
-        "modified": info.modified,
-        "firstMessage": info.first_message,
-    });
-    // The persisted thinking level rides every saved-session summary row
-    // (the durable `thinking_level_change` entry): the agents-view Model
-    // column renders "model:level" for sessions without a live worker,
-    // top-level and subagent alike.
-    if let Some(level) = &info.thinking_level {
-        if let Some(object) = row.as_object_mut() {
-            object.insert("thinkingLevel".to_string(), json!(level));
-        }
-    }
-    // TS `summaryForInactiveSession` publishes the scan's own-usage
-    // summary: the agents-view roster record reads it before the saved
-    // catalog row's (own cost `daemon.usage ?? saved.usage`). The child's
-    // own row carries the child spend, so rollups never double count.
-    if let Some(usage) = &info.usage {
-        if let Some(object) = row.as_object_mut() {
-            object.insert("usage".to_string(), json!(usage));
-        }
-    }
-    row
-}
-
-fn offline_summary(worker_id: &str) -> Value {
-    json!({
-        "id": worker_id,
-        "lifecycle": "recovering",
-        "activity": "idle",
-        "isSessionActive": false,
-        "sessionId": "",
-        "cwd": "",
-        "isStreaming": false,
-        "isCompacting": false,
-        "attachedClients": 0,
-        "messageCount": 0,
-        "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-    })
+/// One outbound client-socket line: a JSON value the connection serializes,
+/// or the pre-serialized bytes of a relayed worker response (the zero-copy
+/// route hands the worker's own line through with the client's command id
+/// spliced in front).
+pub(crate) enum Outbound {
+    Line(Value),
+    Raw(Vec<u8>),
 }
 
 /// Entry point for the supervisor process.
+///
+/// # Errors
+///
+/// Returns an error when the supervisor cannot start (see
+/// [`Supervisor::new`]) or its serve loop fails (see
+/// [`Supervisor::run`]).
 pub async fn run_supervisor(options: SupervisorOptions) -> Result<()> {
     let supervisor = Arc::new(Supervisor::new(options)?);
     supervisor.run().await
 }
 
-/// Saved-session row (port of `serializeSavedSessionInfo`).
-fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
-    let mut row = json!({
-        "path": info.path.to_string_lossy(),
-        "id": info.id,
-        "cwd": info.cwd,
-        "rlmDepth": info.rlm_depth,
-        "created": info.created,
-        "modified": info.modified,
-        "messageCount": info.message_count,
-        "firstMessage": info.first_message,
-        // The scan's capped transcript corpus (TS `allMessagesText`): the
-        // agents-view full-transcript search field.
-        "allMessagesText": info.all_messages_text,
-        "state": info.state.as_ref().map(|state| json!({ "status": state })),
-    });
-    if let Some(status) = &info.agent_status {
-        row.as_object_mut()
-            .expect("row object")
-            .insert("agentStatus".to_string(), status.clone());
-    }
-    let object = row.as_object_mut().expect("row object");
-    if let Some(name) = &info.name {
-        object.insert("name".to_string(), json!(name));
-    }
-    if let Some(parent) = &info.parent_session_path {
-        object.insert("parentSessionPath".to_string(), json!(parent));
-    }
-    if let Some((provider, model_id)) = &info.model {
-        object.insert(
-            "model".to_string(),
-            json!({ "provider": provider, "modelId": model_id }),
-        );
-    }
-    // TS `serializeSavedSessionInfo` publishes the scan's own-usage
-    // summary: the agents-view spend columns and the archived-row
-    // keep-condition read `saved.usage.cost`. The child's own row
-    // carries the child spend, so rollups never double count.
-    if let Some(usage) = &info.usage {
-        object.insert("usage".to_string(), json!(usage));
-    }
-    // TS #2506 `serializeSavedSessionInfo`'s optional
-    // `deletedDescendantUsage`: the recursive spend of ledger-tombstoned
-    // descendants (the listing arm attaches it from the spawn ledger's
-    // bucket). The agents-view recursive cost rollup adds it to this
-    // row's own cost — the deleted child keeps no row anywhere, its
-    // spend bills here exactly once.
-    if let Some(deleted) = &info.deleted_descendant_usage {
-        object.insert("deletedDescendantUsage".to_string(), json!(deleted));
-    }
-    // The persisted thinking level rides the catalog row too: the TUI merges
-    // it into live summaries that lack one (the same enrichment as `model`).
-    if let Some(level) = &info.thinking_level {
-        object.insert("thinkingLevel".to_string(), json!(level));
-    }
-    row
+/// The non-update `daemon_closing` frame (the shutdown command's and the
+/// OS-signal drain's shared spelling): every connected client learns the
+/// daemon is going down for a shutdown, the spelling the TUI reconnects
+/// attached windows on.
+fn daemon_closing_shutdown_event() -> Value {
+    json!({ "type": "daemon_closing", "reason": "shutdown" })
 }
 
 /// The real graceful-stop transport (spec §5 `Stopping`): the routed
@@ -5320,7 +1411,13 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
     ) -> Result<()> {
         resident.intentional_stop.store(true, Ordering::SeqCst);
         let response = self
-            .route_command(resident, "shutdown", json!({}), timeout.as_millis() as u64)
+            .route_command_typed(
+                resident,
+                "shutdown",
+                json!({}),
+                timeout.as_millis() as u64,
+                RouteAdmission::SupervisorInternal,
+            )
             .await?;
         if !response.success {
             anyhow::bail!(
@@ -5340,12 +1437,9 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
                 (descriptor.pid, descriptor.process_start_id.clone())
             };
             let alive = is_process_alive(pid as u32).unwrap_or(false)
-                && start_id
-                    .as_deref()
-                    .map(|start| {
-                        crate::protocol::process_start_id(pid as u32).as_deref() == Some(start)
-                    })
-                    .unwrap_or(true);
+                && start_id.as_deref().is_none_or(|start| {
+                    crate::protocol::process_start_id(pid as u32).as_deref() == Some(start)
+                });
             if !alive {
                 return true;
             }
@@ -5618,14 +1712,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         supervisor
             .registry
@@ -5683,7 +1777,7 @@ mod tests {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let refused = supervisor
             .launch_worker(&create, None)
@@ -5699,7 +1793,7 @@ mod tests {
 
     /// The shutdown gate and the accept loop's exit flag are separate: the
     /// gate refuses creates the moment a terminal stop begins, but the
-    /// loop must stay up until begin_shutdown finishes stopping the workers.
+    /// loop must stay up until `begin_shutdown` finishes stopping the workers.
     #[tokio::test]
     async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -5717,6 +1811,418 @@ mod tests {
         assert!(
             supervisor.accept_exit.load(Ordering::SeqCst),
             "the completed stop pass must exit the accept loop"
+        );
+    }
+
+    /// A kill whose stop never durably started — the stop tombstone's
+    /// persist fails, the only `Err` `stop_worker` takes — must not run
+    /// the kill's belt: the worker is untouched and the kill stays
+    /// retryable (TS `stopWorkerUntracked` throws before any teardown).
+    /// The belt otherwise cancels the session tree's jobs, archives the
+    /// root file, and — for a ledger delete — sweeps the child's
+    /// artifacts against a live worker whose resident still serves the
+    /// file (its stores may still grow).
+    #[tokio::test]
+    async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_file = sessions_dir.join("live-1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"version\":3,\"id\":\"live-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+        )
+        .unwrap();
+        // The live child's artifact partition: a ledger delete's belt
+        // would sweep it; the gated belt must leave it in place.
+        let artifacts = agent_dir.join("session-artifacts").join("live-1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: Some(session_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the stop tombstone's
+        // atomic write cannot land there (the rename onto a directory
+        // fails), so the stop never durably starts.
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        // A ledger-delete kill (delete_subagent's shape: the rest carries
+        // the marker, so the plain-kill path owns it).
+        let rest = Map::from_iter([
+            ("rlmLedgerDelete".to_string(), json!("user")),
+            ("rlmChildId".to_string(), json!("child-1")),
+        ]);
+        supervisor.finish_plain_kill_stop(&resident, &rest).await;
+
+        // The stop never started: the resident stays owned (retryable)
+        // and the live child's artifacts survive the belt.
+        assert!(
+            supervisor.registry.get("w-live").await.is_some(),
+            "the stop never durably started, so the worker stays owned"
+        );
+        assert!(
+            artifacts.join("scheduled-jobs.json").is_file(),
+            "a belt gated behind a failed stop must not sweep a live child's artifacts"
+        );
+    }
+
+    /// A plain kill holds the route-side tombstone when its stop's
+    /// redundant re-write fails: the durable intent is already on disk,
+    /// so the stop proceeds (the escalation runs, the registry row goes,
+    /// the stop is intentional) instead of aborting and leaving the
+    /// killed worker running on its session lease until the next boot —
+    /// the finding-#5 symptom. The belt gate stays keyed on the stop
+    /// that never durably started: no tombstone at all still fails.
+    #[tokio::test]
+    async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-live".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-live".to_string(),
+            owner_client_id: None,
+            root_session_id: Some("live-1".to_string()),
+            session_file: None,
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Map::default(),
+            },
+            consecutive_failures: 0,
+            // The route-side tombstone the plain kill's pre-route persist
+            // wrote before the forward.
+            stop_requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+            archive_on_stop: Some(true),
+            last_failure_at: None,
+            last_error: None,
+            rest: Map::default(),
+        };
+        // The persist target is a directory: the tombstone's redundant
+        // re-write fails (the rename onto a directory cannot land).
+        let persist_target = sessions_dir.join("w.d");
+        std::fs::create_dir(&persist_target).unwrap();
+        let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
+        supervisor.registry.insert(resident.clone()).await;
+
+        supervisor
+            .stop_worker(&resident)
+            .await
+            .expect("the durable tombstone must carry the stop past its failed re-write");
+
+        assert!(
+            supervisor.registry.get("w-live").await.is_none(),
+            "the stop completed: the worker left the registry"
+        );
+        assert!(
+            resident.intentional_stop.load(Ordering::SeqCst),
+            "the stop is intentional"
+        );
+    }
+
+    /// The first OS signal's drain: the gate rejects new work, every
+    /// client gets the `daemon_closing` event, and the running turn
+    /// settles inside its worker's routed `shutdown` before the stop
+    /// pass retires the worker (descriptor gone - no supervisor-lost
+    /// lingering) and lets the accept loop exit. The fake worker holds
+    /// its `shutdown` reply on a test-controlled settle, so a pass that
+    /// does not wait for the flush barrier fails the assertions below.
+    #[tokio::test]
+    async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "w-signal",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "test",
+            "rootActiveSessionId": "w-signal",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let descriptor_dir = dir.path().join("descriptors");
+        std::fs::create_dir_all(&descriptor_dir).unwrap();
+        let descriptor_path = descriptor_dir.join("w-signal.descriptor.json");
+        let resident = Arc::new(ResidentWorker::new(
+            "w-signal".to_string(),
+            descriptor,
+            descriptor_path.clone(),
+        ));
+        // The fake worker connection: the routed `shutdown` reply is the
+        // flush barrier, so it is held until the test releases the turn's
+        // settle.
+        // The bounded command-channel type (the backpressure lane's
+        // request-path bound): one slot is plenty for the single routed
+        // `shutdown`.
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
+        let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
+        let (settle_release_tx, settle_release_rx) = oneshot::channel::<()>();
+        let pump_resident = Arc::clone(&resident);
+        let pump = tokio::spawn(async move {
+            let request = cmd_rx.recv().await.expect("the drain routes a command");
+            assert_eq!(request.command_type, "shutdown");
+            let _ = shutdown_routed_tx.send(());
+            settle_release_rx.await.expect("the turn settles first");
+            let _ = turn_settled_tx.send(());
+            let reply = pump_resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("the routed shutdown holds a reply slot");
+            let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+                None, "shutdown", None,
+            )));
+        });
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let mut events = supervisor.events.subscribe();
+        let create = DaemonCommand::Create {
+            id: None,
+            session_path: None,
+            continue_recent: None,
+            no_session: None,
+            name: None,
+            config: None,
+            telemetry_disabled: None,
+            runtime_metadata: None,
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: Map::default(),
+        };
+        assert!(
+            supervisor.begin_signal_drain(),
+            "the first signal must start the drain"
+        );
+        let refused = supervisor
+            .launch_worker(&create, None)
+            .await
+            .err()
+            .expect("a create during the drain must be rejected");
+        assert_eq!(
+            refused.to_string(),
+            "Supervisor is shutting down",
+            "the refusal error: {refused:#}"
+        );
+        let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("the drain broadcasts daemon_closing")
+            .expect("the events channel stays open");
+        assert!(
+            matches!(routing, ClientRouting::Broadcast),
+            "every client learns the closing"
+        );
+        assert_eq!(
+            *closing,
+            json!({ "type": "daemon_closing", "reason": "shutdown" })
+        );
+        tokio::time::timeout(Duration::from_secs(2), shutdown_routed_rx)
+            .await
+            .expect("the drain routes the worker's shutdown")
+            .expect("the routed channel stays open");
+        // While the settle is held the pass can never finish (the routed
+        // reply is the flush barrier), so assert it stays unexited across
+        // a polled window: a fire-and-forget drain that retired the
+        // worker early fails here deterministically, not on one fixed
+        // sleep.
+        let hold_deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while std::time::Instant::now() < hold_deadline {
+            assert!(
+                !supervisor.accept_exit.load(Ordering::SeqCst),
+                "the stop pass must wait for the settling turn"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _ = settle_release_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), turn_settled_rx)
+            .await
+            .expect("the turn settles within the drain")
+            .expect("the settle channel stays open");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !supervisor.accept_exit.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the completed stop pass must exit the accept loop"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            supervisor.registry.list().await.is_empty(),
+            "the drained worker leaves the registry"
+        );
+        assert!(
+            !descriptor_path.exists(),
+            "the drained worker's descriptor is retired with it"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a second signal while shutting down forces"
+        );
+        pump.abort();
+    }
+
+    /// Every signal that finds a shutdown already in flight is the force
+    /// request: the drain's own second signal, a signal racing the
+    /// shutdown command's gate, and a signal racing an update exit - the
+    /// last without flipping the gate, so the update's
+    /// descriptor-preserving exit never becomes a terminal stop pass.
+    #[tokio::test]
+    async fn a_signal_during_an_in_flight_shutdown_forces() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        assert!(
+            supervisor.begin_signal_drain(),
+            "the first signal starts the drain"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "the second signal forces the exit"
+        );
+
+        // A client-command shutdown already flipped the gate: a signal
+        // racing it forces.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the shutdown command forces"
+        );
+
+        // An update exit published accept_exit before the gate: the
+        // signal forces without flipping the gate.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.accept_exit.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the update exit forces"
+        );
+        assert!(
+            !supervisor.shutting_down.load(Ordering::SeqCst),
+            "the update exit must not become a terminal stop pass"
+        );
+
+        // The update's committed stop window (the coordinator's Stopping
+        // state, before exit_for_update publishes accept_exit): a signal
+        // forces without flipping the gate, so the terminal pass can never
+        // tombstone and delete the descriptors the successor must adopt.
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let update_id = UpdateId::from("u-signal".to_string());
+        let budget = UpdateTimeoutBudget::from_env();
+        supervisor
+            .update_prepare
+            .begin(update_id.clone(), util::now_ms(), &budget);
+        supervisor.update_prepare.drain_complete(&update_id);
+        supervisor
+            .update_prepare
+            .snapshot_written(&update_id, util::now_ms(), &budget);
+        supervisor.update_prepare.prepare_acked(&update_id);
+        supervisor.update_prepare.commit(&update_id);
+        assert_eq!(
+            supervisor.update_prepare.active_state(),
+            Some(PrepareState::Stopping),
+            "the transaction reached the committed stop window"
+        );
+        assert!(
+            !supervisor.begin_signal_drain(),
+            "a signal racing the committed update stop forces"
+        );
+        assert!(
+            !supervisor.shutting_down.load(Ordering::SeqCst),
+            "the committed update stop must not become a terminal stop pass"
         );
     }
 }

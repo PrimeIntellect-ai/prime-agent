@@ -113,7 +113,7 @@ handled.
 | `agent_messages_resume` | Control | no | none | b7 agent-message ingestion |
 | `agent_messages_clear` | Control | no | none | b7 agent-message ingestion |
 | `abort` | Session | yes | worker |  |
-| `abort_and_send_queued` | Session | yes | worker | TS PR #2426 (schema 29): abort + deliver the parked steering |
+| `abort_and_send_queued` | Session | yes | worker | TS PR #2426 (schema 29): abort + deliver the parked steering (divergence 2026-09-25: the queue keeps flowing on a follow-up-only abort too; abort-only when empty) |
 | `start_side_question` | Session | no | worker | (a) wave 1 |
 | `abort_side_question` | Session | no | worker | (a) wave 1 |
 | `execute_bash` | Session | no | none | b5 bash surface |

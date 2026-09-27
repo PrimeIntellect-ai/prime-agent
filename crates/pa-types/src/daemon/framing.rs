@@ -40,6 +40,12 @@ fn assert_frame_length(name: &str, value: usize, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// Encode one length-prefixed private frame.
+///
+/// # Errors
+///
+/// Returns an error if serializing `header` fails, if the encoded header is
+/// empty, or if the header or payload length exceeds `limits`.
 pub fn encode_private_frame(
     header: &serde_json::Value,
     payload: &[u8],
@@ -78,6 +84,14 @@ impl PrivateFrameDecoder {
         self.buffer.len()
     }
 
+    /// Feed one socket chunk in; returns every frame the chunk completed.
+    /// Incomplete trailing bytes stay buffered for the next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a buffered frame's length prefix exceeds
+    /// `limits`, its header length is zero, or its header bytes are not a
+    /// JSON object.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<PrivateFrame>> {
         self.buffer.extend_from_slice(chunk);
         let mut frames = Vec::new();
@@ -118,6 +132,11 @@ impl PrivateFrameDecoder {
     }
 
     /// Errors when the channel ended mid-frame, like `PrivateFrameDecoder.finish`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when buffered bytes remain, i.e. the channel ended
+    /// mid-frame.
     pub fn finish(&self) -> Result<()> {
         if !self.buffer.is_empty() {
             return Err(anyhow!(
@@ -130,6 +149,11 @@ impl PrivateFrameDecoder {
 }
 
 /// Write one frame to a byte sink.
+///
+/// # Errors
+///
+/// Returns an error if encoding the frame fails or if writing or flushing
+/// it on `writer` fails.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     header: &serde_json::Value,
@@ -138,6 +162,44 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     let frame = encode_private_frame(header, payload, limits)?;
     writer.write_all(&frame).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write a private frame without re-buffering the payload.
+///
+/// Same wire bytes as [`write_frame`] — the length prefix, header, and
+/// payload go out in order, one frame — only the intermediate
+/// whole-frame buffer is skipped: the payload writes straight from the
+/// caller's slice, so a large payload does not pay a second
+/// payload-sized allocation and copy per frame. The header serializes and
+/// both frame lengths assert exactly like [`encode_private_frame`]; the
+/// caller holds its write lock across both writes, so no other frame can
+/// interleave.
+///
+/// # Errors
+///
+/// Returns an error if serializing `header` fails, if the encoded header is
+/// empty, if the header or payload length exceeds `limits`, or if writing
+/// the frame on `writer` fails.
+pub async fn write_frame_segments<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    header: &serde_json::Value,
+    payload: &[u8],
+    limits: PrivateFrameLimits,
+) -> Result<()> {
+    let header_bytes = serde_json::to_vec(header).context("serialize private frame header")?;
+    if header_bytes.is_empty() {
+        return Err(anyhow!("Private frame header cannot be empty"));
+    }
+    assert_frame_length("header length", header_bytes.len(), limits.max_header_bytes)?;
+    assert_frame_length("payload length", payload.len(), limits.max_payload_bytes)?;
+    let mut prefix = Vec::with_capacity(FRAME_PREFIX_BYTES + header_bytes.len());
+    prefix.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&header_bytes);
+    writer.write_all(&prefix).await?;
+    writer.write_all(payload).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -166,6 +228,14 @@ impl<R: AsyncRead + Unpin> PrivateFrameReader<R> {
         self.decoder.buffered_bytes()
     }
 
+    /// Read the next frame; `Ok(None)` means clean EOF at a frame boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading from the underlying stream fails, the
+    /// stream ends mid-frame, or a received frame is malformed (length
+    /// prefix over `limits`, zero header length, or a header that is not a
+    /// JSON object).
     pub async fn read_frame(&mut self) -> Result<Option<PrivateFrame>> {
         let mut chunk = [0u8; 8192];
         loop {
@@ -211,6 +281,51 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].header["kind"], "command");
         assert_eq!(decoded[0].payload, b"{\"x\":1}");
+    }
+
+    #[tokio::test]
+    async fn segments_write_the_same_stream_as_the_buffered_frame() {
+        let payload: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let mut buffered = Vec::new();
+        write_frame(
+            &mut buffered,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
+        let mut segmented = Vec::new();
+        write_frame_segments(
+            &mut segmented,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(buffered, segmented);
+
+        let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
+        let decoded = decoder.push(&segmented).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].header["kind"], "outbound");
+        assert_eq!(decoded[0].payload, payload);
+    }
+
+    #[tokio::test]
+    async fn segments_reject_the_same_oversized_frames() {
+        let payload = vec![0u8; DEFAULT_PRIVATE_FRAME_LIMITS.max_payload_bytes + 1];
+        let mut sink = Vec::new();
+        let error = write_frame_segments(
+            &mut sink,
+            &header("outbound"),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await;
+        assert!(error.is_err());
+        assert!(sink.is_empty());
     }
 
     #[test]

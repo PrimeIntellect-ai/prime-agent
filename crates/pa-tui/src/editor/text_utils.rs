@@ -163,8 +163,7 @@ pub(crate) fn ends_with_symbol_token(text: &str) -> bool {
     let start = chars
         .iter()
         .rposition(|&c| c == ' ' || c == '\t')
-        .map(|p| p + 1)
-        .unwrap_or(0);
+        .map_or(0, |p| p + 1);
     let token: String = chars[start..].iter().collect();
     let mut tchars = token.chars();
     matches!(tchars.next(), Some('@' | '#')) && !token.contains(char::is_whitespace)

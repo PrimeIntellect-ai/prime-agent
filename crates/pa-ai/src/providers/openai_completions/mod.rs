@@ -1,4 +1,4 @@
-//! OpenAI Chat Completions streaming provider.
+//! `OpenAI` Chat Completions streaming provider.
 //!
 //! Full port of `packages/ai/src/providers/openai-completions.ts`, split
 //! across submodules: compat detection and options here, message/tool/usage
@@ -19,7 +19,7 @@ use crate::providers::simple_options::build_base_options;
 use crate::registry::Provider;
 use crate::types::{
     AssistantContent, AssistantMessage, CacheRetention, Context, Model, ModelExt,
-    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Usage,
+    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Usage, UsageCost,
 };
 
 mod convert;
@@ -79,7 +79,7 @@ impl OpenAICompletionsOptions {
     }
 }
 
-/// Anthropic-style cache_control payload on OpenAI-compat proxies.
+/// Anthropic-style `cache_control` payload on OpenAI-compat proxies.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OpenAICompatCacheControl {
     ttl: Option<&'static str>, // Some("1h") or None (default 5m)
@@ -357,9 +357,9 @@ pub fn stream_simple_openai_completions(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: crate::utils_inner::diagnostics::now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
-        message.usage.cost = Default::default();
+        message.usage.cost = UsageCost::default();
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
             error: message.clone(),

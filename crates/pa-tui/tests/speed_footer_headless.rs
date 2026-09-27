@@ -183,14 +183,13 @@ fn attach_data(id: &str) -> Value {
 
 /// One scripted assistant turn: a streamed start, one delta, and a
 /// completed message carrying usage and a stream-start timestamp (the
-/// message_end timestamp is set at provider stream start, so the completed
+/// `message_end` timestamp is set at provider stream start, so the completed
 /// message spans a real wall-clock window).
 fn stream_turn(writer: &mut UnixStream) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let stream_start_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
         - 1500;
     write_json(writer, &event(json!({ "type": "turn_start" })));
     write_json(
@@ -247,7 +246,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -269,8 +268,9 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }

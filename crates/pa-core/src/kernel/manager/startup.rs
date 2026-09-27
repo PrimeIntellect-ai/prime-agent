@@ -59,24 +59,37 @@ impl Inner {
 
     fn open_stderr_log_at(&self, path: &std::path::Path) -> anyhow::Result<Arc<Mutex<StderrLog>>> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            // Owner-only directory, matching the other private session
+            // artifacts the kernel manager creates.
+            crate::platform::perms::create_dir_all_private(parent)?;
         }
-        let mut size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut size = path.metadata().map_or(0, |m| m.len());
         if size > MAX_KERNEL_STDERR_LOG_BYTES {
             let old = path.with_extension("log.old");
-            let _ = std::fs::remove_file(&old);
-            match std::fs::rename(path, &old) {
-                Ok(()) => size = 0,
-                Err(error) => {
-                    // A failed rotation must not cost the log: keep appending.
-                    self.append_diagnostic(&format!("cannot rotate kernel stderr log: {error}"));
+            // Tighten before the move: a renamed log keeps its mode, and the
+            // rotated file holds the exception payloads worth protecting.
+            if let Err(error) = crate::platform::perms::restrict_file(path) {
+                self.append_diagnostic(&format!("cannot rotate kernel stderr log: {error}"));
+            } else {
+                let _ = std::fs::remove_file(&old);
+                match std::fs::rename(path, &old) {
+                    Ok(()) => size = 0,
+                    Err(error) => {
+                        // A failed rotation must not cost the log: keep appending.
+                        self.append_diagnostic(&format!(
+                            "cannot rotate kernel stderr log: {error}"
+                        ));
+                    }
                 }
             }
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // Owner-only file bits on create; kernel stderr can carry exception payloads.
+        crate::platform::perms::set_private_mode(&mut options);
+        let file = options.open(path)?;
+        // Exact bits despite the umask; tightens a pre-existing loose log.
+        crate::platform::perms::restrict_open_file(&file)?;
         Ok(Arc::new(Mutex::new(StderrLog {
             file,
             budget: MAX_KERNEL_STDERR_LOG_BYTES.saturating_sub(size),
@@ -177,7 +190,10 @@ impl Inner {
             Ok(child) => child,
             Err(error) => {
                 // Fail a pending start promptly instead of riding out the
-                // ready timeout.
+                // ready timeout. The interpreter itself failed to launch, so
+                // the memoized runtime-ready result is stale: drop it so a
+                // startup retry re-probes (and rebuilds when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
                 {
                     let mut g = lock(&self.guarded);
@@ -194,7 +210,7 @@ impl Inner {
                 ));
             }
         };
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
         {
@@ -211,6 +227,10 @@ impl Inner {
                     // Never tear down a newer start's kernel.
                     return Err(error);
                 }
+                // The child died or never reached ready, so the memoized
+                // runtime-ready result is stale: drop it and let a startup
+                // retry re-probe (and rebuild the venv when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
@@ -230,6 +250,9 @@ impl Inner {
             return Err(anyhow!("{startup_error}"));
         }
         if protocol != REPL_PROTOCOL_VERSION as i64 {
+            // A stale runtime passed a memoized probe's key but speaks the
+            // wrong protocol: the memo is stale, so a retry re-probes.
+            crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             return Err(anyhow!(
                 "Kernel runtime speaks protocol {protocol}, expected {REPL_PROTOCOL_VERSION}. \
                  Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."
@@ -246,7 +269,7 @@ impl Inner {
     /// Wire the spawned child: protocol reader, stderr tail + log, and the
     /// exit watcher that settles the manager when the process dies.
     fn wire_child(self: &Arc<Self>, mut child: tokio::process::Child, generation: u64) {
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -269,26 +292,65 @@ impl Inner {
             let stdin_for_error = stdin;
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
+                // A poisoned child's residue must not grow the buffer again
+                // before the protocol repair kills it: keep draining the pipe
+                // (so a wedged child cannot block on backpressure) and discard.
+                let mut poisoned = false;
+                let mut buffered: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 64 * 1024];
                 loop {
-                    line.clear();
-                    match reader.read_line(&mut line).await {
+                    match reader.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let trimmed = line.trim_end_matches('\n');
-                            if trimmed.trim().is_empty() {
+                        Ok(n) => {
+                            if poisoned {
                                 continue;
                             }
-                            let Some(inner) = inner.upgrade() else {
-                                break;
-                            };
-                            match parse_event(trimmed) {
-                                Ok(event) => inner.handle_event(event),
-                                Err(reason) => {
-                                    let _ = stdin_for_error;
-                                    inner.fail_protocol_frame(generation, &reason);
+                            buffered.extend_from_slice(&chunk[..n]);
+                            if buffered.len() > MAX_PROTOCOL_LINE_BYTES {
+                                poisoned = true;
+                                buffered.clear();
+                                let Some(inner) = inner.upgrade() else {
+                                    break;
+                                };
+                                inner.fail_protocol_frame(
+                                    generation,
+                                    &format!(
+                                        "oversized protocol line: exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
+                                    ),
+                                );
+                                continue;
+                            }
+                            // Consume by offset and drain the prefix once per
+                            // read: per-frame drains would shift the tail each
+                            // iteration (quadratic copying for many short
+                            // frames in one chunk).
+                            let mut consumed = 0;
+                            while let Some(rel) =
+                                buffered[consumed..].iter().position(|&b| b == b'\n')
+                            {
+                                let end = consumed + rel;
+                                // An invalid-UTF-8 stream ends the reader, like
+                                // read_line's decode error did before.
+                                let Ok(trimmed) = std::str::from_utf8(&buffered[consumed..end])
+                                else {
+                                    return;
+                                };
+                                consumed = end + 1;
+                                if trimmed.trim().is_empty() {
+                                    continue;
+                                }
+                                let Some(inner) = inner.upgrade() else {
+                                    return;
+                                };
+                                match parse_event(trimmed) {
+                                    Ok(event) => inner.handle_event(event),
+                                    Err(reason) => {
+                                        let _ = stdin_for_error;
+                                        inner.fail_protocol_frame(generation, &reason);
+                                    }
                                 }
                             }
+                            buffered.drain(..consumed);
                         }
                     }
                 }
@@ -392,12 +454,8 @@ impl Inner {
             if was_live {
                 inner.append_diagnostic(&format!(
                     "unexpected exit code={} signal={}",
-                    exit.code
-                        .map(|c| c.to_string())
-                        .unwrap_or("null".to_string()),
-                    exit.signal
-                        .map(|s| s.to_string())
-                        .unwrap_or("null".to_string()),
+                    exit.code.map_or("null".to_string(), |c| c.to_string()),
+                    exit.signal.map_or("null".to_string(), |s| s.to_string()),
                 ));
             }
             live_kernels::remove(&inner);
@@ -475,4 +533,91 @@ impl Inner {
 #[cfg(unix)]
 fn unix_signal_of(status: &std::process::ExitStatus) -> Option<i32> {
     crate::platform::process::termination_signal(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> ReplKernelManager {
+        ReplKernelManager::new(KernelManagerOptions::default())
+    }
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn kernel_stderr_log_is_owner_only() {
+        let root = temp_root("create");
+        let path = root.join("artifacts").join("kernel-stderr.log");
+        let log = manager()
+            .inner
+            .open_stderr_log_at(&path)
+            .expect("stderr log opens");
+        drop(log);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                crate::platform::perms::file_mode(&path),
+                Some(crate::platform::perms::PRIVATE_FILE_MODE)
+            );
+            assert_eq!(
+                crate::platform::perms::file_mode(path.parent().expect("parent")),
+                Some(crate::platform::perms::PRIVATE_DIR_MODE)
+            );
+        }
+        #[cfg(not(unix))]
+        assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kernel_stderr_log_rotation_tightens_a_world_readable_log() {
+        use std::io::Write;
+
+        let root = temp_root("rotate");
+        let path = root.join("kernel-stderr.log");
+        std::fs::create_dir_all(&root).expect("dir");
+        let mut loose = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .expect("loose log");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = loose.set_permissions(std::fs::Permissions::from_mode(0o644));
+        }
+        loose
+            .write_all(&vec![0u8; (MAX_KERNEL_STDERR_LOG_BYTES + 1) as usize])
+            .expect("fill");
+        drop(loose);
+        let log = manager()
+            .inner
+            .open_stderr_log_at(&path)
+            .expect("stderr log opens");
+        drop(log);
+        #[cfg(unix)]
+        {
+            let old = path.with_extension("log.old");
+            assert_eq!(
+                crate::platform::perms::file_mode(&old),
+                Some(crate::platform::perms::PRIVATE_FILE_MODE),
+                "the rotated file holds the historical exception payloads"
+            );
+            assert_eq!(
+                crate::platform::perms::file_mode(&path),
+                Some(crate::platform::perms::PRIVATE_FILE_MODE),
+                "the fresh log is tightened despite a loose predecessor"
+            );
+        }
+        #[cfg(not(unix))]
+        assert!(path.with_extension("log.old").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

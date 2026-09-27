@@ -17,6 +17,11 @@ use super::{AgentEventSink, AgentLoopConfig};
 ///
 /// The prompts are added to the context and message events are emitted for
 /// them. Returns every message produced by the run.
+///
+/// # Errors
+///
+/// Returns an error if an emitted event fails to send, or if the run fails;
+/// `run_loop`'s error is propagated.
 pub async fn run_agent_loop(
     prompts: Vec<AgentMessage>,
     context: AgentContext,
@@ -63,6 +68,17 @@ pub async fn run_agent_loop(
 ///
 /// **Important:** the last message in context must convert to a `user` or
 /// `toolResult` message via `convert_to_llm`, exactly like the TS reference.
+///
+/// # Errors
+///
+/// Returns an error if the context has no messages, if the last message has
+/// role `assistant`, if an emitted event fails to send, or if the run fails
+/// (`run_loop`'s error is propagated).
+///
+/// # Panics
+///
+/// The `unwrap` on the last context message is not reachable: the function
+/// returns an error earlier if the context has no messages.
 pub async fn run_agent_loop_continue(
     context: AgentContext,
     config: &AgentLoopConfig,
