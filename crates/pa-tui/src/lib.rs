@@ -50,6 +50,7 @@ pub mod hyperlinks;
 mod image_component;
 pub mod image_load;
 mod image_markers;
+pub mod incident_notices;
 pub mod info_commands;
 pub mod info_panel;
 mod input;

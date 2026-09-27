@@ -35,7 +35,7 @@ impl Supervisor {
                     ClientRouting::AttachedSession {
                         active_session_id: previous,
                     },
-                    event,
+                    std::sync::Arc::new(event),
                 ));
             }
         }
@@ -86,13 +86,13 @@ impl Supervisor {
                 ClientRouting::AttachedSession {
                     active_session_id: current.clone(),
                 },
-                json!({
+                std::sync::Arc::new(json!({
                     "type": "session_binding",
                     "previousActiveSessionId": selector,
                     "activeSessionId": current,
                     "sessionId": session_id,
                     "sessionFile": session_file,
-                }),
+                })),
             ));
         }
         current
@@ -148,7 +148,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         command_id: &str,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
     ) -> Vec<Value> {
         let DaemonCommand::ListSavedSessions {
             cwd,
@@ -269,7 +269,7 @@ impl Supervisor {
                 // response carries the authoritative rows regardless,
                 // and the fold still has to visit every file for the data
                 // itself.
-                let mut bundle = (vec![item, progress], false);
+                let mut bundle = (vec![Outbound::Line(item), Outbound::Line(progress)], false);
                 loop {
                     match stream_rows.try_send(bundle) {
                         Ok(()) => break true,
@@ -364,7 +364,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 item["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![item], false)).await;
+            let _ = stream.send((vec![Outbound::Line(item)], false)).await;
         }
         infos.append(&mut merged);
         // Every row - scanned or passive-merged - carries its tombstoned
@@ -406,7 +406,7 @@ impl Supervisor {
             if let Some(active_session_id) = active_session_id {
                 completion["activeSessionId"] = json!(active_session_id);
             }
-            let _ = stream.send((vec![completion], false)).await;
+            let _ = stream.send((vec![Outbound::Line(completion)], false)).await;
         }
         // The streamed rows already reached the client through the scan
         // (and the passive merge above); the terminal response is the
@@ -544,7 +544,7 @@ impl Supervisor {
     /// fallback for an unreachable worker.
     async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
         let response = self
-            .route_command(
+            .route_command_typed(
                 resident,
                 "get_state",
                 json!({}),
@@ -643,7 +643,7 @@ impl Supervisor {
         // authoritative create summary instead of failing the spawn (the
         // session is durable at this point; the child is healthy).
         let summary = match self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "get_state",
                 json!({}),
@@ -693,7 +693,7 @@ impl Supervisor {
         }
         for resident in self.registry.list().await {
             let response = self
-                .route_command(
+                .route_command_typed(
                     &resident,
                     "get_state",
                     json!({}),

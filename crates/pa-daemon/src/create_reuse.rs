@@ -331,7 +331,7 @@ impl Supervisor {
         session_path: &str,
     ) -> Result<ReuseAnswer> {
         match self
-            .route_command_ready(
+            .route_command_ready_typed(
                 resident,
                 "get_state",
                 json!({}),
