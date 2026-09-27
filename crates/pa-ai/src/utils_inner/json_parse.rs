@@ -659,8 +659,11 @@ mod tests {
         assert_eq!(acc.flush(), None);
     }
 
+    // Benchmark, not a CI test: measures the throttled accumulator against
+    // the pre-PR per-delta reparse. Run with:
+    // cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture
     #[test]
-    #[ignore = "run with cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture"]
+    #[ignore = "benchmark; see the comment above for the run command"]
     fn accumulator_benchmark_10k_deltas() {
         // Synthetic tool-call arguments through a 10k-delta stream: the
         // per-delta whole-buffer reparse (pre-PR behavior) vs the

@@ -562,7 +562,7 @@ fn settle_partial_tool_calls(state: &mut ProxyReconstruction) {
         let Some(parsed) = state
             .partial_json
             .get_mut(&key)
-            .and_then(|accumulator| accumulator.flush())
+            .and_then(StreamingJsonAccumulator::flush)
         else {
             continue;
         };
@@ -956,10 +956,11 @@ mod tests {
                 .lines()
                 .find_map(|line| {
                     let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())?
+                    if !name.eq_ignore_ascii_case("content-length") {
+                        return None;
+                    }
+                    value.trim().parse::<usize>().ok()
                 })
-                .flatten()
                 .unwrap_or(0);
             while request.len() < headers_end + content_length {
                 let read = socket.read(&mut chunk).await.unwrap();
@@ -1034,7 +1035,7 @@ mod tests {
 
         let base_url = serve_proxy_sse(body, !ends_cleanly).await;
         let (_handle, mut stream) = stream_proxy(
-            test_model(base_url),
+            test_model(base_url.clone()),
             LlmContext {
                 system_prompt: None,
                 messages: Vec::new(),
