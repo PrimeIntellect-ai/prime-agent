@@ -996,10 +996,11 @@ mod tests {
         let searchable = registry.get_rlm_searchable_models();
         assert!(searchable.iter().all(|model| model.provider != "anthropic"));
         assert!(searchable.iter().any(|model| model.provider == "openai"));
-        // The auth-configured filter keeps the stale provider's models
-        // available (stale is only the searchable-set's gate, TS parity).
+        // `has_auth` is stale-aware (a marked credential is not
+        // "configured"), so the available set gates the stale provider's
+        // models too - the same semantics at the tip and with the memo.
         let available = registry.get_available();
-        assert!(available.iter().any(|model| model.provider == "anthropic"));
+        assert!(!available.iter().any(|model| model.provider == "anthropic"));
         assert!(available.iter().any(|model| model.provider == "openai"));
         assert!(available
             .iter()
