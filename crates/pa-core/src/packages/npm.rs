@@ -90,8 +90,7 @@ pub fn latest_npm_version(command: &str, args: &[String], name: &str) -> Result<
         .map_err(|error| anyhow::anyhow!("npm view returned invalid JSON: {error}"))?;
     Ok(version
         .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| stdout.trim().to_string()))
+        .map_or_else(|| stdout.trim().to_string(), str::to_string))
 }
 
 /// Version recorded in an installed package's `package.json`.

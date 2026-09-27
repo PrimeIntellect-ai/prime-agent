@@ -7,6 +7,7 @@
 //! manifest), the `prime-agent-runtime/` sidecar, `skills/`, and `docs/`
 //! beside it, all resolved at runtime from the executable's directory.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,7 +78,11 @@ fn copy_dir(source: &Path, target: &Path) {
             copy_dir(&path, &destination);
         } else {
             std::fs::copy(&path, &destination).unwrap_or_else(|error| {
-                panic!("copy asset file {path:?} -> {destination:?}: {error}")
+                panic!(
+                    "copy asset file {} -> {}: {error}",
+                    path.display(),
+                    destination.display()
+                )
             });
         }
     }
@@ -106,19 +111,22 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_E2E_KERNEL_PYTHON {explicit:?} not found"
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel e2e");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel e2e",
+        candidate.display()
+    );
     None
 }
 
@@ -490,6 +498,78 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     );
 }
 
+/// A tiny real ELF split into the paired shipped image + decoder that the
+/// fail-closed Linux packer/assembler require (`scripts/release/`
+/// `test_catalog_assets.py` stages the same fixture shape). The directory
+/// must outlive the invocation; the caller keeps it.
+struct PairedFixture {
+    dir: tempfile::TempDir,
+    shipped: std::path::PathBuf,
+    decoder: std::path::PathBuf,
+}
+
+fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixture {
+    let dir = tempfile::TempDir::new().expect("split fixture dir");
+    let source = dir.path().join("prime-agent.c");
+    // The packer's version pin runs `--version` and compares the output:
+    // the fixture answers like a real build at the pinned version.
+    let program = format!(
+        "#include <stdio.h>\nint main(int argc, char **argv) {{ (void)argc; (void)argv; puts(\"{version}\"); return 0; }}\n"
+    );
+    std::fs::write(&source, program).expect("fixture source");
+    let raw = dir.path().join("cargo-prime-agent");
+    let compiled = Command::new("gcc")
+        .arg("-g")
+        .arg("-Wl,--build-id")
+        .arg("-o")
+        .arg(&raw)
+        .arg(&source)
+        .output()
+        .expect("compile the fixture");
+    assert_eq!(
+        compiled.status.code(),
+        Some(0),
+        "fixture gcc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let shipped = dir.path().join("prime-agent");
+    let split = Command::new("python3")
+        .arg(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join("split_debug.py"),
+        )
+        .arg("--binary")
+        .arg(&raw)
+        .arg("--shipped")
+        .arg(&shipped)
+        .arg("--out")
+        .arg(dir.path())
+        .arg("--version")
+        .arg(version)
+        .arg("--target")
+        .arg(target)
+        .output()
+        .expect("split the fixture");
+    assert_eq!(
+        split.status.code(),
+        Some(0),
+        "fixture split failed: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let decoder = dir
+        .path()
+        .join(format!("prime-agent-{version}-{alias}.debug.gz"));
+    assert!(shipped.is_file(), "shipped fixture missing");
+    assert!(decoder.is_file(), "decoder fixture missing");
+    PairedFixture {
+        dir,
+        shipped,
+        decoder,
+    }
+}
+
 /// The packaging dry-run produces the release artifact: staged layout,
 /// tarball, manifest, integrity sums — and no dev caches (a stale `.venv`
 /// must not ride the artifact).
@@ -499,8 +579,7 @@ fn packaging_dry_run_produces_artifact() {
     if !Command::new("python3")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
     {
         eprintln!("python3 not available; skipping the packaging dry-run e2e");
         return;
@@ -537,7 +616,16 @@ fn packaging_dry_run_produces_artifact() {
     .unwrap();
     let docs = tree.path().join("docs");
     std::fs::create_dir_all(&docs).expect("docs tree");
-    std::fs::write(docs.join("MODEL-SURFACE.md"), "# surface\n").unwrap();
+    // Every user-facing doc is REQUIRED payload content (SHIPPED_DOC_ENTRIES
+    // / package_release.py REQUIRED_FILES): the synthetic tree stages all four.
+    for doc in [
+        "MODEL-SURFACE.md",
+        "RUST_QUICKSTART.md",
+        "keybindings.md",
+        "FEATURE_PARITY.md",
+    ] {
+        std::fs::write(docs.join(doc), "# doc\n").unwrap();
+    }
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
     std::fs::write(tree.path().join("LICENSE"), "Apache-2.0\n").unwrap();
     std::fs::write(
@@ -572,18 +660,43 @@ fn packaging_dry_run_produces_artifact() {
     );
 
     let out = tempfile::TempDir::new().expect("packaging out dir");
-    let result = Command::new("python3")
+    // Linux fail-closed: the packer accepts only a paired shipped ELF +
+    // decoder from split_debug.py, so the dry run first splits a tiny real
+    // ELF fixture — the same artifact shape the CI channel ships. The
+    // split fixture dir must outlive the invocation (_split_dir below).
+    let (staged_binary, staged_decoder, _split_dir): (
+        std::ffi::OsString,
+        Option<std::ffi::OsString>,
+        Option<tempfile::TempDir>,
+    ) = if std::env::consts::OS == "linux" {
+        let fixture = split_paired_fixture(
+            env!("CARGO_PKG_VERSION"),
+            "x86_64-unknown-linux-gnu",
+            "linux-x64",
+        );
+        (
+            fixture.shipped.into(),
+            Some(fixture.decoder.into_os_string()),
+            Some(fixture.dir),
+        )
+    } else {
+        (env!("CARGO_BIN_EXE_prime-agent").into(), None, None)
+    };
+    let mut command = Command::new("python3");
+    command
         .arg(repo_root().join("scripts").join("package_release.py"))
         .arg("--root")
         .arg(tree.path())
         .arg("--binary")
-        .arg(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg(&staged_binary)
         .arg("--catalog-assets")
         .arg(assets.path())
         .arg("--out-dir")
-        .arg(out.path())
-        .output()
-        .expect("run the packaging script");
+        .arg(out.path());
+    if let Some(decoder) = staged_decoder {
+        command.arg("--decoder").arg(decoder);
+    }
+    let result = command.output().expect("run the packaging script");
     assert_eq!(
         result.status.code(),
         Some(0),
@@ -679,7 +792,10 @@ fn sha256_file(path: &Path) -> String {
     // A tiny pure-std sha256 (the test dependency set stays minimal).
     let bytes = std::fs::read(path).expect("hash input");
     let digest = sha256(&bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    digest.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 /// SHA-256 (FIPS 180-4), pure std so the e2e needs no extra dev-dependency.

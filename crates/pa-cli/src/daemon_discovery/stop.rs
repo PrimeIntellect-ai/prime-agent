@@ -77,20 +77,20 @@ pub(crate) fn run_reap(json: bool, root: &DaemonStateRoot) -> i32 {
                 // Re-probe right before killing: a daemon classified
                 // unreachable at discovery may have started answering; never
                 // signal one that now responds.
-                if !probe_daemon(&action.daemon.socket_path).reachable {
-                    kill_daemon(pid.unwrap_or(0));
-                    remove_socket_file(&action.daemon.socket_path);
-                    reaped.push((
-                        socket_path,
-                        format!("killed unreachable daemon (pid {})", pid.unwrap_or(0)),
-                    ));
-                } else {
+                if probe_daemon(&action.daemon.socket_path).reachable {
                     apply(
                         reap_reachable_daemon(&action.daemon.socket_path, pid),
                         &socket_path,
                         &mut reaped,
                         &mut skipped,
                     );
+                } else {
+                    kill_daemon(pid.unwrap_or(0));
+                    remove_socket_file(&action.daemon.socket_path);
+                    reaped.push((
+                        socket_path,
+                        format!("killed unreachable daemon (pid {})", pid.unwrap_or(0)),
+                    ));
                 }
             }
             ReapActionKind::Shutdown => {
@@ -330,14 +330,10 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
     // process.exitCode = 1 for any failed stop).
     if json {
         println!("{}", shutdown_report_json(&stopped, &failed));
-        return if failed.is_empty() { 0 } else { 1 };
+        return i32::from(!failed.is_empty());
     }
     print_shutdown_report(&stopped, &failed);
-    if failed.is_empty() {
-        0
-    } else {
-        1
-    }
+    i32::from(!failed.is_empty())
 }
 
 fn apply_stop(
@@ -419,7 +415,7 @@ fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
     let shutdown = DaemonCommand::Shutdown {
         id: None,
         force: Some(force),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     // The daemon may still stop; the connectivity check below is the source
     // of truth.

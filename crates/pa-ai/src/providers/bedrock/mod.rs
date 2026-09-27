@@ -4,9 +4,12 @@
 //! implementation: SigV4-signed `POST /model/{modelId}/converse-stream`,
 //! binary `vnd.amazon.eventstream` response decoding (see [`eventstream`]),
 //! message conversion and cache points (see [`convert`]), and credential /
-//! region resolution (see [`auth`]). Supports bearer-token auth, SigV4 skip
+//! region resolution (see [`auth`]). Supports bearer-token auth, `SigV4` skip
 //! for local gateways, Claude adaptive vs budget-based thinking, and
 //! GovCloud-safe request fields.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use serde_json::{json, Value};
 
@@ -130,7 +133,7 @@ fn bedrock_endpoint_port(endpoint: &str) -> u16 {
 /// Port of the AWS SDK error deserialization for a non-2xx HTTP response:
 /// the error name comes from the body `__type`/`code` (after the `#`
 /// namespace separator, like the SDK's error-code parser) and the message
-/// from the body `message` (defaulting to "UnknownError", like
+/// from the body `message` (defaulting to "`UnknownError`", like
 /// `decorateServiceException`); unknown names fall through
 /// `throwDefaultError`'s `parsedBody.code || errorCode || statusCode` chain.
 /// The result is what `formatBedrockError` composes for it.
@@ -165,16 +168,15 @@ fn bedrock_http_error(
         .as_ref()
         .and_then(|parsed| parsed.get("message").or_else(|| parsed.get("Message")))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
         // `decorateServiceException`: `message || Message || "UnknownError"`
-        .unwrap_or_else(|| "UnknownError".to_string());
+        .map_or_else(|| "UnknownError".to_string(), str::to_string);
     ProviderError::Http(ProviderHttpError {
         message: bedrock_exception_message(&exception_name, &message),
         // AWS SDK exceptions carry no `.status` field for the TS classifier
         // (`$metadata.httpStatusCode` is not read).
         status: None,
         body: None,
-        headers: Default::default(),
+        headers: HashMap::default(),
         request_id: None,
         sdk_name: Some(exception_name),
         retry_after_ms: None,
@@ -245,11 +247,7 @@ fn bedrock_proxy_configured() -> bool {
         "no_proxy",
     ]
     .iter()
-    .any(|key| {
-        std::env::var(key)
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
-    })
+    .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
 }
 
 /// Port of `streamBedrock`.
@@ -277,7 +275,7 @@ pub fn stream_bedrock(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -331,8 +329,7 @@ fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool 
     if options
         .region
         .as_deref()
-        .map(|region| region.to_lowercase().starts_with("us-gov-"))
-        .unwrap_or(false)
+        .is_some_and(|region| region.to_lowercase().starts_with("us-gov-"))
     {
         return true;
     }
@@ -434,7 +431,7 @@ fn encode_model_id(model_id: &str) -> String {
         if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
             encoded.push(c);
         } else {
-            encoded.push_str(&format!("%{byte:02X}"));
+            let _ = write!(encoded, "%{byte:02X}");
         }
     }
     encoded
@@ -454,8 +451,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -664,46 +660,57 @@ async fn run_stream(
         .or_else(|| response.header("x-amzn-request-id"));
 
     let mut state = BedrockStreamState::new();
-    let mut decoder = EventStreamDecoder::new();
-    let mut stream_error: Option<ProviderError> = None;
-    loop {
-        let chunk = match response.next_bytes().await? {
-            Some(chunk) => chunk,
-            None => break,
-        };
-        for message in decoder.push(&chunk) {
-            match handle_event(&message, model, output, writer, &mut state, &request_id) {
-                Ok(()) => {}
-                Err(error) => {
-                    stream_error = Some(error);
-                    break;
+    // The TS try/catch encloses this whole streaming section, including the
+    // abort and stop-reason checks; the catch settles partial tool calls
+    // before the error event carries the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = EventStreamDecoder::new();
+        let mut stream_error: Option<ProviderError> = None;
+        loop {
+            let Some(chunk) = response.next_bytes().await? else {
+                break;
+            };
+            for message in decoder.push(&chunk) {
+                match handle_event(&message, model, output, writer, &mut state, &request_id) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        stream_error = Some(error);
+                        break;
+                    }
                 }
             }
+            if stream_error.is_some() {
+                break;
+            }
         }
-        if stream_error.is_some() {
-            break;
+        if let Some(error) = stream_error {
+            return Err(error);
         }
-    }
-    if let Some(error) = stream_error {
-        return Err(error);
-    }
 
-    if options
-        .base
-        .signal
-        .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
-    {
-        return Err(ProviderError::Aborted);
+        if options
+            .base
+            .signal
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ProviderError::Aborted);
+        }
+        if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            return Err(ProviderError::StreamFailure(
+                stream_failure_from_stop_reason(
+                    output.stop_reason_raw.as_deref(),
+                    request_id.as_deref(),
+                ),
+            ));
+        }
+
+        Ok(())
     }
-    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(ProviderError::StreamFailure(
-            stream_failure_from_stop_reason(
-                output.stop_reason_raw.as_deref(),
-                request_id.as_deref(),
-            ),
-        ));
+    .await;
+
+    if let Err(error) = stream_result {
+        state.settle_partial_tool_calls(output);
+        return Err(error);
     }
 
     Ok(())
@@ -769,7 +776,7 @@ pub fn stream_simple_bedrock(
                     stop_reason_raw: None,
                     error_message: Some(message),
                     timestamp: now_ms(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 };
                 writer.push(AssistantMessageEvent::Error {
                     reason: error_reason(StopReason::Error),
@@ -859,7 +866,7 @@ mod tests {
         let error = bedrock_http_error(
             400,
             "{\"__type\":\"com.amazonaws.bedrock#ValidationException\",\"message\":\"model id is invalid\"}",
-            &Default::default(),
+            &HashMap::default(),
         );
         assert_eq!(error.to_string(), "Validation error: model id is invalid");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
@@ -878,13 +885,13 @@ mod tests {
     }
 
     /// Throttling exceptions keep their name as the classification key
-    /// ("throttl" -> rate_limit), like the TS rethrown stream exception.
+    /// ("throttl" -> `rate_limit`), like the TS rethrown stream exception.
     #[test]
     fn bedrock_throttling_error_classifies() {
         let error = bedrock_http_error(
             429,
             "{\"__type\":\"ThrottlingException\",\"message\":\"too many\"}",
-            &Default::default(),
+            &HashMap::default(),
         );
         assert_eq!(error.to_string(), "Throttling error: too many");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
@@ -897,10 +904,10 @@ mod tests {
     /// An unrecognized error body names the generic fallback by the raw
     /// status text (smithy `throwDefaultError`: `parsedBody.code ||
     /// errorCode || statusCode || "UnknownError"`), and a missing message
-    /// defaults to "UnknownError" like `decorateServiceException`.
+    /// defaults to "`UnknownError`" like `decorateServiceException`.
     #[test]
     fn bedrock_http_error_generic_fallback() {
-        let error = bedrock_http_error(400, "{\"foo\":1}", &Default::default());
+        let error = bedrock_http_error(400, "{\"foo\":1}", &HashMap::default());
         assert_eq!(error.to_string(), "400: UnknownError");
     }
 

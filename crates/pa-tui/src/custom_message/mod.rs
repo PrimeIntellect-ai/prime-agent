@@ -59,47 +59,50 @@ pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 // Row payloads (carried by ChatEntry variants)
 // ---------------------------------------------------------------------------
 
-/// Which agent-message side a row renders: the received label of the
+/// Which agent-message side a row renders: the received notice of the
 /// transcript custom-message rows (TS `AgentMessageComponent`), or the
-/// sent/queued receipt labels of the ipython cell output (TS
-/// `renderSentAgentMessages`).
+/// sent/queued receipts of the ipython cell output (TS
+/// `renderSentAgentMessages`). The variants carry no label of their own:
+/// the operator's 2026-09-25 arrow directive folds the direction word into
+/// the viewer-relative arrow (received `↓`, sent/queued `↑`) that renders
+/// next to the shared `AGENT_MESSAGE_LABEL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMessageDirection {
-    /// `Agent message received` (the transcript custom-message rows).
+    /// The transcript custom-message rows (this chat received the mail).
     Received,
-    /// `Agent message sent` (a delivered receipt in ipython cell output).
+    /// A delivered receipt in ipython cell output.
     Sent,
-    /// `Agent message queued` (an undelivered receipt in ipython cell output).
+    /// An undelivered receipt in ipython cell output.
     Queued,
 }
 
-impl AgentMessageDirection {
-    /// The summary-line label (TS labels in `agent-message.ts` and
-    /// `ipython-cell.ts`).
-    pub fn label(self) -> &'static str {
-        match self {
-            AgentMessageDirection::Received => "Agent message received",
-            AgentMessageDirection::Sent => "Agent message sent",
-            AgentMessageDirection::Queued => "Agent message queued",
-        }
-    }
-}
+/// The summary-line label (the operator's 2026-09-25 arrow directive: the
+/// `received`/`sent`/`queued` word folds into the viewer-relative arrow,
+/// so every direction carries the same label).
+pub(crate) const AGENT_MESSAGE_LABEL: &str = "Agent message";
 
-/// One agent-message summary row: `✉ <label> · <participant>[ · <preview>]`
-/// plus the guttered body when expanded (TS `AgentMessageComponent` for
-/// received rows; the sent/queued directions feed the ipython cell
-/// receipt rows). The `✉` mail envelope is the row's icon — a sanctioned
-/// divergence (Kevin directive 2026-09-24) from the TS `◆` diamond; the
-/// TS side is expected to adopt the same glyph.
+/// One agent-message summary row:
+/// `✉ Agent message · <arrow> <counterpart>` plus the guttered body when
+/// expanded (TS `AgentMessageComponent` for received rows; the sent/queued
+/// directions feed the ipython cell receipt rows). The `✉` mail envelope
+/// is the row's icon — a sanctioned divergence (Kevin directive 2026-09-24)
+/// from the TS `◆` diamond; the TS side is expected to adopt the same
+/// glyph. The collapsed row carries no body preview (the operator's
+/// 2026-09-25 directive: display only `Agent message`, the viewer-relative
+/// arrow, and the counterpart agent's name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentMessageRow {
-    /// Which side renders: the label text follows it.
+    /// Which side renders: it drives the viewer-relative arrow (`↑`
+    /// sent/queued, `↓` received).
     pub direction: AgentMessageDirection,
-    /// `from <role> <name>` / `to <role> <name>` (TS
-    /// `formatAgentMessageParticipant`).
-    pub participant: String,
-    /// `details.message` (the collapsed preview source and the body shown
-    /// expanded).
+    /// The counterpart agent's display name (session name, then the id
+    /// fallbacks, then `unknown`): the other end of the mail the row
+    /// summarizes. The `to`/`from` word and the relationship word fold
+    /// into the arrow and never render (the operator's 2026-09-25
+    /// directive).
+    pub counterpart: String,
+    /// `details.message` (the body shown expanded; never a collapsed
+    /// preview).
     pub message: String,
 }
 
@@ -297,10 +300,7 @@ fn slash_row_entries(
 /// TS `isCompactionOutcomeMessage` envelope: content string + a known
 /// reason/outcome pair; anything else is the malformed notice.
 fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
-    let valid = message
-        .get("content")
-        .map(Value::is_string)
-        .unwrap_or(false)
+    let valid = message.get("content").is_some_and(Value::is_string)
         && matches!(
             details.get("reason").and_then(Value::as_str),
             Some("threshold" | "overflow" | "requested")
@@ -336,11 +336,7 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
     details.get("id").and_then(Value::as_str)?;
     let message = details.get("message").and_then(Value::as_str)?;
     let from = details.get("from").unwrap_or(&Value::Null);
-    let relationship = details
-        .get("fromRelationship")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let name = ["sessionName", "activeSessionId", "clientId", "sessionId"]
+    let counterpart = ["sessionName", "activeSessionId", "clientId", "sessionId"]
         .iter()
         .find_map(|key| {
             from.get(*key)
@@ -349,13 +345,9 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
                 .filter(|name| !name.trim().is_empty())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let participant = match relationship {
-        Some(role) => format!("from {role} {name}"),
-        None => format!("from {name}"),
-    };
     Some(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
         direction: AgentMessageDirection::Received,
-        participant,
+        counterpart,
         message: message.to_string(),
     })))
 }
@@ -480,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_message_decodes_participant_and_body() {
+    fn agent_message_decodes_counterpart_and_body() {
         let entries = decoded(json!({
             "role": "custom",
             "customType": AGENT_MESSAGE_CUSTOM_TYPE,
@@ -501,54 +493,49 @@ mod tests {
         let [ChatEntry::AgentMessage(row)] = entries.as_slice() else {
             panic!("agent message row: {entries:?}");
         };
-        assert_eq!(row.participant, "from child model-probe");
+        assert_eq!(row.counterpart, "model-probe");
         assert_eq!(row.message, "ready");
     }
 
     #[test]
-    fn agent_message_participant_falls_back_to_ids() {
-        // TS `formatAgentMessageParticipant`: session name, then active
-        // session id, client id, session id, then "unknown".
-        let base = |from: serde_json::Value, relationship: Option<&str>| {
-            let mut details = json!({
-                "id": "agentmsg_2",
-                "message": "hi",
-                "from": from,
-            });
-            if let Some(role) = relationship {
-                details["fromRelationship"] = json!(role);
-            }
+    fn agent_message_counterpart_falls_back_to_ids() {
+        // TS `formatAgentMessageParticipant`'s name leg: session name,
+        // then active session id, client id, session id, then "unknown".
+        // The relationship word never reaches the row (the arrow carries
+        // the direction, the operator's 2026-09-25 directive).
+        let base = |from: serde_json::Value| {
             decoded(json!({
                 "role": "custom",
                 "customType": AGENT_MESSAGE_CUSTOM_TYPE,
                 "content": "[agent-message from x]\n\nhi",
                 "display": true,
-                "details": details,
+                "details": {
+                    "id": "agentmsg_2",
+                    "message": "hi",
+                    "from": from,
+                    "fromRelationship": "child",
+                },
             }))
         };
         let entry = |entries: Vec<ChatEntry>| match entries.as_slice() {
-            [ChatEntry::AgentMessage(row)] => row.participant.clone(),
+            [ChatEntry::AgentMessage(row)] => row.counterpart.clone(),
             other => panic!("agent message row: {other:?}"),
         };
         assert_eq!(
             entry(base(
-                json!({ "activeSessionId": "aaa111", "sessionId": "s1" }),
-                None
+                json!({ "activeSessionId": "aaa111", "sessionId": "s1" })
             )),
-            "from aaa111"
+            "aaa111"
         );
         assert_eq!(
-            entry(base(
-                json!({ "clientId": "client-9", "sessionId": "s1" }),
-                None
-            )),
-            "from client-9"
+            entry(base(json!({ "clientId": "client-9", "sessionId": "s1" }))),
+            "client-9"
         );
-        assert_eq!(entry(base(json!({ "sessionId": "s1" }), None)), "from s1");
-        assert_eq!(entry(base(json!(null), None)), "from unknown");
+        assert_eq!(entry(base(json!({ "sessionId": "s1" }))), "s1");
+        assert_eq!(entry(base(json!(null))), "unknown");
         assert_eq!(
-            entry(base(json!({ "sessionName": "parent" }), Some("parent"))),
-            "from parent parent"
+            entry(base(json!({ "sessionName": "model-probe" }))),
+            "model-probe"
         );
         // Without valid id/message details the row is not an agent message;
         // it falls through to the generic box.
@@ -661,6 +648,23 @@ mod tests {
         assert!(matches!(
             restored.as_slice(),
             [ChatEntry::InjectedPrompt(boxed)] if boxed.body.is_none()
+        ));
+        // The unavailable-skills row decodes the failed names and keeps
+        // the full report as its expandable body.
+        let unavailable = decoded(json!({
+            "role": "custom",
+            "customType": PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+            "content": "[python-skills-unavailable]\n\n- websearch: No module named 'websearch'",
+            "display": true,
+            "details": { "skills": ["websearch", "edit"] },
+        }));
+        assert!(matches!(
+            unavailable.as_slice(),
+            [ChatEntry::InjectedPrompt(boxed)]
+                if matches!(&boxed.kind,
+                    InjectedPromptKind::PythonSkillsUnavailable { skills }
+                        if skills == &vec!["websearch".to_string(), "edit".to_string()])
+                    && boxed.body.as_deref() == Some("[python-skills-unavailable]\n\n- websearch: No module named 'websearch'")
         ));
     }
 

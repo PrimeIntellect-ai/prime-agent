@@ -115,6 +115,7 @@ impl AgentSessionEngine {
                         service_tier: resolved.service_tier,
                         api_key: self.resolve_request_api_key(&resolved.model),
                         model: resolved.model.clone(),
+                        headers: self.resolve_request_key_and_headers(&resolved.model).1,
                     },
                     agent_override: pa_agent::agent::AgentModelOverride {
                         thinking_level: map_thinking_level(resolved.thinking_level),
@@ -197,11 +198,15 @@ impl AgentSessionEngine {
             agent.set_model_override(None);
         }
         let mut target = match self.resolve_model() {
-            Ok(model) => Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(&model),
-                model,
-            }),
+            Ok(model) => {
+                let (api_key, headers) = self.resolve_request_key_and_headers(&model);
+                Some(ProviderTarget {
+                    service_tier: *self.service_tier.read().expect("service tier lock"),
+                    api_key,
+                    headers,
+                    model,
+                })
+            }
             Err(_) => route.session_target,
         };
         if let Some(target) = target.take() {

@@ -317,6 +317,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
         Ok(())
     }
+    fn chat_detail(&self) -> String {
+        "details".to_string()
+    }
+    fn set_chat_detail(&self, _detail: &str) -> Result<()> {
+        Ok(())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         true
     }
@@ -346,7 +352,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -368,8 +374,9 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: Some(std::sync::Arc::new(StubSettings::default())),
     }
 }
@@ -467,6 +474,7 @@ fn skills_surface_without_a_settings_seam() {
 /// true; off hides them from the autocomplete).
 #[test]
 fn disabled_skill_commands_stay_out_of_the_menu() {
+    use pa_tui::client_settings::ClientSettings;
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -479,7 +487,6 @@ fn disabled_skill_commands_stay_out_of_the_menu() {
         .expect("tokio runtime");
     let mut opts = options(socket);
     let settings = std::sync::Arc::new(StubSettings::default());
-    use pa_tui::client_settings::ClientSettings;
     settings
         .set_enable_skill_commands(false)
         .expect("pin settings");

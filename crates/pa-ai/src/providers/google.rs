@@ -103,7 +103,7 @@ pub fn stream_google(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -189,8 +189,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleOptions) -> Va
     if context
         .tools
         .as_ref()
-        .map(|tools| !tools.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|tools| !tools.is_empty())
     {
         if let Some(tool_choice) = options.tool_choice {
             body.insert(
@@ -226,8 +225,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -328,9 +326,8 @@ async fn run_stream(
     let mut state = GoogleStreamState::new();
     let mut decoder = SseDecoder::new();
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         for sse in decoder.push_text(&chunk) {
             if sse.data.trim().is_empty() {
@@ -361,8 +358,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

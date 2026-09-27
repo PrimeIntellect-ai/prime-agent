@@ -51,10 +51,9 @@ pub enum InjectedPromptKind {
     },
     /// `◆ Restored Python kernel state` / `◆ Started fresh Python kernel`.
     KernelRestored { restored: bool },
-    /// `Python skills unavailable · <skills>` (muted label, dim skill
-    /// list; the full report renders expanded — TS
-    /// `InjectedPromptMessageComponent`'s `python_skills_unavailable`
-    /// header).
+    /// `Python skills unavailable · <skill names>` (muted label, dim
+    /// names; TS PR #2381's header — no marker glyph), expandable to the
+    /// full report.
     PythonSkillsUnavailable { skills: Vec<String> },
     /// `◆ Subagent <name> finished|failed|cancelled` (the diamond and the
     /// label share the row's semantic color; failed/cancelled rows expand
@@ -109,8 +108,8 @@ pub(crate) fn injected_prompt_row(
             skills: details
                 .get("skills")
                 .and_then(Value::as_array)
-                .map(|skills| {
-                    skills
+                .map(|names| {
+                    names
                         .iter()
                         .filter_map(Value::as_str)
                         .map(str::to_string)
@@ -138,10 +137,8 @@ pub(crate) fn injected_prompt_row(
     let body = match &kind {
         // The kernel-state row stays header-only (TS keeps
         // `ipython_state_restored` header-only); a finished child carries
-        // no reason to expand. The unavailable-skills row expands to the
-        // full import-error report.
+        // no reason to expand.
         InjectedPromptKind::KernelRestored { .. } => None,
-        InjectedPromptKind::PythonSkillsUnavailable { .. } => Some(content),
         InjectedPromptKind::RlmChildStatus { outcome, .. } => match outcome {
             RlmChildOutcome::Finished => None,
             RlmChildOutcome::Failed => rlm_child_reason(details, "error", &content),
@@ -252,11 +249,14 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
             ),
         ],
         InjectedPromptKind::PythonSkillsUnavailable { skills } => {
-            let mut spans: Line =
-                vec![Span::styled("Python skills unavailable".to_string(), muted)];
+            let mut spans = vec![Span::styled("Python skills unavailable".to_string(), muted)];
             if !skills.is_empty() {
-                spans.push(Span::styled(" \u{b7} ".to_string(), dim));
-                spans.push(Span::styled(skills.join(", "), dim));
+                // TS `truncateToWidth(skills.join(", "),
+                // max(20, 90 - "Python skills unavailable · ".length))` = 62.
+                spans.push(Span::styled(
+                    format!(" \u{b7} {}", truncate_text(&skills.join(", "), 62, "...")),
+                    dim,
+                ));
             }
             spans
         }
@@ -319,7 +319,7 @@ fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str>
 /// expression as `every <expression>` (a leading case-insensitive `every`
 /// plus whitespace stripped from the stored expression first).
 fn heartbeat_schedule(schedule: &Option<String>) -> String {
-    let trimmed = schedule.as_deref().map(str::trim).unwrap_or("");
+    let trimmed = schedule.as_deref().map_or("", str::trim);
     let compact = if trimmed.is_empty() {
         "prompt"
     } else if trimmed.get(..5).is_some_and(|prefix| {
@@ -370,6 +370,9 @@ mod tests {
                 objective: Some("long 数据 objective".repeat(10)),
             },
             InjectedPromptKind::KernelRestored { restored: true },
+            InjectedPromptKind::PythonSkillsUnavailable {
+                skills: vec!["websearch".into(), "edit 数据".into()],
+            },
             InjectedPromptKind::RlmChildStatus {
                 outcome: RlmChildOutcome::Failed,
                 session_name: "child 数据".into(),
@@ -420,44 +423,6 @@ mod tests {
             crate::chat::ChatEntry::InjectedPrompt(boxed) => *boxed,
             other => panic!("not an injected prompt: {other:?}"),
         }
-    }
-
-    #[test]
-    fn python_skills_unavailable_row_decodes_and_renders() {
-        // The wire row decodes into the unavailable-skills kind with its
-        // skill list, the header renders the muted label + dim skills, and
-        // the collapsed row expands to the full report (TS
-        // `InjectedPromptMessageComponent`'s `python_skills_unavailable`).
-        let row = decoded_row(serde_json::json!({
-            "role": "custom",
-            "customType": "python_skills_unavailable",
-            "content": "[python-skills-unavailable]\n\nThese installed Python skill modules failed to import into the Python kernel, so calling them raises an error:\n- websearch: No module named 'websearch'",
-            "display": true,
-            "details": { "skills": ["websearch", "edit"] },
-        }));
-        assert_eq!(
-            row.kind,
-            InjectedPromptKind::PythonSkillsUnavailable {
-                skills: vec!["websearch".to_string(), "edit".to_string()],
-            }
-        );
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
-        assert_eq!(
-            flat(&rows[1]).trim_end(),
-            " Python skills unavailable \u{b7} websearch, edit"
-        );
-        assert!(row.body.is_some(), "the row expands to the report");
-        // Missing details fall back to the bare label.
-        let row = decoded_row(serde_json::json!({
-            "role": "custom",
-            "customType": "python_skills_unavailable",
-            "content": "[python-skills-unavailable]",
-            "display": true,
-        }));
-        assert_eq!(
-            row.kind,
-            InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() }
-        );
     }
 
     #[test]
@@ -556,6 +521,52 @@ mod tests {
             70,
             "objective {meta:?}"
         );
+    }
+
+    #[test]
+    fn python_skills_unavailable_header_shapes() {
+        // Collapsed: muted label + dim names (the TS header has no marker
+        // glyph) with the dim expand-hint space; no body.
+        let row = InjectedPromptRow {
+            kind: InjectedPromptKind::PythonSkillsUnavailable {
+                skills: vec!["websearch".to_string(), "edit".to_string()],
+            },
+            body: Some("[python-skills-unavailable]\n\n...".to_string()),
+        };
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            " Python skills unavailable \u{b7} websearch, edit"
+        );
+        assert_eq!(rows[1][1].style, theme().fg_style(ThemeColor::Muted));
+        assert_eq!(rows[1][2].style, theme().fg_style(ThemeColor::Dim));
+        // Expanded: no hint, the full report renders as the body.
+        let rows = render_injected_prompt(&row, Detail::All, &theme(), 80);
+        assert!(rows.len() > 2, "body renders expanded: {rows:?}");
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            " Python skills unavailable \u{b7} websearch, edit"
+        );
+        // The names truncate to the TS budget (62 columns, `...`).
+        let long: Vec<String> = (0..12).map(|i| format!("skill-{i}")).collect();
+        let row = InjectedPromptRow {
+            kind: InjectedPromptKind::PythonSkillsUnavailable { skills: long },
+            body: None,
+        };
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120);
+        let row_text = flat(&rows[1]);
+        let meta = row_text.trim_end();
+        let names = meta.trim_start_matches(" Python skills unavailable \u{b7} ");
+        assert_eq!(str_width(names), 62, "names width: {names}");
+        assert!(names.ends_with("..."), "ellipsized names: {names}");
+        // No skills details: the label alone.
+        let row = InjectedPromptRow {
+            kind: InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() },
+            body: None,
+        };
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80);
+        assert_eq!(flat(&rows[1]).trim_end(), " Python skills unavailable");
     }
 
     #[test]

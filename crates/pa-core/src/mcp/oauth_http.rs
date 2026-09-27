@@ -75,6 +75,11 @@ impl Default for ReqwestOAuthHttp {
 }
 
 impl ReqwestOAuthHttp {
+    /// # Panics
+    ///
+    /// Panics when the underlying `reqwest` client cannot be built; with no
+    /// TLS configuration and redirects disabled this construction cannot
+    /// fail.
     pub fn new() -> Self {
         ReqwestOAuthHttp {
             client: reqwest::Client::builder()

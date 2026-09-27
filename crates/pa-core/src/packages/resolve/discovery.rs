@@ -42,7 +42,7 @@ fn read_entries_sorted(dir: &Path) -> Vec<DirEntry> {
     entries
 }
 
-/// Follow symlinks: classify an entry as (is_dir, is_file); unreadable
+/// Follow symlinks: classify an entry as (`is_dir`, `is_file`); unreadable
 /// symlinks classify as nothing.
 fn classify(path: &Path) -> (bool, bool) {
     match std::fs::metadata(path) {
@@ -194,12 +194,21 @@ pub(crate) enum FileKind {
     Json,
 }
 
+/// Lowercase file-name extension test (a bare `.md` name has no extension and
+/// does not match).
+fn extension_is(name: &str, wanted: &[&str]) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| wanted.contains(&ext))
+}
+
 impl FileKind {
     fn matches(self, name: &str) -> bool {
         match self {
-            FileKind::Extension => name.ends_with(".ts") || name.ends_with(".js"),
-            FileKind::Markdown => name.ends_with(".md"),
-            FileKind::Json => name.ends_with(".json"),
+            FileKind::Extension => extension_is(name, &["ts", "js"]),
+            FileKind::Markdown => extension_is(name, &["md"]),
+            FileKind::Json => extension_is(name, &["json"]),
         }
     }
 }
@@ -293,7 +302,7 @@ fn collect_skill_entries_inner(
             && dir == root
             && !is_dir
             && is_file
-            && entry.name.ends_with(".md")
+            && extension_is(&entry.name, &["md"])
             && !matcher.ignores(&rel_path, false)
         {
             entries.push(entry.path.clone());

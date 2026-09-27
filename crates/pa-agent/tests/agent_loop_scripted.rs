@@ -29,7 +29,7 @@ fn test_model() -> Model {
         provider: "test".into(),
         base_url: String::new(),
         reasoning: false,
-        cost: Default::default(),
+        cost: pa_agent::types::UsageCost::default(),
         context_window: 100_000,
         max_tokens: 4_096,
     }
@@ -68,7 +68,7 @@ impl AgentTool for EchoTool {
         self.name
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Echoes its text argument back."
     }
 
@@ -116,11 +116,11 @@ impl AgentTool for EchoTool {
 struct TerminatingTool;
 
 impl AgentTool for TerminatingTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "stop_tool"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Stops the agent run."
     }
 
@@ -633,7 +633,7 @@ async fn steering_message_injects_before_next_turn() {
         .filter_map(|m| match m {
             Message::User(u) => match &u.content {
                 UserContent::Text(t) => Some(t.as_str()),
-                _ => None,
+                UserContent::Parts(_) => None,
             },
             _ => None,
         })

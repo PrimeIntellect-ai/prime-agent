@@ -37,6 +37,10 @@ impl MockSink {
     }
 
     /// All recorded batches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batches mutex is poisoned.
     pub fn batches(&self) -> Vec<RecordedBatch> {
         self.batches.lock().expect("mock sink poisoned").clone()
     }
@@ -55,6 +59,10 @@ impl MockSink {
     }
 
     /// Clear recorded batches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batches mutex is poisoned.
     pub fn clear(&self) {
         self.batches.lock().expect("mock sink poisoned").clear();
     }

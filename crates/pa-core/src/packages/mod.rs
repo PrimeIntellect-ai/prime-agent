@@ -31,6 +31,7 @@ pub use resolve::{
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// The TS `CONFIG_DIR_NAME` (project-local settings/packages root).
@@ -41,11 +42,9 @@ pub(crate) use npm::NETWORK_TIMEOUT_MS;
 
 /// True when `PI_OFFLINE` disables all package network operations.
 pub(crate) fn is_offline_mode_enabled() -> bool {
-    std::env::var("PI_OFFLINE")
-        .map(|value| {
-            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false)
+    std::env::var("PI_OFFLINE").is_ok_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
 }
 
 /// The package directory: `PI_PACKAGE_DIR` wins (matching the TS
@@ -124,10 +123,10 @@ pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(format!("{prefix}-{}", suffix.unwrap_or_default()).as_bytes());
     let digest = hasher.finalize();
-    let hash: String = digest[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hash: String = digest[..4].iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    });
     std::env::temp_dir()
         .join("pi-extensions")
         .join(prefix)
@@ -137,7 +136,7 @@ pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// Process-wide env reads and writes (HOME, PI_OFFLINE) serialize
+    /// Process-wide env reads and writes (HOME, `PI_OFFLINE`) serialize
     /// through one lock across the packages test modules: parallel test
     /// threads in the same binary otherwise race the process env.
     pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());

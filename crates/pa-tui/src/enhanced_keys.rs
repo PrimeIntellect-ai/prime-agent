@@ -12,11 +12,26 @@
 //!
 //! The kitty query runs on a probe thread that holds no UI state: it
 //! blocks inside crossterm's terminal support check until the terminal
-//! answers (or its 2s budget lapses) while the fallback timer fires on
-//! the TS schedule. crossterm parks the response in its internal event
-//! queue, so the app reader never sees protocol bytes as key input.
-//! A late answer still upgrades to kitty — the TS response handler
-//! stays installed after the fallback fires too.
+//! answers (or its patched 250ms budget lapses) while the fallback timer
+//! fires on the TS schedule. Crossterm parks user keys in its internal event
+//! queue, so early typing is preserved; the app reader never sees protocol
+//! bytes as key input. An answer after the 150ms fallback but within the
+//! 250ms query window still upgrades to kitty. Replies arriving after that
+//! window are filtered by crossterm, and the terminal stays in legacy mode.
+//!
+//! The query runs ONCE per process (the first terminal surface), never
+//! again on a later start or resume: the support check holds the
+//! process-global event-reader lock for up to 250ms on silent terminals,
+//! so re-querying at every start would delay input after every SIGCONT
+//! resume (and the check's implicit raw-mode bracket can race the app's
+//! own suspend bracket). The terminal's kitty capability cannot change across a
+//! stop/continue of the same process, so the probe resolves once and
+//! every later start re-applies the resolved state — the observable
+//! TS contract (kitty terminals keep CSI-u parsing after a resume;
+//! non-kitty terminals never gain it) with none of the reader
+//! starvation. The first-mount window is the one accepted cost: input
+//! typed during it queues and delivers when the probe settles, exactly
+//! like keys typed while the TS query is pending.
 //!
 //! DIVERGENCE FROM TS (the shift-modified printable bug class): this port
 //! never arms modifyOtherKeys mode 2 and instead resets it
@@ -65,6 +80,16 @@ const KITTY_QUERY_FALLBACK: Duration = Duration::from_millis(150);
 static BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KITTY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// The terminal answered the kitty query once (the resolved capability).
+/// The answer outlives any one surface: a suspend pops the flags but the
+/// capability stays, so the next start re-applies them without asking
+/// again — the once-per-process contract (see the module docs).
+static KITTY_SUPPORTED: AtomicBool = AtomicBool::new(false);
+/// The kitty query was sent at least once this process. The probe
+/// machinery never runs again after the first query (see the module
+/// docs); this is the latch that keeps every later start from re-arming
+/// it.
+static KITTY_PROBED: AtomicBool = AtomicBool::new(false);
 /// Serializes every mode-flag read-modify-write with its escape write:
 /// the flag and the terminal must move as one unit, or a probe thread
 /// enabling kitty can interleave with a teardown disabling it (the flags
@@ -94,6 +119,120 @@ pub(crate) fn release_for_exit() {
     EXIT_RELEASE.store(true, Ordering::SeqCst);
 }
 
+/// What one `enable` does about the kitty protocol, decided from the
+/// process-global resolution state. Pure so the unit tests lock every
+/// transition without a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KittyAction {
+    /// First terminal surface of the process: run the query.
+    Probe,
+    /// The terminal answered kitty once (the capability survived a
+    /// suspend's flag pop): push the flags back.
+    PushFlags,
+    /// Settled no-kitty, already active, or a probe still in flight (its
+    /// answer upgrades late): nothing to do.
+    None,
+}
+
+fn kitty_action(
+    kitty_supported: bool,
+    kitty_probed: bool,
+    kitty_active: bool,
+    query_in_flight: bool,
+) -> KittyAction {
+    if kitty_active || query_in_flight {
+        return KittyAction::None;
+    }
+    if kitty_supported {
+        return KittyAction::PushFlags;
+    }
+    if kitty_probed {
+        return KittyAction::None;
+    }
+    KittyAction::Probe
+}
+
+/// Direct-terminal hints are useful only without a transport that can
+/// forward environment variables while changing or filtering escape replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardCapability {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Default)]
+struct TerminalEnvironment<'a> {
+    term: Option<&'a str>,
+    term_program: Option<&'a str>,
+    kitty_window_id: Option<&'a str>,
+    ghostty_resources_dir: Option<&'a str>,
+    wezterm_pane: Option<&'a str>,
+    tmux: Option<&'a str>,
+    sty: Option<&'a str>,
+    zellij: Option<&'a str>,
+    ssh_connection: Option<&'a str>,
+    ssh_tty: Option<&'a str>,
+}
+
+fn keyboard_capability(env: &TerminalEnvironment<'_>) -> KeyboardCapability {
+    let term = env.term.unwrap_or_default();
+    if env.tmux.is_some()
+        || env.sty.is_some()
+        || env.zellij.is_some()
+        || env.ssh_connection.is_some()
+        || env.ssh_tty.is_some()
+        || term.starts_with("tmux")
+        || term.starts_with("screen")
+    {
+        return KeyboardCapability::Unknown;
+    }
+    if matches!(term, "dumb" | "linux") {
+        return KeyboardCapability::Unsupported;
+    }
+    if env.kitty_window_id.is_some()
+        || env.ghostty_resources_dir.is_some()
+        || env.wezterm_pane.is_some()
+        || matches!(env.term_program, Some("kitty" | "ghostty" | "WezTerm"))
+    {
+        return KeyboardCapability::Supported;
+    }
+    KeyboardCapability::Unknown
+}
+
+fn local_keyboard_capability() -> KeyboardCapability {
+    let term = std::env::var("TERM").ok();
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let kitty_window_id = std::env::var("KITTY_WINDOW_ID").ok();
+    let ghostty_resources_dir = std::env::var("GHOSTTY_RESOURCES_DIR").ok();
+    let wezterm_pane = std::env::var("WEZTERM_PANE").ok();
+    let tmux = std::env::var("TMUX").ok();
+    let sty = std::env::var("STY").ok();
+    let zellij = std::env::var("ZELLIJ").ok();
+    let ssh_connection = std::env::var("SSH_CONNECTION").ok();
+    let ssh_tty = std::env::var("SSH_TTY").ok();
+    keyboard_capability(&TerminalEnvironment {
+        term: term.as_deref(),
+        term_program: term_program.as_deref(),
+        kitty_window_id: kitty_window_id.as_deref(),
+        ghostty_resources_dir: ghostty_resources_dir.as_deref(),
+        wezterm_pane: wezterm_pane.as_deref(),
+        tmux: tmux.as_deref(),
+        sty: sty.as_deref(),
+        zellij: zellij.as_deref(),
+        ssh_connection: ssh_connection.as_deref(),
+        ssh_tty: ssh_tty.as_deref(),
+    })
+}
+
+/// Record the terminal's kitty capability (a probe answered). The
+/// resolution outlives the surface it arrived on: a later start pushes
+/// the flags back from the memory instead of re-querying (the
+/// once-per-process contract).
+fn record_kitty_supported() {
+    KITTY_SUPPORTED.store(true, Ordering::SeqCst);
+}
+
 /// Enable the enhanced-key modes for a surface start (TS
 /// `ProcessTerminal.start`): bracketed paste unconditionally, the kitty
 /// protocol behind a query, and a defensive modifyOtherKeys reset (the
@@ -114,8 +253,40 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         write_all(out, ENABLE_BRACKETED_PASTE)?;
     }
     write_all(out, MODIFY_OTHER_KEYS_RESET)?;
-    if !KITTY_ACTIVE.load(Ordering::SeqCst) && !QUERY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        spawn_kitty_probe();
+    match kitty_action(
+        KITTY_SUPPORTED.load(Ordering::SeqCst),
+        KITTY_PROBED.load(Ordering::SeqCst),
+        KITTY_ACTIVE.load(Ordering::SeqCst),
+        QUERY_IN_FLIGHT.load(Ordering::SeqCst),
+    ) {
+        KittyAction::Probe => {
+            // Known direct terminals need no query. Ambiguous terminals use
+            // the bounded crossterm reader so typeahead stays in its queue.
+            match local_keyboard_capability() {
+                KeyboardCapability::Supported => {
+                    KITTY_PROBED.store(true, Ordering::SeqCst);
+                    record_kitty_supported();
+                    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                        write_all(out, ENABLE_KITTY_FLAGS)?;
+                    }
+                }
+                KeyboardCapability::Unsupported => {
+                    KITTY_PROBED.store(true, Ordering::SeqCst);
+                }
+                KeyboardCapability::Unknown => {
+                    if !QUERY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                        KITTY_PROBED.store(true, Ordering::SeqCst);
+                        spawn_kitty_probe();
+                    }
+                }
+            }
+        }
+        KittyAction::PushFlags => {
+            if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                write_all(out, ENABLE_KITTY_FLAGS)?;
+            }
+        }
+        KittyAction::None => {}
     }
     Ok(())
 }
@@ -155,21 +326,65 @@ pub(crate) fn drain_for_exit(out: &mut Stdout) {
     drain_bounded(out, EXIT_DRAIN_MAX);
 }
 
-fn drain_bounded(out: &mut Stdout, max: Duration) {
+/// The in-process handoff variant (an exit that hands the pane to another
+/// surface of this process — the agents view, a `/resume` chain). The
+/// idle window's guarded leak is a release that lands AFTER raw mode is
+/// off; a handoff keeps raw mode on (the adopting surface's reader takes
+/// over the same tty), and every surface's dispatch drops key-release
+/// events (`input::filter_enhanced_key_events`, TS tui.ts), so a release
+/// that outruns the drain is consumed-and-ignored by the next reader, not
+/// leaked anywhere. The fixed idle window buys nothing observable on
+/// this path, so the drain consumes what the terminal has already
+/// written — zero-timeout polls, no wait — and returns as soon as the
+/// buffer is observed empty. Only when input IS flowing (the observed
+/// case) does it fall through to the bounded drain, so a burst around a
+/// handoff is coalesced exactly like the exit drain's idle window
+/// ([`DRAIN_IDLE`] silence, [`DRAIN_MAX`] cap).
+pub(crate) fn drain_for_handoff(out: &mut Stdout) {
     disable_keyboard_modes(out);
     if !enhanced_keys_active() {
         return;
     }
     let start = std::time::Instant::now();
+    let mut observed_input = false;
+    while start.elapsed() < DRAIN_MAX {
+        match crossterm::event::poll(Duration::ZERO) {
+            Ok(true) => {
+                let _ = crossterm::event::read();
+                observed_input = true;
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+    if observed_input {
+        // The hard cap spans the whole handoff drain: the zero-timeout loop
+        // may have consumed most of DRAIN_MAX under continuous input, so
+        // the bounded phase runs on what remains, never a fresh budget.
+        drain_until_idle(DRAIN_MAX.saturating_sub(start.elapsed()));
+    }
+}
+
+fn drain_bounded(out: &mut Stdout, max: Duration) {
+    disable_keyboard_modes(out);
+    if !enhanced_keys_active() {
+        return;
+    }
+    drain_until_idle(max);
+}
+
+/// The consume loop both bounded drains share: eat input until the idle
+/// window (`DRAIN_IDLE` of silence after the last event) closes or the
+/// hard cap lapses.
+fn drain_until_idle(max: Duration) {
+    let start = std::time::Instant::now();
     let mut last_input = start;
     while start.elapsed() < max && last_input.elapsed() < DRAIN_IDLE {
-        match crossterm::event::poll(DRAIN_IDLE.min(max - start.elapsed())) {
+        match crossterm::event::poll(DRAIN_IDLE.min(max.saturating_sub(start.elapsed()))) {
             Ok(true) => {
                 let _ = crossterm::event::read();
                 last_input = std::time::Instant::now();
             }
-            Ok(false) => break,
-            Err(_) => break,
+            Ok(false) | Err(_) => break,
         }
     }
 }
@@ -247,6 +462,9 @@ fn write_all(out: &mut Stdout, sequence: &[u8]) -> Result<()> {
 /// gone — a stray enable would leave the flags pushed over the next
 /// surface's own setup.
 fn enable_kitty(out: &mut Stdout) {
+    // The capability is the durable truth: a later start re-applies the
+    // flags from it even when this push stands down for the exit.
+    record_kitty_supported();
     let _modes = lock_modes();
     // The exit release ran: the flags are popped (or never pushed), and a
     // probe answer arriving around the exit must not push them back on —
@@ -261,23 +479,32 @@ fn enable_kitty(out: &mut Stdout) {
 }
 
 /// The probe thread: hold the query open for the TS fallback window,
-/// then settle. An answer inside the window enables kitty; no answer
-/// settles with no enhanced modes (this port never arms the
-/// modifyOtherKeys fallback — see the module docs), and a late answer
-/// still upgrades (the TS response handler stays installed after the
-/// fallback fires too).
+/// then settle. An answer within crossterm's patched 250ms query window
+/// enables kitty; no answer settles with no enhanced modes (this port
+/// never arms the modifyOtherKeys fallback — see the module docs).
 fn spawn_kitty_probe() {
     let probe = std::thread::Builder::new()
         .name("tui-kitty-probe".to_string())
         .spawn(|| {
             let (answer_tx, answer_rx) = mpsc::channel();
             // crossterm's support check sends the query and blocks on the
-            // answer for its own 2s budget; it reads the tty through the
-            // shared internal reader, so the bytes it skips (user keys
-            // typed during the window) stay queued for the app reader.
+            // answer for at most 250ms (the vendored crossterm patch). It
+            // reads the tty through the shared internal reader, so the
+            // skipped user keys stay queued for the app reader.
             let reader = std::thread::Builder::new()
                 .name("tui-kitty-probe-read".to_string())
                 .spawn(move || {
+                    // A dying process must not start the support check: with
+                    // the app's raw-mode bracket already off (the exit
+                    // restore's window) crossterm brackets raw mode itself —
+                    // re-arming raw on a handed-back terminal and stealing
+                    // the raw-mode save slot. The exit paths set the
+                    // standdown before they restore, so settle with no
+                    // answer instead of running the check.
+                    if EXIT_RELEASE.load(Ordering::SeqCst) {
+                        let _ = answer_tx.send(Ok(false));
+                        return;
+                    }
                     let _ = answer_tx.send(crossterm::terminal::supports_keyboard_enhancement());
                 });
             match answer_rx.recv_timeout(KITTY_QUERY_FALLBACK) {
@@ -300,10 +527,16 @@ fn spawn_kitty_probe() {
                             let answer = answer_rx.recv().unwrap_or(Err(std::io::Error::other(
                                 "the kitty probe reader exited",
                             )));
-                            if matches!(answer, Ok(true))
-                                && BRACKETED_PASTE_ACTIVE.load(Ordering::SeqCst)
-                            {
-                                enable_kitty(&mut std::io::stdout());
+                            if let Ok(true) = answer {
+                                // The capability outlives the surface the
+                                // answer arrived on: record it even when the
+                                // push stands down (a suspended surface has
+                                // paste off — its resume re-applies the
+                                // flags from the memory).
+                                record_kitty_supported();
+                                if BRACKETED_PASTE_ACTIVE.load(Ordering::SeqCst) {
+                                    enable_kitty(&mut std::io::stdout());
+                                }
                             }
                             QUERY_IN_FLIGHT.store(false, Ordering::SeqCst);
                         })
@@ -336,7 +569,134 @@ mod tests {
         BRACKETED_PASTE_ACTIVE.store(false, Ordering::SeqCst);
         KITTY_ACTIVE.store(false, Ordering::SeqCst);
         QUERY_IN_FLIGHT.store(false, Ordering::SeqCst);
+        KITTY_SUPPORTED.store(false, Ordering::SeqCst);
+        KITTY_PROBED.store(false, Ordering::SeqCst);
         EXIT_RELEASE.store(false, Ordering::SeqCst);
+    }
+
+    /// The first terminal mount queries kitty; a settled-no answer never
+    /// re-queries on a later start. This locks the once-per-process
+    /// contract: pre-fix, every start (including every SIGCONT resume)
+    /// re-armed the probe, whose 2s crossterm support check starved the
+    /// app reader for its whole budget on terminals that never answer
+    /// the query.
+    #[test]
+    fn the_query_runs_once_and_a_settled_no_never_re_queries() {
+        let _lock = lock_state();
+        reset_state();
+        // First mount: probe.
+        assert_eq!(kitty_action(false, false, false, false), KittyAction::Probe);
+        // In flight: nothing (the late answer upgrades on its own).
+        assert_eq!(kitty_action(false, true, false, true), KittyAction::None);
+        // Settled no-kitty: nothing, forever — the second start and every
+        // later resume must not run the query again.
+        assert_eq!(kitty_action(false, true, false, false), KittyAction::None);
+    }
+
+    #[test]
+    fn only_direct_terminal_markers_skip_the_probe() {
+        for env in [
+            TerminalEnvironment {
+                kitty_window_id: Some("42"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                wezterm_pane: Some("3"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term_program: Some("ghostty"),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Supported);
+        }
+        for env in [
+            TerminalEnvironment {
+                term: Some("dumb"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term: Some("linux"),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Unsupported);
+        }
+        for env in [
+            TerminalEnvironment::default(),
+            TerminalEnvironment {
+                term: Some("xterm-ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term_program: Some("vscode"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term: Some("tmux-256color"),
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                tmux: Some("/tmp/tmux"),
+                kitty_window_id: Some("42"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                ssh_connection: Some("remote"),
+                wezterm_pane: Some("3"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                zellij: Some("0"),
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(keyboard_capability(&env), KeyboardCapability::Unknown);
+        }
+    }
+
+    /// A suspend/resume cycle on a kitty-capable terminal re-applies the
+    /// flags from the recorded capability instead of re-querying: the
+    /// disable popped them, the resume pushes them back.
+    #[test]
+    fn a_resume_re_applies_the_flags_from_the_recorded_capability() {
+        let _lock = lock_state();
+        reset_state();
+        record_kitty_supported();
+        // The probe's answer arm through enable_kitty (the flags push):
+        // active now, so a second enable without a disable does nothing.
+        assert_eq!(kitty_action(true, true, true, false), KittyAction::None);
+        // The suspend pops the flags; the resume pushes them back.
+        assert_eq!(
+            kitty_action(true, true, false, false),
+            KittyAction::PushFlags
+        );
+    }
+
+    /// The flag-level suspend/resume cycle with a settled-no probe: the
+    /// resume's enable must not probe again — the exact transition the
+    /// e2e's no-query-after-SIGCONT assertion locks from the outside.
+    #[test]
+    fn a_suspend_resume_cycle_after_a_settled_no_probe_does_not_probe() {
+        let _lock = lock_state();
+        reset_state();
+        // First mount probed and settled no.
+        KITTY_PROBED.store(true, Ordering::SeqCst);
+        // The suspend cycle: disable pops (nothing active), resume must
+        // stay on the settled answer.
+        assert_eq!(kitty_action(false, true, false, false), KittyAction::None);
+        // And the in-flight window before the first settle: the suspend
+        // could only be driven by input the reader cannot deliver while
+        // the probe holds the event-reader lock, so this state is the
+        // only other one a resume can observe.
+        assert_eq!(kitty_action(false, true, false, true), KittyAction::None);
     }
 
     #[test]

@@ -4,15 +4,15 @@
 //! child.
 //!
 //! Usage:
-//!   kernel_bench ensure-python      — time `ensure_kernel_python`
-//!   kernel_bench boot               — full provisioner boot + N executes
-//!   kernel_bench snapshot-restore   — build a ~5 MiB namespace, time
+//!   `kernel_bench` ensure-python      — time `ensure_kernel_python`
+//!   `kernel_bench` boot               — full provisioner boot + N executes
+//!   `kernel_bench` snapshot-restore   — build a ~5 MiB namespace, time
 //!                                      snapshot + restore (+ idempotence)
 //!
 //! Environment:
-//!   PA_BENCH_SKILLS_DIR   — skills directory (repo `skills/`); defaults to
+//!   `PA_BENCH_SKILLS_DIR`   — skills directory (repo `skills/`); defaults to
 //!                           `../skills` relative to the crate
-//!   PRIME_AGENT_KERNEL_VENV / PRIME_AGENT_KERNEL_PYTHON / HOME as for the
+//!   `PRIME_AGENT_KERNEL_VENV` / `PRIME_AGENT_KERNEL_PYTHON` / HOME as for the
 //!                           product paths themselves.
 //!
 //! Run cold with a fresh HOME + venv dir, then warm with the same dirs to
@@ -32,9 +32,10 @@ use pa_core::kernel::shared::{
 use pa_core::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 
 fn skills_dir() -> PathBuf {
-    std::env::var("PA_BENCH_SKILLS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills"))
+    std::env::var("PA_BENCH_SKILLS_DIR").map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills"),
+        PathBuf::from,
+    )
 }
 
 fn bench_python_skills() -> Vec<KernelPythonSkill> {
@@ -72,10 +73,11 @@ fn manager_options(
     KernelManagerOptions {
         python: Some(python),
         cwd: Some(std::env::temp_dir()),
-        env: Default::default(),
+        env: std::collections::HashMap::default(),
         session_id: Some("kernel-bench".to_string()),
         host_handlers: HostRequestHandlers::new(),
         python_skills: bench_python_skills(),
+        on_background_work_settled: None,
         snapshot: snapshot_dir.map(|dir| KernelSnapshotConfig {
             path: snapshot_path_in(dir),
             manifest_path: manifest_path_in(dir),

@@ -220,7 +220,7 @@ mod tests {
     use serde_json::json;
 
     /// One test at a time over the global faux registry (the same contract
-    /// print_goal and print_boundary tests hold).
+    /// `print_goal` and `print_boundary` tests hold).
     static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -300,7 +300,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -321,7 +321,7 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// The faux engine bed (the print_goal test pattern): a persisted
+    /// The faux engine bed (the `print_goal` test pattern): a persisted
     /// session over its own tempdir, the wired goal surface with a capture
     /// sink, and the default autonomous state.
     async fn bed(script: Value) -> Bed {
@@ -340,6 +340,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
@@ -377,6 +378,7 @@ mod tests {
                     cli_extension_sources: Vec::new(),
                     extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
+                    on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
                     image_model_router: None,
@@ -419,7 +421,7 @@ mod tests {
         parse_session_command(&registry, text).expect("the test text is a session command")
     }
 
-    /// The driver's session-command branch (print_runtime's loop body).
+    /// The driver's session-command branch (`print_runtime`'s loop body).
     async fn run_command(bed: &Bed, text: &str) -> Option<String> {
         let execution = execute_prompt_session_command(
             &bed.engine,
@@ -647,14 +649,20 @@ mod tests {
         let long_seed = "seed turn one ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed, Default::default())
+            .prompt(
+                &long_seed,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;
         let long_seed_two = "seed turn two ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed_two, Default::default())
+            .prompt(
+                &long_seed_two,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;

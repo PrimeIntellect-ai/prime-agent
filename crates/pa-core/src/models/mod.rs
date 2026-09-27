@@ -6,11 +6,17 @@ pub use private_auth::{
     read_private_prime_authorization_cache, write_private_prime_authorization_cache,
     PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
 };
-pub use registry::{ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth};
+pub use registry::{
+    ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth, SetModelSelectionError,
+};
 
 pub use catalog_chain::{
     catalog_for, install_catalog, prime_credentials_for_dir, spawn_hourly_refresh, startup_refresh,
 };
+/// The refresh triggers (`pa-models`' own enum — the daemon's picker-open
+/// and auth-change wiring selects it; pa-daemon's runtime surface goes
+/// through pa-core, so the trigger rides this re-export).
+pub use pa_models::RefreshTrigger;
 
 pub mod allowlist;
 pub(crate) mod catalog_chain;

@@ -17,10 +17,8 @@ use crate::worker::Worker;
 impl Worker {
     /// `get_connection_state`: the connection state block (the same shape
     /// the attach snapshot carries) with the TS `createConnectionState`
-    /// overlays — `heartbeat` (this worker owns no cron store, so the
-    /// overlay is the TS null) and `recap` (only when a live summary
-    /// exists; this port's worker summaries surface through the roster,
-    /// so the persisted recap stays).
+    /// `heartbeat` overlay (this worker owns no cron store, so the
+    /// overlay is the TS null).
     pub(crate) fn handle_get_connection_state(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_connection_state") {
             return response;
@@ -95,7 +93,7 @@ impl Worker {
         // answers from memory in bounded time even on a grown store. The
         // artifact-tree walk is the cache's background refresh
         // (`context_tree_cache`), never the request path.
-        let (label, context_usage, own_usage, total_usage, session_id) = {
+        let (label, context_usage, own_usage, total_usage, session_id, own_usage_by_model) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let label = store
@@ -105,15 +103,35 @@ impl Worker {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
             let session_id = store.map(|store| store.session_id().to_string());
-            let (own_usage, total_usage) = match store {
+            // The per-model own-usage breakdown rides the node when every
+            // usage-carrying row resolved to a model (None degrades to the
+            // plain TS totals): a session that switched models mid-run —
+            // or whose subagents billed on other models — shows which
+            // model billed what.
+            let (own_usage, total_usage, own_usage_by_model) = match store {
                 Some(store) => {
                     let branch = store.branch_bridged();
                     let all_entries = store.entries();
-                    compute_own_and_total_usage(&branch, all_entries)
+                    let (own_usage, total_usage) =
+                        compute_own_and_total_usage(&branch, all_entries);
+                    let own_usage_by_model = compute_own_usage_by_model(
+                        &branch,
+                        all_entries,
+                        &own_usage,
+                        store.window_boundary_model().as_ref(),
+                    );
+                    (own_usage, total_usage, own_usage_by_model)
                 }
-                None => (empty_usage(), empty_usage()),
+                None => (empty_usage(), empty_usage(), None),
             };
-            (label, context_usage, own_usage, total_usage, session_id)
+            (
+                label,
+                context_usage,
+                own_usage,
+                total_usage,
+                session_id,
+                own_usage_by_model,
+            )
         };
         let model = self.engine.model_metadata().and_then(|model| {
             Some(json!({
@@ -144,6 +162,9 @@ impl Worker {
         }
         if let Some(usage) = context_usage {
             tree["contextUsage"] = usage;
+        }
+        if let Some(by_model) = own_usage_by_model {
+            tree["ownUsageByModel"] = json!(by_model);
         }
         response_success(None, "get_context_tree", Some(tree))
     }
@@ -430,6 +451,194 @@ pub(crate) fn compute_own_and_total_usage(
     (own, total)
 }
 
+/// The branch's own usage broken down by serving model (the operator's
+/// cost question: a session that switches models mid-conversation — or
+/// hosts subagents on other models — shows which model billed what).
+///
+/// Each assistant row folds into the bucket of the model on its message
+/// envelope (the request-time serving model — cost blocks were computed
+/// against that model's rates, so each bucket holds only spend billed at
+/// those rates); `compaction` / `branch_summary` rows fold on the model
+/// their entry records when the summary call named one (TS #2411 routes
+/// branch summaries to a configured auxiliary model — the timeline names
+/// the session's current model, not the routed one that billed) and
+/// otherwise follow the branch's `model_change` timeline, seeded on a
+/// windowed load with the retained-window boundary's model (the newest
+/// `model_change` in the discarded prefix — the leaf's model would bill
+/// the boundary's early summarizer rows on the wrong side of a post-
+/// boundary switch).
+/// Child-usage attributions subtract from the target row's model bucket
+/// exactly like [`compute_own_and_total_usage`] subtracts from
+/// `ownUsage`, so the buckets sum to the node's own usage — and the sum
+/// is verified against the caller's `own_usage` before the breakdown is
+/// served. `None` when any usage-carrying row resolves to no model (a
+/// foreign file without `model_change` rows or model-tagged assistants),
+/// or when the buckets cannot reconcile: an attribution larger than its
+/// target row's bucket clamps inside that bucket while the plain fold
+/// subtracts the same amount from the combined pool, so the buckets
+/// would overstate the node. A partial breakdown would not add up to the
+/// displayed totals, so the caller omits the field and the display
+/// degrades to the plain TS totals.
+pub(crate) fn compute_own_usage_by_model(
+    branch: &[&crate::session_store::SessionEntry],
+    all_entries: &[crate::session_store::SessionEntry],
+    own_usage: &Value,
+    initial_model: Option<&(String, String)>,
+) -> Option<Vec<Value>> {
+    // The buckets in first-seen order: JSON arrays keep the fold order,
+    // so the display renders the model the session started on first.
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut position: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    let mut buckets: Vec<Value> = Vec::new();
+    // The branch's model timeline seeded with the retained-window
+    // boundary's model when the load kept only a window (a reopened
+    // compacted session's retained branch starts at the boundary — its
+    // early rows billed on the boundary's model, not the leaf's, and a
+    // full history keeps `None` so a foreign file still omits the
+    // breakdown) and the assistant id -> bucket map the attribution
+    // subtraction reads.
+    let mut current: Option<(String, String)> = initial_model.cloned();
+    let mut assistant_buckets: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    let mut unresolved = false;
+    let mut bucket_for =
+        |key: Option<(String, String)>, buckets: &mut Vec<Value>| -> Option<usize> {
+            let key = key?;
+            let at = *position.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                buckets.push(empty_usage());
+                buckets.len() - 1
+            });
+            Some(at)
+        };
+    for entry in branch {
+        let usage = match entry.type_.as_str() {
+            "model_change" => {
+                let provider = entry
+                    .fields
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let model_id = entry
+                    .fields
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                current = (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()));
+                continue;
+            }
+            "message" => {
+                let Some(message) = entry.fields.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let usage = message.get("usage");
+                if usage.is_none() {
+                    // An assistant row without usage bills nothing; the
+                    // own-usage fold skips it the same way (an attribution
+                    // targeting it subtracts from a zero base).
+                    continue;
+                }
+                // The serving model on the envelope outranks the timeline
+                // (the row is the request's own record).
+                let provider = message
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let model_id = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let key = (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()))
+                    .or(current.clone());
+                match bucket_for(key, &mut buckets) {
+                    Some(at) => {
+                        add_usage(&mut buckets[at], usage.expect("checked"));
+                        assistant_buckets.insert(entry.id.as_str(), at);
+                    }
+                    None => unresolved = true,
+                }
+                continue;
+            }
+            "compaction" | "branch_summary" => entry.fields.get("usage"),
+            _ => continue,
+        };
+        if let Some(usage) = usage {
+            // A row that records the model its summary call served on
+            // (TS #2411's auxiliary routing — persisted on the entry)
+            // outranks the timeline: the branch timeline names the
+            // session's current model, not the routed one that billed.
+            let row_model = (|| {
+                let provider = entry.fields.get("provider")?.as_str()?;
+                let model_id = entry.fields.get("modelId")?.as_str()?;
+                (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()))
+            })();
+            match bucket_for(row_model.or_else(|| current.clone()), &mut buckets) {
+                Some(at) => add_usage(&mut buckets[at], usage),
+                None => unresolved = true,
+            }
+        }
+    }
+    if unresolved {
+        return None;
+    }
+    for entry in all_entries {
+        if entry.type_ != "child_usage_attributed" {
+            continue;
+        }
+        let Some(target_id) = entry.fields.get("targetId").and_then(Value::as_str) else {
+            continue;
+        };
+        let (Some(at), Some(child_usage)) = (
+            assistant_buckets.get(target_id).copied(),
+            entry.fields.get("childUsage"),
+        ) else {
+            continue;
+        };
+        subtract_usage(&mut buckets[at], child_usage);
+    }
+    // Reconciliation: the buckets must sum to the node's own usage. The
+    // per-bucket attribution subtraction clamps inside the target row's
+    // bucket while the plain fold subtracts from the combined pool, so
+    // an attribution larger than its target row's spend (or one whose
+    // target row carries no usage) leaves the buckets overstating the
+    // node. Omit the breakdown then — the unresolved-model contract: a
+    // breakdown that cannot add up is worse than none. Token fields
+    // compare exactly; the cost fields allow the last-ulp drift of two
+    // differently ordered float sums.
+    let mut summed = empty_usage();
+    for bucket in &buckets {
+        add_usage(&mut summed, bucket);
+    }
+    for field in ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] {
+        if summed[field] != own_usage[field] {
+            return None;
+        }
+    }
+    for field in ["input", "output", "cacheRead", "cacheWrite", "total"] {
+        let summed_cost = summed["cost"][field].as_f64().unwrap_or_default();
+        let own_cost = own_usage["cost"][field].as_f64().unwrap_or_default();
+        if (summed_cost - own_cost).abs() > 1e-9 * (1.0 + summed_cost.max(own_cost)) {
+            return None;
+        }
+    }
+    Some(
+        order
+            .into_iter()
+            .zip(buckets)
+            .map(|((provider, model_id), own_usage)| {
+                json!({ "provider": provider, "id": model_id, "ownUsage": own_usage })
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +890,235 @@ mod tests {
         assert_eq!(stats["tokens"]["output"], json!(5863));
         assert_eq!(stats["tokens"]["cacheRead"], json!(18560));
         assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
+        // The title's full-session total: the same folded aggregate —
+        // the six attributed children's spend rides the assistant rows
+        // (the fixture has no compaction, so the active region and the
+        // whole session coincide here).
+        assert_eq!(stats["totalCost"].as_f64(), Some(0.008_995_7));
+    }
+
+    /// The operator's cost question, proven over the real file path: a
+    /// session that switches models mid-conversation accumulates the
+    /// correct per-model costs INCLUDING the switch's cache-write burst.
+    /// The synthetic file's cost blocks are the provider-computed records
+    /// (`calculate_cost` against the catalog rates: gpt-5.6-sol $4/$20 per
+    /// M; claude-opus-4-6 $5/$25/M, cacheRead $0.5/M, cacheWrite $6.25/M
+    /// = the 1.25x write multiplier): the sol turn bills $0.44; the first
+    /// opus request re-caches the whole history — 104k cache-write tokens
+    /// at $6.25/M = $0.65 exactly — and bills $0.70; the next opus turn
+    /// hits the cache ($0.0775). The per-model buckets carry each model's
+    /// share with the fold's exact float sums, and the grand totals are
+    /// per-model-summed across the switch.
+    #[tokio::test]
+    async fn get_context_tree_breaks_own_usage_down_by_model() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("switched.jsonl");
+        let usage = |input: u64,
+                     output: u64,
+                     cache_read: u64,
+                     cache_write: u64,
+                     total: u64,
+                     (ci, co, cr, cw, ct): (f64, f64, f64, f64, f64)| {
+            json!({
+                "input": input, "output": output, "cacheRead": cache_read,
+                "cacheWrite": cache_write, "totalTokens": total,
+                "cost": {"input": ci, "output": co, "cacheRead": cr,
+                          "cacheWrite": cw, "total": ct},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "switched-0001", "timestamp": "2026-09-24T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-24T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-24T00:00:01.000Z", "message": {"role": "user", "content": "audit the costs"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-24T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(100_000, 2000, 0, 0, 1200, (0.4, 0.04, 0.0, 0.0, 0.44))}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-24T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-24T00:00:04.000Z", "message": {"role": "user", "content": "switch to opus"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-24T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(5000, 1000, 0, 104_000, 110_000, (0.025, 0.025, 0.0, 0.65, 0.7))}}),
+            json!({"type": "message", "id": "e5", "parentId": "e4", "timestamp": "2026-09-24T00:00:06.000Z", "message": {"role": "user", "content": "and now a cache hit"}}),
+            json!({"type": "message", "id": "e6", "parentId": "e5", "timestamp": "2026-09-24T00:00:07.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "cheap"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(500, 800, 110_000, 0, 110_500, (0.0025, 0.02, 0.055, 0.0, 0.0775))}}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        // The grand totals sum every record's stored cost — the honest
+        // per-model-summed total across the switch.
+        assert_eq!(tree["ownUsage"]["input"], json!(105_500));
+        assert_eq!(tree["ownUsage"]["output"], json!(3800));
+        assert_eq!(tree["ownUsage"]["cacheRead"], json!(110_000));
+        assert_eq!(tree["ownUsage"]["cacheWrite"], json!(104_000));
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(221_700));
+        assert_eq!(
+            tree["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.4 + 0.04 + 0.7 + 0.0775)
+        );
+        // The per-model breakdown: first-seen order, each bucket holding
+        // exactly the records that model served.
+        let buckets = tree["ownUsageByModel"]
+            .as_array()
+            .expect("the by-model breakdown is present");
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["provider"], json!("openai"));
+        assert_eq!(buckets[0]["id"], json!("gpt-5.6-sol"));
+        assert_eq!(buckets[0]["ownUsage"]["input"], json!(100_000));
+        assert_eq!(buckets[0]["ownUsage"]["output"], json!(2000));
+        assert_eq!(buckets[0]["ownUsage"]["cacheWrite"], json!(0));
+        assert_eq!(
+            buckets[0]["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.4 + 0.04)
+        );
+        assert_eq!(buckets[1]["provider"], json!("anthropic"));
+        assert_eq!(buckets[1]["id"], json!("claude-opus-4-6"));
+        assert_eq!(buckets[1]["ownUsage"]["input"], json!(5500));
+        assert_eq!(buckets[1]["ownUsage"]["output"], json!(1800));
+        assert_eq!(buckets[1]["ownUsage"]["cacheRead"], json!(110_000));
+        assert_eq!(buckets[1]["ownUsage"]["cacheWrite"], json!(104_000));
+        // The switch's cache-write burst bills at the new model's write
+        // rate: 104k tokens x $6.25/M (1.25x the $5/M input rate) is
+        // exactly $0.65.
+        assert_eq!(
+            buckets[1]["ownUsage"]["cost"]["cacheWrite"].as_f64(),
+            Some(104_000.0 * 6.25 / 1_000_000.0)
+        );
+        assert_eq!(
+            buckets[1]["ownUsage"]["cost"]["total"].as_f64(),
+            Some(0.7 + 0.0775)
+        );
+    }
+
+    /// The buckets reconcile or the breakdown is omitted: a child
+    /// attribution whose `totalTokens` exceed its target row's bucket
+    /// (the captured-fixture shape — the child's token deltas do not
+    /// ride the row's aggregate) clamps inside that bucket, while the
+    /// plain own-usage fold subtracts the same amount from the combined
+    /// pool where the other model's spend absorbs it. The buckets would
+    /// sum past `ownUsage`, so `ownUsageByModel` is omitted and the
+    /// display degrades to the plain totals instead of overstating the
+    /// node (the Macroscope attribution-clamp round).
+    #[tokio::test]
+    async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bucket() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bmx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("clamped.jsonl");
+        let usage = |input: u64, output: u64, total: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": total,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "clamped-0001", "timestamp": "2026-09-25T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-25T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-25T00:00:01.000Z", "message": {"role": "user", "content": "audit the mix"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-25T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(1_000, 100, 1_100)}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-25T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-25T00:00:04.000Z", "message": {"role": "user", "content": "big opus turn"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-25T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(100_000, 2_000, 102_000)}}),
+            // The child's input/output ride the cumulative aggregate; the
+            // totalTokens do not (the row keeps its own 1_100).
+            json!({"type": "child_usage_attributed", "id": "a1", "parentId": "e4", "timestamp": "2026-09-25T00:00:06.000Z", "targetId": "e2",
+                "childUsage": usage(3_000, 300, 9_000),
+                "aggregateUsage": usage(4_000, 400, 1_100),
+                "origin": "spawn_task"}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        // The plain fold subtracts the 9_000 tokens from the combined
+        // pool: 1_100 + 102_000 - 9_000. The input and output fields
+        // reconcile exactly (the attribution rides the aggregate), so a
+        // mismatch here would mean the reconciliation itself drifted.
+        assert_eq!(tree["ownUsage"]["input"], json!(101_000));
+        assert_eq!(tree["ownUsage"]["output"], json!(2_100));
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(94_100));
+        // The sol bucket clamps at zero while the opus bucket keeps its
+        // 102_000: the buckets would sum to 102_000 and overstate the
+        // node's 94_100, so the breakdown is omitted.
+        assert!(
+            tree["ownUsageByModel"].is_null(),
+            "the clamped breakdown must not be served: {}",
+            tree["ownUsageByModel"]
+        );
+    }
+
+    /// The control for the omission rule: an attribution that fits its
+    /// target row's bucket reconciles (the buckets sum to `ownUsage`
+    /// exactly) and the breakdown stays served.
+    #[tokio::test]
+    async fn get_context_tree_keeps_the_breakdown_when_an_attribution_fits_its_bucket() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bmf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("fits.jsonl");
+        let usage = |input: u64, output: u64, total: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": total,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "fits-0001", "timestamp": "2026-09-25T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-25T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-25T00:00:01.000Z", "message": {"role": "user", "content": "audit the mix"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-25T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(1_000, 100, 1_100)}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-25T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-25T00:00:04.000Z", "message": {"role": "user", "content": "big opus turn"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-25T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(100_000, 2_000, 102_000)}}),
+            json!({"type": "child_usage_attributed", "id": "a1", "parentId": "e4", "timestamp": "2026-09-25T00:00:06.000Z", "targetId": "e2",
+                "childUsage": usage(3_000, 300, 500),
+                "aggregateUsage": usage(4_000, 400, 1_100),
+                "origin": "spawn_task"}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(102_600));
+        let buckets = tree["ownUsageByModel"]
+            .as_array()
+            .expect("the fitting breakdown is served");
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["id"], json!("gpt-5.6-sol"));
+        assert_eq!(buckets[0]["ownUsage"]["input"], json!(1_000));
+        assert_eq!(buckets[0]["ownUsage"]["totalTokens"], json!(600));
+        assert_eq!(buckets[1]["id"], json!("claude-opus-4-6"));
+        assert_eq!(buckets[1]["ownUsage"]["totalTokens"], json!(102_000));
     }
 
     /// `get_context_tree` surfaces the persisted child sessions under the
@@ -873,6 +1311,136 @@ mod tests {
         let (own, _) = compute_own_and_total_usage(&branch_refs_more, &entries_more);
         assert_eq!(own["input"], json!(0));
         assert_eq!(own["cost"]["total"].as_f64(), Some(0.0));
+    }
+
+    /// A `branch_summary` row served by an auxiliary model (TS #2411)
+    /// bills on the model its entry records, not the branch timeline's
+    /// current model: the routed call billed at the auxiliary model's
+    /// rates, so its spend belongs to that model's bucket while the
+    /// buckets still reconcile with the plain own-usage fold (the
+    /// Macroscope wrong-bucket round).
+    #[test]
+    fn branch_summary_usage_bills_on_the_row_recorded_auxiliary_model() {
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        let usage = |input: u64, output: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": input + output,
+                "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0, "cacheWrite": 0, "total": 0.3},
+            })
+        };
+        let entries = vec![
+            entry(
+                &json!({"type": "model_change", "provider": "openai", "modelId": "gpt-a"}),
+                "m0",
+            ),
+            entry(
+                &json!({
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "on it", "provider": "openai", "model": "gpt-a", "usage": usage(100, 10)},
+                }),
+                "e1",
+            ),
+            entry(
+                &json!({
+                    "type": "branch_summary",
+                    "summary": "explored",
+                    "usage": usage(50, 5),
+                    "provider": "anthropic",
+                    "modelId": "aux-opus-4",
+                }),
+                "b1",
+            ),
+        ];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, _) = compute_own_and_total_usage(&branch, &entries);
+        let breakdown =
+            compute_own_usage_by_model(&branch, &entries, &own, None).expect("resolved");
+        assert_eq!(breakdown.len(), 2);
+        assert_eq!(breakdown[0]["provider"], json!("openai"));
+        assert_eq!(breakdown[0]["id"], json!("gpt-a"));
+        assert_eq!(breakdown[0]["ownUsage"]["totalTokens"], json!(110));
+        // The auxiliary summary lands on the routed model's bucket, not
+        // the timeline's current model.
+        assert_eq!(breakdown[1]["provider"], json!("anthropic"));
+        assert_eq!(breakdown[1]["id"], json!("aux-opus-4"));
+        assert_eq!(breakdown[1]["ownUsage"]["totalTokens"], json!(55));
+    }
+
+    /// A windowed load (a reopened compacted session) seeds the timeline
+    /// with the retained-window boundary's model: retained usage rows
+    /// before the branch's first `model_change` still resolve a bucket and
+    /// the breakdown is served instead of omitted — the target case this
+    /// change exists for (the Bugbot windowed-omission round). The same
+    /// walk without a seed (a full-history foreign file without
+    /// `model_change` rows) keeps omitting the breakdown.
+    #[test]
+    fn window_seed_resolves_rows_before_the_first_model_change() {
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        let usage = |input: u64, output: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": input + output,
+                "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0, "cacheWrite": 0, "total": 0.3},
+            })
+        };
+        // The retained branch starts at the compaction boundary: the
+        // summarizer's usage row carries no model of its own (an
+        // unattributed row) and no `model_change` row precedes it on the walk.
+        let entries = vec![
+            entry(
+                &json!({"type": "branch_summary", "summary": "cut", "usage": usage(30, 3)}),
+                "b1",
+            ),
+            entry(
+                &json!({
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "resumed", "provider": "openai", "model": "gpt-a", "usage": usage(100, 10)},
+                }),
+                "e1",
+            ),
+        ];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, _) = compute_own_and_total_usage(&branch, &entries);
+        let seeded = compute_own_usage_by_model(
+            &branch,
+            &entries,
+            &own,
+            Some(&("openai".to_string(), "gpt-a".to_string())),
+        )
+        .expect("the seed resolves the boundary rows");
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0]["provider"], json!("openai"));
+        assert_eq!(seeded[0]["id"], json!("gpt-a"));
+        assert_eq!(seeded[0]["ownUsage"]["totalTokens"], json!(143));
+        // The unseeded walk keeps the foreign-file contract: a branch
+        // whose usage rows resolve to no model omits the breakdown.
+        assert_eq!(
+            compute_own_usage_by_model(&branch, &entries, &own, None),
+            None
+        );
     }
 
     /// `get_commands` / `get_resource_snapshot` on the scripted engine:

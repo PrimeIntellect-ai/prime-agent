@@ -12,7 +12,7 @@
 //! tests/differential/run.sh
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::providers::openai_completions::{stream_openai_completions, OpenAICompletionsOptions};
 use crate::types::{AssistantContent, Model, StopReason, StreamOptions};
@@ -66,7 +66,7 @@ async fn normalized_result(model: &Model) -> Value {
                     .into(),
             ),
             timestamp: 1_789_529_142_000,
-            rest: Default::default(),
+            rest: Map::default(),
         })],
         tools: None,
     };

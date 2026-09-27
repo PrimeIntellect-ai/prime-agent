@@ -18,7 +18,7 @@ use crate::JsonMap;
 // Git context
 // ---------------------------------------------------------------------------
 
-/// Git repository identity captured alongside session headers and git_state entries.
+/// Git repository identity captured alongside session headers and `git_state` entries.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitContext {
@@ -288,31 +288,6 @@ pub struct SessionStateEntry {
     pub state: SessionState,
 }
 
-/// High-level task state derived by the session's status summarizer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskState {
-    NeedsInput,
-    Completed,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStatus {
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state: Option<AgentTaskState>,
-    pub based_on_message_count: u64,
-}
-
-/// `type: "agent_status"`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStatusEntry {
-    pub status: AgentStatus,
-}
-
 /// `type: "git_state"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -427,12 +402,6 @@ pub enum FileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
-    AgentStatus {
-        #[serde(flatten)]
-        payload: AgentStatusEntry,
-        #[serde(flatten)]
-        base: EntryBase,
-    },
     GitState {
         #[serde(flatten)]
         payload: GitStateEntry,
@@ -533,12 +502,6 @@ enum KnownFileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
-    AgentStatus {
-        #[serde(flatten)]
-        payload: AgentStatusEntry,
-        #[serde(flatten)]
-        base: EntryBase,
-    },
     GitState {
         #[serde(flatten)]
         payload: GitStateEntry,
@@ -576,7 +539,6 @@ impl From<KnownFileEntry> for FileEntry {
             KnownFileEntry::Label { payload, base } => Self::Label { payload, base },
             KnownFileEntry::SessionInfo { payload, base } => Self::SessionInfo { payload, base },
             KnownFileEntry::SessionState { payload, base } => Self::SessionState { payload, base },
-            KnownFileEntry::AgentStatus { payload, base } => Self::AgentStatus { payload, base },
             KnownFileEntry::GitState { payload, base } => Self::GitState { payload, base },
             KnownFileEntry::CustomMessage { payload, base } => {
                 Self::CustomMessage { payload, base }
@@ -620,7 +582,6 @@ impl FileEntry {
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
-            | FileEntry::AgentStatus { base, .. }
             | FileEntry::GitState { base, .. }
             | FileEntry::CustomMessage { base, .. } => base,
         };
@@ -645,7 +606,6 @@ impl FileEntry {
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
-            | FileEntry::AgentStatus { base, .. }
             | FileEntry::GitState { base, .. }
             | FileEntry::CustomMessage { base, .. } => Some(base),
         };
@@ -673,7 +633,6 @@ impl FileEntry {
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
-            | FileEntry::AgentStatus { base, .. }
             | FileEntry::GitState { base, .. }
             | FileEntry::CustomMessage { base, .. } => base,
         };
