@@ -211,7 +211,22 @@ fn setup(name: &str) -> Harness {
     let script = dir.path().join("faux.json");
     std::fs::write(
         &script,
-        json!({ "engine": "faux", "responses": responses }).to_string(),
+        json!({
+            "engine": "faux",
+            // The goal-continuation loop mints one continuation turn per
+            // natural turn end while the goal is ACTIVE — unbounded churn,
+            // so a finite script can run dry mid-flow (the registered red
+            // red-goal-recovery-faux-exhaustion-20260926-1: under CI load
+            // the pause raced ~14 churn cycles, the queue emptied before
+            // the seeding prompts, and s2 failed with "No more faux
+            // responses queued"). The repeat-last knob opts this harness
+            // out of the exhaustion contract: once the queue runs dry the
+            // provider re-serves the last reply, so no prompt of this
+            // flow can ever fail on the script budget.
+            "repeatLastResponse": true,
+            "responses": responses,
+        })
+        .to_string(),
     )
     .expect("write faux script");
     let socket = dir.path().join(format!("{name}.sock"));
@@ -317,6 +332,48 @@ impl Harness {
         );
         let done = self.client.request(id);
         assert_eq!(done["success"], true, "prompt {id} failed: {done}");
+    }
+
+    /// The bounded event wait: read the streaming session events until one
+    /// matches `predicate` (the deadline catches a stalled session).
+    /// The quiet `drain_events` cannot observe a mid-churn moment — the
+    /// goal-continuation loop never lets the socket go quiet while an
+    /// active goal runs — so this reads lines until the target event
+    /// arrives. Everything read on the way is collected like any other
+    /// read.
+    fn wait_for_event(&mut self, what: &str, predicate: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut line = String::new();
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the session never streamed {what}: {:?}",
+                self.client.events
+            );
+            self.client
+                .reader
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("timeout");
+            match self.client.reader.read_line(&mut line) {
+                Ok(0) => panic!("supervisor closed the connection"),
+                Ok(_) if line.trim().is_empty() => {
+                    line.clear();
+                }
+                Ok(_) => {
+                    let value: Value = serde_json::from_str(line.trim()).expect("parse line");
+                    line.clear();
+                    let matched = value.get("type").and_then(Value::as_str)
+                        == Some("session_event")
+                        && predicate(&value["event"]);
+                    self.client.collect_event(&value);
+                    if matched {
+                        return;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     /// The last `goal_update` announcement's `continuationsUsed`.
@@ -592,4 +649,41 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
         "the post-recovery mint never announced continuationsUsed {post_final_count}: {:?}",
         harness.client.events
     );
+}
+
+/// The deterministic-red regression for the registered flake
+/// `red-goal-recovery-faux-exhaustion-20260926-1` (run 36273426478, shard
+/// 4/4: `prompt s2 failed: {"success":false,"error":"No more faux
+/// responses queued"}` at `goal_recovery_e2e.rs:300`). The
+/// goal-continuation loop mints one scripted model turn per natural turn
+/// end while the goal is ACTIVE — unbounded churn, quieted only by a
+/// pause — so a finite harness script can run dry mid-flow; on the
+/// registered failure the churn emptied the 16-deep queue before the
+/// seeding prompts reached it.
+///
+/// The proof is deterministic on both sides of the fix. The goal is never
+/// paused, so the churn consumes the script front to back while this test
+/// only watches; the last scripted reply's `message_end` is the witness —
+/// once it is observed, the queue is empty and every further provider call
+/// errors with the registered string (the base is red at exactly the CI
+/// failure site) or re-serves the last reply (the repeat-last knob is
+/// green). The next prompt then MUST succeed.
+#[test]
+fn repeat_last_script_stays_answerable_once_the_goal_churn_empties_it() {
+    let mut harness = setup("goal-recovery-exhaustion");
+
+    harness.prompt_racing_the_loop("g1", &format!("/goal {OBJECTIVE}"));
+    harness.wait_for_event("the last scripted reply", |event| {
+        event.get("type").and_then(Value::as_str) == Some("message_end")
+            && serde_json::to_string(event)
+                .unwrap_or_default()
+                .contains("scripted reply 15")
+    });
+
+    // The queue is dry from here on: the next prompt must still be served.
+    harness.prompt_racing_the_loop("x1", "keep working past the scripted depth");
+    // A quiet teardown: the pause withdraws the minted continuation, so
+    // the churn stops before the harness drops the supervisor.
+    harness.prompt_racing_the_loop("x2", "/goal pause");
+    harness.client.drain_events(Duration::from_secs(1));
 }
