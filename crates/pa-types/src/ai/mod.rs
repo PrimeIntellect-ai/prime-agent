@@ -1096,7 +1096,8 @@ pub fn supports_fast_mode(model: &Model) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
+    use super::*;
+
     /// A minimal model for the tier-eligibility predicate (TS #2144's
     /// gating tests run the same provider/api/id combinations).
     fn tier_model(provider: &str, api: &str, id: &str) -> Model {
@@ -1124,6 +1125,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn service_tier_eligibility_matches_ts() {
         use ServiceTier::*;
         // `default` is always accepted (it means no tier request at all).

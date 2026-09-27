@@ -1002,6 +1002,7 @@ mod tests {
             max_tokens: None,
             reasoning: ThinkingLevel::Off,
             session_id: None,
+            service_tier: None,
             api_key: None,
             signal: AbortSignal::never(),
             on_payload: None,
