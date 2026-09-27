@@ -64,9 +64,18 @@ fn row_pack_expands_every_range_byte_exact_with_many_styles() {
     let multi = "\u{1f9e2} unicode \u{754c}".repeat(300);
     let mut rows: Vec<crate::Line> = vec![
         vec![
-            crate::Span { style: styles[0], content: long.clone() },
-            crate::Span { style: styles[47], content: multi.clone() },
-            crate::Span { style: styles[0], content: String::new() },
+            crate::Span {
+                style: styles[0],
+                content: long.clone(),
+            },
+            crate::Span {
+                style: styles[47],
+                content: multi.clone(),
+            },
+            crate::Span {
+                style: styles[0],
+                content: String::new(),
+            },
         ],
         Vec::new(),
         (0..17)
@@ -75,16 +84,25 @@ fn row_pack_expands_every_range_byte_exact_with_many_styles() {
                 content: format!("span {i} padded text"),
             })
             .collect(),
-        vec![crate::Span { style: styles[9], content: String::new() }],
-        vec![crate::Span { style: styles[0], content: long.clone() }],
+        vec![crate::Span {
+            style: styles[9],
+            content: String::new(),
+        }],
+        vec![crate::Span {
+            style: styles[0],
+            content: long.clone(),
+        }],
     ];
     rows.push(Vec::new());
     let pack = RowPack::pack(&rows).expect("representable rows");
     assert_eq!(pack.len(), rows.len());
     for from in 0..=rows.len() {
         for to in from..=rows.len() {
-            assert_eq!(pack.range(from, to), rows[from..to].to_vec(),
-                "range [{from}, {to}) must expand byte-exact");
+            assert_eq!(
+                pack.range(from, to),
+                rows[from..to].to_vec(),
+                "range [{from}, {to}) must expand byte-exact"
+            );
         }
     }
 }
