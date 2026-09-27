@@ -156,6 +156,10 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
 
+        // Set by the fresh-path arm when the name landed in its single
+        // rewrite: the shared post-match name persist must not append a
+        // second `session_info` line for that arm.
+        let mut name_persisted_by_fresh_arm = false;
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
                 let loaded = {
@@ -310,9 +314,16 @@ impl Worker {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
-                if let Err(error) = created.rewrite() {
-                    return response_failure(None, "create", &error.to_string(), None);
-                }
+                // One durable write instead of three: the prefix, the
+                // `active` state, and the session name are appended in
+                // memory and land in a single rewrite. The dropped first
+                // rewrite persisted a header-only intermediate that no
+                // reader consumes — the durable create stays pathless
+                // until this create succeeds, so no replay, scan, or
+                // registration reads the file mid-create — and the final
+                // bytes are identical to the sequential writes (same
+                // entries, same order; the name's line is the exact
+                // `persist_entry` construction via `append_session_info`).
                 append_creation_prefix(
                     &mut created,
                     self.engine.as_ref(),
@@ -321,6 +332,10 @@ impl Worker {
                     true,
                 );
                 let _ = created.append_session_state("active");
+                if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+                    created.append_session_info(name);
+                    name_persisted_by_fresh_arm = true;
+                }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
                 }
@@ -336,10 +351,13 @@ impl Worker {
             }
         };
 
-        if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
-            if let Err(error) = store.persist_entry("session_info", json!({ "name": name.trim() }))
-            {
-                return response_failure(None, "create", &error.to_string(), None);
+        if !name_persisted_by_fresh_arm {
+            if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+                if let Err(error) =
+                    store.persist_entry("session_info", json!({ "name": name.trim() }))
+                {
+                    return response_failure(None, "create", &error.to_string(), None);
+                }
             }
         }
         let restored_tier = store
@@ -642,3 +660,7 @@ fn append_creation_prefix(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "create_collapse_tests.rs"]
+mod create_collapse_tests;

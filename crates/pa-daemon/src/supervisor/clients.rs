@@ -10,6 +10,14 @@ async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> 
     Ok(())
 }
 
+/// Write one pre-serialized client line (the byte relay's raw form already
+/// carries its trailing newline).
+async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -> Result<()> {
+    writer.write_all(line).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 pub(crate) fn client_command_payload(
     command: &DaemonCommand,
     client_id: &str,
@@ -20,13 +28,32 @@ pub(crate) fn client_command_payload(
         object.insert("clientId".to_string(), json!(client_id));
         // The supervisor always attaches slim, like the TS supervisor's
         // `attachClient`: summary and messages travel inside the snapshot.
-        if matches!(
-            command,
-            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. }
-        ) {
+        // The client's OWN normalized capability set rides alongside as
+        // `clientCapabilities`: the worker echoes it into the attach
+        // result's `client.capabilities`, so the response the supervisor
+        // relays by bytes already carries the echo the supervisor used to
+        // patch into the parsed tree.
+        if let DaemonCommand::Attach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        }
+        | DaemonCommand::Reattach {
+            capabilities,
+            supports_extension_ui,
+            ..
+        } = command
+        {
             object.insert(
                 "capabilities".to_string(),
                 json!(["attach_snapshot", "event_sequence", "slim_attach"]),
+            );
+            object.insert(
+                "clientCapabilities".to_string(),
+                json!(crate::snapshot_stream::attach_client_capabilities(
+                    capabilities.as_deref(),
+                    *supports_extension_ui
+                )),
             );
         }
         // Create carries its fields under `config`; the worker reads them flat.
@@ -100,7 +127,7 @@ impl Supervisor {
         // reads nothing stalls only its own dispatch tasks once the queue
         // fills — memory stays bounded per connection — while every other
         // client and worker is unaffected.
-        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Value>, bool)>(
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<(Vec<Outbound>, bool)>(
             crate::backpressure::CLIENT_OUTBOUND_CAPACITY,
         );
         // One dispatch slot per concurrent command. The read arm is armed
@@ -185,7 +212,11 @@ impl Supervisor {
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        if let Err(error) = write_line(&mut writer, &outbound).await {
+                        let written = match outbound {
+                            Outbound::Line(value) => write_line(&mut writer, &value).await,
+                            Outbound::Raw(line) => write_raw_line(&mut writer, &line).await,
+                        };
+                        if let Err(error) = written {
                             // A failed response write must not strand the
                             // shutdown: the stop pass still has to run.
                             if stop {
@@ -278,7 +309,7 @@ impl Supervisor {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
                 let _ = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "detach",
                         payload,
@@ -311,8 +342,8 @@ impl Supervisor {
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
-    ) -> (Vec<Value>, bool) {
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
+    ) -> (Vec<Outbound>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -332,12 +363,12 @@ impl Supervisor {
                     "parse"
                 };
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         id.as_deref(),
                         type_name,
                         &error.to_string(),
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -359,12 +390,12 @@ impl Supervisor {
                 .register(&active_session_id, admission_id)
             {
                 return (
-                    vec![response_line(&response_failure(
+                    vec![Outbound::Line(response_line(&response_failure(
                         Some(&command_id),
                         "parse",
                         &error,
                         None,
-                    ))],
+                    )))],
                     false,
                 );
             }
@@ -377,12 +408,12 @@ impl Supervisor {
         // gate, so its own response path is unaffected.
         if self.shutting_down.load(Ordering::SeqCst) {
             return (
-                vec![response_line(&response_failure(
+                vec![Outbound::Line(response_line(&response_failure(
                     Some(&command_id),
                     &type_name,
                     "Supervisor is shutting down",
                     None,
-                ))],
+                )))],
                 false,
             );
         }
@@ -404,12 +435,12 @@ impl Supervisor {
             if let Some(state) = self.update_prepare.active_state() {
                 if update_gate_refuses(state, &type_name) {
                     return (
-                        vec![response_line(&response_failure(
+                        vec![Outbound::Line(response_line(&response_failure(
                             Some(&command_id),
                             &type_name,
                             UPDATE_PREPARING_MESSAGE,
                             None,
-                        ))],
+                        )))],
                         false,
                     );
                 }
@@ -437,7 +468,14 @@ impl Supervisor {
         if mutating {
             self.mutation_drain.end();
         }
-        outcome
+        (
+            outcome
+                .0
+                .into_iter()
+                .map(Outbound::Line)
+                .collect::<Vec<_>>(),
+            outcome.1,
+        )
     }
     /// The parsed-command match of [`Self::dispatch_client`], executed under
     /// the mutation-drain latch by that wrapper.
@@ -452,7 +490,7 @@ impl Supervisor {
         connection_id: &str,
         command_id: String,
         type_name: String,
-        stream: &tokio::sync::mpsc::Sender<(Vec<Value>, bool)>,
+        stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
@@ -465,7 +503,7 @@ impl Supervisor {
                     ClientRouting::BroadcastExcept {
                         connection_id: connection_id.to_string(),
                     },
-                    closing.clone(),
+                    std::sync::Arc::new(closing.clone()),
                 ));
                 lines.push(closing);
                 // Answer first, then shut down: the connection loop writes
@@ -754,6 +792,7 @@ impl Supervisor {
                         attached,
                         command_id.clone(),
                         type_name.clone(),
+                        Some(stream),
                     )
                     .await;
                 // A selector that resolves to nothing detaches nothing and
@@ -796,7 +835,14 @@ impl Supervisor {
                 // generic one (streamed attach included).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let outcome = self
-                    .route_client_command(command, &client_id, attached, command_id, type_name)
+                    .route_client_command(
+                        command,
+                        &client_id,
+                        attached,
+                        command_id,
+                        type_name,
+                        Some(stream),
+                    )
                     .await;
                 let mut cleared = vec![active_session_id.clone(), target_active_session_id.clone()];
                 if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
@@ -929,8 +975,15 @@ impl Supervisor {
             }
             command => {
                 let client_id = effective_client_id.lock().unwrap().clone();
-                self.route_client_command(command, &client_id, attached, command_id, type_name)
-                    .await
+                self.route_client_command(
+                    command,
+                    &client_id,
+                    attached,
+                    command_id,
+                    type_name,
+                    Some(stream),
+                )
+                .await
             }
         }
     }
@@ -999,7 +1052,9 @@ mod tests {
         for index in 0..flood {
             let _ = supervisor.events.send((
                 ClientRouting::Broadcast,
-                json!({ "type": "session_event", "index": index, "padding": padding }),
+                std::sync::Arc::new(json!({
+                    "type": "session_event", "index": index, "padding": padding
+                })),
             ));
         }
         // Drain the parked connection while watching for the log line: the
