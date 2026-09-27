@@ -1163,7 +1163,7 @@ mod tests {
         );
     }
 
-/// The standalone response line byte-orders its keys exactly like the
+    /// The standalone response line byte-orders its keys exactly like the
     /// TS daemon wire bytes (`daemon-protocol.ts` `success`/`failure`):
     /// id?, type, command, success, then data or error/errorInfo.
     #[test]
