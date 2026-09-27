@@ -246,6 +246,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         default_thinking_level: None,
         no_session: false,
         session: SessionSelection::New,
+        restore_dock_focus: false,
         initial_message: None,
         show_images: true,
         fullscreen_mouse: true,
