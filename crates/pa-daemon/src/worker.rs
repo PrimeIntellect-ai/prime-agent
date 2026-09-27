@@ -83,7 +83,7 @@ use crate::engine::{
     EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity, ScriptedEngine,
     SessionEngine,
 };
-use crate::framing::{write_frame, DEFAULT_PRIVATE_FRAME_LIMITS};
+use crate::framing::{write_frame, write_frame_segments, DEFAULT_PRIVATE_FRAME_LIMITS};
 use crate::journal::WorkerRecoveryJournal;
 use crate::paths;
 use crate::peer::{
