@@ -1059,7 +1059,10 @@ mod tests {
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2, "the settle compacts to verdict + snapshot");
         assert_eq!(after_first_settle, 2, "the first settle compacted");
-        assert_eq!(after_second_admission, 4, "the second admission grew the file");
+        assert_eq!(
+            after_second_admission, 4,
+            "the second admission grew the file"
+        );
         let verdict: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(verdict["busy"], false);
         assert_eq!(verdict["operation"], "turn_end");
