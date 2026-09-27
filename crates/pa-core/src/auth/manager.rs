@@ -1,8 +1,9 @@
 //! `AuthStorage`: credential resolution with runtime overrides, environment
 //! keys, stored credentials, fallback resolvers, and stale-marking. Port of
-//! the AuthStorage class.
+//! the `AuthStorage` class.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::resolve_config_value::{resolve_config_value, resolve_config_value_uncached};
@@ -23,7 +24,10 @@ fn fingerprint(source: AuthSource, material: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 /// One candidate credential source.
@@ -229,7 +233,14 @@ impl AuthStorage {
 
     /// File-backed storage at `agentDir/auth.json`.
     pub fn create(agent_dir: impl AsRef<std::path::Path>) -> Self {
-        Self::create_with_oauth(agent_dir, Arc::new(NoOAuth))
+        // The built-in subscription providers' integration (the codex
+        // refresh): the TS storage delegates to the AI library's oauth
+        // registry on every instance, and `api_key_for` matches `NoOAuth`
+        // (the access token passthrough), so only token refresh gains.
+        Self::create_with_oauth(
+            agent_dir,
+            Arc::new(super::provider_oauth::ProviderOAuth::new()),
+        )
     }
 
     /// File-backed storage with an explicit OAuth integration (the MCP
@@ -251,7 +262,7 @@ impl AuthStorage {
     /// In-memory storage with no ambient environment source: hermetic
     /// resolution for embedded hosts and test harnesses that must pin the
     /// model catalog scope (an ambient provider credential variable such
-    /// as PRIME_API_KEY cannot make models available through this
+    /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
     pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
@@ -307,12 +318,10 @@ impl AuthStorage {
 
     /// Reload credentials from storage.
     pub fn reload(&mut self) {
-        let mut content: Option<String> = None;
-        let result = self.storage.with_lock(&mut |current| {
-            content = current;
-            Ok(((), None))
-        });
-        match result.and_then(|_| parse_storage_data(content.as_deref())) {
+        // The pure-read arm: a locked protocol read on any cache miss, the
+        // process-cached copy on a hit (see `AuthStorageBackend::read`).
+        let result = self.storage.read();
+        match result.and_then(|content| parse_storage_data(content.as_deref())) {
             Ok(data) => {
                 self.data = data;
                 self.load_error = None;
@@ -656,7 +665,7 @@ impl AuthStorage {
         self.reload();
     }
 
-    /// API-key resolution: runtime > (prime-inference: env) > stored (api_key
+    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
     /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
     /// are skipped.
     /// Provider-scoped request headers (prime-inference team header only).
@@ -749,8 +758,7 @@ impl AuthStorage {
                         AuthCredential::Oauth { expires, .. } => {
                             let now_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(i64::MAX);
+                                .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
                                 // Refresh under the backend lock.
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
@@ -839,8 +847,7 @@ impl AuthStorage {
             };
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(i64::MAX);
+                .map_or(i64::MAX, |d| d.as_millis() as i64);
             if now_ms < *expires {
                 refreshed = Some(credential);
                 return Ok(((), None));
@@ -1007,19 +1014,14 @@ mod tests {
     use super::*;
 
     /// Fixed environment credential source: hermetic against the ambient
-    /// process env (e.g. this sandbox exports PRIME_API_KEY globally).
+    /// process env (e.g. this sandbox exports `PRIME_API_KEY` globally).
     struct ScriptedEnv(HashMap<String, String>);
 
     impl EnvCredentialSource for ScriptedEnv {
         fn key_names(&self, provider: &str) -> Option<Vec<String>> {
             let names = pa_ai::env_api_keys::get_api_key_env_vars(provider)?
                 .into_iter()
-                .filter(|name| {
-                    self.0
-                        .get(*name)
-                        .map(|value| !value.is_empty())
-                        .unwrap_or(false)
-                })
+                .filter(|name| self.0.get(*name).is_some_and(|value| !value.is_empty()))
                 .map(str::to_string)
                 .collect::<Vec<_>>();
             (!names.is_empty()).then_some(names)
@@ -1356,7 +1358,7 @@ mod tests {
             update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
         ) -> anyhow::Result<()> {
             let current = self.0.lock().unwrap().clone();
-            let (_, next) = update(current)?;
+            let ((), next) = update(current)?;
             match next {
                 Some(_) => Err(anyhow::anyhow!("the locked write failed")),
                 None => Ok(()),

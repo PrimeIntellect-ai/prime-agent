@@ -21,10 +21,11 @@ use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;
 use crate::daemon_client::DaemonClientEvent;
+use crate::daemon_reconnect::RecoveryKind;
 use crate::exit_guard::ExitGuard;
 use crate::keybindings::KeybindingsManager;
 use crate::session_ui::SessionUi;
-use crate::view::{AgentView, FlushPlan};
+use crate::view::AgentView;
 
 use crossterm::event::KeyEvent;
 use crossterm::terminal;
@@ -39,7 +40,7 @@ type ReconnectConnect = tokio::sync::oneshot::Receiver<
     anyhow::Result<(DaemonClient, mpsc::UnboundedReceiver<DaemonClientEvent>)>,
 >;
 
-/// Cap on the exit-path telemetry flush: the PostHog sink alone allows up
+/// Cap on the exit-path telemetry flush: the `PostHog` sink alone allows up
 /// to 1.5s, so the exit event must be dropped rather than awaited past the
 /// exit-within-1s contract.
 const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
@@ -87,6 +88,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first selection copy (`tui selection used`): `lines` is
     /// the copied text's line count.
     fn selection_used(&self, lines: usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first click-driven interaction (`tui click used`):
+    /// `surface` is `transcript` (a card or condensed-run expand click)
+    /// / `editor` (a prompt-bar caret placement) / `picker` (a menu row
+    /// select).
+    fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A builtin client command was submitted (`agent command used`):
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.
@@ -109,8 +115,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A menu surface opened (event `tui menu opened`): `menu` names the
-    /// surface (`model`, `mcp`), `source` how it opened (`command` — the
-    /// bare slash submission, `tab` — a typed partial + Tab).
+    /// surface (`model`, `mcp`, `settings`, or a read-only info panel
+    /// command — `context`, `session`, `system-prompt`, `logs`,
+    /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
+    /// (`command` — the bare slash submission, `tab` — a typed partial +
+    /// Tab).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -195,17 +204,47 @@ pub trait OnboardingSink: Send + Sync {
     /// only a fresh home (no choice written) is asked once.
     fn agent_traces_choice_written(&self) -> bool;
     /// Persist the trace-sharing answer (TS `setAgentTracesEnabled`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when persisting the choice to the settings store
+    /// fails.
     fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()>;
     /// Mark the onboarding flow completed (TS `markOnboardingShown` +
     /// `flush`); an aborted flow leaves the flag unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when persisting the completion marker fails.
     fn mark_onboarding_complete(&self) -> anyhow::Result<()>;
 }
 
+/// The model-readiness probe (TS `isOnboardingModelReady` over
+/// `getOnboardingState`): the composition root re-resolves the startup
+/// model chain, because the flow's own steps can change the answer (the
+/// Prime sign-in configures the startup model; TS re-checks readiness
+/// before the completion marker writes).
+pub type ModelReadiness = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The first-run flow to run before the session screen (TS
-/// `runStartupOnboarding`, model-ready branch: splash + trace question).
+/// `runStartupOnboarding`): the model-ready branch asks the trace
+/// question on the immediate splash; a home with no usable model runs
+/// the full flow (TS `runOnboardingFlow`'s not-ready branch) — the
+/// welcome screen's login action, the Prime Inference sign-in through
+/// the inline auth panel, the default-model apply, the
+/// connect-more-providers picker, and the trace question.
 #[derive(Clone)]
 pub struct OnboardingTask {
     pub sink: std::sync::Arc<dyn OnboardingSink>,
+    /// The startup model's readiness (TS the flow-start branch).
+    pub model_ready: ModelReadiness,
+    /// The startup model itself (TS `getCurrentModel` at flow time):
+    /// the default model applies only without one.
+    pub current_model: Option<pa_types::ai::Model>,
+    /// The provider auth flows the full branch signs in through (the
+    /// composition root's `/login` surface); `None` leaves a
+    /// not-ready home without its sign-in step.
+    pub provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
 }
 
 impl std::fmt::Debug for OnboardingTask {
@@ -308,6 +347,12 @@ pub struct InteractiveOptions {
     /// Whether the opened session had direct children (TS
     /// `sessionHasChildren`).
     pub session_has_children: bool,
+    /// The agents view handed the pane back from the dock's scoped panel
+    /// (TS `scope_back`: the parent key and escape both reopen the scope
+    /// root's chat): the reopened chat starts with the dock focused on
+    /// the panel's own group — the Subagents item — at its first paint
+    /// after the attach, instead of the prompt bar.
+    pub restore_dock_focus: bool,
     /// The client-process settings the interactive commands read and
     /// persist (`/settings`, `/fullscreen`). The
     /// composition root implements the seam over the real store; `None`
@@ -400,6 +445,15 @@ pub enum HeadlessStep {
     SettleIdle,
     /// Hold until the current turn finishes (bounded by `timeout_ms`).
     WaitIdle { timeout_ms: u64 },
+    /// Hold until a frame rendered after this step contains `needle`
+    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
+    /// rows (side-question answers, streamed notices), which arrive on
+    /// the event cadence rather than a known wall-clock delay.
+    WaitRender { needle: String, timeout_ms: u64 },
+    /// Hold until the newest frame no longer contains `needle` (bounded by
+    /// `timeout_ms`): the verifier's condition wait for a surface closing
+    /// (the pane going away, a banner clearing).
+    WaitGone { needle: String, timeout_ms: u64 },
     /// Hold the plan for `ms` before the next step: the verifier's timing
     /// window (queue prompts deterministically inside a scripted
     /// `delayMs` hold, where the turn is provably busy).
@@ -437,15 +491,304 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Drive the onboarding pane until the trace question settles. Returns
-/// `true` when the exit keys quit the app (TS `onExit` → shutdown).
+/// One onboarding flow's background task (the Prime login, a provider's
+/// key prompt): the spawned join plus the flow's cooperative cancel
+/// signal, shared with the panel handle the flow holds. The phase
+/// drives the pane while it runs and takes the settled outcome.
+struct OnboardingFlowTask {
+    join: tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome>,
+    cancel: crate::auth_panel::FlowCancel,
+}
+
+impl OnboardingFlowTask {
+    /// Spawn the flow and pair it with the panel handle's cancel signal:
+    /// the blocking login body checks the signal before its auth-store
+    /// writes, so the pane can end the flow without aborting it
+    /// (a `JoinHandle::abort` cannot reach a started `spawn_blocking`
+    /// login — without the signal an exited pane would leave the login
+    /// running to completion and still writing credentials).
+    fn spawn<F>(future: F, cancel: crate::auth_panel::FlowCancel) -> Self
+    where
+        F: std::future::Future<Output = crate::provider_auth::ProviderAuthOutcome> + Send + 'static,
+    {
+        OnboardingFlowTask {
+            join: tokio::spawn(future),
+            cancel,
+        }
+    }
+
+    /// The flow's settled outcome (the pane waits for it).
+    fn settle(
+        &mut self,
+    ) -> &mut tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome> {
+        &mut self.join
+    }
+
+    /// End the flow with the exiting pane: mark the cooperative signal,
+    /// then wait for the blocking login to observe it (bounded by the
+    /// login's request timeouts) — the exit never leaves a detached
+    /// flow writing credentials in the background.
+    async fn end(self) {
+        self.cancel.mark();
+        let _ = self.join.await;
+    }
+}
+
+/// The outcome of one onboarding pane drive: a screen decision, the exit
+/// keys, or the background flow settling while the pane waited.
+enum PaneOutcome {
+    /// A screen decision: the answer to the mounted panel's step, or the
+    /// onboarding exit keys (they arrive as a decision, not a drive
+    /// outcome — the pane's key loop reports them like any other key).
+    Decision(crate::onboarding::OnboardingDecision),
+    /// The input channel closed under the pane (the headless plan is done,
+    /// the terminal reader is gone): the flow ends without an answer and
+    /// the marker stays unset — the next launch re-runs it.
+    InputClosed,
+    /// The flow settled; `Err` is a crashed task (the flow's outcome
+    /// reports the same error surface a failed login does).
+    Flow(Result<crate::provider_auth::ProviderAuthOutcome, tokio::task::JoinError>),
+}
+
+/// The pane drive's borrowed services: the input channel, the renderer,
+/// the force-quit guard, the mounted panels' keybindings, and the auth
+/// panel request channel (the same channel the run loop services once
+/// the pane ends).
+struct PaneDrive<'a> {
+    ui_rx: &'a mut mpsc::UnboundedReceiver<UiInput>,
+    renderer: &'a mut Renderer,
+    exit_guard: &'a ExitGuard,
+    keybindings: KeybindingsManager,
+    auth_panel_rx: &'a mut mpsc::UnboundedReceiver<crate::auth_panel::AuthPanelRequest>,
+    /// The run loop's headless-plan-completed flag: the pane marks it
+    /// when the plan's `HeadlessDone` lands while it owns the input
+    /// channel, so the run loop's idle gate still ends the run (the
+    /// pane keeps driving until the channel closes or a decision ends
+    /// it).
+    headless_done: &'a mut bool,
+}
+
+/// The pane drive's render barrier (the run loop's `WaitRender`/
+/// `WaitGone` contract, pane-scoped): the headless plan's condition
+/// steps hold the queued input batch behind them until a frame rendered
+/// after arming satisfies the condition, so later keystrokes land on a
+/// pane that is actually ready for them instead of racing the panel
+/// mounts (a fixed wall-clock sleep only wins when the machine is idle).
+enum PaneBarrier {
+    /// `WaitRender`: a frame rendered at or after the baseline contains
+    /// the needle.
+    Render {
+        needle: String,
+        baseline: usize,
+        deadline: Instant,
+    },
+    /// `WaitGone`: the newest frame no longer contains the needle.
+    Gone { needle: String, deadline: Instant },
+}
+
+/// Draw the mounted onboarding screen and drive it until a key decides,
+/// the exit keys quit, or the optional background flow settles (TS the
+/// splash's render/wait loop). Each iteration draws first and waits
+/// after — a deciding key that is already queued still leaves the
+/// mounted frame captured — servicing keys, pastes, the auth-panel
+/// channel, and the animation tick (TS `ANIMATION_INTERVAL_MS`).
+async fn drive_onboarding_pane(
+    view: &mut AgentView,
+    drive: &mut PaneDrive<'_>,
+    mut screen: crate::onboarding::OnboardingScreen,
+    mut flow: Option<OnboardingFlowTask>,
+    osc_sink: &mut crate::clipboard::OscSink,
+) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
+    // The armed render barrier holds the input batch behind it (the
+    // loop's post-draw check pops it on satisfy or timeout).
+    let mut barrier: Option<PaneBarrier> = None;
+    loop {
+        // The barrier check rides the redraw cadence: every iteration
+        // drew a fresh frame first, so the condition scans the frames
+        // that exist now.
+        if let Some(armed) = barrier.take() {
+            let satisfied = drive
+                .renderer
+                .headless_frames()
+                .is_some_and(|frames| match &armed {
+                    PaneBarrier::Render {
+                        needle, baseline, ..
+                    } => frames
+                        .get(*baseline..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|frame| frame.contains(needle.as_str())),
+                    PaneBarrier::Gone { needle, .. } => !frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str())),
+                });
+            let expired = match &armed {
+                PaneBarrier::Render { deadline, .. } | PaneBarrier::Gone { deadline, .. } => {
+                    Instant::now() > *deadline
+                }
+            };
+            if !satisfied && !expired {
+                barrier = Some(armed);
+            }
+        }
+        // The pane owns the frame from the mount (TS renders the splash
+        // the moment it opens).
+        view.onboarding = Some(screen);
+        match drive.renderer {
+            Renderer::Terminal { .. } => {
+                if let Some(renderer) = drive.renderer.is_terminal_mut() {
+                    if let Err(error) = crate::app::draw(renderer, view) {
+                        // A failed frame ends the pane: end a
+                        // still-running login flow with it — the
+                        // cooperative cancel reaches the blocking login
+                        // body, so the error path never leaves a
+                        // detached flow writing credentials in the
+                        // background.
+                        if let Some(task) = flow.take() {
+                            task.end().await;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            Renderer::Headless { .. } => drive.renderer.render_headless_pane(view),
+        }
+        let Some(mut pane) = view.onboarding.take() else {
+            unreachable!("the pane mounts at the top of every iteration");
+        };
+        tokio::select! {
+            maybe_input = drive.ui_rx.recv(), if barrier.is_none() => {
+                // A closed input channel ends the pane (the headless plan
+                // is done, the terminal reader is gone): without this arm
+                // the always-ready `recv()` spins the redraw loop hot.
+                let Some(input) = maybe_input else {
+                    // A closed input channel ends the pane: end a
+                    // still-running login flow with it — the
+                    // cooperative cancel reaches the blocking login
+                    // body, so the exit never leaves a detached flow
+                    // writing credentials in the background.
+                    if let Some(task) = flow.take() {
+                        task.end().await;
+                    }
+                    return Ok((pane, PaneOutcome::InputClosed));
+                };
+                match input {
+                UiInput::Key(key) => {
+                    let Some(key_id) = crate::keys::key_event_to_id(&key) else {
+                        screen = pane;
+                        continue;
+                    };
+                    // The onboarding exit keys include Ctrl+C (`app.clear`):
+                    // report the handled press so the force-quit guard's
+                    // handled counter stays in sync with the reader's
+                    // observations.
+                    if key_id == "ctrl+c" {
+                        drive.exit_guard.note_ctrl_c_handled();
+                    }
+                    if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
+                        // A decision tears the pane down mid-drive: end
+                        // a still-running login flow with it (TS the
+                        // dialog's abort signal) — the cooperative
+                        // cancel reaches the blocking login body, so a
+                        // quit never leaves a detached flow writing
+                        // credentials in the background.
+                        if let Some(task) = flow.take() {
+                            task.end().await;
+                        }
+                        return Ok((pane, PaneOutcome::Decision(decision)));
+                    }
+                }
+                UiInput::Paste(text) => {
+                    pane.handle_paste(&text);
+                }
+                // The headless plan completed while the pane owned the
+                // channel: mark the run loop's flag (the pane keeps
+                // driving until the channel closes or a decision ends
+                // it — the run loop's idle gate ends the run).
+                UiInput::HeadlessDone => *drive.headless_done = true,
+                // The plan's render barriers (the run loop's
+                // `WaitRender`/`WaitGone` contract, pane-scoped): a
+                // condition that already holds pops immediately; a
+                // pending one arms and holds the input batch behind it
+                // until a later frame satisfies it or the deadline pops
+                // (the timeout proceeds silently — the harness's
+                // assertion then reports the actual frame, the honest
+                // failure mode for a stall). The steps only ever come
+                // from the headless harness; a terminal pane consumes
+                // them as no-ops.
+                UiInput::WaitRender { needle, timeout_ms } => {
+                    let holds_now = drive.renderer.headless_frames().is_some_and(|frames| {
+                        frames.last().is_some_and(|frame| frame.contains(needle.as_str()))
+                    });
+                    if !holds_now {
+                        if let Some(frames) = drive.renderer.headless_frames() {
+                            barrier = Some(PaneBarrier::Render {
+                                needle,
+                                baseline: frames.len(),
+                                deadline: Instant::now()
+                                    + Duration::from_millis(timeout_ms),
+                            });
+                        }
+                    }
+                }
+                UiInput::WaitGone { needle, timeout_ms } => {
+                    let holds_now = drive.renderer.headless_frames().is_some_and(|frames| {
+                        !frames.last().is_some_and(|frame| frame.contains(needle.as_str()))
+                    });
+                    if !holds_now {
+                        barrier = Some(PaneBarrier::Gone {
+                            needle,
+                            deadline: Instant::now()
+                                + Duration::from_millis(timeout_ms),
+                        });
+                    }
+                }
+                // The plan's driving steps mean nothing to the pane
+                // (the headless harness replays them against the session
+                // screen once the pane releases).
+                UiInput::Submit(_)
+                | UiInput::SettleIdle
+                | UiInput::Mouse(_)
+                | UiInput::WaitIdle { .. }
+                | UiInput::ScrollTop
+                | UiInput::Resize => {}
+                }
+            }
+            // The login flows drive the mounted dialog through the
+            // request channel (the run loop's channel arm equivalent for
+            // the pane-owned panel).
+            maybe_request = drive.auth_panel_rx.recv() => {
+                if let Some(request) = maybe_request {
+                    pane.apply_auth_request(request);
+                }
+            }
+            settled = async {
+                match flow.as_mut() {
+                    Some(task) => task.settle().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                return Ok((pane, PaneOutcome::Flow(settled)));
+            }
+            // The field animates behind the flow panels until dismissal
+            // (TS ANIMATION_INTERVAL_MS).
+            () = tokio::time::sleep(Duration::from_millis(120)) => {
+                pane.tick();
+            }
+        }
+        // Hand the pane back for the next draw (the non-deciding arms).
+        screen = pane;
+    }
+}
+
+/// Drive the first-run onboarding flow before the session screen (TS
+/// `runStartupOnboarding` -> `runOnboardingFlow`). Returns `true` when
+/// the exit keys quit the app (TS `onExit` -> shutdown).
 async fn run_onboarding_phase(
     task: &OnboardingTask,
     session: &mut SessionUi,
     view: &mut AgentView,
-    ui_rx: &mut mpsc::UnboundedReceiver<UiInput>,
-    renderer: &mut Renderer,
-    exit_guard: &ExitGuard,
+    drive: &mut PaneDrive<'_>,
 ) -> Result<bool> {
     // One-shot: the startup gate read the marker once to mount this task,
     // but the agents-view flow re-runs the phase for every session it
@@ -454,89 +797,424 @@ async fn run_onboarding_phase(
     if task.sink.onboarding_shown() {
         return Ok(false);
     }
-    // A home that already carries a trace-sharing choice (a provisioned or
-    // copied-config home, or a `/traces` change made before the flow
-    // completed) never sees the question: the standing choice stands and
-    // the flow completes silently. The question below is the first-run
-    // step for a fresh home only — asked exactly once, then the marker
-    // gates every later run.
-    if task.sink.agent_traces_choice_written() {
+    if (task.model_ready)() {
+        // The ready branch's standing-choice gate (the operator ruling): a
+        // home that already carries a trace-sharing choice (a provisioned
+        // or copied-config home, or a `/traces` change made before the
+        // flow completed) never sees the question — the standing choice
+        // stands and the flow completes silently. The question below is
+        // the first-run step for a fresh home only — asked exactly once,
+        // then the marker gates every later run.
+        if task.sink.agent_traces_choice_written() {
+            if let Err(error) = task.sink.mark_onboarding_complete() {
+                warn_onboarding_persist_failure(session, view, &error);
+            }
+            return Ok(false);
+        }
+        // The model-ready branch (TS `runOnboardingFlow`'s ready case):
+        // the immediate splash mounts the trace question alone.
+        let screen = crate::onboarding::OnboardingScreen::new();
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
+        match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
+                // `Share` opts in; `Not now` keeps traces off (TS
+                // finish(index === 0)). A cancel writes no answer at all,
+                // but the flow still completed. A write that fails
+                // surfaces as a warning row: the flow still settled this
+                // run, but an unpersisted marker re-mounts it next launch —
+                // the user must know, the run never dies over it.
+                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                    warn_onboarding_persist_failure(session, view, &error);
+                }
+            }
+            // A cancel writes no answer; the flow still completed (TS
+            // finish(undefined)).
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
+            // The question binds nothing else; a settled flow never ran.
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Begin
+                | crate::onboarding::OnboardingDecision::Pick(_),
+            )
+            | PaneOutcome::Flow(_) => {
+                unreachable!("the question panel yields Selected or Cancelled only")
+            }
+        }
         if let Err(error) = task.sink.mark_onboarding_complete() {
             warn_onboarding_persist_failure(session, view, &error);
         }
         return Ok(false);
     }
-    let mut screen = crate::onboarding::OnboardingScreen::new();
-    let keybindings = view.editor.keybindings().clone();
-    let mut exit_requested = false;
-    loop {
-        // The pane owns the frame from the mount (TS renders the splash the
-        // moment it opens), so each iteration draws first and waits for
-        // input after — a deciding key that is already queued still leaves
-        // the mounted frame captured.
-        view.onboarding = Some(screen.clone());
-        match renderer {
-            Renderer::Terminal { .. } => {
-                if let Some(renderer) = renderer.is_terminal_mut() {
-                    crate::app::draw(renderer, view)?;
-                }
-            }
-            Renderer::Headless { .. } => renderer.render_headless_pane(view),
+
+    // The full flow (TS `runOnboardingFlow`'s not-ready branch): one
+    // sequence for every first launch. Signing in is instant when a
+    // Prime CLI token is already on disk, so users who arrive with
+    // credentials still reach the same account, provider and trace
+    // questions. A flow that aborts (a cancelled or failed sign-in,
+    // the exit keys) leaves the marker unset — the next launch retries.
+    let screen = crate::onboarding::OnboardingScreen::welcome();
+    let (mut screen, outcome) =
+        drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
+    // The welcome binds one key: Enter starts the flow (TS: cancel is
+    // deliberately unbound — signing in is the only way forward).
+    match outcome {
+        PaneOutcome::InputClosed => return Ok(false),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
+        PaneOutcome::Decision(
+            crate::onboarding::OnboardingDecision::Selected(_)
+            | crate::onboarding::OnboardingDecision::Cancelled
+            | crate::onboarding::OnboardingDecision::Pick(_),
+        )
+        | PaneOutcome::Flow(_) => {
+            unreachable!("the welcome screen yields Begin or Exit only")
         }
-        view.onboarding = None;
-        tokio::select! {
-            maybe_input = ui_rx.recv() => {
-                if let Some(UiInput::Key(key)) = maybe_input {
-                    let Some(key_id) = crate::keys::key_event_to_id(&key) else {
-                        continue;
-                    };
-                    // The onboarding exit keys include Ctrl+C (`app.clear`):
-                    // report the handled press so the force-quit guard's
-                    // handled counter stays in sync with the reader's
-                    // observations.
-                    if key_id == "ctrl+c" {
-                        exit_guard.note_ctrl_c_handled();
+    }
+
+    // The Prime Inference sign-in (TS `runPrimeInferenceLogin`) through
+    // the inline auth panel, over the composition root's auth surface.
+    let Some(provider_auth) = task.provider_auth.clone() else {
+        // No auth surface means no sign-in: the flow aborts and the
+        // marker stays unset (the product always provides the surface).
+        return Ok(false);
+    };
+    let prime_row = provider_auth
+        .0
+        .login_options()
+        .await
+        .into_iter()
+        .find(|row| row.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID);
+    let Some(prime_row) = prime_row else {
+        // A composition root without the Prime row has no sign-in to run.
+        return Ok(false);
+    };
+    let prime_panel = session.auth_panel_handle();
+    let prime_cancel = prime_panel.cancel_signal();
+    // TS `loginDialogOptions()`'s onboarding shape: the panel mounts
+    // chrome-less (`topRule: false, hideTitle: true`) — the splash's
+    // heading names the step — and the actions row reads the same
+    // resolved keybindings the pane answers with; the panel carries the
+    // flow's cancel signal, so the row's cancel hint ends the login (TS
+    // the dialog's abort signal).
+    let mut prime_dialog =
+        crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", prime_row.name));
+    prime_dialog.set_cancel_signal(prime_cancel.clone());
+    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+        panel: std::boxed::Box::new(prime_dialog),
+        heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+    });
+    let prime_row_for_flow = prime_row.clone();
+    let prime_auth = provider_auth.clone();
+    let prime_flow = OnboardingFlowTask::spawn(
+        async move {
+            prime_auth
+                .0
+                .login_on_panel(&prime_row_for_flow, prime_panel)
+                .await
+        },
+        prime_cancel,
+    );
+    let (mut screen, outcome) = drive_onboarding_pane(
+        view,
+        &mut *drive,
+        screen,
+        Some(prime_flow),
+        &mut session.osc_sink,
+    )
+    .await?;
+    // The dialog consumes every key itself; only the flow settling or
+    // the exit keys can end the drive.
+    let login = match outcome {
+        PaneOutcome::InputClosed => return Ok(false),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+        PaneOutcome::Flow(result) => result.unwrap_or_else(|_| {
+            crate::provider_auth::ProviderAuthOutcome::Error(
+                "the Prime Inference login task failed".to_string(),
+            )
+        }),
+        PaneOutcome::Decision(_) => {
+            unreachable!("the login dialog yields no decisions")
+        }
+    };
+    match login {
+        // The status row lands behind the pane (the session transcript
+        // renders it once the flow dismisses).
+        crate::provider_auth::ProviderAuthOutcome::Status(message) => {
+            session
+                .apply_auth_outcome(
+                    crate::provider_auth::ProviderAuthOutcome::Status(message),
+                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                    view,
+                )
+                .await;
+        }
+        // A failed or cancelled sign-in aborts the flow: the marker
+        // stays unset and the next launch retries (TS `authResult.status
+        // !== "success"`).
+        outcome => {
+            session
+                .apply_auth_outcome(
+                    outcome,
+                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                    view,
+                )
+                .await;
+            return Ok(false);
+        }
+    }
+
+    // The default-model apply (TS `prepareForModelSelectionAfterLogin`):
+    // only a home with no current model picks the Prime default. The
+    // daemon resolves the model against its own registry — read fresh at
+    // the switch, so the just-stored credential is what makes GLM 5.3
+    // available (the client's startup snapshot predates the sign-in and
+    // never carries it). A resolution failure surfaces as the switch's
+    // error row and the flow still completes.
+    if task.current_model.is_none() {
+        session
+            .apply_model_selection(
+                crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                crate::provider_auth::PRIME_INFERENCE_DEFAULT_MODEL_ID,
+                view,
+            )
+            .await;
+    }
+
+    // The connect-more-providers picker (TS `askOnboardingProviders`):
+    // the picker stays mounted between logins so several can connect in
+    // one pass, with fresh connected marks after each one.
+    loop {
+        let rows = provider_auth.0.login_options().await;
+        // One row per provider id (TS dedupes by id), never the Prime
+        // row the flow just signed in and never a service (`mcp:`
+        // integrations are services, not model providers).
+        let mut seen = std::collections::HashSet::new();
+        let options: Vec<crate::onboarding_flow::ProviderPickerOption> = rows
+            .iter()
+            .filter(|row| {
+                row.id != crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    && !row.id.starts_with("mcp:")
+            })
+            .filter(|row| seen.insert(row.id.clone()))
+            .map(|row| crate::onboarding_flow::ProviderPickerOption {
+                id: row.id.clone(),
+                // A custom provider's name is user-controlled bytes (an
+                // unknown provider falls back to its id): the control
+                // scrub runs before any row renders it.
+                name: crate::menu_panel::scrub_controls(&row.name),
+                connected: row.configured,
+                available: row.available,
+            })
+            .collect();
+        // An empty provider list ends the step (TS `options.length === 0`).
+        if options.is_empty() {
+            break;
+        }
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Providers(
+            crate::onboarding_flow::ProviderPicker::new(options),
+        ));
+        let (picked_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
+        screen = picked_screen;
+        let pick = match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+            // Continue or Esc ends the step (TS settle(undefined) ->
+            // return).
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
+                crate::onboarding_flow::ProviderPick::Continue
+                | crate::onboarding_flow::ProviderPick::Cancelled,
+            )) => break,
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
+                crate::onboarding_flow::ProviderPick::Provider(id),
+            )) => id,
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Selected(_)
+                | crate::onboarding::OnboardingDecision::Cancelled
+                | crate::onboarding::OnboardingDecision::Begin,
+            )
+            | PaneOutcome::Flow(_) => unreachable!("the picker yields Pick only"),
+        };
+        let row = rows
+            .iter()
+            .find(|row| row.id == pick)
+            .expect("the picked row came from the same options list");
+        // TS `loginProvider`: the row's flow — the panel-prompted key,
+        // or the panel-driven flow.
+        if row.flow == crate::provider_auth::AuthFlow::ApiKeyPrompt {
+            let panel = session.auth_panel_handle();
+            let prompt_cancel = panel.cancel_signal();
+            let mut api_key_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            api_key_dialog.set_cancel_signal(prompt_cancel.clone());
+            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                panel: std::boxed::Box::new(api_key_dialog),
+                heading: None,
+            });
+            let prompt_cancel_body = prompt_cancel.clone();
+            let provider_id = row.id.clone();
+            let row = row.clone();
+            let prompt_auth = provider_auth.clone();
+            let prompt_flow = OnboardingFlowTask::spawn(
+                async move {
+                    // TS `showApiKeyLoginDialog`: the submitted key
+                    // stores through the composition root; a cancel is
+                    // silent. A pane exit after the submit marks the
+                    // signal — the login (the credential write) never
+                    // runs once the pane is gone.
+                    match panel
+                        .paste_prompt(
+                            crate::onboarding_flow::API_KEY_PROMPT,
+                            // TS `showPrompt` renders the prompt as a
+                            // section title in the text colour.
+                            crate::auth_panel::PastePromptTone::Text,
+                            // The field renders bullets, not the typed key:
+                            // a first-run screen is exactly the shared and
+                            // recorded surface a secret must never render on
+                            // (the token paste panel's rule; TS renders the
+                            // typed key — the port masks the secret).
+                            crate::auth_panel::PasteStyle::Masked,
+                        )
+                        .await
+                    {
+                        Some(api_key) if !prompt_cancel_body.cancelled() => {
+                            prompt_auth.0.login(&row, Some(&api_key)).await
+                        }
+                        _ => crate::provider_auth::ProviderAuthOutcome::Cancelled,
                     }
-                    match screen.handle_key(&key_id, &keybindings) {
-                        Some(crate::onboarding::OnboardingDecision::Selected(index)) => {
-                            // `Share` opts in; `Not now` keeps traces off
-                            // (TS finish(index === 0)). A cancel writes no
-                            // answer at all, but the flow still completed.
-                            // A write that fails surfaces as a warning row:
-                            // the flow still settled this run, but an
-                            // unpersisted marker re-mounts it next launch —
-                            // the user must know, the run never dies over it.
-                            if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            if let Err(error) = task.sink.mark_onboarding_complete() {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            break;
-                        }
-                        Some(crate::onboarding::OnboardingDecision::Cancelled) => {
-                            if let Err(error) = task.sink.mark_onboarding_complete() {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            break;
-                        }
-                        Some(crate::onboarding::OnboardingDecision::Exit) => {
-                            exit_requested = true;
-                            break;
-                        }
-                        None => {}
-                    }
+                },
+                prompt_cancel,
+            );
+            let (prompted_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(prompt_flow),
+                &mut session.osc_sink,
+            )
+            .await?;
+            screen = prompted_screen;
+            match outcome {
+                PaneOutcome::InputClosed => return Ok(false),
+                PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
+                    return Ok(true);
+                }
+                PaneOutcome::Flow(result) => {
+                    let outcome = result.unwrap_or_else(|_| {
+                        crate::provider_auth::ProviderAuthOutcome::Error(
+                            "the provider login task failed".to_string(),
+                        )
+                    });
+                    session
+                        .apply_auth_outcome(outcome, &provider_id, view)
+                        .await;
+                }
+                PaneOutcome::Decision(_) => {
+                    unreachable!("the key prompt dialog yields no decisions")
                 }
             }
-            // The field animates behind the flow panels until dismissal
-            // (TS ANIMATION_INTERVAL_MS).
-            _ = tokio::time::sleep(Duration::from_millis(120)) => {
-                screen.tick();
+        } else {
+            // A terminal-flow row runs its panel-driven flow through the
+            // mounted auth panel — the MCP device flow, the ported codex
+            // subscription OAuth: the `/login` selector's panel path
+            // (the non-panel body answers the silent cancel for OAuth
+            // rows, so it would dead-end the available rows; the picker
+            // keeps the unavailable ones inert). The panel mounts
+            // chrome-less (TS the onboarding `loginDialogOptions`) with
+            // the pane's resolved keybindings.
+            let panel = session.auth_panel_handle();
+            let service_cancel = panel.cancel_signal();
+            let mut service_dialog =
+                crate::auth_panel::AuthPanel::onboarding(format!("Login to {}", row.name));
+            service_dialog.set_cancel_signal(service_cancel.clone());
+            screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                panel: std::boxed::Box::new(service_dialog),
+                heading: None,
+            });
+            let provider_id = row.id.clone();
+            let row = row.clone();
+            let service_auth = provider_auth.clone();
+            let provider_login = OnboardingFlowTask::spawn(
+                async move { service_auth.0.login_on_panel(&row, panel).await },
+                service_cancel,
+            );
+            let (login_screen, outcome) = drive_onboarding_pane(
+                view,
+                &mut *drive,
+                screen,
+                Some(provider_login),
+                &mut session.osc_sink,
+            )
+            .await?;
+            screen = login_screen;
+            match outcome {
+                PaneOutcome::InputClosed => return Ok(false),
+                PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => {
+                    return Ok(true);
+                }
+                PaneOutcome::Flow(result) => {
+                    let outcome = result.unwrap_or_else(|_| {
+                        crate::provider_auth::ProviderAuthOutcome::Error(
+                            "the provider login task failed".to_string(),
+                        )
+                    });
+                    session
+                        .apply_auth_outcome(outcome, &provider_id, view)
+                        .await;
+                }
+                PaneOutcome::Decision(_) => {
+                    unreachable!("the login dialog yields no decisions")
+                }
+            }
+        }
+        // The loop re-mounts a fresh picker with fresh connected marks.
+    }
+
+    // The trace question (TS `askOnboardingTraceOptIn`), the flow's last
+    // step — the merged question surface. A home that already carries a
+    // standing choice skips it (the operator ruling: the choice stands)
+    // while the flow still completes below — an aborted retry (the model
+    // still not ready) leaves the marker unset, so the next launch runs
+    // the sign-in again without re-asking.
+    if !task.sink.agent_traces_choice_written() {
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Question(
+            crate::onboarding_choice::OnboardingChoice::new(
+                crate::onboarding::trace_question_options(),
+                None,
+                crate::onboarding::trace_question_config(),
+            ),
+        ));
+        let (_screen, outcome) =
+            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
+        match outcome {
+            PaneOutcome::InputClosed => return Ok(false),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
+                // `Share` opts in; `Not now` keeps traces off. A cancel
+                // writes no answer, but the flow still completed.
+                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                    warn_onboarding_persist_failure(session, view, &error);
+                }
+            }
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Begin
+                | crate::onboarding::OnboardingDecision::Pick(_),
+            )
+            | PaneOutcome::Flow(_) => {
+                unreachable!("the question panel yields Selected or Cancelled only")
             }
         }
     }
-    if exit_requested {
-        return Ok(true);
+    // TS `runStartupOnboarding`: only a completed flow whose model is
+    // ready marks onboarding seen — a flow whose sign-in left the home
+    // without a usable model stays unset and retries next launch.
+    if (task.model_ready)() {
+        if let Err(error) = task.sink.mark_onboarding_complete() {
+            warn_onboarding_persist_failure(session, view, &error);
+        }
     }
     Ok(false)
 }
@@ -585,6 +1263,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// Links opened by mouse clicks (headless runs have no terminal to
+    /// hand a browser to; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -604,6 +1285,18 @@ enum UiInput {
     /// One materialized input-idle tick (the headless `SettleIdle` step).
     SettleIdle,
     WaitIdle {
+        timeout_ms: u64,
+    },
+    /// The headless `WaitRender` barrier's condition: a frame rendered
+    /// after arming must contain `needle`.
+    WaitRender {
+        needle: String,
+        timeout_ms: u64,
+    },
+    /// The headless `WaitGone` barrier's condition: the newest frame must
+    /// no longer contain `needle`.
+    WaitGone {
+        needle: String,
         timeout_ms: u64,
     },
     ScrollTop,
@@ -627,6 +1320,16 @@ const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
 
 /// The reconnect backoff cap.
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// TS #2458 `DAEMON_RECONNECT_TIMEOUT_MS`: the announced non-update
+/// closing's recovery window — an explicit stop stays stopped, so the
+/// pane waits for the daemon to come back bounded instead of retrying
+/// through the §10.2 resume window.
+const DAEMON_SHUTDOWN_RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+
+/// TS #2458 `SHUTDOWN_RECONNECT_RETRY_MS`: the shutdown recovery's poll
+/// cadence (fixed, unlike the doubling hiccup backoff).
+const SHUTDOWN_RECONNECT_RETRY: Duration = Duration::from_millis(100);
 
 /// TS `DAEMON_RECONNECT_TIMEOUT_MS`: the bounded session-plane reconnect
 /// window after the direct worker link dies.
@@ -670,21 +1373,23 @@ impl SessionReconnect {
     }
 }
 
-/// The interactive loop's reconnect driver (spec §10.2): attempts with
-/// doubling backoff inside the 10-minute window; the user can leave with
-/// Ctrl+C at any point (UI input keeps flowing through the same loop).
-/// The same driver also serves an UNEXPECTED connection loss (the
-/// supervisor connection died mid-run with no update in flight — a daemon
-/// hiccup at load, 2026-09-24: the one-shot path exited the operator's
-/// TUI with "the daemon connection closed"): the pane keeps its
-/// transcript and editor and retries instead of dying.
+/// The interactive loop's full reconnect driver (spec §10.2): attempts
+/// with backoff inside the window; the user can leave with Ctrl+C at any
+/// point (UI input keeps flowing through the same loop). Three closings arm
+/// it — an update restart's resume contract, an UNEXPECTED connection loss
+/// (the supervisor connection died mid-run with no update in flight — a
+/// daemon hiccup at load, 2026-09-24: the one-shot path exited the
+/// operator's TUI with "the daemon connection closed"), and an ANNOUNCED
+/// non-update closing (TS #2458: the operator's own shutdown used to kill
+/// every attached window) — the pane keeps its transcript and editor and
+/// retries instead of dying.
 struct ReconnectLoop {
     deadline: tokio::time::Instant,
     next_attempt: tokio::time::Instant,
     delay: Duration,
-    /// Whether this driver serves an unexpected loss (the expiry and
-    /// failure notes name it, not an update restart).
-    lost: bool,
+    /// The closing that armed this driver: the reattach banner and the
+    /// expiry row follow it.
+    kind: RecoveryKind,
 }
 
 impl ReconnectLoop {
@@ -694,28 +1399,74 @@ impl ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: false,
+            kind: RecoveryKind::Update,
         }
     }
 
     /// The unexpected-loss variant: same window, same backoff, its own
-    /// expiry note.
+    /// expiry row.
     fn start_lost() -> Self {
         let delay = Duration::from_secs(1);
         ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
-            lost: true,
+            kind: RecoveryKind::Lost,
         }
     }
 
-    /// The next attempt with doubling backoff (capped).
+    /// TS #2458 `reconnectAfterShutdown`: the announced non-update
+    /// closing. The window is the TS reconnect timeout (not the §10.2
+    /// resume window — an explicit stop stays stopped), the cadence is
+    /// the TS fixed poll, and the expiry is the saved-transcript close.
+    fn start_shutdown() -> Self {
+        ReconnectLoop {
+            deadline: tokio::time::Instant::now() + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            next_attempt: tokio::time::Instant::now() + SHUTDOWN_RECONNECT_RETRY,
+            delay: SHUTDOWN_RECONNECT_RETRY,
+            kind: RecoveryKind::Shutdown,
+        }
+    }
+
+    /// The next attempt: doubling backoff (capped) for the resume and
+    /// hiccup windows; the shutdown recovery keeps the TS fixed poll.
     fn next_attempt(mut self) -> Self {
-        self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        if !matches!(self.kind, RecoveryKind::Shutdown) {
+            self.delay = (self.delay * 2).min(RECONNECT_BACKOFF_MAX);
+        }
         self.next_attempt = tokio::time::Instant::now() + self.delay;
         self
     }
+}
+
+/// TS #2458 `reconnectAfterShutdown`'s arming: an announced non-update
+/// closing (`daemon_closing` with no update) keeps the pane mounted while
+/// it waits bounded for the daemon to come back on the same socket path
+/// (the recovery never relaunches the daemon — an explicit stop stays
+/// stopped). No-op when the notice is absent (a bare session stop stays
+/// stopped) or a driver already owns the recovery; `true` when it armed.
+fn arm_shutdown_recovery(
+    session: &mut SessionUi,
+    view: &mut AgentView,
+    reconnect: &mut Option<ReconnectLoop>,
+    session_reconnect: &mut Option<SessionReconnect>,
+) -> bool {
+    if reconnect.is_some() || session.daemon_closing_notice.as_deref() != Some("shutdown") {
+        return false;
+    }
+    session.note_as(
+        "the Prime Agent daemon shut down; waiting for it to come back…",
+        crate::chat::StatusKind::Warning,
+        view,
+    );
+    // TS #2458's yield rule: the shutdown recovery owns the run — a
+    // session-plane retry armed by an earlier direct-link loss would race
+    // it through a dying supervisor, and its expiry would block submits
+    // after a later reconnect lands.
+    *session_reconnect = None;
+    *reconnect = Some(ReconnectLoop::start_shutdown());
+    session.dirty = true;
+    true
 }
 
 /// Run the interactive UI until the user exits (terminal) or the plan
@@ -729,9 +1480,58 @@ impl ReconnectLoop {
 /// idempotent, so a return after the tail already ran (the startup
 /// refusal path finishes the surface itself) only re-emits the two
 /// unconditional tail bytes.
+/// The open route for one interactive run (TS `runAgentsViewLoop`'s
+/// open versus the CLI's own open): the agents-view open waits through a
+/// daemon update restart (TS #2391) instead of failing the open hard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionOpenRoute {
+    /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single
+    /// attempt, today's behavior — a preparing-restart create refusal
+    /// hands off to the agents view with the refusal as its status line.
+    Cli,
+    /// The agents view's open (TS `runAgentsViewLoop` ->
+    /// `openAgentsViewSession`): the open waits through the
+    /// update-restart window and retries against the successor.
+    AgentsView,
+}
+
+/// Run one interactive session (the CLI open route).
+///
+/// # Errors
+///
+/// Returns `Err` when the interactive surface fails (the daemon
+/// connection, a transport error in a key handler, a draw failure, a
+/// suspend/resume failure); the restore runs first whenever this run
+/// owned or adopted the terminal.
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::Cli).await
+}
+
+/// Run one interactive session opened from the agents view (TS #2391): the
+/// startup open waits through a daemon update restart instead of failing
+/// (see [`SessionOpenRoute::AgentsView`]).
+///
+/// # Errors
+///
+/// Returns `Err` when the interactive surface fails (the daemon
+/// connection, a transport error in a key handler, a draw failure, a
+/// suspend/resume failure) or the open waits out the update-restart
+/// window; the restore runs first whenever this run owned or adopted
+/// the terminal.
+pub async fn run_interactive_agents_view_open(
+    options: InteractiveOptions,
+    ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::AgentsView).await
+}
+
+async fn run_interactive_route(
+    options: InteractiveOptions,
+    ui: UiMode,
+    route: SessionOpenRoute,
 ) -> Result<InteractiveOutcome> {
     // The headless harness drives the same dispatch on plain pipes: it
     // never owned the terminal, so its error returns must not run a
@@ -744,7 +1544,7 @@ pub async fn run_interactive(
     // actually mounted.
     let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mounted = std::sync::Arc::clone(&surface_mounted);
-    match run_interactive_surface(options, ui, mounted).await {
+    match run_interactive_surface(options, ui, route, mounted).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             // Restore when THIS run changed the terminal state (the flag
@@ -769,12 +1569,17 @@ pub async fn run_interactive(
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
+    route: SessionOpenRoute,
     surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
-    let (client, mut events) = DaemonClient::connect_with_retry(&options.socket_path)
+    // The startup open's connection: the first open attempt below uses
+    // this one (a fresh-pane connect failure must stay a pre-mount
+    // failure, so the CLI open keeps its no-restore teardown), while a
+    // wait retry reconnects against the successor daemon.
+    let (client, events) = DaemonClient::connect_with_retry(&options.socket_path)
         .await
         .with_context(|| "the interactive UI could not attach to the daemon")?;
     // Background notes (a failed abort request) fold into the transcript
@@ -784,6 +1589,12 @@ async fn run_interactive_surface(
     // failed abort into the transcript note and clears the stuck loader.
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
+    // A backgrounded prompt round trip reports here (TS `onSubmit`
+    // resolves `agentConnection.prompt` off the render path — the
+    // cleared editor paints before the daemon answers); the loop folds
+    // the settled outcome into the session.
+    let (prompt_tx, mut prompt_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::PromptSubmitNote>();
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
@@ -832,6 +1643,15 @@ async fn run_interactive_surface(
     let theme = crate::app::load_theme(&options.theme);
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
+    // The file-completion provider browses the SESSION cwd (TS
+    // `createBaseAutocompleteProvider` anchors on `this.getCurrentCwd()`),
+    // not the process cwd: the editor constructor's `env::current_dir()`
+    // default only matches when the launch directory is the session cwd —
+    // the attach flows pass the session's own cwd, and the completion
+    // menu must browse the directory the user sees.
+    view.editor.set_autocomplete_provider(Box::new(
+        crate::autocomplete::CombinedAutocompleteProvider::from_registry(options.cwd.clone()),
+    ));
     // The effective bindings (user `keybindings.json` merged over the TS
     // defaults) drive the editor, the pickers, and every hint the view
     // renders (TS `KeybindingsManager.create()` + `setKeybindings`).
@@ -843,6 +1663,14 @@ async fn run_interactive_surface(
     // toggle (TS `fullscreenEnabled`); the compose gates the top bar on it.
     if let Some(settings) = &options.client_settings {
         view.fullscreen = settings.fullscreen();
+        // TS constructs the chat TUI with the live `showHardwareCursor`
+        // value (interactive-mode.ts `new TUI(..., getShowHardwareCursor())`);
+        // the settings menu's toggle updates it in place.
+        view.show_hardware_cursor = settings.show_hardware_cursor();
+        // TS #2709: the interactive-mode constructor assigns the persisted
+        // `chatDetail` level (`assignChatDetail(getChatDetail())`), so a
+        // chat opens at the level the last Ctrl+O pick saved.
+        view.detail = crate::chat::Detail::from_wire_name(&settings.chat_detail());
     }
     apply_startup_chrome(&mut view, &options);
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
@@ -862,39 +1690,85 @@ async fn run_interactive_surface(
         options.fullscreen_mouse,
         &surface_mounted,
     )?;
-    if !headless {
-        // TS `ui.start()` renders once before the session loads: the first
-        // frame is the startup chrome (banner, editor, tray). The model
-        // and session labels are placeholders until the attach's
-        // `rebuild_view` repaints with the snapshot.
+    // The startup chrome paints before the session loads only for a NEW
+    // chat (TS `ui.start()` renders the banner once before the session
+    // loads): a fresh session's dock is deterministically empty, so the
+    // placeholder frame never reflows when the attach lands. A direct
+    // open into an existing session holds the previous surface instead
+    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
+    // construct the chat over an already-attached connection whose
+    // `getInitialSnapshot` is cached, so the first visible frame is the
+    // content): the queued clear rides the first draw's single flush,
+    // which carries the complete frame — no splash flash, no panel
+    // appearing late over a half-open view.
+    if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
     }
-    // The supervisor reader's death watch: the event channel itself stays
-    // open across a supervisor socket loss (the retained sender keeps it
-    // alive for direct reader pumps), so this watch is the observable
-    // signal the loop's reconnect driver arms on.
-    let mut reader_dead = client.reader_dead();
-    let mut session = match SessionUi::open(
-        client,
-        &options,
-        notes_tx,
-        compaction_abort_tx,
-        share_tx,
-        reload_tx,
-        traces_upload_tx,
-        catalog_tx,
-        auth_panel_tx,
-        crate::session_ui::ActivityUpdates {
-            heartbeats: heartbeats_tx,
-            bash: bash_tx,
-            commands: commands_tx,
+    // The startup open (TS `runAgentsViewLoop` -> `openAgentsViewSession`,
+    // TS #2391): an agents-view open that lands while the daemon prepares an
+    // update restart waits through the restart window (bounded, 500ms retry
+    // cadence, the attached-session reconnect budget) and retries against
+    // the successor instead of failing the open; the CLI route keeps the
+    // single attempt. The first attempt reuses the pre-mount connection; a
+    // retry reconnects fresh. Only the open waits — once the session is up,
+    // the reconnect loop owns the mid-chat restart window.
+    let mut first_connection = Some((client, events));
+    let open_outcome = crate::update_restart_wait::wait_through_update_restart(
+        route == SessionOpenRoute::AgentsView,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
+        || {
+            // The attempt future owns everything it touches (an `async
+            // move` over clones taken here): an `FnMut` closure's captures
+            // may not escape into the returned future, so the synchronous
+            // body moves the pieces out instead.
+            let first = first_connection.take();
+            let options = options.clone();
+            let notes_tx = notes_tx.clone();
+            let compaction_abort_tx = compaction_abort_tx.clone();
+            let prompt_tx = prompt_tx.clone();
+            let share_tx = share_tx.clone();
+            let reload_tx = reload_tx.clone();
+            let traces_upload_tx = traces_upload_tx.clone();
+            let catalog_tx = catalog_tx.clone();
+            let auth_panel_tx = auth_panel_tx.clone();
+            let heartbeats_tx = heartbeats_tx.clone();
+            let bash_tx = bash_tx.clone();
+            let commands_tx = commands_tx.clone();
+            async move {
+                let (client, events) = match first {
+                    Some(first) => first,
+                    None => DaemonClient::connect(&options.socket_path)
+                        .await
+                        .with_context(|| "the interactive UI could not attach to the daemon")?,
+                };
+                let session = SessionUi::open(
+                    client,
+                    &options,
+                    notes_tx,
+                    compaction_abort_tx,
+                    prompt_tx,
+                    share_tx,
+                    reload_tx,
+                    traces_upload_tx,
+                    catalog_tx,
+                    auth_panel_tx,
+                    crate::session_ui::ActivityUpdates {
+                        heartbeats: heartbeats_tx,
+                        bash: bash_tx,
+                        commands: commands_tx,
+                    },
+                )
+                .await?;
+                Ok((events, session))
+            }
         },
     )
-    .await
-    {
-        Ok(session) => session,
+    .await;
+    let ((mut events, mut session), waited_for_update_restart) = match open_outcome {
+        Ok(opened) => opened,
         Err(error) => {
             // A daemon refusal for the startup create/attach/resume (the
             // daemon is alive and refused THIS request — a remembered id
@@ -965,6 +1839,20 @@ async fn run_interactive_surface(
                     ..Default::default()
                 });
             }
+            // The open wait's deadline failure is the same handoff (TS
+            // `runAgentsViewLoop` catches it as "Failed to open agent:"):
+            // the guidance to retry once the update finishes must land on
+            // the view the user came from — never tear the process down.
+            if crate::update_restart_wait::is_update_restart_deadline_error(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
+            }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
             // teardown contract as the onboarding exit below).
@@ -976,6 +1864,15 @@ async fn run_interactive_surface(
         }
     };
     session.exit_guard = exit_guard.clone();
+    // The supervisor reader's death watch: the event channel itself stays
+    // open across a supervisor socket loss (the retained sender keeps it
+    // alive for direct reader pumps), so this watch is the observable
+    // signal the loop's reconnect driver arms on. Taken from the LIVE
+    // session client after the open: an update-restart wait may have
+    // retried the open onto a fresh connection (the pre-mount one died
+    // with the old daemon), and the watch must name the connection the
+    // loop actually serves.
+    let mut reader_dead = session.client.reader_dead();
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
@@ -984,10 +1881,6 @@ async fn run_interactive_surface(
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
-    // The scoped heartbeat catalog seeds the tray heartbeat label (TS
-    // refreshes the catalog on chat open; failures stay silent).
-    session.spawn_heartbeat_refresh();
-    session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
@@ -996,25 +1889,57 @@ async fn run_interactive_surface(
         });
         session.dirty = true;
     }
+    // TS #2391 `startupNotice`/`updateRestartWaitNotice`: an open that
+    // waited through the update restart says so — the session's first
+    // status row (the TS `showWarning(startupNotice)` row) and, when the
+    // chat hands back to the view, the agents-view status line (the
+    // outcome's notice below).
+    if waited_for_update_restart {
+        let notice = crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE;
+        view.push_entry(crate::chat::ChatEntry::Status {
+            text: format!("\u{26a0} {notice}"),
+            kind: crate::chat::StatusKind::Warning,
+        });
+        session.dirty = true;
+    }
+    // TS `maybeWarnAboutAnthropicSubscriptionAuth()` at startup (#2645):
+    // the ban-risk warning when the session opens on an Anthropic
+    // subscription credential.
+    if let Some(provider) = session.current_model_provider().await {
+        session
+            .maybe_warn_anthropic_subscription_auth_if_subscribed(
+                Some(provider.as_str()),
+                &mut view,
+            )
+            .await;
+    }
     // TS `restorePromptStashOnOpen`: a draft stashed on the way out (a
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
+    // Whether the headless plan completed (the plan's final
+    // `HeadlessDone`; the run loop's idle gate ends the run on it):
+    // declared above the onboarding phase because the pane's drive marks
+    // it when the plan completes while the pane owns the input channel.
+    let mut headless_done = false;
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch). The trace question is
-    // the opt-in moment for a fresh home; a home that already carries a
-    // standing choice completes silently, and the phase's own marker
-    // gate keeps it one-shot across the agents-view loop's sessions.
+    // `runStartupOnboarding`): a home whose startup model is ready sees
+    // the trace question alone, and a not-ready home runs the full
+    // sign-in flow. The trace question is the opt-in moment for a fresh
+    // home; a home that already carries a standing choice completes
+    // silently, and the phase's own marker gate keeps it one-shot across
+    // the agents-view loop's sessions.
     if let Some(task) = options.onboarding.clone() {
-        let exit_requested = run_onboarding_phase(
-            &task,
-            &mut session,
-            &mut view,
-            &mut ui_rx,
-            &mut renderer,
-            &exit_guard,
-        )
-        .await?;
+        let mut drive = PaneDrive {
+            ui_rx: &mut ui_rx,
+            renderer: &mut renderer,
+            exit_guard: &exit_guard,
+            keybindings: view.editor.keybindings().clone(),
+            auth_panel_rx: &mut auth_panel_rx,
+            headless_done: &mut headless_done,
+        };
+        let exit_requested =
+            run_onboarding_phase(&task, &mut session, &mut view, &mut drive).await?;
         if exit_requested {
             // The exit deadline is armed from the moment the run decides to
             // leave: no cleanup below may block past it.
@@ -1037,6 +1962,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -1074,8 +2000,14 @@ async fn run_interactive_surface(
     // expired between iterations).
     let mut hint_painted = false;
     let mut running = true;
-    let mut headless_done = false;
     let mut wait_idle_deadline: Option<Instant> = None;
+    // The headless render barrier's armed state: its deadline, and the
+    // frames captured at arming (the `WaitRender` condition scans only
+    // frames rendered after the barrier became the queue's head, so a
+    // needle that already scrolled out of an older frame still satisfies
+    // it; `WaitGone` checks only the newest frame).
+    let mut wait_render_deadline: Option<Instant> = None;
+    let mut wait_render_baseline: usize = 0;
     // Spec §10.2: the reconnect loop after a `daemon_closing` update frame.
     // Retry with backoff for up to RECONNECT_WINDOW; each attempt reads the
     // successor's hello (`update_resume`, §10.3) and reattaches by durable
@@ -1110,7 +2042,7 @@ async fn run_interactive_surface(
     // so the respawned worker serves the session again.
     let mut session_reconnect: Option<SessionReconnect> = None;
 
-    while running {
+    'run: while running {
         // The enhanced-key modes settle once per run: the kitty probe
         // answered, or the modifyOtherKeys fallback fired. One adoption
         // event reports the established combination.
@@ -1154,8 +2086,16 @@ async fn run_interactive_surface(
                 let timeout_ms = *timeout_ms;
                 // A parked follow-up/steering message keeps the barrier waiting
                 // until the session delivers it (the queue strip must clear
-                // before the next step observes the frames).
-                if session.turn_active || !view.queued.is_empty() {
+                // before the next step observes the frames). A submit whose
+                // round trip is still armed holds the barrier too: the async
+                // submit resolves off the render path (the inline submit
+                // held the barrier by blocking the loop until its ack
+                // landed), so the outcome must land before the barrier can
+                // read idle.
+                if session.turn_active
+                    || !view.queued.is_empty()
+                    || session.prompt_submits_in_flight() > 0
+                {
                     if wait_idle_deadline.is_none() {
                         wait_idle_deadline =
                             Some(Instant::now() + Duration::from_millis(timeout_ms));
@@ -1170,6 +2110,80 @@ async fn run_interactive_surface(
                 } else {
                     wait_idle_deadline = None;
                     pending.pop_front();
+                }
+            } else if let Some((needle, timeout_ms, present)) = match pending.front() {
+                Some(UiInput::WaitRender { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, true))
+                }
+                Some(UiInput::WaitGone { needle, timeout_ms }) => {
+                    Some((needle.clone(), *timeout_ms, false))
+                }
+                _ => None,
+            } {
+                // The render barrier: `WaitRender` holds until a frame
+                // rendered after arming contains the needle (daemon-driven
+                // rows land on the loop's event/tick cadence, so this rides
+                // out any load latency instead of a fixed wall-clock
+                // window); `WaitGone` holds until the newest frame cleared
+                // it. Frames captured before the barrier reached the queue
+                // head never satisfy it — the baseline is recorded at
+                // arming and only subsequent frames count, except for the
+                // newest frame at arming time (the current state: a
+                // condition that already holds pops immediately instead of
+                // stalling on a repaint that may never come). Like the
+                // idle barrier it holds the whole queued batch behind it,
+                // and its timeout pops with a note (the note never embeds
+                // the needle: the note row renders into frames, and quoting
+                // the needle would make a timed-out wait satisfy the very
+                // condition that failed).
+                let current_state_ok = renderer.headless_frames().is_some_and(|frames| {
+                    frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str()) == present)
+                });
+                if wait_render_deadline.is_none() {
+                    if current_state_ok {
+                        pending.pop_front();
+                    } else {
+                        wait_render_baseline =
+                            renderer.headless_frames().map_or(0, <[String]>::len);
+                        wait_render_deadline =
+                            Some(Instant::now() + Duration::from_millis(timeout_ms));
+                        inputs_pending = false;
+                    }
+                } else {
+                    let satisfied = renderer.headless_frames().is_some_and(|frames| {
+                        if present {
+                            frames
+                                .get(wait_render_baseline..)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|frame| frame.contains(needle.as_str()))
+                        } else {
+                            !frames
+                                .last()
+                                .is_some_and(|frame| frame.contains(needle.as_str()))
+                        }
+                    });
+                    if satisfied {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                    } else if Instant::now() > wait_render_deadline.unwrap() {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                        session.note(
+                            if present {
+                                "timed out waiting for the headless render condition"
+                            } else {
+                                "timed out waiting for the headless render to clear"
+                            },
+                            &mut view,
+                        );
+                    } else {
+                        // The barrier holds the batch while the render
+                        // catches up.
+                        inputs_pending = false;
+                    }
                 }
             } else if let Some(input) = pending.pop_front() {
                 session.dirty = true;
@@ -1317,6 +2331,9 @@ async fn run_interactive_surface(
                         }
                     }
                     UiInput::HeadlessDone => headless_done = true,
+                    UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
+                        unreachable!("render barrier handled above")
+                    }
                     UiInput::ScrollTop => {
                         session.stop_selection_auto_scroll();
                         view.scroll_to_top();
@@ -1370,8 +2387,24 @@ async fn run_interactive_surface(
                 // `/resume`, `/exit`): in terminal mode the teardown below must
                 // run this iteration, not after the select's 50ms idle tick
                 // parks the loop — that park reads directly as switch latency
-                // (TS's event loop leaves on the key). Headless runs keep the
-                // tail pass so captured frames stay identical.
+                // (TS's event loop leaves on the key). A HANDOFF takes the
+                // leave now: the bare `break` below only leaves the
+                // input-drain loop, and the select after it parks the exit
+                // for the tick — measured as ~50ms of chat->agents switch
+                // latency on every handoff. The handoff's next surface owns
+                // the pane (its mount clears the alt screen), so nothing the
+                // tail pass paints can reach the user. A non-handoff exit
+                // (`/exit`, `/quit`) keeps the tail pass: its frame gate
+                // paints the final chat frame the exit's main-screen flush
+                // shows. Headless runs keep the tail pass so captured
+                // frames stay identical.
+                if renderer.is_terminal()
+                    && session.exit_requested
+                    && (session.open_agents_view || session.pending_selection.is_some())
+                {
+                    session.exit_reason = "session_request";
+                    break 'run;
+                }
                 if session.exit_requested && renderer.is_terminal() {
                     session.exit_reason = "session_request";
                     break;
@@ -1381,8 +2414,8 @@ async fn run_interactive_surface(
                 // next applies (a plan step is not a terminal burst, and the
                 // captured frame sequence IS the verifier evidence — a
                 // batched drain would collapse intermediate states like the
-                // quick-shortcut guide or the expanded compaction block out
-                // of the capture). The terminal path keeps the full batch
+                // expanded compaction block or an open panel out of the
+                // capture). The terminal path keeps the full batch
                 // drain, the input-starvation fix.
                 if !renderer.is_terminal() {
                     inputs_pending = false;
@@ -1403,6 +2436,7 @@ async fn run_interactive_surface(
         if headless_done
             && pending.is_empty()
             && !session.turn_active
+            && session.prompt_submits_in_flight() == 0
             && view.queued.is_empty()
             && wait_idle_deadline.is_none()
             && !session.dirty
@@ -1434,137 +2468,162 @@ async fn run_interactive_surface(
                 }
                 events.recv().await
             } => {
-                match maybe_event {
-                    Some(event) => {
+                                if let Some(event) = maybe_event {
+                    session.apply_client_event(event, &mut view);
+                    // Batch the rest of the queued frames before this
+                    // iteration's render: a stream burst applies as one
+                    // transcript pass instead of one full re-layout per
+                    // frame (a replay-scale ingest renders once per
+                    // batch, not once per row).
+                    while let Ok(event) = events.try_recv() {
                         session.apply_client_event(event, &mut view);
-                        // Batch the rest of the queued frames before this
-                        // iteration's render: a stream burst applies as one
-                        // transcript pass instead of one full re-layout per
-                        // frame (a replay-scale ingest renders once per
-                        // batch, not once per row).
-                        while let Ok(event) = events.try_recv() {
-                            session.apply_client_event(event, &mut view);
-                        }
-                        // A succeeded compaction rebuilt the durable
-                        // transcript: replace the view's chat with it, and
-                        // refresh the tray usage the same way a settled
-                        // turn does (TS refreshes after "a turn or
-                        // compaction completes" — post-compaction usage is
-                        // unknown until the next assistant response).
-                        if session.transcript_stale {
-                            session.rebuild_transcript(&mut view).await;
-                            session.refresh_stats().await;
-                            session.rebuild_tray(&mut view);
-                        }
-                        // A settled turn refreshes the tray's context usage.
-                        if was_active && !session.turn_active {
-                            session.refresh_stats().await;
-                            session.rebuild_tray(&mut view);
-                        }
-                        // A `session_binding` supersede notice: the session
-                        // lives under a new active id, so re-attach to it -
-                        // event routing follows the attach, and the
-                        // transcript rebuilds from the snapshot (silent, no
-                        // banner). A failed re-attach changes nothing: the
-                        // new attach never landed, so the pane keeps its
-                        // current id and subscription (the old one detaches
-                        // only after a new attach succeeds); the next
-                        // supersede notice or the submit-path retry
-                        // re-attaches once a worker can serve the session.
-                        if let Some(current) = session.pending_rebind.take() {
-                            match session.attach_session(&current).await {
-                                Ok(()) => session.rebuild_view(
-                                    &mut view,
-                                    crate::session_ui::RebuildKind::Rebind,
-                                ),
-                                Err(error) => session.note(
-                                    &format!("session rebind failed: {error:#}"),
-                                    &mut view,
-                                ),
-                            }
-                        }
-                        // An update close frame arms the reconnect driver
-                        // immediately: the doomed connection's reader task is
-                        // gone, but the client struct retains an event
-                        // sender, so the channel itself never closes - the
-                        // frame, not the EOF, is the trigger (spec §10.2).
-                        if reconnect.is_none() {
-                            if let Some(update) = session.reconnect.take() {
-                                session.note(
-                                    &format!(
-                                        "the daemon is restarting for an update (about {}s) — reconnecting…",
-                                        update.est_seconds.max(1)
-                                    ),
-                                    &mut view,
-                                );
-                                reconnect = Some(ReconnectLoop::start(&update));
-                                session.dirty = true;
-                            }
-                        }
-                        // A dead direct worker link arms the session
-                        // re-attach driver (TS `connection_status:
-                        // "reconnecting"`): the warning row rides the chat
-                        // while the driver retries the attach.
-                        if session_reconnect.is_none() {
-                            if let Some(lost) = session.transport_lost.take() {
-                                // A supervisor loss retained while the direct
-                                // link lived: the supervisor client is dead,
-                                // so the session-plane retry loop could never
-                                // restore it — the full reconnect driver
-                                // replaces the client and reattaches.
-                                if supervisor_lost && reconnect.is_none() {
-                                    session.note_as(
-                                        "the daemon connection closed — reconnecting…",
-                                        crate::chat::StatusKind::Warning,
-                                        &mut view,
-                                    );
-                                    reconnect = Some(ReconnectLoop::start_lost());
-                                    supervisor_lost = false;
-                                } else {
-                                    session.note_as(
-                                        "Daemon connection lost; reconnecting…",
-                                        crate::chat::StatusKind::Warning,
-                                        &mut view,
-                                    );
-                                    session_reconnect = Some(SessionReconnect::start(&lost));
-                                }
-                                session.dirty = true;
-                            }
+                    }
+                    // A succeeded compaction rebuilt the durable
+                    // transcript: replace the view's chat with it, and
+                    // refresh the tray usage the same way a settled
+                    // turn does (TS refreshes after "a turn or
+                    // compaction completes" — post-compaction usage is
+                    // unknown until the next assistant response).
+                    if session.transcript_stale {
+                        session.rebuild_transcript(&mut view).await;
+                        session.refresh_stats().await;
+                        session.rebuild_tray(&mut view);
+                    }
+                    // A settled turn refreshes the tray's context usage.
+                    if was_active && !session.turn_active {
+                        session.refresh_stats().await;
+                        session.rebuild_tray(&mut view);
+                    }
+                    // A `session_binding` supersede notice: the session
+                    // lives under a new active id, so re-attach to it -
+                    // event routing follows the attach, and the
+                    // transcript rebuilds from the snapshot (silent, no
+                    // banner). A failed re-attach changes nothing: the
+                    // new attach never landed, so the pane keeps its
+                    // current id and subscription (the old one detaches
+                    // only after a new attach succeeds); the next
+                    // supersede notice or the submit-path retry
+                    // re-attaches once a worker can serve the session.
+                    if let Some(current) = session.pending_rebind.take() {
+                        match session
+                            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
+                            .await
+                        {
+                            Ok(()) => session.rebuild_view(
+                                &mut view,
+                                crate::session_ui::RebuildKind::Rebind,
+                            ),
+                            Err(error) => session.note(
+                                &format!("session rebind failed: {error:#}"),
+                                &mut view,
+                            ),
                         }
                     }
-                    None => {
-                        events_closed = true;
-                        if let Some(update) = session.reconnect.take() {
-                            // §10: an update restart closed the daemon; the
-                            // UI stays mounted and reconnects.
-                            session.note(
-                                &format!(
-                                    "the daemon is restarting for an update (about {}s) — reconnecting…",
-                                    update.est_seconds.max(1)
-                                ),
-                                &mut view,
-                            );
-                            reconnect = Some(ReconnectLoop::start(&update));
-                            session.dirty = true;
-                        } else if reconnect.is_some() {
-                            // Already reconnecting: the dead channel's
-                            // terminal None frames are expected.
-                        } else {
-                            // An unexpected connection loss (no update in
-                            // flight) is a daemon hiccup, not a session
-                            // end: the pane keeps its transcript and
-                            // retries with the same bounded window and
-                            // backoff as the update restart. The user
-                            // can leave at any point; the window expires
-                            // into the honest exit note.
-                            session.note_as(
-                                "the daemon connection closed — reconnecting…",
-                                crate::chat::StatusKind::Warning,
-                                &mut view,
-                            );
-                            reconnect = Some(ReconnectLoop::start_lost());
+                    // An update close frame arms the reconnect driver
+                    // immediately: the doomed connection's reader task is
+                    // gone, but the client struct retains an event
+                    // sender, so the channel itself never closes - the
+                    // frame, not the EOF, is the trigger (spec §10.2).
+                    // An update closing outranks a shutdown recovery in
+                    // flight (TS #2458): the §10.2 resume contract replaces
+                    // it.
+                    if let Some(update) = session.reconnect.take() {
+                        session.note(
+                            &format!(
+                                "the daemon is restarting for an update (about {}s) — reconnecting…",
+                                update.est_seconds.max(1)
+                            ),
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start(&update));
+                        session.dirty = true;
+                    }
+                    // An announced non-update closing arms the bounded
+                    // shutdown recovery instead (TS #2458): no-op unless
+                    // the notice says the daemon itself is going down.
+                    arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    );
+                    // A dead direct worker link arms the session
+                    // re-attach driver (TS `connection_status:
+                    // "reconnecting"`): the warning row rides the chat
+                    // while the driver retries the attach.
+                    if session_reconnect.is_none() {
+                        if let Some(lost) = session.transport_lost.take() {
+                            // A supervisor loss retained while the direct
+                            // link lived: the supervisor client is dead,
+                            // so the session-plane retry loop could never
+                            // restore it — the full reconnect driver
+                            // replaces the client and reattaches.
+                            if supervisor_lost && reconnect.is_none() {
+                                session.note_as(
+                                    "the daemon connection closed — reconnecting…",
+                                    crate::chat::StatusKind::Warning,
+                                    &mut view,
+                                );
+                                reconnect = Some(ReconnectLoop::start_lost());
+                                supervisor_lost = false;
+                            } else if reconnect.is_some() {
+                                // TS #2458: a full reconnect driver (an
+                                // update restart, or the announced
+                                // shutdown's recovery) owns the run — the
+                                // dead direct link joins it instead of
+                                // racing a session-plane retry through a
+                                // supervisor it cannot reach.
+                            } else {
+                                session.note_as(
+                                    "Daemon connection lost; reconnecting…",
+                                    crate::chat::StatusKind::Warning,
+                                    &mut view,
+                                );
+                                session_reconnect = Some(SessionReconnect::start(&lost));
+                            }
                             session.dirty = true;
                         }
+                    }
+                } else {
+                    events_closed = true;
+                    if let Some(update) = session.reconnect.take() {
+                        // §10: an update restart closed the daemon; the
+                        // UI stays mounted and reconnects.
+                        session.note(
+                            &format!(
+                                "the daemon is restarting for an update (about {}s) — reconnecting…",
+                                update.est_seconds.max(1)
+                            ),
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start(&update));
+                        session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // TS #2458: the announced non-update closing owns
+                        // the recovery, not the hiccup loop.
+                    } else if reconnect.is_some() {
+                        // Already reconnecting: the dead channel's
+                        // terminal None frames are expected.
+                    } else {
+                        // An unexpected connection loss (no update in
+                        // flight) is a daemon hiccup, not a session
+                        // end: the pane keeps its transcript and
+                        // retries with the same bounded window and
+                        // backoff as the update restart. The user
+                        // can leave at any point; the window expires
+                        // into the honest exit note.
+                        session.note_as(
+                            "the daemon connection closed — reconnecting…",
+                            crate::chat::StatusKind::Warning,
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start_lost());
+                        session.dirty = true;
                     }
                 }
             }
@@ -1591,6 +2650,16 @@ async fn run_interactive_surface(
                     }
                     if session.reconnect.is_some() {
                         session.dirty = true;
+                    } else if arm_shutdown_recovery(
+                        &mut session,
+                        &mut view,
+                        &mut reconnect,
+                        &mut session_reconnect,
+                    ) {
+                        // The announced non-update closing owns the
+                        // recovery (TS #2458): the supervisor socket's
+                        // death joins its driver — the direct link below
+                        // must not retain the loss behind it.
                     } else if session.client.direct_session_id().is_some() {
                         // A supervisor socket loss while a live direct link
                         // still serves the session is not a pane-level loss
@@ -1625,7 +2694,16 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            maybe_input = ui_rx.recv() => {
+            maybe_input = async {
+                // The headless driver drops its sender after HeadlessDone.
+                // A closed recv is always ready and would starve turn events
+                // while the final submitted prompt is still settling.
+                if headless_done {
+                    std::future::pending::<Option<UiInput>>().await
+                } else {
+                    ui_rx.recv().await
+                }
+            } => {
                 if let Some(input) = maybe_input {
                     pending.push_back(input);
                 }
@@ -1680,6 +2758,14 @@ async fn run_interactive_surface(
                     session.apply_command_catalog(update, &mut view);
                 }
             }
+            maybe_prompt = prompt_rx.recv() => {
+                if let Some(note) = maybe_prompt {
+                    // Protocol corruption stays fatal exactly like the
+                    // inline submit's ladder (the handle-key catch's
+                    // "everything else" arm).
+                    session.apply_prompt_outcome(note, &mut view).await?;
+                }
+            }
             _reconnect_tick = async {
                 // Park the tick while an attempt is in flight: the armed
                 // `next_attempt` is in the past (the attempt consumed it),
@@ -1696,23 +2782,36 @@ async fn run_interactive_surface(
                 if reconnect_connect.is_some() {
                     continue;
                 }
-                let (deadline, lost) = match reconnect.as_ref() {
-                    Some(state) => (state.deadline, state.lost),
+                let (deadline, kind) = match reconnect.as_ref() {
+                    Some(state) => (state.deadline, state.kind),
                     None => continue,
                 };
                 if tokio::time::Instant::now() > deadline {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -1727,6 +2826,13 @@ async fn run_interactive_surface(
                 let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
                 reconnect_connect = Some(attempt_rx);
                 reconnect_attempt_in_flight = true;
+                // TS #2458: the shutdown recovery's discovery waits no
+                // longer than the bound — one bounded connect+hello per
+                // poll (the fixed 100ms cadence re-arms faster than the
+                // retry helper's own backoff, and a single leg bounds the
+                // window's over-run; the resume/hiccup windows keep the
+                // retrying helper).
+                let shutdown = matches!(kind, RecoveryKind::Shutdown);
                 tokio::spawn(async move {
                     // No outer timeout: dropping the future mid-attempt
                     // would cancel an in-flight handshake without its
@@ -1734,7 +2840,11 @@ async fn run_interactive_surface(
                     // an accepting-but-silent daemon). The leg self-bounds
                     // — every attempt's connect and hello carry their own
                     // budgets and abort their own reader on failure.
-                    let attempt = DaemonClient::connect_with_retry(&socket_path).await;
+                    let attempt = if shutdown {
+                        DaemonClient::connect(&socket_path).await
+                    } else {
+                        DaemonClient::connect_with_retry(&socket_path).await
+                    };
                     let _ = attempt_tx.send(attempt);
                 });
             }
@@ -1758,23 +2868,36 @@ async fn run_interactive_surface(
                     Some(state) => tokio::time::Instant::now() > state.deadline,
                     None => continue,
                 };
-                let lost = match reconnect.as_ref() {
-                    Some(state) => state.lost,
+                let kind = match reconnect.as_ref() {
+                    Some(state) => state.kind,
                     None => continue,
                 };
                 if expired {
-                    if lost {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "daemon_reconnect_failed";
-                    } else {
-                        session.note(
-                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                            &mut view,
-                        );
-                        session.exit_reason = "update_reconnect_failed";
+                    match kind {
+                        RecoveryKind::Shutdown => {
+                            // TS #2458: the daemon never came back within
+                            // the reconnect timeout — the saved-transcript
+                            // close (the session file survives on disk).
+                            session.note(
+                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_closed";
+                        }
+                        RecoveryKind::Lost => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "daemon_reconnect_failed";
+                        }
+                        RecoveryKind::Update => {
+                            session.note(
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                &mut view,
+                            );
+                            session.exit_reason = "update_reconnect_failed";
+                        }
                     }
                     reconnect = None;
                     session.dirty = true;
@@ -1789,7 +2912,7 @@ async fn run_interactive_surface(
                         // is a RETRY outcome, never a fatal one (§10.4: a
                         // queued attach can legitimately wait out a slow
                         // restore).
-                        match session.reattach_after_update(client, &mut view, lost).await {
+                        match session.reattach_after_recovery(client, &mut view, kind).await {
                             Ok(crate::session_ui::ReattachOutcome::Attached) => {
                                 events = fresh_events;
                                 events_closed = false;
@@ -1808,13 +2931,6 @@ async fn run_interactive_surface(
                                 reader_loss_handled = false;
                                 session.reconnect = None;
                                 reconnect = None;
-                                if lost {
-                                    session.note_as(
-                                        "reconnected to the daemon",
-                                        crate::chat::StatusKind::Info,
-                                        &mut view,
-                                    );
-                                }
                                 session.dirty = true;
                             }
                             Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
@@ -1834,12 +2950,14 @@ async fn run_interactive_surface(
                             Err(error) => {
                                 // An unexpected-loss reattach failure is a
                                 // hiccup like any other (the worker still
-                                // respawning): keep retrying through the
-                                // window instead of exiting — the pane never
-                                // dies to it (the operator's kicked-out
-                                // class). The update path keeps its exit
-                                // semantics.
-                                if lost {
+                                // respawning), and a shutdown recovery
+                                // retries until its own bound lands the
+                                // saved-transcript close (TS #2458): keep
+                                // retrying through the window instead of
+                                // exiting — the pane never dies to it (the
+                                // operator's kicked-out class). The update
+                                // path keeps its exit semantics.
+                                if matches!(kind, RecoveryKind::Lost | RecoveryKind::Shutdown) {
                                     session.note_as(
                                         &format!("reattach failed: {error:#} — retrying…"),
                                         crate::chat::StatusKind::Warning,
@@ -1886,9 +3004,17 @@ async fn run_interactive_surface(
                 if state.active_session_id != session.active_session_id {
                     continue;
                 }
+                // The reconnect attempt's budget covers the attach
+                // alone: the surface is already up and its dock holds
+                // (the background refreshes update it), so the
+                // first-frame fold's bounded fetches cannot eat the 10s
+                // attempt budget on a slow daemon.
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
-                    session.attach_session(&state.active_session_id),
+                    session.attach_session(
+                        &state.active_session_id,
+                        crate::session_ui::DockFold::Held,
+                    ),
                 )
                 .await;
                 match attempt {
@@ -1948,7 +3074,7 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+            () = tokio::time::sleep(Duration::from_millis(50)) => {
                 // The input stream went quiet for a tick: parked editor
                 // autocomplete requests materialize now (TS resolves
                 // suggestions asynchronously after the keystroke batch, so
@@ -1969,7 +3095,7 @@ async fn run_interactive_surface(
             _frame = async {
                 match render_deadline {
                     Some(deadline) => {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                     }
                     None => std::future::pending::<()>().await,
                 }
@@ -2053,15 +3179,24 @@ async fn run_interactive_surface(
         // burning a render now.
         if session.dirty {
             if let Some(renderer) = renderer.is_terminal_mut() {
-                let interval_elapsed = last_render_at
-                    .map(|at| at.elapsed() >= MIN_RENDER_INTERVAL)
-                    .unwrap_or(true);
+                let interval_elapsed =
+                    last_render_at.is_none_or(|at| at.elapsed() >= MIN_RENDER_INTERVAL);
                 if interval_elapsed {
                     crate::app::draw(renderer, &mut view)?;
                     session.dirty = false;
                     last_render_at = Some(Instant::now());
                     last_pulse_phase = view.pulse_frame;
                     render_deadline = None;
+                    // The attach fold arms this once: the first frame
+                    // that renders the rebuilt transcript materializes
+                    // its visible window (the wrap/render churn on top
+                    // of the fold's parse churn), so return that freed
+                    // heap right after the frame paints instead of
+                    // keeping the resume's peak resident for the
+                    // process lifetime.
+                    if session.take_trim_after_frame() {
+                        pa_types::memory_release::trim_freed_heap();
+                    }
                 } else {
                     render_deadline = Some(last_render_at.unwrap() + MIN_RENDER_INTERVAL);
                 }
@@ -2151,7 +3286,7 @@ async fn run_interactive_surface(
     let turn_active_at_exit = session.turn_active;
     if let Some(telemetry) = session.telemetry.clone() {
         let exit_event = async move {
-            let _ = telemetry
+            let () = telemetry
                 .client_exit(exit_reason, turn_active_at_exit)
                 .await;
         };
@@ -2180,7 +3315,14 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
-        agents_view_notice: None,
+        opened_urls: std::mem::take(&mut session.opened_urls),
+        // TS #2391: the view's status line keeps the wait notice when the
+        // chat hands back (the `updateRestartWaitNotice` the open armed).
+        agents_view_notice: if waited_for_update_restart && preserve_alt_screen {
+            Some(crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE.to_string())
+        } else {
+            None
+        },
     };
     // The agents-view handoff's background detach owns this connection now
     // (it closes once the daemon answers); every other exit closes it here.
@@ -2300,8 +3442,13 @@ impl Renderer {
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
-                // flashes the primary screen.
-                crate::altscreen::enter()?;
+                // flashes the primary screen. The enter itself is ARMED,
+                // not written: it rides the first draw's flush (see
+                // `altscreen::arm_first_draw_mount`), so a direct open —
+                // which paints nothing until its first content frame —
+                // holds the shell (a fresh process) or the handed-off
+                // surface through the attach.
+                crate::altscreen::arm_first_draw_mount();
                 // SGR mouse tracking follows the fullscreen surface in and
                 // out (TS `enterFullscreen` enables it blind — probing is
                 // not viable under tmux and unsupporting terminals ignore
@@ -2312,8 +3459,9 @@ impl Renderer {
                 // Bracketed paste and the kitty keyboard protocol come up
                 // with the raw-mode bracket (TS `ProcessTerminal.start`):
                 // pastes arrive as one chunk instead of per-line Enter
-                // submissions, and the kitty probe runs before the reader
-                // thread starts polling.
+                // submissions, and the kitty probe (once per process —
+                // see `enhanced_keys`) runs before the reader thread
+                // starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 // One reader thread feeds the loop; crossterm events are
                 // process-global, so the reader registry joins the previous
@@ -2334,10 +3482,10 @@ impl Renderer {
                     // boundary: same contract as the terminal's own mouse
                     // events below — consumed unless tracking is active.
                     crate::input::ReaderInput::Mouse(report) => {
-                        if !crate::mouse_tracking::active() {
-                            true
-                        } else {
+                        if crate::mouse_tracking::active() {
                             ui_tx.send(UiInput::Mouse(report)).is_ok()
+                        } else {
+                            true
                         }
                     }
                     crate::input::ReaderInput::Event(event) => match event {
@@ -2373,17 +3521,14 @@ impl Renderer {
                 // the first draw repaints the same buffer (a fresh alt
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
-                // never reach the pane on its own: queue it with the
-                // cursor show and let the first draw's single flush carry
-                // clear + frame together — a separate clear-and-flush
-                // here shows a blank pane for the whole render gap, a
-                // visible flicker on every surface switch (the chat's own
-                // first frame is the tail render on the first event).
-                crossterm::queue!(
-                    std::io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Show
-                )?;
+                // never reach the pane on its own: the armed mount's
+                // clear and cursor hide ride the first draw's single
+                // flush (see `altscreen::take_first_draw_mount`) — a
+                // clear queued HERE would let any mid-gap flush (the
+                // kitty probe, a mode enable) carry it out early, wiping
+                // the shell or the held surface during a direct open's
+                // attach wait. The cursor hides with the mount (TS
+                // `TUI.start` writes hideCursor, never a show).
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,
@@ -2424,6 +3569,22 @@ impl Renderer {
                             }
                             HeadlessStep::WaitIdle { timeout_ms } => {
                                 if ui_tx.send(UiInput::WaitIdle { timeout_ms }).is_err() {
+                                    return;
+                                }
+                            }
+                            HeadlessStep::WaitRender { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitRender { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            HeadlessStep::WaitGone { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitGone { needle, timeout_ms })
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -2505,9 +3666,20 @@ impl Renderer {
                 // The suspension released the alternate screen (the client
                 // command prompted on the primary one); re-enter it.
                 crate::altscreen::enter()?;
+                // The suspend's release tail showed the cursor for the
+                // plain terminal (the client command's prompt needs it);
+                // taking the surface back hides it again (TS `ui.start()`
+                // on the SIGCONT resume) — otherwise the visible cursor
+                // sits at a stale position through the clear and the full
+                // repaint below, the exact window the glitch shows in.
+                let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 // The raw-mode bracket re-arms the enhanced-key modes (TS
                 // `start` on SIGCONT re-runs the paste enable and the kitty
-                // query).
+                // query; the port resolves the kitty capability once per
+                // process, so a resume re-applies the resolved state —
+                // crossterm's support check monopolizes the event-reader
+                // lock for its 2s budget and must not run on the resume
+                // path).
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 // The fullscreen surface re-enables mouse tracking with the
                 // terminal (TS `applyFullscreen` on resume).
@@ -2536,6 +3708,7 @@ impl Renderer {
     /// writes into the user's scrollback, so it can be disabled without a
     /// release if it misbehaves.
     fn flush_to_main_screen(&mut self, view: &mut AgentView) -> Result<()> {
+        use std::io::Write;
         // Only the terminal renderer owns a real screen to flush;
         // headless verification keeps its plain pipes.
         if !matches!(self, Renderer::Terminal { .. }) {
@@ -2546,23 +3719,12 @@ impl Renderer {
             return Ok(());
         }
         let (width, height) = terminal::size()?;
-        let plan = view.take_flush_plan(width as usize, height as usize);
-        use std::io::Write;
+        // The flush streams row-by-row in bounded chunks: a long transcript
+        // must reach the terminal without ever holding the whole frame (a
+        // +O(rows) peak right at exit) — the bytes are the materialized
+        // flush's bytes, the peak is one section plus one chunk.
         let mut out = std::io::stdout();
-        let mut buffer = String::new();
-        match plan {
-            FlushPlan::Append(rows) if rows.is_empty() => {}
-            FlushPlan::Append(rows) => {
-                write_flush_rows(&mut buffer, &rows);
-            }
-            FlushPlan::Repaint(rows) => {
-                // Erase the visible screen only — scrollback above it
-                // stays (TS `fullRender`'s `\x1b[2J\x1b[H`).
-                buffer.push_str("\x1b[2J\x1b[H");
-                write_flush_rows(&mut buffer, &rows);
-            }
-        }
-        out.write_all(buffer.as_bytes())?;
+        view.stream_flush_to(&mut out, width as usize, height as usize)?;
         out.flush()?;
         Ok(())
     }
@@ -2597,6 +3759,15 @@ impl Renderer {
         let text = crate::app::render_frame_text(view, *width, *height).join("\n");
         if frames.last().map(String::as_str) != Some(text.as_str()) {
             frames.push(text);
+        }
+    }
+
+    /// The headless capture's frames (None on a terminal renderer): the
+    /// render barriers wait on these.
+    fn headless_frames(&self) -> Option<&[String]> {
+        match self {
+            Renderer::Headless { frames, .. } => Some(frames),
+            Renderer::Terminal { .. } => None,
         }
     }
 
@@ -2648,8 +3819,15 @@ impl Renderer {
         // after raw mode is off would leak its escape sequence into the
         // parent shell over slow SSH. Runs on every exit — the agents-view
         // handoff drains too (TS `teardownSessionUi`); headless runs hold
-        // plain pipes and skip it inside the drain.
-        crate::enhanced_keys::drain(&mut std::io::stdout());
+        // plain pipes and skip it inside the drain. A handoff (preserve)
+        // keeps raw mode on — the adopting surface's dispatch drops
+        // releases (TS tui.ts), so the handoff drain consumes only what
+        // is already buffered instead of parking on the idle window.
+        if preserve_alt_screen {
+            crate::enhanced_keys::drain_for_handoff(&mut std::io::stdout());
+        } else {
+            crate::enhanced_keys::drain(&mut std::io::stdout());
+        }
         // Tracking releases with the surface (TS `TUI.stop` writes the
         // disable before leaving the alt screen).
         let _ = crate::mouse_tracking::disable(&mut std::io::stdout());
@@ -2660,6 +3838,17 @@ impl Renderer {
         match self {
             Renderer::Terminal { .. } => {
                 if preserve_alt_screen {
+                    // ratatui's `Terminal` drop restores the cursor its
+                    // last frame hid (the `hidden_cursor` flag): run the
+                    // drop before the hide so the hide is the handoff's
+                    // final word — TS `stop(preserveAltScreen)` leaves the
+                    // cursor hidden for the surface taking the screen
+                    // over, and the adopting mount must not race a stale
+                    // show against its own hide.
+                    let Renderer::Terminal { term, .. } = self else {
+                        unreachable!("the arm matched the terminal renderer")
+                    };
+                    drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                     // Flag this surface's input reader for the background
                     // stop now (TS tears its listener down with the chat):
@@ -2687,7 +3876,7 @@ impl Renderer {
 /// feed), rows are joined with CRLF, and a trailing CRLF parks the cursor
 /// below the frame (TS `TUI.stop`'s closing newline) so whatever prints
 /// next — the shell prompt or the resume hint — starts on a fresh line.
-fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
+pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
     for row in rows {
         buffer.push('\r');
         // An image-placement row is written raw (TS `applyLineResets` /
@@ -2712,6 +3901,7 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn headless_error_returns_never_touch_the_terminal() {
@@ -2748,6 +3938,41 @@ mod tests {
         );
     }
 
+    /// TS #2458's shutdown recovery constants: the announced non-update
+    /// closing waits the TS reconnect timeout (60s) on the TS fixed poll
+    /// (100ms, never doubling) — not the §10.2 resume window or the
+    /// hiccup loop's doubling backoff.
+    #[test]
+    fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
+        let before = tokio::time::Instant::now();
+        let state = ReconnectLoop::start_shutdown();
+        let after = tokio::time::Instant::now();
+        assert_eq!(state.kind, RecoveryKind::Shutdown);
+        // The window is 60s off the arming instant: the deadline sits
+        // inside [before + 60s, after + 60s] (the arming ran between the
+        // two clock reads — a single `now + 60s` bound can miss by the
+        // nanoseconds between the reads).
+        assert!(
+            state.deadline >= before + DAEMON_SHUTDOWN_RECONNECT_WINDOW
+                && state.deadline <= after + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
+            "the window is TS #2458's 60s reconnect timeout"
+        );
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The first poll is the TS 100ms cadence off the same arming
+        // instant, inside the same two clock reads.
+        assert!(
+            state.next_attempt >= before + SHUTDOWN_RECONNECT_RETRY
+                && state.next_attempt <= after + SHUTDOWN_RECONNECT_RETRY,
+            "the first poll is the TS 100ms cadence"
+        );
+        // The fixed poll never doubles.
+        let state = state.next_attempt();
+        assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
+        // The hiccup loop doubles: 1s -> 2s.
+        let lost = ReconnectLoop::start_lost().next_attempt();
+        assert_eq!(lost.delay, Duration::from_secs(2));
+    }
+
     #[test]
     fn flush_rows_write_crlf_and_keep_zone_markers() {
         // A marked row keeps its zero-width zone sequence inline (the
@@ -2781,7 +4006,7 @@ mod tests {
             script_path: None,
             model_selection: selection,
             model_catalog: Vec::new(),
-            model_configured_providers: Default::default(),
+            model_configured_providers: HashSet::default(),
             model_recent_models: Vec::new(),
             default_thinking_level: None,
             no_session: false,
@@ -2803,8 +4028,9 @@ mod tests {
             telemetry: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
             session_rlm_depth: None,
-            prompt_stash: Default::default(),
+            prompt_stash: std::sync::Arc::default(),
             session_has_children: false,
+            restore_dock_focus: false,
             client_settings: None,
         }
     }

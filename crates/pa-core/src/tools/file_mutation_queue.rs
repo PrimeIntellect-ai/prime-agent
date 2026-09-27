@@ -83,7 +83,7 @@ mod tests {
                     order.lock().await.push(i);
                     tokio::time::sleep(Duration::from_millis(2)).await;
                 })
-                .await
+                .await;
             }));
         }
         for h in handles {

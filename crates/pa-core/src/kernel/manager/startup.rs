@@ -61,7 +61,7 @@ impl Inner {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut size = path.metadata().map_or(0, |m| m.len());
         if size > MAX_KERNEL_STDERR_LOG_BYTES {
             let old = path.with_extension("log.old");
             let _ = std::fs::remove_file(&old);
@@ -177,7 +177,10 @@ impl Inner {
             Ok(child) => child,
             Err(error) => {
                 // Fail a pending start promptly instead of riding out the
-                // ready timeout.
+                // ready timeout. The interpreter itself failed to launch, so
+                // the memoized runtime-ready result is stale: drop it so a
+                // startup retry re-probes (and rebuilds when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
                 {
                     let mut g = lock(&self.guarded);
@@ -194,7 +197,7 @@ impl Inner {
                 ));
             }
         };
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
         {
@@ -211,6 +214,10 @@ impl Inner {
                     // Never tear down a newer start's kernel.
                     return Err(error);
                 }
+                // The child died or never reached ready, so the memoized
+                // runtime-ready result is stale: drop it and let a startup
+                // retry re-probe (and rebuild the venv when the probe fails).
+                crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
@@ -230,6 +237,9 @@ impl Inner {
             return Err(anyhow!("{startup_error}"));
         }
         if protocol != REPL_PROTOCOL_VERSION as i64 {
+            // A stale runtime passed a memoized probe's key but speaks the
+            // wrong protocol: the memo is stale, so a retry re-probes.
+            crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             return Err(anyhow!(
                 "Kernel runtime speaks protocol {protocol}, expected {REPL_PROTOCOL_VERSION}. \
                  Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."
@@ -246,7 +256,7 @@ impl Inner {
     /// Wire the spawned child: protocol reader, stderr tail + log, and the
     /// exit watcher that settles the manager when the process dies.
     fn wire_child(self: &Arc<Self>, mut child: tokio::process::Child, generation: u64) {
-        let pid = child.id().map(|p| p as i32).unwrap_or(-1);
+        let pid = child.id().map_or(-1, |p| p as i32);
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -392,12 +402,8 @@ impl Inner {
             if was_live {
                 inner.append_diagnostic(&format!(
                     "unexpected exit code={} signal={}",
-                    exit.code
-                        .map(|c| c.to_string())
-                        .unwrap_or("null".to_string()),
-                    exit.signal
-                        .map(|s| s.to_string())
-                        .unwrap_or("null".to_string()),
+                    exit.code.map_or("null".to_string(), |c| c.to_string()),
+                    exit.signal.map_or("null".to_string(), |s| s.to_string()),
                 ));
             }
             live_kernels::remove(&inner);

@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -74,6 +75,41 @@ STAGED_ENTRIES = [
     "mcp-services.bundled.json",
 ]
 
+# Shipped-content policy: what the installed tree carries beyond the binary.
+#
+# The runtime sidecar ships only what the kernel consumes. The venv
+# bootstrap installs it with `uv pip install <payload>/prime-agent-runtime`
+# (uv's pip interface builds the hatchling wheel, whose target packages
+# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` +
+# `pyproject.toml` — so the pytest suite (`test/`) and the development
+# `uv.lock` (the pip interface never reads the project lockfile) are dead
+# weight in every installed tree, and dropping them changes neither the
+# built wheel nor the bootstrap-version identity. The cache names and
+# suffixes mirror package_release.py's EXCLUDED_* so a stale `.venv` or
+# `__pycache__` cannot ride the payload either.
+RUNTIME_EXCLUDED_NAMES = frozenset({
+    "test",
+    "uv.lock",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".git",
+    ".DS_Store",
+    "node_modules",
+})
+RUNTIME_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
+
+# The docs/ files that ship to end users: the quickstart install-rust.sh
+# prints the payload path for ("next steps"), the keybindings reference,
+# and the model-surface contract package_release.py's REQUIRED_FILES
+# pins. The rest of docs/ is porting/audit/CI material for repository
+# developers (~570KB at assembly time) and stays out of the installed
+# footprint; the docs payload entry itself always ships (the update
+# flow's RELEASE_ASSETS and the TS binaryAssets list require it).
+SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md", "FEATURE_PARITY.md")
+
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
 TARGET_ALIASES = {
     "x86_64-unknown-linux-gnu": "linux-x64",
@@ -84,6 +120,47 @@ TARGET_ALIASES = {
 }
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+
+# Split-debug decoder sidecars (prime-agent-*.debug / *.debug.gz) are release
+# assets for offline symbolication, NEVER install payload: the installer and
+# the update channel extract the tarball verbatim, so a decoder inside it
+# would ship DWARF bytes to every install. release.yml uploads the decoder
+# as a separate release asset; this assembly hard-fails if one appears in
+# the staging tree or the packed archive (guards the future, not just today:
+# a later staging mistake must fail the release step, not ride the tarball).
+DECODER_SUFFIXES = (".debug", ".debug.gz")
+
+
+def decoder_like(path: Path) -> bool:
+    return path.name.endswith(DECODER_SUFFIXES)
+
+
+def fail_if_decoder_in_tree(staging: Path) -> None:
+    offenders = sorted(
+        str(p.relative_to(staging))
+        for p in staging.rglob("*") if p.is_file() and decoder_like(p)
+    )
+    if offenders:
+        fail(
+            "decoder-like sidecar(s) in the release payload (split-debug "
+            "assets are separate release assets, never install payload): "
+            + ", ".join(offenders)
+        )
+
+
+def fail_if_decoder_in_archive(archive_path: Path) -> None:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        offenders = sorted(
+            m.name for m in archive.getmembers()
+            if decoder_like(Path(m.name))
+        )
+    if offenders:
+        archive_path.unlink(missing_ok=True)
+        fail(
+            f"decoder-like sidecar(s) packed into {archive_path.name} "
+            "(split-debug assets are separate release assets, never install "
+            f"payload): {', '.join(offenders)}"
+        )
 
 # A git commit SHA as carried by `${GITHUB_SHA}` (full 40 hex chars, either
 # case accepted).
@@ -114,6 +191,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--binary", type=Path, default=None)
+    parser.add_argument("--decoder", type=Path, default=None,
+                        help="separate Linux .debug.gz sidecar from split_debug.py")
     parser.add_argument("--runtime-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--sha", default=None,
@@ -164,6 +243,39 @@ def validate_sha(sha: str) -> None:
         fail(f"invalid commit SHA {sha!r} (expected 40 hex chars)")
 
 
+def copy_runtime_tree(source: Path, target: Path) -> None:
+    """Copy the kernel sidecar, dropping the dev-only files
+    (RUNTIME_EXCLUDED_*): a plain-file, no-link tree like the rest of the
+    payload (symlinks still fail at pack time in `_deterministic_member`).
+    """
+
+    def ignore(directory, names):
+        return {
+            name for name in names
+            if name in RUNTIME_EXCLUDED_NAMES
+            or name.endswith(RUNTIME_EXCLUDED_SUFFIXES)
+        }
+
+    shutil.copytree(source, target, ignore=ignore)
+
+
+def copy_shipped_docs(source: Path, target: Path) -> None:
+    """Stage the user-facing docs subset (SHIPPED_DOC_ENTRIES).
+
+    The docs entry always ships (the update flow's RELEASE_ASSETS and the
+    TS binaryAssets list require it), and every curated doc is REQUIRED:
+    a missing user-facing doc fails the assembly (the adversarial-review
+    gate — a whitelist that silently skips missing files would let the
+    payload ship without the quickstart install-rust.sh points at).
+    """
+    target.mkdir()
+    for name in SHIPPED_DOC_ENTRIES:
+        doc = source / name
+        if not doc.is_file():
+            fail(f"user-facing doc {name!r} missing from {source}; the payload must ship {SHIPPED_DOC_ENTRIES}")
+        shutil.copy2(doc, target / name)
+
+
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
 
@@ -171,6 +283,10 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     releases); when set, a `package.json` manifest is staged beside the binary
     so `--version` reports it at runtime (the same exe-adjacent manifest the
     TS binaryAssets carry — the Rust binary resolves it from `current_exe()`).
+
+    The runtime and docs entries ship the curated content (see
+    RUNTIME_EXCLUDED_* and SHIPPED_DOC_ENTRIES); every other entry is a
+    verbatim copy.
     """
     binary = resolve_binary(args)
     runtime_dir = args.runtime_dir or (args.repo_root / "prime-agent-runtime")
@@ -193,7 +309,18 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         if not source.exists():
             fail(f"release payload entry {name!r} missing at {source}")
         if source.is_dir():
-            shutil.copytree(source, target_path)
+            if name == "prime-agent-runtime":
+                copy_runtime_tree(source, target_path)
+            elif name == "docs":
+                copy_shipped_docs(source, target_path)
+            elif name == "skills":
+                shutil.copytree(source, target_path, ignore=lambda _directory, names: {
+                    entry for entry in names
+                    if entry in RUNTIME_EXCLUDED_NAMES
+                    or entry.endswith(RUNTIME_EXCLUDED_SUFFIXES)
+                })
+            else:
+                shutil.copytree(source, target_path)
         else:
             shutil.copy2(source, target_path)
     os.chmod(staging / "prime-agent", 0o755)
@@ -224,6 +351,9 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         }
         (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
         payload.append("package.json")
+    # The payload guard runs on the staged tree BEFORE packing: a decoder
+    # sidecar staged by a later change fails here, not in the field.
+    fail_if_decoder_in_tree(staging)
     return {
         "executable_sha256": sha256_file(staging / "prime-agent"),
         "payload": payload,
@@ -282,6 +412,57 @@ def pack_tarball(staging: Path, out_path: Path, entries: list[str]) -> None:
         fail(str(error))
 
 
+def debug_sections(binary: Path) -> list[str]:
+    """ELF .debug_* section names, so the split asserts on real evidence."""
+    result = subprocess.run(["objdump", "-h", str(binary)], capture_output=True, text=True)
+    if result.returncode != 0:
+        fail(f"objdump -h failed on {binary}: {result.stderr.strip()}")
+    return [
+        line.split()[1]
+        for line in result.stdout.splitlines()
+        if line[:1].isspace() and ".debug" in line
+    ]
+
+
+def gnu_build_id(path: Path) -> str:
+    result = subprocess.run(["readelf", "-n", str(path)],
+                            capture_output=True, text=True)
+    match = re.search(r"Build ID: ([0-9a-f]+)", result.stdout) if result.returncode == 0 else None
+    if match is None:
+        fail(f"no GNU build ID in {path}: {result.stderr.strip()}")
+    return match.group(1)
+
+
+def decoder_facts(args: argparse.Namespace) -> dict | None:
+    if args.target.endswith("-unknown-linux-gnu"):
+        if args.binary is None or args.decoder is None:
+            fail("Linux release requires explicit --binary shipped ELF and "
+                 "--decoder from split_debug.py")
+        if debug_sections(resolve_binary(args)):
+            fail(f"Linux shipped ELF still has DWARF: {args.binary}")
+        expected = f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
+        decoder = args.decoder
+        if decoder.name != expected or not decoder.is_file():
+            fail(f"missing required Linux decoder {expected}")
+        binary = resolve_binary(args)
+        with tempfile.TemporaryDirectory(prefix="prime-agent-decoder-") as tmp:
+            uncompressed = Path(tmp) / "prime-agent.debug"
+            try:
+                with gzip.open(decoder, "rb") as src, uncompressed.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except (OSError, EOFError) as error:
+                fail(f"cannot decompress decoder {decoder}: {error}")
+            build_id = gnu_build_id(binary)
+            if gnu_build_id(uncompressed) != build_id:
+                fail(f"decoder build ID does not match shipped ELF {binary}")
+        return {"target": args.target, "file": expected,
+                "sha256": sha256_file(decoder), "buildId": build_id,
+                "executableSha256": sha256_file(binary)}
+    if args.decoder is not None:
+        fail("decoder is only supported for Linux targets")
+    return None
+
+
 def main() -> int:
     args = parse_args()
     validate_version(args.version)
@@ -292,6 +473,7 @@ def main() -> int:
     if args.target not in TARGET_ALIASES:
         fail(f"unknown release target {args.target!r} (known: {', '.join(TARGET_ALIASES)})")
 
+    decoder = decoder_facts(args)
     out_dir = (args.out_dir or args.repo_root / "target" / "release" / "dist").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix="prime-agent-archive-"))
@@ -302,6 +484,9 @@ def main() -> int:
         )
         archive_path = out_dir / archive_name
         pack_tarball(staging, archive_path, facts["payload"])
+        # The packed archive is the artifact the channel serves: assert it
+        # carries no decoder sidecar before anything records its hash.
+        fail_if_decoder_in_archive(archive_path)
         archive_sha256 = sha256_file(archive_path)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -330,20 +515,32 @@ def main() -> int:
         if existing.get("version") == manifest["version"] \
                 and existing.get("commit") == manifest.get("commit"):
             manifest["binaries"] = existing["binaries"]
+            previous = existing.get("decoders", [])
+            targets = [d["target"] for d in previous]
+            if len(targets) != len(set(targets)):
+                fail("existing manifest has duplicate decoder target entries")
+            if previous:
+                manifest["decoders"] = previous
     manifest["binaries"] = [
         b for b in manifest["binaries"] if b.get("target") != args.target
     ] + [entry]
     manifest["binaries"].sort(key=lambda b: b["file"])
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
+    decoders = [d for d in manifest.get("decoders", [])
+                if d.get("target") != args.target]
+    if decoder is not None:
+        decoders.append(decoder)
+    if decoders:
+        manifest["decoders"] = sorted(decoders, key=lambda d: d["file"])
+    else:
+        manifest.pop("decoders", None)
     sums_path = out_dir / "SHA256SUMS"
-    lines = []
-    for line in sums_path.read_text().splitlines() if sums_path.exists() else []:
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1].strip() != archive_name:
-            lines.append(line)
-    lines.append(f"{archive_sha256}  {archive_name}")
-    lines.sort(key=lambda line: line.split(None, 1)[1])
+    artifacts = manifest["binaries"] + manifest.get("decoders", [])
+    files = [artifact["file"] for artifact in artifacts]
+    if len(files) != len(set(files)):
+        fail("manifest contains duplicate artifact filenames")
+    lines = [f"{artifact['sha256']}  {artifact['file']}"
+             for artifact in sorted(artifacts, key=lambda item: item["file"])]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     sums_path.write_text("\n".join(lines) + "\n")
 
     print(json.dumps(entry, indent=2))

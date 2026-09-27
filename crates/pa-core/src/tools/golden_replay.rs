@@ -109,9 +109,10 @@ fn truncation_json(result: &crate::tools::truncate::TruncationResult) -> serde_j
 }
 
 fn assert_json_eq(actual: serde_json::Value, expected: serde_json::Value, what: &str) {
-    if actual != expected {
-        panic!("{what} mismatch\nexpected: {expected}\n  actual: {actual}");
-    }
+    assert!(
+        actual == expected,
+        "{what} mismatch\nexpected: {expected}\n  actual: {actual}"
+    );
 }
 
 // ---------------------------------------------------------------------------

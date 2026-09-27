@@ -419,8 +419,7 @@ impl Editor {
                     let advance = self
                         .segment(&after)
                         .first()
-                        .map(|g| g.segment.chars().count())
-                        .unwrap_or(1);
+                        .map_or(1, |g| g.segment.chars().count());
                     self.set_cursor_col(self.cursor_col + advance);
                 } else if self.cursor_line < self.lines.len() - 1 {
                     self.cursor_line += 1;
@@ -434,8 +433,7 @@ impl Editor {
                 let back = self
                     .segment(&before)
                     .last()
-                    .map(|g| g.segment.chars().count())
-                    .unwrap_or(1);
+                    .map_or(1, |g| g.segment.chars().count());
                 // The hidden bang prefix floors the move (TS
                 // `moveCursorHorizontally` clamps at the line start).
                 self.set_cursor_col(

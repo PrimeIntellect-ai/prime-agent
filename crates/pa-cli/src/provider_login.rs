@@ -1,12 +1,12 @@
 //! The composition root's provider auth flows behind the TUI's `/login`
 //! and `/logout` (TS `ProviderAuthFlows`): the provider catalog rows with
 //! their auth status, the API-key store, the MCP device flow, the Prime
-//! Inference terminal login (`prime_inference_login`), and the credential
-//! removal. The provider OAuth flows (TS `the TS AI library/oauth`:
-//! Anthropic, GitHub Copilot, OpenAI Codex, xAI subscriptions) and the
-//! Prime browser logins (the RSA `auth_challenge` flow) are not ported
-//! yet; their rows render (TS shape) and their flows report the
-//! unavailability.
+//! Inference terminal login (`prime_inference_login`), and the four
+//! subscription logins — the Codex Subscription login
+//! (`codex_subscription_login`) and the Anthropic, GitHub Copilot, and
+//! xAI logins (`subscription_login`: the PKCE callback flow, the device
+//! flows, the token exchanges, and the credential writes). The Prime
+//! browser logins (the RSA `auth_challenge` flow) are not ported yet.
 
 use std::path::PathBuf;
 
@@ -15,10 +15,11 @@ use pa_core::models::ModelRegistry;
 use pa_tui::provider_auth::{
     AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
+    ProviderWarningFuture,
 };
 
-/// The TS OAuth provider rows (`the TS AI library/oauth` registry): subscription
-/// logins whose flows this build does not port yet.
+/// The TS OAuth provider rows (`the TS AI library/oauth` registry): the
+/// subscription logins, every flow ported.
 const SUBSCRIPTION_PROVIDERS: [(&str, &str); 4] = [
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("github-copilot", "GitHub Copilot"),
@@ -77,8 +78,7 @@ fn display_name(provider_id: &str) -> String {
     BUILT_IN_PROVIDER_DISPLAY_NAMES
         .iter()
         .find(|(id, _)| *id == provider_id)
-        .map(|(_, name)| name.to_string())
-        .unwrap_or_else(|| provider_id.to_string())
+        .map_or_else(|| provider_id.to_string(), |(_, name)| name.to_string())
 }
 
 /// TS `isApiKeyLoginProvider`: the display-name map, or a provider the
@@ -189,6 +189,11 @@ fn ts_row_order(a: &ProviderRow, b: &ProviderRow) -> std::cmp::Ordering {
     a.name.cmp(&b.name)
 }
 
+/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (#2645): subscription
+/// requests identify as Claude Code, which may violate Anthropic's
+/// terms; an API key avoids the risk.
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
+
 /// The provider auth surface against one daemon's shared directories.
 #[derive(Clone)]
 pub struct ProviderAuth {
@@ -214,6 +219,23 @@ impl ProviderAuth {
         let credential = auth.get_all().credential(provider_id);
         let status = auth.get_auth_status(provider_id);
         (credential, status)
+    }
+
+    /// TS `getAnthropicSubscriptionAuthWarning` (#2645, blocking body):
+    /// the ban-risk warning applies when the stored Anthropic credential
+    /// is an OAuth login, or the resolved key is a subscription token
+    /// (`sk-ant-oat...` — the same prefix the provider layer treats as
+    /// OAuth). `None` = the auth is not a subscription.
+    fn anthropic_subscription_warning_blocking(&self) -> Option<&'static str> {
+        let mut auth = self.auth_storage();
+        if let Some(credential) = auth.get_all().credential("anthropic") {
+            if matches!(credential, AuthCredential::Oauth { .. }) {
+                return Some(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+            }
+        }
+        auth.get_api_key("anthropic")
+            .is_some_and(|key| key.starts_with("sk-ant-oat"))
+            .then_some(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING)
     }
 }
 
@@ -246,8 +268,8 @@ impl ProviderAuthCommands for ProviderAuth {
     }
 
     /// TS `loginProvider`: the API-key store for prompted keys, the MCP
-    /// device flow for integrations; the subscription/Prime flows report
-    /// their unported state.
+    /// device flow for integrations; the panel-driven subscription and
+    /// Prime flows route through [`ProviderAuth::login_on_panel`].
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
@@ -286,6 +308,30 @@ impl ProviderAuthCommands for ProviderAuth {
         })
     }
 
+    /// TS `getAnthropicSubscriptionAuthWarning` (#2645): the ban-risk
+    /// warning for an active Anthropic subscription auth, for the session
+    /// surface to show once per run. The store lock (and the key
+    /// resolution, which may run a `!command` credential) stay off the
+    /// async workers.
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
+        let provider = self.clone();
+        Box::pin(async move {
+            // The lookup is warning-only (TS ignores auth lookup failures
+            // the same way), so a hung `!command` credential must not pin
+            // the session surface: the TS resolution caps command
+            // execution at 10s (`execSyncHidden`/`spawnSyncHidden`
+            // `timeout: 10000`), and the check resolves no-warning at the
+            // same bound.
+            let lookup = tokio::task::spawn_blocking(move || {
+                provider.anthropic_subscription_warning_blocking()
+            });
+            match tokio::time::timeout(std::time::Duration::from_secs(10), lookup).await {
+                Ok(joined) => joined.unwrap_or(None),
+                Err(_) => None,
+            }
+        })
+    }
+
     /// TS `runLogout`'s removal: the message matches the credential's
     /// type; a missing credential is a no-op notice.
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture {
@@ -307,8 +353,10 @@ impl ProviderAuth {
         {
             let mut rows: Vec<ProviderRow> = Vec::new();
 
-            // The subscription OAuth rows (TS `getOAuthProviders`). Their
-            // login flows are not ported; the rows keep the TS shape.
+            // The subscription OAuth rows (TS `getOAuthProviders`).
+            // Every flow is ported: the rows select and their logins
+            // run through the panel (the menu rule's unavailable
+            // marking stays for the surfaces a future row may lack).
             for (id, name) in SUBSCRIPTION_PROVIDERS {
                 let (credential, status) = provider.credential_status(id);
                 rows.push(ProviderRow {
@@ -317,6 +365,8 @@ impl ProviderAuth {
                     auth_type: AuthType::Oauth,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
                     flow: AuthFlow::TerminalFlow,
+                    configured: status.configured,
+                    available: true,
                 });
             }
 
@@ -356,6 +406,8 @@ impl ProviderAuth {
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
                     flow,
+                    configured: status.configured,
+                    available: true,
                 });
             }
 
@@ -421,6 +473,13 @@ impl ProviderAuth {
                     label: "configured".to_string(),
                 }),
                 flow: AuthFlow::TerminalFlow,
+                // The stored-credential rows exist because the credential
+                // is there (TS `getProviderAuthStatus(id).configured`);
+                // credential removal always runs (an unavailable row's
+                // login never existed; its logout still removes the
+                // stored credential).
+                configured: true,
+                available: true,
             });
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -430,19 +489,22 @@ impl ProviderAuth {
 
 /// The login flow body (blocking: the auth store and the MCP manager stay
 /// off the async workers). The panel-driven rows (the MCP OAuth logins,
-/// the Prime Inference login) route to [`login_blocking_on_panel`]; this
-/// body serves the panel-prompted key store and the unported OAuth
-/// stubs.
+/// the Prime Inference login, the subscription logins) route to
+/// [`login_blocking_on_panel`]; this body serves the panel-prompted key
+/// store, and an OAuth row reaching it answers the silent cancel (the
+/// session routes the panel rows to the panel body).
 fn login_blocking(
     provider_row: ProviderRow,
     agent_dir: PathBuf,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
     if provider_row.auth_type == AuthType::Oauth {
-        return ProviderAuthOutcome::Error(format!(
-            "{} subscription login is not available in this build yet.",
-            provider_row.name
-        ));
+        // The panel-driven flows (the MCP logins, the Prime Inference
+        // login) run on the panel. An OAuth row reaching this
+        // non-panel body answers the silent cancel — the session
+        // routes the panel rows to the panel body, and no row dead-ends
+        // in an after-selection error wall.
+        return ProviderAuthOutcome::Cancelled;
     }
     let Some(api_key) = api_key.filter(|key| !key.is_empty()) else {
         return ProviderAuthOutcome::Error(format!(
@@ -469,7 +531,8 @@ fn login_blocking(
 }
 
 /// The login flow body for the panel-driven rows (the MCP OAuth logins,
-/// the Prime Inference login): blocking on the dedicated thread — the
+/// the Prime Inference login, the four subscription logins): blocking on
+/// the dedicated thread — the
 /// flow awaits its transport AND the panel's prompt/picker replies (the
 /// answers arrive from the TUI loop's thread), and the inline auth panel
 /// carries every surface the plain terminal used to.
@@ -484,14 +547,16 @@ fn login_blocking_on_panel(
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
-                    &auth,
-                    &format!("login {server}"),
-                    panel,
-                ))
-            })
-            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
+            .map_or_else(
+                |error: std::io::Error| format!("login failed: {error}"),
+                |runtime| {
+                    runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
+                        &auth,
+                        &format!("login {server}"),
+                        panel,
+                    ))
+                },
+            );
         return if outcome.starts_with("Usage:") {
             ProviderAuthOutcome::Error(outcome)
         } else {
@@ -499,41 +564,155 @@ fn login_blocking_on_panel(
         };
     }
     // TS `loginProvider`'s prime-inference dispatch: the API-key flow
-    // (the paste prompt, the whoami check, the team selection; the
-    // browser challenge stays unported) rendered through the panel.
+    // (the browser challenge raced against the paste prompt, the whoami
+    // check, the team selection) rendered through the panel.
     if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
-                    crate::prime_inference_login::PrimeLoginInputs {
-                        agent_dir: &agent_dir,
-                        provider_name: &provider_row.name,
-                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
-                        http: &pa_core::auth::ReqwestPrimeHttp,
-                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
-                            &agent_dir,
-                        )
-                        .as_deref(),
-                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
-                    },
-                    &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
-                ))
-            })
-            .unwrap_or_else(|error| {
-                ProviderAuthOutcome::Error(format!(
-                    "Failed to login to {}: {error}",
-                    provider_row.name
-                ))
-            });
+            .map_or_else(
+                |error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                        crate::prime_inference_login::PrimeLoginInputs {
+                            agent_dir: &agent_dir,
+                            provider_name: &provider_row.name,
+                            config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                            http: &pa_core::auth::ReqwestPrimeHttp,
+                            prime_cli_config_path:
+                                crate::prime_inference_login::prime_cli_config_path(&agent_dir)
+                                    .as_deref(),
+                            prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                            poll_interval_ms: None,
+                        },
+                        &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
+                    ))
+                },
+            );
     }
-    // Any other row that reaches the panel body reports the stub (the
-    // session routes only the panel rows here).
-    ProviderAuthOutcome::Error(format!(
-        "{} subscription login is not available in this build yet.",
-        provider_row.name
-    ))
+    // The Codex Subscription login (TS `loginProvider`'s dispatch to
+    // the AI library's `openaiCodexOAuthProvider.login`): the browser
+    // authorization URL block, the manual paste racing the localhost
+    // callback, the token exchange, and the credential write, all
+    // through the inline auth panel (TS the login dialog).
+    if provider_row.id == pa_core::auth::OPENAI_CODEX_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_or_else(
+                |error: std::io::Error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(
+                        crate::codex_subscription_login::run_codex_subscription_login(
+                            &agent_dir,
+                            &provider_row.name,
+                            &pa_ai::oauth::ReqwestCodexHttp::new(),
+                            &crate::codex_subscription_login::PanelCodexLoginUi::new(panel),
+                        ),
+                    )
+                },
+            );
+    }
+    // The Anthropic (Claude Pro/Max) login (TS `loginProvider`'s
+    // dispatch to the AI library's `anthropicOAuthProvider.login`):
+    // the PKCE authorization URL, the manual paste racing the localhost
+    // callback, the JSON token exchange, and the credential write, all
+    // through the inline auth panel.
+    if provider_row.id == pa_core::auth::ANTHROPIC_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_or_else(
+                |error: std::io::Error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::subscription_login::run_anthropic_login(
+                        &agent_dir,
+                        &provider_row.name,
+                        &pa_ai::oauth::ReqwestProviderHttp::new(),
+                        &crate::subscription_login::PanelSubscriptionLoginUi::new(
+                            panel,
+                            &provider_row.id,
+                        ),
+                    ))
+                },
+            );
+    }
+    // The GitHub Copilot login (TS `loginProvider`'s dispatch to the AI
+    // library's `githubCopilotOAuthProvider.login`): the enterprise
+    // domain prompt, the device flow, the Copilot token exchange, the
+    // model-policy enabling, and the credential write, all through the
+    // inline auth panel.
+    if provider_row.id == pa_core::auth::GITHUB_COPILOT_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_or_else(
+                |error: std::io::Error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::subscription_login::run_github_copilot_login(
+                        &agent_dir,
+                        &provider_row.name,
+                        &pa_ai::oauth::ReqwestProviderHttp::new(),
+                        &crate::subscription_login::PanelSubscriptionLoginUi::new(
+                            panel,
+                            &provider_row.id,
+                        ),
+                    ))
+                },
+            );
+    }
+    // The xAI (Grok) login (TS `loginProvider`'s dispatch to the AI
+    // library's `xaiOAuthProvider.login`): the device flow, the token
+    // poll, and the credential write, all through the inline auth
+    // panel.
+    if provider_row.id == pa_core::auth::XAI_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_or_else(
+                |error: std::io::Error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::subscription_login::run_xai_login(
+                        &agent_dir,
+                        &provider_row.name,
+                        &pa_ai::oauth::ReqwestProviderHttp::new(),
+                        &crate::subscription_login::PanelSubscriptionLoginUi::new(
+                            panel,
+                            &provider_row.id,
+                        ),
+                    ))
+                },
+            );
+    }
+    // Any other row that reaches the panel body answers the silent
+    // cancel (the session routes only the ported rows here — never an
+    // error wall).
+    ProviderAuthOutcome::Cancelled
 }
 
 /// The logout body (blocking: the auth store lock stays off the async
@@ -591,11 +770,13 @@ mod tests {
                     access: "a".to_string(),
                     refresh: None,
                     expires: 1,
+                    account_id: None,
                     endpoint: None,
                     token_endpoint: None,
                     client_id: None,
                     resource: None,
                     issuer: None,
+                    enterprise_url: None,
                 }),
                 &AuthStatus::default(),
                 AuthType::ApiKey
@@ -687,11 +868,17 @@ mod tests {
         std::env::remove_var("PRIME_API_KEY");
         let auth = ProviderAuth::new(dir.path(), agent.clone());
         let rows = auth.login_options().await;
-        // The TS OAuth registry rows render (their flows stay unported).
+        // The TS OAuth registry rows render; every subscription flow is
+        // ported, so every row selects (the flows answer through the
+        // panel — never an after-selection error wall).
         for (id, name) in SUBSCRIPTION_PROVIDERS {
+            let row = rows
+                .iter()
+                .find(|row| row.id == id && row.name == name)
+                .unwrap_or_else(|| panic!("the {id} subscription row renders"));
             assert!(
-                rows.iter().any(|row| row.id == id && row.name == name),
-                "the {id} subscription row renders"
+                row.available,
+                "the {id} row's flow is ported and selectable"
             );
         }
         // The operator's 2026-09-24 directive: /login is providers only —
@@ -708,6 +895,73 @@ mod tests {
         );
     }
 
+    /// Port of the TS #2645 warning detection: the ban-risk warning is
+    /// reported exactly when the active Anthropic credential is the
+    /// subscription (a stored OAuth login or an `sk-ant-oat` key), and
+    /// its text names the risk.
+    #[tokio::test]
+    async fn the_anthropic_subscription_warning_matches_the_active_credential() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent = dir.path().join("agent");
+        std::fs::create_dir_all(&agent).expect("agent dir");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let auth = ProviderAuth::new(dir.path(), agent.clone());
+
+        // No credential: no warning.
+        assert_eq!(auth.anthropic_subscription_warning().await, None);
+
+        // A plain API key: no warning (an API key avoids the risk).
+        let mut storage = pa_core::auth::AuthStorage::create(&agent);
+        storage.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "sk-ant-api03-plain".to_string(),
+                prime_team: None,
+            },
+        );
+        assert_eq!(auth.anthropic_subscription_warning().await, None);
+
+        // A subscription token key (TS `isAnthropicSubscriptionAuthKey`).
+        storage.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "sk-ant-oat-subscription".to_string(),
+                prime_team: None,
+            },
+        );
+        let warning = auth
+            .anthropic_subscription_warning()
+            .await
+            .expect("a sk-ant-oat key is the subscription");
+        assert!(warning.contains("identifies as Claude Code"));
+        assert!(warning.contains("restricted or banned"));
+        assert!(warning.contains("An Anthropic API key avoids the risk"));
+
+        // A stored OAuth login is the subscription too.
+        storage.set(
+            "anthropic",
+            AuthCredential::Oauth {
+                access: "a".to_string(),
+                refresh: None,
+                expires: i64::MAX,
+                endpoint: None,
+                token_endpoint: None,
+                client_id: None,
+                resource: None,
+                issuer: None,
+                account_id: None,
+                enterprise_url: None,
+            },
+        );
+        assert!(auth.anthropic_subscription_warning().await.is_some());
+
+        // An env subscription key resolves active with no stored credential.
+        storage.remove("anthropic");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-oat-env");
+        assert!(auth.anthropic_subscription_warning().await.is_some());
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
     #[tokio::test]
     async fn login_stores_an_api_key_and_logout_removes_it() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -720,6 +974,8 @@ mod tests {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            configured: false,
+            available: true,
         };
         match auth.login(&row, Some("sk-test")).await {
             ProviderAuthOutcome::Status(message) => {

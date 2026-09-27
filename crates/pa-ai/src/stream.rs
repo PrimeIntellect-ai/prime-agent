@@ -24,6 +24,7 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
 /// conservative policy the session engine's compaction estimator applies
 /// (`pa-core` cannot be a dependency here, so the heuristic is restated).
 fn estimated_input_tokens(context: &Context) -> u64 {
+    const TOOL_ENVELOPE_CHARS: u64 = 48;
     let mut chars = context
         .system_prompt
         .as_deref()
@@ -34,12 +35,10 @@ fn estimated_input_tokens(context: &Context) -> u64 {
     // envelope on the wire (OpenAI-completions:
     // `{"type":"function","function":...}` plus flags like `strict`), so
     // every tool also counts the widest envelope's chars.
-    const TOOL_ENVELOPE_CHARS: u64 = 48;
     for tool in context.tools.iter().flatten() {
         chars = chars.saturating_add(
             serde_json::to_string(tool)
-                .map(|json| TOOL_ENVELOPE_CHARS + json.chars().count() as u64)
-                .unwrap_or(0),
+                .map_or(0, |json| TOOL_ENVELOPE_CHARS + json.chars().count() as u64),
         );
     }
     for message in &context.messages {
@@ -61,8 +60,7 @@ fn estimated_input_tokens(context: &Context) -> u64 {
                     crate::types::AssistantContent::ToolCall(call) => {
                         call.name.chars().count() as u64
                             + serde_json::to_string(&call.arguments)
-                                .map(|json| json.chars().count() as u64)
-                                .unwrap_or(0)
+                                .map_or(0, |json| json.chars().count() as u64)
                     }
                 })
                 .sum(),
@@ -81,9 +79,9 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .map(|block| match block {
             crate::types::UserOrToolContent::Text(text) => text.text.chars().count() as u64,
             crate::types::UserOrToolContent::Image(_) => 4_800,
-            crate::types::UserOrToolContent::Raw(value) => serde_json::to_string(value)
-                .map(|json| json.chars().count() as u64)
-                .unwrap_or(0),
+            crate::types::UserOrToolContent::Raw(value) => {
+                serde_json::to_string(value).map_or(0, |json| json.chars().count() as u64)
+            }
         })
         .sum()
 }
@@ -128,6 +126,10 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
 }
 
 /// Start streaming a completion for `model` using provider-native options.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream(
     model: &Model,
     context: &Context,
@@ -140,6 +142,10 @@ pub fn stream(
 }
 
 /// Await the final assistant message of a provider-native stream.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete(
     model: &Model,
     context: &Context,
@@ -150,6 +156,10 @@ pub async fn complete(
 }
 
 /// Start a streaming completion with unified reasoning options (`streamSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream_simple(
     model: &Model,
     context: &Context,
@@ -167,6 +177,10 @@ pub fn stream_simple(
 }
 
 /// Await the final assistant message of a simple stream (`completeSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete_simple(
     model: &Model,
     context: &Context,
@@ -181,9 +195,10 @@ mod tests {
     use super::*;
     use crate::types::{
         AssistantContent, AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall,
-        ToolResultMessage, UserMessage, UserMessageContent, UserOrToolContent,
+        ToolResultMessage, Usage, UserMessage, UserMessageContent, UserOrToolContent,
     };
     use serde_json::json;
+    use serde_json::Map;
 
     fn test_model(context_window: u64, max_tokens: u64) -> Model {
         serde_json::from_value(json!({
@@ -201,7 +216,7 @@ mod tests {
             messages: vec![crate::types::Message::User(UserMessage {
                 content: UserMessageContent::Text("x".repeat(chars)),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             tools: None,
         }
@@ -238,7 +253,7 @@ mod tests {
             .push(crate::types::Message::User(UserMessage {
                 content: UserMessageContent::Blocks(vec![UserOrToolContent::Raw(value)]),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         assert_eq!(
             estimated_input_tokens(&context),
@@ -367,16 +382,16 @@ mod tests {
                         UserOrToolContent::Text(TextContent {
                             text: "12345678".to_string(), // 2 tokens
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                         UserOrToolContent::Image(ImageContent {
                             data: "QQ==".to_string(),
                             mime_type: "image/png".to_string(),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }), // 1,200 tokens
                     ]),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 crate::types::Message::Assistant(AssistantMessage {
                     content: vec![
@@ -384,7 +399,7 @@ mod tests {
                             thinking: "12345678".to_string(), // 2 tokens
                             thinking_signature: None,
                             redacted: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                         AssistantContent::ToolCall(ToolCall {
                             id: "c".to_string(),
@@ -392,7 +407,7 @@ mod tests {
                             arguments: json!({"code": "ls"}).as_object().cloned().unwrap(),
                             // 12 chars
                             thought_signature: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         }),
                     ],
                     api: "openai-completions".into(),
@@ -401,12 +416,12 @@ mod tests {
                     response_model: None,
                     response_id: None,
                     diagnostics: None,
-                    usage: Default::default(),
+                    usage: Usage::default(),
                     stop_reason: crate::types::StopReason::Stop,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
                 crate::types::Message::ToolResult(ToolResultMessage {
                     tool_call_id: "c".to_string(),
@@ -414,12 +429,12 @@ mod tests {
                     content: vec![UserOrToolContent::Text(TextContent {
                         text: "12345678".to_string(), // 2 tokens
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             ],
             tools: None,

@@ -28,6 +28,7 @@ pub enum Detail {
 impl Detail {
     /// The Ctrl+O cycle (TS `toggleToolOutputExpansion`): overview adds
     /// details, details adds the expanded output, all wraps to overview.
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             Detail::Overview => Detail::Details,
@@ -49,6 +50,28 @@ impl Detail {
     /// Edit diffs expand (TS `editDiffsExpanded = detail !== "overview"`).
     pub fn edit_diffs_expanded(self) -> bool {
         !matches!(self, Detail::Overview)
+    }
+
+    /// The stored wire name (TS `ChatDetail`): "overview" | "details" |
+    /// "all".
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Detail::Overview => "overview",
+            Detail::Details => "details",
+            Detail::All => "all",
+        }
+    }
+
+    /// The level for a stored wire name (TS #2709 `getChatDetail`):
+    /// an unset or unknown value reads as the `details` startup level.
+    #[must_use]
+    pub fn from_wire_name(name: &str) -> Self {
+        match name {
+            "overview" => Detail::Overview,
+            "all" => Detail::All,
+            _ => Detail::Details,
+        }
     }
 }
 
@@ -74,8 +97,6 @@ pub enum ChatEntry {
     /// A durable session-command echo row (`session_slash_command`):
     /// the command as typed, laid out like a user message.
     SlashCommand { text: String },
-    /// A durable session-command outcome row (`session_slash_command_result`).
-    SlashCommandResult { content: String },
     /// The compaction summary row (TS `CompactionSummaryMessageComponent`):
     /// `◆ Context compacted` with the summary below.
     CompactionSummary {
@@ -112,21 +133,6 @@ pub enum ChatEntry {
     RefinementOutcome(Box<crate::custom_message::RefinementOutcomeRow>),
     /// One generic custom row (TS `CustomMessageComponent` box).
     CustomPanel(Box<crate::custom_message::CustomPanelRow>),
-    /// A client-side markdown block appended to the chat (TS
-    /// `chatContainer.addChild(new Markdown(...))`, e.g. the `/hotkeys`
-    /// guide): not a durable session row.
-    ClientMarkdown { text: String },
-    /// A client-side info block (TS `chatContainer.addChild(new
-    /// Spacer(1))` + `new Text(info, 1, 0)`, e.g. the `/session`,
-    /// `/context`, `/system-prompt`, and `/logs` displays): not a durable
-    /// session row.
-    ClientText {
-        rows: Vec<crate::info_commands::ClientLine>,
-    },
-    /// The `/changelog` panel (TS `handleChangelogCommand`): the border,
-    /// `What's New` title, and the entries markdown. Not a durable
-    /// session row.
-    ChangelogPanel { markdown: String },
 }
 
 // The card types live in `tool_card`; re-exported here because the
@@ -250,7 +256,7 @@ impl WorkingState {
     }
 }
 
-/// Spinner frames (TS `Loader` DEFAULT_FRAMES).
+/// Spinner frames (TS `Loader` `DEFAULT_FRAMES`).
 pub(crate) const LOADER_FRAMES: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
@@ -342,7 +348,7 @@ pub fn render_user_block(
     if rendered.is_empty() {
         let row = vec![
             Span::styled("  ".to_string(), bg),
-            Span::styled("".to_string(), body),
+            Span::styled(String::new(), body),
         ];
         rows.push(pad_to(row, width, bg));
     }
@@ -451,7 +457,7 @@ pub(crate) fn render_markdown_block(
     let rendered =
         crate::markdown::render_markdown_tagged(text.trim(), content_width, md, "", cache);
     let mut out = Vec::new();
-    for line in rendered.into_iter() {
+    for line in rendered {
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
         row.extend(line);
         // TS pads every markdown row with unstyled spaces after the row's
@@ -477,7 +483,7 @@ fn render_thinking_block(
     let rendered =
         crate::markdown::render_markdown_tagged(text.trim(), content_width, &md, "dim", cache);
     let mut out = Vec::new();
-    for line in rendered.into_iter() {
+    for line in rendered {
         // The markdown margin sits outside the styled content (default fg).
         let mut row: Line = vec![Span::raw(" ")];
         row.extend(line);
@@ -558,7 +564,7 @@ impl RetryState {
     }
 }
 
-/// The retry loader rows (TS auto_retry_start rendering: muted spinner +
+/// The retry loader rows (TS `auto_retry_start` rendering: muted spinner +
 /// the retry message).
 pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usize) -> Vec<Line> {
     let muted = theme.fg_style(ThemeColor::Muted);
@@ -576,6 +582,7 @@ pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osc133::RowMarkers;
     use crate::theme::{ColorMode, Theme, ThemeColor};
 
     fn theme() -> Theme {
@@ -678,6 +685,17 @@ mod tests {
     }
 
     #[test]
+    fn detail_wire_names_round_trip_with_ts_fallback() {
+        // TS #2709: the Ctrl+O level persists as the `chatDetail` wire
+        // string and reads back; anything unknown is the startup level.
+        for detail in [Detail::Overview, Detail::Details, Detail::All] {
+            assert_eq!(Detail::from_wire_name(detail.wire_name()), detail);
+        }
+        assert_eq!(Detail::from_wire_name(""), Detail::Details);
+        assert_eq!(Detail::from_wire_name("verbose"), Detail::Details);
+    }
+
+    #[test]
     fn user_block_renders_box_rows() {
         let rows = render_user_block("Run a quick check.", &theme(), "  ", 60);
         assert_eq!(rows.len(), 3);
@@ -717,7 +735,7 @@ mod tests {
                     continue;
                 }
             }
-            runs.push((span.content.to_string(), span.style));
+            runs.push((span.content.clone(), span.style));
         }
         runs
     }
@@ -807,7 +825,7 @@ mod tests {
         let rows = render_user_block("look \u{E000} at @file", &theme(), "  ", 60);
         let styled: Vec<(String, Style)> = rows[1]
             .iter()
-            .map(|s| (s.content.to_string(), s.style))
+            .map(|s| (s.content.clone(), s.style))
             .collect();
         assert!(
             styled
@@ -887,7 +905,7 @@ mod tests {
             false,
             &mut crate::markdown::MarkdownBlockCache::default(),
         );
-        assert_eq!(crate::osc133::row_markers(&rows[0]), Default::default());
+        assert_eq!(crate::osc133::row_markers(&rows[0]), RowMarkers::default());
     }
 
     #[test]

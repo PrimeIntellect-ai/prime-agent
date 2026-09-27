@@ -57,7 +57,11 @@ impl AcpSession {
     /// `RefineFailed` mapping (TS emits `refine_failed` on the wire for
     /// a failed serialized round). A declined review stays silent.
     pub(super) async fn consume_compact_auto_refine(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        // The config queue serializes the round against picker switches:
+        // the armed trigger runs on the model the session reports, never
+        // on the pre-switch pair mid-switch.
+        let _guard = mode.config_queue.lock().await;
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let outcome = self
@@ -74,7 +78,10 @@ impl AcpSession {
     /// round is best-effort like the TS drain — close proceeds even
     /// when the review fails.
     pub(super) async fn drain_compact_auto_refine_at_close(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        // Same serialization as the mid-session checkpoint (the close
+        // path drains the queue first, then the round takes it cleanly).
+        let _guard = mode.config_queue.lock().await;
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let outcome = self
@@ -97,7 +104,7 @@ impl AcpSession {
             .session
             .consume_compact_auto_refine(
                 model,
-                mode.api_key.clone(),
+                mode.current_api_key().await,
                 mode.agent_dir.as_path().to_path_buf(),
                 surface,
             )
@@ -137,8 +144,8 @@ mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -235,6 +242,7 @@ mod tests {
                 // The settings default (no prewarm); the ACP autorefine
                 // tests do not exercise kernel boot paths.
                 prewarm_ipython_kernel: None,
+                on_background_work_settled: None,
                 queued_goal_context_purge: None,
             })
             .await
@@ -263,6 +271,11 @@ mod tests {
             session: Some(SessionEntry {
                 session,
                 prompt_task: None,
+                config: std::sync::Arc::new(super::super::InProcessConfig {
+                    published: tokio::sync::Mutex::new(Vec::new()),
+                    models: tokio::sync::Mutex::new(Vec::new()),
+                }),
+                config_refresh: None,
             }),
             session_new_in_flight: false,
             session_close_in_flight: false,
@@ -271,9 +284,11 @@ mod tests {
             engine: engine.clone(),
             actual_cwd: std::sync::Arc::new(dir.path().to_path_buf()),
             product_version: std::sync::Arc::new("test".to_string()),
-            model: Some(model),
-            api_key: None,
+            model: std::sync::Arc::new(Mutex::new(Some(model))),
+            api_key: std::sync::Arc::new(Mutex::new(None)),
+            config_queue: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             agent_dir: std::sync::Arc::new(agent_dir),
+            provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             autonomous_config: None,
             mcp: engine.mcp_manager.clone(),
             mcp_owner_id: std::sync::Arc::new("acp-autorefine-owner".to_string()),

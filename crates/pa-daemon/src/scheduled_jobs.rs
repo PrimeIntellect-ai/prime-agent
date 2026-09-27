@@ -10,7 +10,7 @@
 //! process, like TS daemon-mode (`options.worker ?
 //! AgentCronJobStore.forSessionArtifacts() : ...`); sessions register
 //! their artifact partition when they bind (create and every
-//! replacement flow - new_session / switch_session / import_jsonl /
+//! replacement flow - `new_session` / `switch_session` / `import_jsonl` /
 //! fork) and jobs rebind with them.
 //!
 //! Delivery: a due job is claimed by the store and fired through the
@@ -203,19 +203,23 @@ impl AgentCronSchedulerHooks for QueueHooks {
             } else {
                 (job.prompt.clone(), None, None)
             };
-            lane.push_back(QueuedItem {
-                message,
-                preview,
-                custom_message,
-                agent_message: None,
-                admission_id: None,
-                images: Vec::new(),
-                queue_key,
-                done: Some(done_tx),
-                queue_visible: true,
-                policy: crate::worker::TurnPolicy::Injected,
-                forced_batch: false,
-            });
+            crate::worker::enqueue_priority(
+                lane,
+                QueuedItem {
+                    priority: crate::worker::QueuePriority::Background,
+                    message,
+                    preview,
+                    custom_message,
+                    agent_message: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    queue_key,
+                    done: Some(done_tx),
+                    queue_visible: true,
+                    policy: crate::worker::TurnPolicy::Injected,
+                    forced_batch: false,
+                },
+            );
         }
         // The fire checkpoint (busy=true): a scheduled prompt is admitted
         // live work, and heartbeats/cron jobs run unattended — no client
@@ -1209,10 +1213,6 @@ mod tests {
     /// a clean run and a skip respectively.
     #[tokio::test]
     async fn settles_classify_ran_failed_or_skipped() {
-        let dir = std::env::temp_dir().join(format!("pa-sched-fail-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let session = write_active_session(&dir);
-
         // Park one fire, settle it with `settle`, and return the verdict.
         async fn settle_one(
             session: &(String, std::path::PathBuf),
@@ -1256,6 +1256,10 @@ mod tests {
             }
             run.await.expect("run task")
         }
+
+        let dir = std::env::temp_dir().join(format!("pa-sched-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = write_active_session(&dir);
 
         // A provider failure surfaces: the scheduler records it and backs
         // off (the incident's 404).

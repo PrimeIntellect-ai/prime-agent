@@ -18,47 +18,12 @@ pub enum DaemonCommandPlane {
     Control,
 }
 
-/// TS `DAEMON_COMMAND_PLANE`, verbatim. Every command the TS product defines
-/// has an entry; unknown types are control (never forwarded on a peer link).
+/// TS `DAEMON_COMMAND_PLANE`: every session-plane command the TS product
+/// defines has an entry; all other commands, known or unknown, are control
+/// (never forwarded on a peer link).
 pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
     use DaemonCommandPlane::{Control, Session};
     match command_type {
-        "ack_result"
-        | "list"
-        | "list_saved_sessions"
-        | "list_agent_peers"
-        | "get_direct_worker_transport"
-        | "get_worker_peer_transport"
-        | "create"
-        | "reattach"
-        | "complete_owned_session"
-        | "promote_owned_session"
-        | "kill"
-        | "rename"
-        | "set_session_name"
-        | "send_message"
-        | "agent_messages_status"
-        | "agent_messages_pause"
-        | "agent_messages_resume"
-        | "agent_messages_clear"
-        | "cron_list"
-        | "heartbeats_list"
-        | "roster_subscribe"
-        | "roster_unsubscribe"
-        | "worker_roster_delta"
-        | "heartbeat_manage"
-        | "cron_add"
-        | "cron_cancel"
-        | "heartbeat_get"
-        | "heartbeat_set"
-        | "heartbeat_update"
-        | "rename_saved_session"
-        | "delete_saved_session"
-        | "prepare_update_restart"
-        | "commit_update_restart"
-        | "retry_worker"
-        | "restart"
-        | "shutdown" => Control,
         "attach"
         | "detach"
         | "prompt"

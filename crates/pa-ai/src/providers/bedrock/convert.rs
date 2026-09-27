@@ -397,10 +397,9 @@ pub fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) ->
     match effective {
         ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => "low",
         ModelThinkingLevel::Medium => "medium",
-        ModelThinkingLevel::High => "high",
+        ModelThinkingLevel::High | ModelThinkingLevel::Off => "high",
         ModelThinkingLevel::Xhigh => "xhigh",
         ModelThinkingLevel::Max => "max",
-        ModelThinkingLevel::Off => "high",
     }
 }
 

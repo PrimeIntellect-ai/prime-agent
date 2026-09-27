@@ -75,6 +75,11 @@ pub enum AutoRetryEvent {
 /// `reset-too-far`). A `Some` outcome parks the session — the chain
 /// surfaces the parked status as the final `auto_retry_end` instead of
 /// the give-up — and `None` keeps the immediate give-up.
+///
+/// # Errors
+///
+/// Returns the `attempt` future's error when a turn attempt fails, or the
+/// `emit` callback's error while observing retry events.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     policy: &ProviderRetryPolicy,
@@ -311,7 +316,7 @@ mod tests {
         }
     }
 
-    /// A rate_limit failure whose server-requested wait exceeds the cap
+    /// A `rate_limit` failure whose server-requested wait exceeds the cap
     /// parks the session when the park seam reports a park: the give-up
     /// status becomes the parked sentence (TS #2375).
     #[tokio::test]
@@ -524,7 +529,7 @@ mod tests {
             .iter()
             .filter_map(|event| match event {
                 AutoRetryEvent::Start { delay_ms, .. } => Some(*delay_ms),
-                _ => None,
+                AutoRetryEvent::End { .. } => None,
             })
             .collect();
         assert_eq!(delays.len(), 2, "two retry starts: {events:?}");
@@ -614,7 +619,7 @@ mod tests {
         assert!(events.lock().unwrap().is_empty());
     }
 
-    /// TS #2472: a safety-filter failure (e.g. a content_filter
+    /// TS #2472: a safety-filter failure (e.g. a `content_filter`
     /// rejection) is a deterministic rejection — one attempt, no retry
     /// loop, no retry events.
     #[tokio::test]

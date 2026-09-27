@@ -3,8 +3,9 @@
 //! call and file-op details land with the provider integration slice.
 
 use pa_types::session::{AgentMessage, FileEntry};
+use std::fmt::Write as _;
 
-/// Default compaction settings (TS DEFAULT_COMPACTION_SETTINGS).
+/// Default compaction settings (TS `DEFAULT_COMPACTION_SETTINGS`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 
@@ -91,13 +92,12 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
                 match block {
                     pa_types::ai::AssistantContentBlock::Text(text) => total += chars(&text.text),
                     pa_types::ai::AssistantContentBlock::Thinking(thinking) => {
-                        total += chars(&thinking.thinking)
+                        total += chars(&thinking.thinking);
                     }
                     pa_types::ai::AssistantContentBlock::ToolCall(call) => {
                         total += chars(&call.name)
                             + serde_json::to_string(&call.arguments)
-                                .map(|json| json.chars().count() as u64)
-                                .unwrap_or(0);
+                                .map_or(0, |json| json.chars().count() as u64);
                     }
                 }
             }
@@ -215,6 +215,14 @@ pub struct ContextTokensEstimate {
     pub last_usage_index: Option<usize>,
 }
 
+/// Estimate the context tokens of the live messages (TS
+/// `estimateContextTokens`): the last valid assistant usage plus chars/4
+/// estimates for the messages that trail it.
+///
+/// # Panics
+///
+/// The `expect` on the usage at the found index cannot fire: the index
+/// comes from an `rposition` over messages whose usage is present.
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextTokensEstimate {
     match messages
         .iter()
@@ -271,40 +279,38 @@ pub fn threshold_compaction_due(
         _ => None,
     });
     let estimate = estimate_context_tokens(messages);
-    let context_tokens = match estimate.last_usage_index {
-        Some(index) => {
-            // The usage anchor must postdate the latest compaction.
-            if compaction_timestamp
-                .is_some_and(|timestamp| message_timestamp(&messages[index]) <= timestamp)
-            {
-                return false;
-            }
-            estimate.tokens
+    let context_tokens = if let Some(index) = estimate.last_usage_index {
+        // The usage anchor must postdate the latest compaction.
+        if compaction_timestamp
+            .is_some_and(|timestamp| message_timestamp(&messages[index]) <= timestamp)
+        {
+            return false;
         }
-        // TS fallback: no valid usage in the context — the last assistant
-        // message's raw usage decides; error turns never trigger.
-        None => {
-            let Some(AgentMessage::Assistant(assistant)) = messages
-                .iter()
-                .rev()
-                .find(|message| matches!(message, AgentMessage::Assistant(_)))
-            else {
-                return false;
-            };
-            if assistant.stop_reason == pa_types::ai::StopReason::Error {
-                return false;
-            }
-            if compaction_timestamp.is_some_and(|timestamp| assistant.timestamp <= timestamp) {
-                return false;
-            }
-            calculate_context_tokens(&assistant.usage)
+        estimate.tokens
+    }
+    // TS fallback: no valid usage in the context — the last assistant
+    // message's raw usage decides; error turns never trigger.
+    else {
+        let Some(AgentMessage::Assistant(assistant)) = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message, AgentMessage::Assistant(_)))
+        else {
+            return false;
+        };
+        if assistant.stop_reason == pa_types::ai::StopReason::Error {
+            return false;
         }
+        if compaction_timestamp.is_some_and(|timestamp| assistant.timestamp <= timestamp) {
+            return false;
+        }
+        calculate_context_tokens(&assistant.usage)
     };
     should_compact(context_tokens, context_window, max_output_tokens, settings)
 }
 
 /// Valid cut point indices: user/assistant/custom/branch/compaction-summary
-/// messages plus branch_summary and custom_message entries. Never tool results.
+/// messages plus `branch_summary` and `custom_message` entries. Never tool results.
 pub fn find_valid_cut_points(
     entries: &[FileEntry],
     start_index: usize,
@@ -346,8 +352,9 @@ fn find_turn_start_index(
     for i in (start_index..=entry_index).rev() {
         let entry = &entries[i];
         match entry {
-            FileEntry::BranchSummary { .. } | FileEntry::CustomMessage { .. } => return Some(i),
-            FileEntry::Message {
+            FileEntry::BranchSummary { .. }
+            | FileEntry::CustomMessage { .. }
+            | FileEntry::Message {
                 message: AgentMessage::User(_) | AgentMessage::BashExecution(_),
                 ..
             } => return Some(i),
@@ -367,6 +374,11 @@ pub struct CutPointResult {
 }
 
 /// Find the cut point keeping approximately `keep_recent_tokens`.
+///
+/// # Panics
+///
+/// The `unwrap` on the last cut point cannot fire: the cut-point list was
+/// checked non-empty above.
 pub fn find_cut_point(
     entries: &[FileEntry],
     start_index: usize,
@@ -457,9 +469,9 @@ pub fn build_summarization_prompt(
     }
     .to_string();
     if let Some(custom_instructions) = custom_instructions {
-        base.push_str(&format!(
+        let _ = write!(base,
             "\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n{custom_instructions}\n</user-instructions>"
-        ));
+        );
     }
     format!("{base}\n\n{KERNEL_PERSIST_SUMMARY_NOTE}")
 }
@@ -476,7 +488,7 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: Some(parent.to_string()),
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -488,7 +500,7 @@ mod tests {
             AgentMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text(text.to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
         )
     }
@@ -502,7 +514,7 @@ mod tests {
                     pa_types::ai::TextContent {
                         text: "ok".to_string(),
                         text_signature: None,
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                     },
                 )],
                 api: "openai-completions".to_string(),
@@ -517,13 +529,13 @@ mod tests {
                     cache_read: 0,
                     cache_write: 0,
                     total_tokens: 150,
-                    cost: Default::default(),
+                    cost: pa_types::ai::UsageCost::default(),
                 },
                 stop_reason: pa_types::ai::StopReason::Stop,
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
         )
     }
@@ -532,7 +544,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -542,7 +554,7 @@ mod tests {
                 pa_types::ai::TextContent {
                     text: "ok".to_string(),
                     text_signature: None,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             )],
             api: "openai-completions".to_string(),
@@ -557,13 +569,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: usage_total,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -574,6 +586,7 @@ mod tests {
             retained_message_count: None,
             custom_instructions: None,
             harness_digest: None,
+            harness_state_fingerprint: None,
             timestamp,
         })
     }
@@ -743,7 +756,7 @@ mod tests {
         let user = AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("12345678".to_string()), // 8 chars -> 2 tokens
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         assert_eq!(estimate_tokens(&user), 2);
         // Usage math: totalTokens wins.
@@ -753,7 +766,7 @@ mod tests {
             cache_read: 1,
             cache_write: 1,
             total_tokens: 100,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         assert_eq!(calculate_context_tokens(&usage), 100);
     }
@@ -787,13 +800,13 @@ mod tests {
                         pa_types::ai::TextContent {
                             text: "result".to_string(),
                             text_signature: None,
-                            rest: Default::default(),
+                            rest: serde_json::Map::default(),
                         },
                     )],
                     details: None,
                     is_error: false,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ),
         ];
@@ -866,13 +879,13 @@ mod tests {
                         cache_read: 0,
                         cache_write: 0,
                         total_tokens: 2,
-                        cost: Default::default(),
+                        cost: pa_types::ai::UsageCost::default(),
                     },
                     stop_reason: pa_types::ai::StopReason::Aborted,
                     stop_reason_raw: None,
                     error_message: None,
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 }),
             ),
         ];

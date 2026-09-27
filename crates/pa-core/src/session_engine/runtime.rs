@@ -1,7 +1,7 @@
 //! The session runtime: shared goal-driver + cron-store state with kernel
 //! host-handler registration. This is the wiring layer that binds the
 //! goal/rlm-heartbeat host requests (kernel bridge) to a live session, the
-//! Rust equivalent of the AgentSession host-request controllers.
+//! Rust equivalent of the `AgentSession` host-request controllers.
 
 use std::sync::Arc;
 
@@ -81,7 +81,7 @@ impl SessionRuntime {
         &self.cron_store
     }
 
-    /// Register the goal.* and rlm_heartbeat.* handlers onto a handler map.
+    /// Register the `goal.*` and `rlm_heartbeat.*` handlers onto a handler map.
     pub fn register_host_handlers(
         &self,
         session: Arc<Mutex<SessionManager>>,
@@ -397,8 +397,8 @@ mod tests {
         let response = list(payload(serde_json::json!({ "type": "rlm_heartbeat.list" })))
             .await
             .unwrap();
-        assert!(response["heartbeats"].as_array().unwrap().len() == 1);
-        assert!(mutations.lock().await.len() == 1);
+        assert_eq!(response["heartbeats"].as_array().unwrap().len(), 1);
+        assert_eq!(mutations.lock().await.len(), 1);
 
         // A pause withdraws the queued fire (TS `updateRlmHeartbeatForState`).
         let update = handlers.get("rlm_heartbeat.update").unwrap().clone();

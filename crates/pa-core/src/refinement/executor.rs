@@ -188,6 +188,14 @@ fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
 /// Produce a refinement proposal (rollback, or the LLM pass) without mutating
 /// any harness state. Callers re-read the harness file before applying because
 /// the LLM call can take many seconds.
+///
+/// # Errors
+///
+/// Returns an error when a requested rollback id is not in the refinement
+/// history, when building the refinement request fails because the prompt
+/// leaves no output-token room in the model's context window, when the
+/// refinement call itself fails, or when its reply cannot be parsed into
+/// a proposal.
 pub async fn plan_refinement(
     messages: &[AgentMessage],
     state: &HarnessState,
@@ -332,6 +340,11 @@ fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
 }
 
 /// The automatic /refine review gate.
+///
+/// # Errors
+///
+/// Returns an error when the review request cannot be built, the LLM call
+/// fails, or its reply cannot be parsed into a review.
 pub async fn review_auto_refine(
     messages: &[AgentMessage],
     state: &HarnessState,
@@ -383,7 +396,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -391,12 +404,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -496,9 +509,9 @@ mod tests {
                     content: "builds are   green".to_string(),
                     path: "/m/m1".to_string(),
                     scope: Some(HarnessScope::Local),
-                    reference: Default::default(),
-                    arguments: Default::default(),
-                    metadata: Default::default(),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
                     source: "test".to_string(),
                     created_at: String::new(),
                     updated_at: String::new(),

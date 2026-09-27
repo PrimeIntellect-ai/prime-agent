@@ -53,7 +53,7 @@ pub(crate) static RESTORE_ATTEMPTS: std::sync::atomic::AtomicUsize =
 /// Serializes the tests that read [`RESTORE_ATTEMPTS`]: the counter is
 /// process-global and the test threads run in parallel, so a reader must
 /// hold this lock across its read window (the unwind-guard test's
-/// catch_unwind and the interactive error-path test's run both take it).
+/// `catch_unwind` and the interactive error-path test's run both take it).
 #[cfg(test)]
 pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -95,13 +95,21 @@ pub(crate) fn restore_terminal() {
 /// exit frame — the drain, the mode releases, the alt-screen leave with
 /// the inline flush — and ends through here, so every exit path lands in
 /// the same terminal state.
+///
+/// Each completed write reports exit-path progress: on a slow terminal
+/// these tail writes block behind the flush draining the pty, and the
+/// exit guard's watchdog must read that block-and-complete as movement
+/// (a terminal still draining), not as a stalled shutdown — a forced
+/// exit here would cut the terminal restore in half.
 pub(crate) fn terminal_release_tail(out: &mut Stdout) {
     let _ = out.write_all(SYNC_OUTPUT_OFF);
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
+    crate::exit_guard::note_exit_progress();
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
     let _ = out.flush();
+    crate::exit_guard::note_exit_progress();
 }
 
 /// The repair notice goes through a fallible write: `eprintln!` panics

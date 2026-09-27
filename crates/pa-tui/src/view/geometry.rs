@@ -7,6 +7,12 @@ impl AgentView {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
+        // A condensed run's block counts in place of its entries in the
+        // collapsed detail mode (the members count zero); every other
+        // detail mode counts each entry exactly as before.
+        if let Some(rows) = self.count_condensed(index, width) {
+            return rows;
+        }
         // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
         // the previous row: a tool call, agent message, bash execution, or
         // shell completion all count.
@@ -41,9 +47,6 @@ impl AgentView {
                 usize::from(spacing)
                     + crate::chat_slash::slash_command_row_count(text, &self.theme, width)
             }
-            ChatEntry::SlashCommandResult { content } => {
-                2 + crate::width::wrapped_text_count(content, width.saturating_sub(4).max(1))
-            }
             ChatEntry::AgentMessage(row) => {
                 crate::custom_message::geometry::agent_message_row_count(
                     row,
@@ -63,26 +66,6 @@ impl AgentView {
             }
             ChatEntry::CustomPanel(row) => {
                 crate::custom_message::geometry::custom_panel_row_count(row, &self.theme, width)
-            }
-            ChatEntry::ClientMarkdown { text } => {
-                let mut style = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                style.code_block_indent.clone_from(&self.code_block_indent);
-                3 + crate::markdown::markdown_row_count(
-                    text.trim(),
-                    width.saturating_sub(2).max(1),
-                    &style,
-                )
-            }
-            ChatEntry::ClientText { rows } => {
-                crate::info_commands::client_text_row_count(rows, &self.theme, width)
-            }
-            ChatEntry::ChangelogPanel { markdown } => {
-                crate::info_commands::changelog_panel_row_count(
-                    markdown,
-                    &self.theme,
-                    &self.code_block_indent,
-                    width,
-                )
             }
             ChatEntry::Tool(card) => {
                 usize::from(spacing)
@@ -163,6 +146,7 @@ mod tests {
 
     #[test]
     fn supported_entry_geometry_matches_rendering() {
+        use crate::custom_message::*;
         let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
         for text in [
             "",
@@ -179,9 +163,6 @@ mod tests {
             });
             view.push_entry(ChatEntry::User { text: text.into() });
             view.push_entry(ChatEntry::SlashCommand { text: text.into() });
-            view.push_entry(ChatEntry::SlashCommandResult {
-                content: text.into(),
-            });
             for error in [
                 None,
                 Some("Traceback error\n  context\nValueError: failed".to_string()),
@@ -198,10 +179,9 @@ mod tests {
                 })));
             }
         }
-        use crate::custom_message::*;
         view.push_entry(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
             direction: AgentMessageDirection::Received,
-            participant: "from child".into(),
+            counterpart: "lane".into(),
             message: "hello 界\nnext".into(),
         })));
         view.push_entry(ChatEntry::ShellCompletion(Box::new(ShellCompletionRow {
@@ -238,15 +218,6 @@ mod tests {
             summary: "summary\nnext".into(),
             tokens_before: 100,
             custom_instructions: Some("keep code".into()),
-        });
-        view.push_entry(ChatEntry::ClientMarkdown {
-            text: "# help\nbody".into(),
-        });
-        view.push_entry(ChatEntry::ClientText {
-            rows: vec![Vec::new()],
-        });
-        view.push_entry(ChatEntry::ChangelogPanel {
-            markdown: "## Changes\n- fix".into(),
         });
         for name in ["bash", "ipython", "other"] {
             view.push_entry(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {

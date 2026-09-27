@@ -356,7 +356,6 @@ async fn run_prompt_turn(
                     break;
                 }
                 mode.engine.session.agent().wait_for_idle().await;
-                continue;
             }
             goal_continuation::GoalFollowUp::None => {
                 match session.autonomous_follow_up(&final_message).await {
@@ -421,7 +420,12 @@ async fn run_session_command_segment(
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     turn_failure: &mut Option<String>,
 ) -> anyhow::Result<bool> {
-    let Some(model) = mode.model.clone() else {
+    // The command executor runs on one model/key pair read through the
+    // config queue: a concurrent picker switch cannot hand `/compact`
+    // or `/refine` the pre-switch model with the switched provider's
+    // key.
+    let (model, api_key) = mode.model_and_api_key().await;
+    let Some(model) = model else {
         // Unreachable in practice (the engine assembly requires a model);
         // fail as a request error instead of a turn failure.
         anyhow::bail!("No model available to run the session command");
@@ -434,7 +438,7 @@ async fn run_session_command_segment(
         let mut autonomous = session.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
-            api_key: mode.api_key.clone(),
+            api_key,
             global_harness_dir: mode.agent_dir.as_path().to_path_buf(),
             autonomous: &mut autonomous,
         };
@@ -617,26 +621,22 @@ async fn settle_turn(
     // The completion update carries the autonomous accounting while a run
     // is enabled (the stop status when the driver stopped the run, the live
     // snapshot otherwise).
-    let autonomous_status = match &autonomous_stop {
-        Some((_, status)) => Some((**status).clone()),
-        None => {
-            let status = session.autonomous_status().await;
-            status.enabled.then_some(status)
-        }
+    let autonomous_status = if let Some((_, status)) = &autonomous_stop {
+        Some((**status).clone())
+    } else {
+        let status = session.autonomous_status().await;
+        status.enabled.then_some(status)
     };
     let autonomous_meta = autonomous_status.as_ref().map(autonomous_meta);
     // The remaining continuation slots the quiescence observation reports:
     // the configured budget minus what the run consumed (zero when no
     // autonomous run is active).
-    let remaining_continuations = autonomous_status
-        .as_ref()
-        .map(|status| {
-            status
-                .limits
-                .max_continuations
-                .saturating_sub(status.continuations_used)
-        })
-        .unwrap_or(0);
+    let remaining_continuations = autonomous_status.as_ref().map_or(0, |status| {
+        status
+            .limits
+            .max_continuations
+            .saturating_sub(status.continuations_used)
+    });
     if session::publish_completion_envelope(
         session,
         turn_id,

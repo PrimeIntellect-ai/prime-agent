@@ -1,6 +1,6 @@
 //! The cron job store: file-backed job state with cross-process locking,
 //! claim-based dispatch, and heartbeat lifecycle management. Port of the
-//! AgentCronJobStore half of core/cron-jobs.ts.
+//! `AgentCronJobStore` half of core/cron-jobs.ts.
 //!
 //! Split across submodules: construction, the public input types, and the
 //! heartbeat catalog signature live here; state save/load in [`state`],

@@ -44,15 +44,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
@@ -190,6 +188,7 @@ fn make_executable(path: &Path) {
 
 #[tokio::test]
 async fn tui_export_and_share_surface() {
+    use base64::Engine as _;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -232,7 +231,7 @@ async fn tui_export_and_share_surface() {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -249,9 +248,9 @@ async fn tui_export_and_share_surface() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -273,8 +272,9 @@ async fn tui_export_and_share_surface() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let html_out = dir.path().join("export.html");
@@ -314,7 +314,6 @@ async fn tui_export_and_share_surface() {
     let html = std::fs::read_to_string(&html_out).expect("exported html");
     assert!(html.contains("Session Export"), "template scaffold");
     assert!(html.contains("--accent: #7c6faf;"), "theme vars embedded");
-    use base64::Engine as _;
     let marker = "session-data\" type=\"application/json\">";
     let start = html.find(marker).expect("session data element");
     let blob = &html[start + marker.len()..];

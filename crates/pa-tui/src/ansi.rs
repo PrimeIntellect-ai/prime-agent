@@ -3,6 +3,7 @@
 
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier};
+use std::fmt::Write;
 
 /// Remove all escape sequences (CSI, OSC, DCS, APC/PM/SOS, and ordinary
 /// two-char escapes), leaving plain text — the exact port of TS `stripAnsi`
@@ -10,6 +11,12 @@ use ratatui::style::{Color, Modifier};
 /// then the shared scanner (`escape_len`) handles the wider CSI grammar,
 /// control strings, and malformed sequences. An ESC immediately before a
 /// line separator stays (TS strips neither half of `ESC \n`).
+///
+/// # Panics
+///
+/// Cannot panic for any valid `str`: the internal `expect`s guard
+/// byte-scan invariants (every visited index starts a char; the
+/// two-char strip only runs once the following char exists).
 pub fn strip_ansi(text: &str) -> String {
     if !text.contains('\u{1b}') {
         return text.to_string();
@@ -40,23 +47,20 @@ pub fn strip_ansi(text: &str) -> String {
     let mut plain_start = 0usize;
     let mut escape_index = input.find('\u{1b}');
     while let Some(idx) = escape_index {
-        match crate::width::escape_len(&input[idx..]) {
-            Some(len) => {
+        if let Some(len) = crate::width::escape_len(&input[idx..]) {
+            if plain_start < idx {
+                result.push_str(&input[plain_start..idx]);
+            }
+            plain_start = idx + len;
+        } else {
+            let next = input[idx + 1..].chars().next();
+            let strip_two =
+                matches!(next, Some(c) if !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'));
+            if strip_two {
                 if plain_start < idx {
                     result.push_str(&input[plain_start..idx]);
                 }
-                plain_start = idx + len;
-            }
-            None => {
-                let next = input[idx + 1..].chars().next();
-                let strip_two =
-                    matches!(next, Some(c) if !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'));
-                if strip_two {
-                    if plain_start < idx {
-                        result.push_str(&input[plain_start..idx]);
-                    }
-                    plain_start = idx + 1 + next.expect("strip_two implies a char").len_utf8();
-                }
+                plain_start = idx + 1 + next.expect("strip_two implies a char").len_utf8();
             }
         }
         let from = (idx + 1).max(plain_start);
@@ -93,7 +97,7 @@ pub fn line_to_ansi(line: &Line) -> String {
     for span in line {
         let codes = sgr_codes(span);
         if let Some(codes) = codes {
-            out.push_str(&format!("\x1b[{codes}m"));
+            let _ = write!(out, "\x1b[{codes}m");
             open = true;
         }
         out.push_str(&span.content);

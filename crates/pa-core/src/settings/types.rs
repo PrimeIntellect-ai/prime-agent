@@ -232,7 +232,7 @@ pub struct AgentTracesSettings {
 pub struct TelemetrySettings {
     pub enabled: Option<bool>,
     pub notice_shown: Option<bool>,
-    /// Self-hosted PostHog capture configuration. Nothing is compiled in;
+    /// Self-hosted `PostHog` capture configuration. Nothing is compiled in;
     /// an empty configuration resolves to the no-op sink.
     pub posthog: Option<PostHogSettings>,
     /// Local JSONL mirror at `<agentDir>/telemetry.jsonl` (default on:
@@ -358,6 +358,10 @@ pub struct Settings {
     /// unrestricted (the TS behavior).
     pub allowed_models: Option<Vec<String>>,
     pub tree_filter_mode: Option<String>,
+    /// `chatDetail` (TS #2709): the conversation-detail level Ctrl+O
+    /// cycles and persists ("overview"/"details"/"all"); `None` reads
+    /// as the TS default startup level, `details`.
+    pub chat_detail: Option<String>,
     pub thinking_budgets: Option<ThinkingBudgetsSettings>,
     pub editor_padding_x: Option<u64>,
     pub autocomplete_max_visible: Option<u64>,
@@ -365,6 +369,9 @@ pub struct Settings {
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
     pub session_dir: Option<String>,
+    /// Log per-request provider timing phases to the diagnostic log (TS
+    /// `requestTiming`; unset means OFF, exactly the TS default).
+    pub request_timing: Option<bool>,
     /// Unknown keys survive load/save round-trips (forward compatibility).
     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,

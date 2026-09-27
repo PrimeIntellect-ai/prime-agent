@@ -1,4 +1,4 @@
-//! The resolve() methods on the package manager: configured-source
+//! The `resolve()` methods on the package manager: configured-source
 //! resolution (including missing-source install policy and temporary-git
 //! refresh), settings top-level arrays, and package resource collection
 //! (manifest, convention directories, and filter patterns).
@@ -123,12 +123,23 @@ fn installed_npm_matches_pinned_version(source: &NpmSource, installed_path: &Pat
 impl PackageManager {
     /// Resolve every session resource path, installing missing configured
     /// package sources when not offline-skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured package source cannot be parsed,
+    /// installed, or refreshed (npm/git failures, missing local paths).
     pub fn resolve(&mut self) -> Result<ResolvedPaths> {
         self.resolve_with_on_missing(None)
     }
 
     /// [`PackageManager::resolve`] with a missing-source policy callback
     /// (`None` installs missing sources directly, the resource-loader path).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured package source cannot be parsed,
+    /// installed, or refreshed (npm/git failures, missing local paths), or
+    /// when the missing-source policy chooses to error.
     pub fn resolve_with_on_missing(
         &mut self,
         on_missing: Option<&mut dyn FnMut(&str) -> MissingSourceAction>,
@@ -185,6 +196,11 @@ impl PackageManager {
     /// Resolve a caller-supplied list of package sources (CLI extension
     /// sources) without touching settings. Unpinned temporary git sources
     /// auto-refresh from their origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one of the given sources cannot be parsed,
+    /// installed, or refreshed (npm/git failures, missing local paths).
     pub fn resolve_extension_sources(
         &mut self,
         sources: &[String],

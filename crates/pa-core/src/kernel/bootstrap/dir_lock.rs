@@ -105,8 +105,7 @@ fn lock_missing_pid_is_stale(lock_path: &Path) -> bool {
     };
     std::time::SystemTime::now()
         .duration_since(modified)
-        .map(|age| age.as_millis() as u64 > BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS)
-        .unwrap_or(false)
+        .is_ok_and(|age| age.as_millis() as u64 > BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS)
 }
 
 /// Serialize concurrent bootstraps across processes on the same venv.

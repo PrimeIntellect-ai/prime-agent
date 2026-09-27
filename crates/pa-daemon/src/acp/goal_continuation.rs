@@ -11,7 +11,7 @@
 //! ACP path drives every continuation INSIDE the one `session/prompt`
 //! request: continuation turns surface as events of the same prompt turn,
 //! and the response settles only after the goal run ends (complete /
-//! paused / budget_limited / error, or genuinely nothing more to do). The
+//! paused / `budget_limited` / error, or genuinely nothing more to do). The
 //! daemon-attached transport rides the worker's queue (the #244 lane);
 //! this module is the in-process counterpart: the prompt turn's settle
 //! loop consults the same arms at each settled boundary.
@@ -43,7 +43,7 @@ use super::AcpModeState;
 /// proceeds to the autonomous arm).
 pub(super) enum GoalFollowUp {
     None,
-    /// Boxed: the message's insertion-ordered JSON maps (preserve_order,
+    /// Boxed: the message's insertion-ordered JSON maps (`preserve_order`,
     /// wire parity) would dwarf the empty variant (`large_enum_variant`).
     Turn(Box<CustomMessage>),
 }
@@ -164,8 +164,8 @@ mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -256,6 +256,7 @@ mod tests {
                     cli_extension_sources: Vec::new(),
                     extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
+                    on_background_work_settled: None,
                     queued_goal_context_purge: None,
                 })
                 .await
@@ -284,6 +285,11 @@ mod tests {
                 session: Some(SessionEntry {
                     session,
                     prompt_task: None,
+                    config: std::sync::Arc::new(super::super::InProcessConfig {
+                        published: tokio::sync::Mutex::new(Vec::new()),
+                        models: tokio::sync::Mutex::new(Vec::new()),
+                    }),
+                    config_refresh: None,
                 }),
                 session_new_in_flight: false,
                 session_close_in_flight: false,
@@ -292,9 +298,11 @@ mod tests {
                 engine: engine.clone(),
                 actual_cwd: std::sync::Arc::new(dir.path().to_path_buf()),
                 product_version: std::sync::Arc::new("test".to_string()),
-                model: Some(model),
-                api_key: None,
+                model: std::sync::Arc::new(Mutex::new(Some(model))),
+                api_key: std::sync::Arc::new(Mutex::new(None)),
+                config_queue: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 agent_dir: std::sync::Arc::new(agent_dir),
+                provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
                 autonomous_config: None,
                 mcp: engine.mcp_manager.clone(),
                 mcp_owner_id: std::sync::Arc::new("acp-goal-owner".to_string()),
@@ -497,7 +505,7 @@ mod tests {
 
     /// The budget-limit wrap-up steer: the turn whose usage crossed the
     /// goal budget runs the budget-limit context as the prompt's last
-    /// model segment, the goal settles budget_limited, and no
+    /// model segment, the goal settles `budget_limited`, and no
     /// continuation is minted (the steer consumes no slot).
     #[tokio::test]
     async fn budget_crossing_runs_the_wrap_up_steer_and_settles() {

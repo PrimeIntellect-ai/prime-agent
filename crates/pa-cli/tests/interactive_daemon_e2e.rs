@@ -10,6 +10,8 @@
 //! never sets it.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -54,17 +56,29 @@ impl Drop for Supervisor {
 fn kill_worker(pid: &u32) {
     // The worker pid is a child of the supervisor we just killed, so it is
     // not our child and cannot be waited on directly; poll /proc liveness.
-    unsafe {
-        libc::kill(*pid as i32, libc::SIGKILL);
+    // Best effort by design: this runs inside `Drop` (a failing test's
+    // unwind path included), where an assert would abort the process and
+    // orphan every other parallel test's daemons. The contractual
+    // worker-leak detection lives in `assert_daemon_stops_clean` (a plain
+    // test body, where a panic is a proper failure); here a surviving
+    // worker is re-killed and reported to stderr instead.
+    for round in 0..2 {
+        unsafe {
+            libc::kill(*pid as i32, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(*pid) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !process_alive(*pid) {
+            return;
+        }
+        eprintln!("worker {pid} survived teardown kill round {round}; re-killing");
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(*pid) {
-        assert!(
-            Instant::now() < deadline,
-            "worker {pid} survived the teardown kill"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    eprintln!("worker {pid} still alive after two teardown kills");
 }
 
 /// RAII guard for a detached supervisor (spawned by
@@ -75,6 +89,10 @@ struct DetachedDaemon {
 
 impl Drop for DetachedDaemon {
     fn drop(&mut self) {
+        // Best effort by design: this runs inside `Drop` (a failing test's
+        // unwind path included), where an assert would ABORT the process and
+        // orphan every other parallel test's daemons. A supervisor that
+        // misses the graceful exit deadline is SIGKILLed by pid instead.
         let supervisor_pid = graceful_shutdown(&self.socket);
         if let Some(pid) = supervisor_pid {
             // Snapshot the supervisor's live worker children before it goes
@@ -83,10 +101,13 @@ impl Drop for DetachedDaemon {
             let worker_pids = child_pids_of(pid);
             let deadline = Instant::now() + Duration::from_secs(10);
             while process_alive(pid) {
-                assert!(
-                    Instant::now() < deadline,
-                    "the spawned supervisor {pid} did not exit after shutdown"
-                );
+                if Instant::now() >= deadline {
+                    eprintln!("spawned supervisor {pid} missed the shutdown deadline; killing");
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
             for worker in worker_pids {
@@ -245,8 +266,117 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
     supervisor_pid
 }
 
+/// The headless run's wall: the plan's barriers are each bounded, but the
+/// run loop has no global exit bound — a turn that never settles holds the
+/// idle gate closed and the run parks forever. The wall turns that into a
+/// failing test instead of a hung binary; dropping the expired future
+/// cancels the run loop, and the supervisor guards still tear the daemons
+/// down. Generous against real load: the suite settles in 16-63s wall and
+/// the longest plan's barriers sum to ~120s.
+const HEADLESS_RUN_BOUND: Duration = Duration::from_secs(300);
+
+async fn run_headless_bounded(
+    options: pa_tui::interactive::InteractiveOptions,
+    plan: pa_tui::interactive::HeadlessPlan,
+) -> anyhow::Result<pa_tui::interactive::InteractiveOutcome> {
+    let started = Instant::now();
+    match tokio::time::timeout(
+        HEADLESS_RUN_BOUND,
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan)),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_expired) => panic!(
+            "the headless run exceeded the {HEADLESS_RUN_BOUND:?} wall after {:?}: the wedge class - a turn never settled and the idle gate never opened",
+            started.elapsed()
+        ),
+    }
+}
+
+/// Kill supervisors leaked by earlier runs of this verifier: a binary
+/// that dies without unwinding (a kill, an abort) runs no `Drop`, so its
+/// daemons get reparented to init and keep contending for CPU and memory
+/// with every later run. A daemon matches when its `--daemon-socket` sits
+/// in a `tempfile`-created `.tmpXXXXXX` dir (this suite's spawn shape —
+/// the product's own daemons never use that prefix) and its parent is
+/// dead (ppid 1). A daemon of a still-running test keeps its test binary
+/// as the parent and never matches.
+fn sweep_orphan_test_daemons() {
+    static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if SWEEPED.set(()).is_err() {
+        return; // a later test's spawn: the first spawn already swept
+    }
+    let mut swept = 0;
+    for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        // /proc cmdline is NUL-separated.
+        let args: Vec<String> = cmdline
+            .split(|b| *b == 0)
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        let flag = |needle: &str| args.iter().any(|a| a == needle);
+        let arg_after = |needle: &str| {
+            args.iter()
+                .position(|a| a == needle)
+                .and_then(|idx| args.get(idx + 1))
+                .cloned()
+        };
+        if !flag("--mode") || arg_after("--mode").as_deref() != Some("daemon") {
+            continue;
+        }
+        let Some(socket) = arg_after("--daemon-socket") else {
+            continue;
+        };
+        // The orphan signature: a test-spawned daemon (its socket lives in a
+        // `tempfile`-created `.tmpXXXXXX` dir — the product's own daemons
+        // never use that prefix) whose parent is dead (ppid 1 after the
+        // killed run's reparent). A live run's daemon keeps its owning test
+        // binary as the parent, and the user's product daemons fail the
+        // path test, so neither is ever swept.
+        let orphan_socket_dir = Path::new(&socket)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tmp"));
+        if !orphan_socket_dir {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let Ok(ppid) = rest
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .parse::<u32>()
+        else {
+            continue;
+        };
+        if ppid != 1 && process_alive(ppid) {
+            continue; // a live run's daemon: its test binary is still up
+        }
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        swept += 1;
+    }
+    if swept > 0 {
+        eprintln!("swept {swept} orphan test daemon(s) (socket dir gone) before spawning");
+    }
+}
+
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
+    sweep_orphan_test_daemons();
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -298,8 +428,26 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
+    // A full workspace run around this suite (the battery) can starve a
+    // freshly-launched session worker's boot far past the 30s default
+    // connect budget; the generous override keeps the suite's session
+    // creates deterministic under that load (the supervisor passes its
+    // environment to the workers it spawns).
+    command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
+    // Die with this test binary: a supervisor that outlives the process
+    // (a kill or abort runs no `Drop`) gets reparented to init and keeps
+    // running, so the kernel SIGKILLs it the moment its parent dies. The
+    // guard's protocol teardown below stays the normal exit path; this is
+    // the backstop. The per-test guards drop before the owning harness
+    // thread can exit, so the early-fire window is empty.
+    unsafe {
+        command.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
             return Supervisor { child, socket };
@@ -339,7 +487,7 @@ async fn create_session_via_daemon(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("create session");
@@ -379,9 +527,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -404,8 +552,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -414,10 +563,19 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
             pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Session list, then switch to the second session by id: the
+            // Session list (the read-only info panel over the dock), then
+            // close it and switch to the second session by id: the
             // transcript must rebuild from its (empty) snapshot and the next
             // prompt must run against the switched session.
             pa_tui::interactive::HeadlessStep::Submit("/list".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "live sessions:".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            )),
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {second}")),
             pa_tui::interactive::HeadlessStep::Submit("third".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
@@ -425,10 +583,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
@@ -473,7 +630,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: second.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text");
@@ -485,7 +642,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("list");
@@ -596,6 +753,9 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Enter answers the mounted question on its pre-selected `Share` row;
     // the submission that follows must reach the editor, not the dialog.
@@ -611,10 +771,9 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // The question owned the pane first, then released it to the session:
     // the answer and the completion flag persisted together.
@@ -674,6 +833,9 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // No key step answers anything: the flow must complete before the
     // plan's submission reaches the editor.
@@ -685,10 +847,9 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     let rendered = outcome.frames.join("\n");
     assert!(
@@ -711,6 +872,326 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
     assert!(
         settings.get_onboarding_shown(),
         "the silent flow marked onboarding shown"
+    );
+    drop(supervisor);
+}
+
+/// The scripted provider-auth surface the full-flow verifier drives: the
+/// Prime Inference row and its panel-driven login (a progress line, the
+/// paste prompt, the store), one api-key provider row (the picker's
+/// connect step), and one `mcp:` service row (the picker's exclusion).
+/// Credentials persist through the real auth store so the model-readiness
+/// probe and the connected marks read them like the product does.
+struct FullFlowProviderAuth {
+    agent_dir: PathBuf,
+}
+
+impl FullFlowProviderAuth {
+    fn stored(&self, provider: &str) -> bool {
+        pa_core::auth::AuthStorage::create(&self.agent_dir)
+            .get_all()
+            .credential(provider)
+            .is_some()
+    }
+}
+
+impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
+    fn login_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        let rows = vec![
+            pa_tui::provider_auth::ProviderRow {
+                id: pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID.to_string(),
+                name: "Prime Inference".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: Some(pa_tui::provider_auth::AuthStatusIndicator {
+                    style: pa_tui::provider_auth::AuthStatusStyle::Success,
+                    label: "configured".to_string(),
+                }),
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: self.stored(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "faux-key".to_string(),
+                name: "Faux Key".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::ApiKey,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::ApiKeyPrompt,
+                configured: self.stored("faux-key"),
+                available: true,
+            },
+            pa_tui::provider_auth::ProviderRow {
+                id: "mcp:faux".to_string(),
+                name: "Faux MCP".to_string(),
+                auth_type: pa_tui::provider_auth::AuthType::Oauth,
+                status: None,
+                flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
+                configured: false,
+                available: true,
+            },
+        ];
+        Box::pin(async move { rows })
+    }
+
+    fn logout_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn login(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        api_key: Option<&str>,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        let key = api_key.map(str::to_string);
+        Box::pin(async move {
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: key.unwrap_or_default(),
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to save API key for {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}"
+            ))
+        })
+    }
+
+    fn login_on_panel(
+        &self,
+        provider: &pa_tui::provider_auth::ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        let agent_dir = self.agent_dir.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        Box::pin(async move {
+            // Only the Prime row runs here (the flow's sign-in step);
+            // anything else cancels.
+            if provider_id != pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            }
+            panel.progress("Checking Prime Inference access...");
+            let Some(api_key) = panel
+                .paste_prompt(
+                    "Paste a Prime API key below:",
+                    pa_tui::auth_panel::PastePromptTone::Muted,
+                    pa_tui::auth_panel::PasteStyle::Visible,
+                )
+                .await
+            else {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
+            };
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            auth.set(
+                &provider_id,
+                pa_core::auth::AuthCredential::ApiKey {
+                    key: api_key,
+                    prime_team: None,
+                },
+            );
+            if auth.drain_errors().pop().is_some() {
+                return pa_tui::provider_auth::ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {provider_name}"
+                ));
+            }
+            pa_tui::provider_auth::ProviderAuthOutcome::Status(format!(
+                "Saved API key for {provider_name}. Credentials saved to {}.",
+                agent_dir.join("auth.json").display()
+            ))
+        })
+    }
+
+    fn logout(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+
+    fn anthropic_subscription_warning(&self) -> pa_tui::provider_auth::ProviderWarningFuture {
+        // The faux full-flow drives no Anthropic subscription auth.
+        Box::pin(async move { None })
+    }
+}
+
+/// The full first-run flow on a fresh home with no usable model (TS
+/// #2340's `runOnboardingFlow` not-ready branch): the welcome screen's
+/// login action starts the flow, the Prime Inference sign-in runs through
+/// the inline auth panel (a progress line, the paste prompt), the default
+/// GLM 5.3 model applies behind the pane, the connect-more-providers
+/// picker connects one more provider through its key prompt and
+/// re-mounts with the connected mark, and the trace question ends the
+/// flow — every answer, both credentials, and the completion flag
+/// persist together, and the released pane runs the submitted turn.
+#[tokio::test]
+async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello full flow", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    // The readiness probe mirrors the flow's contract: the home is not
+    // ready until the sign-in stores its credential (the model-ready
+    // gate at flow end).
+    let probe_agent_dir = agent_dir.clone();
+    let model_ready = std::sync::Arc::new(move || {
+        pa_core::auth::AuthStorage::create(&probe_agent_dir)
+            .get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some()
+    });
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+        model_ready,
+        current_model: None,
+        provider_auth: Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+            std::sync::Arc::new(FullFlowProviderAuth {
+                agent_dir: agent_dir.clone(),
+            }),
+        )),
+    });
+    let enter = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    let down = || {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    // The plan waits on observable readiness, not fixed sleeps: each
+    // barrier holds the queued batch until a frame rendered after arming
+    // contains the condition, so a loaded runner cannot fire keys at a
+    // pane whose field or picker has not mounted yet (the pane drive
+    // implements the same WaitRender contract the run loop's session
+    // steps use).
+    let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 5_000,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The welcome screen's login action starts the flow.
+            enter(),
+            // The Prime sign-in: the paste prompt mounts with the flow.
+            wait_render("Paste a Prime API key below:"),
+            pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
+            enter(),
+            // The model applies behind the pane, then the picker mounts.
+            wait_render("Connect other providers, or continue."),
+            // Down to the provider row: Enter runs its key prompt.
+            down(),
+            enter(),
+            wait_render("Enter API key"),
+            pa_tui::interactive::HeadlessStep::Type("faux-key".to_string()),
+            enter(),
+            // The picker re-mounts with the connected mark; Enter on the
+            // pinned Continue row ends the step.
+            wait_render("\u{2713}"),
+            enter(),
+            // The trace question: Enter on the pre-selected Share row.
+            wait_render("Share agent traces"),
+            enter(),
+            // The released pane runs the submitted turn.
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Log in with Prime Intellect"),
+        "the welcome screen's action rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Login with Prime Intellect"),
+        "the login dialog's heading replaced the brand line:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Paste a Prime API key below:"),
+        "the paste prompt mounted inside the pane:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Connect other providers, or continue."),
+        "the providers picker rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Share agent traces"),
+        "the trace question ended the flow:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("hello full flow"),
+        "the completed flow released the pane and the first turn ran:\n{rendered}"
+    );
+    // The default-model apply's round trip: the scripted engine refuses
+    // live model switches by design (Engine::switch_model returns false
+    // for the harness), so the daemon's refusal row is the proof the
+    // apply REQUEST reached it and its failure surfaced like TS's
+    // applySelectedModel error path — the flow still completes and the
+    // marker still writes (the readiness probe reads the registry, not
+    // the session).
+    assert!(
+        rendered.contains("This session does not support model switching"),
+        "the apply round-tripped and the scripted engine's refusal surfaced:\n{rendered}"
+    );
+    // The connected provider's status row shows the store outcome.
+    assert!(
+        rendered.contains("Saved API key for Faux Key"),
+        "the provider login's status row applied:\n{rendered}"
+    );
+
+    // Everything persisted together: the flag, the answer, both
+    // credentials.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        settings.get_onboarding_shown(),
+        "the completed flow marked onboarding shown"
+    );
+    assert!(
+        settings.get_agent_traces_enabled(),
+        "the Share answer persisted"
+    );
+    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    assert!(
+        auth.get_all()
+            .credential(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID)
+            .is_some(),
+        "the Prime sign-in stored its credential"
+    );
+    assert!(
+        auth.get_all().credential("faux-key").is_some(),
+        "the provider login stored its key"
     );
     drop(supervisor);
 }
@@ -748,6 +1229,9 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -757,10 +1241,9 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("the run survives the failed write");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("the run survives the failed write");
 
     let rendered = outcome.frames.join("\n");
     assert!(
@@ -819,6 +1302,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
         }),
+        model_ready: std::sync::Arc::new(|| true),
+        current_model: None,
+        provider_auth: None,
     });
     // Down + Enter answers `Not now` (the answer that used to re-show the
     // question on every later session open), then the turn runs.
@@ -838,12 +1324,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         width: 100,
         height: 30,
     };
-    let first = pa_tui::interactive::run_interactive(
-        options.clone(),
-        pa_tui::interactive::UiMode::Headless(first_plan),
-    )
-    .await
-    .expect("first interactive run");
+    let first = run_headless_bounded(options.clone(), first_plan)
+        .await
+        .expect("first interactive run");
     let first_rendered = first.frames.join("\n");
     assert!(
         first_rendered.contains("Share agent traces"),
@@ -874,12 +1357,9 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         width: 100,
         height: 30,
     };
-    let second = pa_tui::interactive::run_interactive(
-        options,
-        pa_tui::interactive::UiMode::Headless(second_plan),
-    )
-    .await
-    .expect("second interactive run");
+    let second = run_headless_bounded(options, second_plan)
+        .await
+        .expect("second interactive run");
     let second_rendered = second.frames.join("\n");
     assert!(
         second_rendered.contains("hello each session"),
@@ -924,9 +1404,9 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -949,8 +1429,9 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // The interactive runtime's own launch sequence, minus the TTY: spawn
@@ -962,16 +1443,14 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     pa_cli::ensure_daemon_running_with(&exe, &socket, dir.path())
         .await
         .expect("spawn the daemon");
-    let outcome = pa_tui::interactive::run_interactive(
-        options,
-        pa_tui::interactive::UiMode::Headless(pa_tui::interactive::HeadlessPlan {
-            steps: vec![pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 }],
-            width: 80,
-            height: 24,
-        }),
-    )
-    .await
-    .expect("headless interactive run");
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 }],
+        width: 80,
+        height: 24,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("headless interactive run");
     assert!(
         outcome
             .frames
@@ -1016,9 +1495,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1041,8 +1520,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1075,10 +1555,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -1201,7 +1680,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
     // intent. `spawn_supervisor` strips the same variables from the daemon
     // side.
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        Default::default(),
+        pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -1218,9 +1697,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: catalog,
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1243,8 +1722,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1257,10 +1737,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Mock 1"),
@@ -1300,6 +1779,136 @@ async fn tui_model_picker_applies_and_effort_reports() {
     drop(supervisor);
 }
 
+/// `/effort` on a thinking-capable model whose `reasoning` flag is false
+/// but whose `thinkingLevelMap` declares addressable levels (the live
+/// catalog's `gpt-5.3-chat-latest` shape): the map is the capability
+/// signal, so the command applies the level instead of reporting the
+/// unsupported-model note. No scripted engine runs — the switch and the
+/// state read must resolve the models.json model, not the faux one.
+#[tokio::test]
+async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_flag() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": {
+                "test-provider": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9/v1",
+                    "apiKey": "sk-test",
+                    "models": [
+                        { "id": "chat-plus", "name": "Chat Plus", "reasoning": false,
+                          "thinkingLevelMap": { "off": null, "xhigh": "xhigh" },
+                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
+                          "maxTokens": 4096 }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+    let supervisor = spawn_supervisor(dir.path());
+    let auth = pa_core::auth::AuthStorage::in_memory_without_env(
+        pa_core::auth::AuthStorageData::default(),
+        std::sync::Arc::new(pa_core::auth::NoOAuth),
+    );
+    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+    registry.load_private_authorization_from_cache();
+    let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
+    assert_eq!(catalog.len(), 1, "the models.json model resolves available");
+    assert_eq!(catalog[0].id, "chat-plus");
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: None,
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: catalog,
+        model_configured_providers: ["test-provider".to_string()].into_iter().collect(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::New,
+        show_images: true,
+        client_settings: None,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("chat".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/effort xhigh".to_string()),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Model: chat-plus"),
+        "picking the model showed the TS confirm row:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Thinking level: xhigh"),
+        "the /effort command applied the map's addressable level:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Current model does not support thinking"),
+        "a map-addressable model must not report the unsupported-model note:\n{rendered}"
+    );
+
+    // The durable `thinking_level_change` row persisted for the applied
+    // level (TS `appendThinkingLevelChange` on an effective change).
+    let mut level_changes = 0;
+    for entry in std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        level_changes += content
+            .lines()
+            .filter(|line| line.contains(r#""type":"thinking_level_change""#))
+            .filter(|line| line.contains("xhigh"))
+            .count();
+    }
+    assert!(
+        level_changes >= 1,
+        "the thinking_level_change row persisted at xhigh (saw {level_changes})"
+    );
+    drop(supervisor);
+}
+
 /// `/compact` on a fresh session: the compaction skips (TS
 /// `CompactionSkippedError`) and the warning reaches the transcript through
 /// the `compaction_end` event, with the durable echo row — TS's live
@@ -1321,9 +1930,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1346,8 +1955,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1358,10 +1968,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
@@ -1462,9 +2071,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1487,8 +2096,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let ctrl_o = || {
@@ -1521,10 +2131,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -1659,9 +2268,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1686,8 +2295,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let key = |code: KeyCode| {
@@ -1731,10 +2341,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         width: 100,
         height: 34,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -1834,7 +2443,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     // the applied content progressed instead of jumping once at turn end.
     let mut filler = String::new();
     for segment in 0..24 {
-        filler.push_str(&format!("MARK-{segment:02} "));
+        let _ = write!(filler, "MARK-{segment:02} ");
         filler.push_str(&"history ".repeat(250));
     }
     // Paced at 3000 tokens/second so the ~12k-token turn streams for
@@ -1859,9 +2468,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -1884,8 +2493,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // 45s per turn is the throughput bound: the producer finishes each
@@ -1903,10 +2513,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         height: 30,
     };
     let started = Instant::now();
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let wall = started.elapsed();
 
     // Verification seam: dump the captured frames for manual frame-diffing
@@ -1992,7 +2601,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(dir.path().join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
         model_configured_providers: std::collections::HashSet::new(),
         model_recent_models: Vec::new(),
@@ -2018,8 +2627,9 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         // default set.
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let key = |code: KeyCode, modifiers: KeyModifiers| {
@@ -2040,43 +2650,60 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
             // The default key must no longer fire it (a second cycle would
             // reach the "all" mode).
             ctrl_o,
-            // The documentation surface renders the effective binding.
+            // The documentation surface renders the effective binding: the
+            // read-only info panel mounts over the dock (the operator's
+            // 2026-09-26 directive — the guide no longer floods the
+            // transcript), End jumps the scrollable window to the
+            // document's bottom, and Esc closes it back to the dock.
             pa_tui::interactive::HeadlessStep::Submit("/hotkeys".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The `?` quick-shortcut guide (app.shortcuts) mounts with the
-            // effective bindings; the next submission clears it.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Move cursor / browse history".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('?'),
+                crossterm::event::KeyCode::End,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            pa_tui::interactive::HeadlessStep::Submit("done".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "mouse click on link".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "scroll \u{b7} Esc close".to_string(),
+                timeout_ms: 30_000,
+            },
         ],
         width: 120,
-        // Tall enough that the whole `/hotkeys` guide (the expandTools row
-        // ~30 rows in) renders inside the visible transcript window.
+        // Tall enough that the `/hotkeys` info panel holds a real window
+        // of the guide.
         height: 60,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
 
-    // The hint renders the user's binding, not the default.
-    assert!(
-        rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
-        "the prompt-context hint renders the override:\n{rendered}"
-    );
-    // The override key fired the action: the detail cycled to Details.
+    // The hint renders the user's binding, not the default, at the
+    // startup detail level (TS #2447: chats start at the middle
+    // `details` level).
     assert!(
         rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
+        "the prompt-context hint renders the override:\n{rendered}"
+    );
+    // The override key fired the action: the detail cycled to the
+    // expanded level.
+    assert!(
+        rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
         "the override key cycled conversation detail:\n{rendered}"
     );
-    // The default key no longer fires the action: the cycle never reached
-    // the third (all output) mode.
+    // The default key leaves the detail unchanged: the cycle never wraps
+    // back to the collapsed overview mode.
     assert!(
-        !rendered.contains("All mode ("),
+        !rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
         "the default ctrl+o must not cycle after the override:\n{rendered}"
     );
     // The scripted turn still ran under the custom bindings.
@@ -2084,43 +2711,35 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         rendered.contains("scripted reply"),
         "the scripted turn rendered:\n{rendered}"
     );
-    // `/hotkeys` documents the effective binding. The guide renders as
-    // markdown, so the table is a bordered grid ("| Ctrl+Alt+X | Cycle
-    // overview ..."), not the raw markdown source.
+    // `/hotkeys` renders in the info panel: the guide's first window
+    // rendered (the Navigation row), End jumped the scrollable window to
+    // the document's bottom (the Fullscreen table), and the override's
+    // own row is covered by the hotkeys guide unit tests.
     assert!(
-        rendered.contains("Ctrl+Alt+X"),
-        "the hotkeys guide renders the override:\n{rendered}"
+        rendered.contains("Move cursor / browse history"),
+        "the hotkeys panel rendered the guide:\n{rendered}"
     );
     assert!(
-        rendered.contains("Cycle overview"),
-        "the hotkeys guide renders the expand row:\n{rendered}"
+        rendered.contains("mouse click on link"),
+        "the End key jumped the panel to the guide's bottom:\n{rendered}"
     );
-    assert!(
-        rendered.contains("Clear input / cancel autocomplete"),
-        "the hotkeys guide renders the default rows:\n{rendered}"
-    );
-    // The removed default key is gone from the guide (no other default
-    // binding uses ctrl+o).
+    // The removed default key is gone (no other default binding uses
+    // ctrl+o).
     assert!(
         !rendered.contains("Ctrl+O"),
         "the hotkeys guide must not show the removed default:\n{rendered}"
     );
-    // The `?` quick-shortcut guide mounted (TS `showShortcutGuide`): the
-    // effective override renders in its Controls row and the Help line
-    // references `/hotkeys`.
-    assert!(
-        rendered.contains("quick shortcuts \u{b7} /hotkeys full reference"),
-        "the quick-shortcut guide rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Ctrl+Alt+X overview"),
-        "the quick-shortcut guide renders the override in the Controls row:\n{rendered}"
-    );
-    // The final submission cleared the guide (TS `clearShortcutGuide`).
+    // The guide stayed out of the transcript (the operator's no-flooding
+    // directive): after Esc closed the panel the last frame holds the
+    // scripted reply and the dock, not the guide's rows.
     let last = outcome.frames.last().expect("frames");
     assert!(
-        !last.contains("shell mode"),
-        "the submission cleared the quick-shortcut guide:\n{last}"
+        !last.contains("Move cursor / browse history"),
+        "the hotkeys guide never lands in the transcript:\n{last}"
+    );
+    assert!(
+        last.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
+        "the dock returned after the panel closed:\n{last}"
     );
     drop(supervisor);
 }
@@ -2156,9 +2775,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2180,8 +2799,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -2204,10 +2824,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
@@ -2254,8 +2873,12 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
 /// the status label stale. The fixed contract is TS parity: the flagged
 /// model resolves from the full catalog, the turn fails at the run-start
 /// auth validation with the TS login-guidance message
-/// (`_validateCanStartAgentRun`), and the failed pick keeps the label
-/// (nothing switched — the TS daemon fails the same pick the same way).
+/// (`_validateCanStartAgentRun`), and the pick of the unsigned provider
+/// never surfaces the dead-end "Model not found" — the daemon's typed
+/// refusal routes the sign-in flow (TS `ensureModelProviderConfigured`),
+/// which in this headless composition (no provider-auth hook) lands the TS
+/// external-config error; the failed pick keeps the label (nothing
+/// switched).
 #[tokio::test]
 async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentials() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2287,7 +2910,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
             ..Default::default()
         },
         model_catalog: vec![glm],
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2310,8 +2933,9 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -2325,14 +2949,17 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("Model not found: ") && rendered.contains("z-ai/glm-5.3"),
-        "the pick against the empty auth-scoped catalog fails with the TS message (label keeps the resolved model):\n{rendered}"
+        rendered.contains("must be configured externally") && rendered.contains("prime-inference"),
+        "the pick against the empty auth-scoped catalog routes the sign-in flow (no provider-auth hook in this composition, so the TS external-config error):\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Model not found: "),
+        "the not-signed-in pick never surfaces the dead-end refusal (the typed sign-in class):\n{rendered}"
     );
     assert!(
         rendered.contains("No API key found for prime-inference"),
@@ -2343,8 +2970,11 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         "the auth-blind turn resolution must not report the resolver's empty-catalog error:\n{rendered}"
     );
     let last = outcome.frames.last().expect("a final frame");
+    // The reasoning fixture renders its live effort suffix (TS
+    // `getModelContextLabel`): the label the failed pick must hold is
+    // `model:effort`, with the daemon's effective level for glm-5.3.
     assert!(
-        last.contains("z-ai/glm-5.3 ·"),
+        last.contains("z-ai/glm-5.3:high ·"),
         "the footer label holds the resolved flagged model (the failed pick switched nothing):\n{last}"
     );
     drop(supervisor);
@@ -2397,7 +3027,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     // daemon's (hermetic auth; the models.json key is the only configured
     // credential).
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        Default::default(),
+        pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -2413,7 +3043,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: None,
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: catalog,
         model_configured_providers: ["test-provider".to_string()].into_iter().collect(),
         model_recent_models: Vec::new(),
@@ -2438,8 +3068,9 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -2453,10 +3084,9 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Model: mock-2"),
@@ -2489,9 +3119,9 @@ fn base_options(
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
         script_path: Some(dir.join("script.json")),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2510,8 +3140,9 @@ fn base_options(
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
         provider_auth: None,
         traces: None,
@@ -2547,10 +3178,9 @@ async fn tui_renames_session_through_slash_command() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -2603,7 +3233,7 @@ async fn tui_renames_session_through_slash_command() {
         .request_ok(DaemonCommand::GetState {
             id: None,
             active_session_id: outcome.active_session_id.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_state");
@@ -2636,31 +3266,62 @@ async fn tui_side_question_pane_flow() {
             pa_tui::interactive::HeadlessStep::Submit(
                 "/btw what is the capital of France".to_string(),
             ),
-            // The side question runs outside the turn state; give the
-            // daemon run time to stream and settle.
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            // The side question runs outside the turn state (the WaitIdle
+            // barrier cannot see it), and its answer is a daemon-driven
+            // stream: wait for the rendered condition (early exit) instead
+            // of a fixed wall-clock window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Paris, obviously".to_string(),
+                timeout_ms: 30_000,
+            },
+            // The pane's run must SETTLE before the follow-up: TS's
+            // active-run guard drops a follow-up submitted while the run
+            // is still streaming (it keeps the draft and warns). The
+            // settled hint row ("reply to follow up") is the pane's own
+            // idle marker, so wait for it — never a fixed window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // The open pane captures a plain reply as a follow-up side
             // question (TS's side-conversation ladder).
             pa_tui::interactive::HeadlessStep::Submit("and its largest city".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Second answer".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Settle again: an Esc against a still-running pane would
+            // CANCEL the run instead of closing the pane (TS's two-stage
+            // escape), so the close step needs the pane idle too.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // A slash command inside the pane gets the TS notice turn.
             pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Slash commands are not available in side conversations.".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Esc returns to the main thread.
+            // Esc returns to the main thread: the pane's hint row is the
+            // surface's own state, so wait for it to leave the newest
+            // frame.
             escape,
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "esc to return to session".to_string(),
+                timeout_ms: 10_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
         ],
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -2763,10 +3424,9 @@ async fn tui_settings_menu_cycles_rows() {
         width: 120,
         height: 36,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     // Verification seam: dump the captured frames for manual frame-diffing
     // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
@@ -2783,9 +3443,100 @@ async fn tui_settings_menu_cycles_rows() {
         "the settings menu rendered its first row:\n{rendered}"
     );
     assert!(
-        rendered.contains("Type to search · Enter/Space to change · Esc to cancel"),
+        rendered.contains("1 General  2 Models  3 Display  4 Editor  5 Agents"),
+        "the settings menu rendered its tab strip:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close"),
         "the settings hint rendered:\n{rendered}"
     );
+}
+
+/// The operator's Esc-ordering pin (2026-09-25): while a turn streams, the
+/// cwd completion menu (`./` + Tab) lists the non-hidden entries only (the
+/// `.claude` directory stays out of the menu), and Esc closes the menu
+/// without interrupting the running turn — the abort ladder runs only when
+/// no menu is open.
+#[tokio::test]
+async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
+    use crossterm::event::KeyCode;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(dir.path().join(".claude")).expect("dot dir");
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}").expect("write");
+    std::fs::write(dir.path().join("notes.md"), "notes").expect("write");
+    // One turn: a fast text block marks it provably streaming, then the
+    // slow thinking block keeps it alive while the menu interaction runs.
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 4,
+        "responses": [
+            { "content": [
+                { "type": "text", "text": "the turn is streaming" },
+                { "type": "thinking",
+                  "thinking": "a long slow thinking pass keeps the turn streaming while the completion menu opens and escape closes it" },
+                { "type": "text", "text": "the final answer streams after the menu check" },
+            ] },
+        ],
+    });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let supervisor = spawn_supervisor(dir.path());
+    let options = base_options(&supervisor, dir.path(), &session_dir);
+    let key = |code: KeyCode| {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("start the long turn".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "the turn is streaming".to_string(),
+                timeout_ms: 30_000,
+            },
+            // The editor stays live during the turn: `./` + Tab opens the
+            // cwd completion menu over it.
+            pa_tui::interactive::HeadlessStep::Type("./".to_string()),
+            key(KeyCode::Tab),
+            pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "notes.md".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Esc closes the menu; the turn keeps running to its final
+            // answer (a leaked abort would kill it mid-stream).
+            key(KeyCode::Esc),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "notes.md".to_string(),
+                timeout_ms: 10_000,
+            },
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 60_000 },
+        ],
+        width: 100,
+        height: 34,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    // The menu listed the cwd's non-hidden entries and never the dot dir.
+    assert!(
+        rendered.contains("main.rs") && rendered.contains("notes.md"),
+        "the cwd completion menu listed the non-hidden entries:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(".claude"),
+        "the dot dir never lists in the cwd browse:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("the final answer streams after the menu check"),
+        "Esc closed the menu and the turn ran to its final answer (no leaked abort):\n{rendered}"
+    );
+    drop(supervisor);
 }
 
 /// Prompt-stash verifier (TS `prompt-stash-state.ts` + the
@@ -2833,9 +3584,9 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -2854,9 +3605,10 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         client_settings: None,
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let enter = || {
         pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -2880,10 +3632,9 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -2899,7 +3650,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: first.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text on the first session");
@@ -2911,7 +3662,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: second.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text on the second session");
@@ -2968,7 +3719,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     std::fs::write(&png_path, MINIMAL_PNG).expect("write fixture image");
     std::env::set_var("PRIME_AGENT_TEST_CLIPBOARD_IMAGE", &png_path);
     let prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>> =
-        Default::default();
+        std::sync::Arc::default();
     let make_options = || pa_tui::interactive::InteractiveOptions {
         provider_auth: None,
         traces: None,
@@ -2977,9 +3728,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -3001,6 +3752,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         prompt_stash: prompt_stash.clone(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
 
     // Run one: the draft is typed, then the resume key hands the pane to
@@ -3022,12 +3774,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         width: 100,
         height: 30,
     };
-    let outcome_one = pa_tui::interactive::run_interactive(
-        make_options(),
-        pa_tui::interactive::UiMode::Headless(plan_one),
-    )
-    .await
-    .expect("interactive run one");
+    let outcome_one = run_headless_bounded(make_options(), plan_one)
+        .await
+        .expect("interactive run one");
     assert!(
         outcome_one.return_to_agents_view,
         "the resume key hands the pane to the agents view"
@@ -3048,12 +3797,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         width: 100,
         height: 30,
     };
-    let outcome_two = pa_tui::interactive::run_interactive(
-        make_options(),
-        pa_tui::interactive::UiMode::Headless(plan_two),
-    )
-    .await
-    .expect("interactive run two");
+    let outcome_two = run_headless_bounded(make_options(), plan_two)
+        .await
+        .expect("interactive run two");
     let rendered = outcome_two.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -3091,7 +3837,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         .request_ok(DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: first.clone(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("get_last_assistant_text");
@@ -3157,9 +3903,9 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
         script_path: Some(script_path.clone()),
-        model_selection: Default::default(),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -3178,9 +3924,10 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         client_settings: None,
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let ctrl_v = || {
         pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(
@@ -3211,10 +3958,9 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Restored stashed prompt"),
@@ -3265,6 +4011,7 @@ fn empty_prompt_input() -> pa_types::daemon::PromptInput {
         queue_key: None,
         prefix_messages: None,
         admission_id: None,
+        rlm_notice_nonce: None,
     }
 }
 
@@ -3290,7 +4037,7 @@ async fn create_idle_session_with_settled_turn(
             active_session_id: session.clone(),
             message: prompt_text.to_string(),
             input: empty_prompt_input(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("prompt_and_wait");
@@ -3333,10 +4080,9 @@ async fn tui_attach_to_idle_session_renders_without_input() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
     assert!(
         !outcome.frames.is_empty(),
         "the attach painted frames with no key, submit, or resize input"
@@ -3393,7 +4139,7 @@ async fn tui_idle_session_event_repaints_without_input() {
             width: 100,
             height: 30,
         };
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+        run_headless_bounded(options, plan)
             .await
             .expect("interactive run")
     });
@@ -3409,7 +4155,7 @@ async fn tui_idle_session_event_repaints_without_input() {
             id: None,
             active_session_id: session.clone(),
             name: "renamed-while-attached".to_string(),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
         .await
         .expect("rename");
@@ -3466,10 +4212,9 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
 
     // The fresh session ran the turn; the poisoned session was never the
     // opened one.
@@ -3514,6 +4259,472 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
         Some(outcome.session_id),
         "the created file belongs to the opened session ({})",
         new_files[0].display()
+    );
+    drop(supervisor);
+}
+
+/// The backgrounded submit keeps the WIRE in submit order (the ordered
+/// submit worker): two back-to-back submissions — the first starting its
+/// turn, the second arriving while the first's round trip is still in
+/// flight — reach the daemon in submit order, so the session file's
+/// first mention of each prompt is first-then-second and both scripted
+/// turns render. A per-submit task would schedule the two wire writes
+/// independently; the ordered channel pins the order the blocked loop
+/// and TS's single-threaded event loop guaranteed.
+#[tokio::test]
+async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "first scripted reply", "delayMs": 20 },
+        { "text": "second scripted reply" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::New,
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    };
+    // Two submits with NO barrier between them: the second's round trip is
+    // armed while the first is still in flight — the ordering case the
+    // per-submit spawn could flip under load.
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("first submit".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("second submit".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("first scripted reply"),
+        "the first turn rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("second scripted reply"),
+        "the queued second turn rendered:\n{rendered}"
+    );
+    // The daemon received the two prompts in submit order: the session
+    // file mentions "first submit" before "second submit" (the queue
+    // admission and message rows all carry the wire order).
+    let mut first_index = None;
+    let mut second_index = None;
+    for entry in std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        first_index = first_index.or_else(|| content.find("first submit"));
+        second_index = second_index.or_else(|| content.find("second submit"));
+    }
+    let (Some(first_index), Some(second_index)) = (first_index, second_index) else {
+        panic!("the session file persisted both prompts:\n{rendered}");
+    };
+    assert!(
+        first_index < second_index,
+        "the daemon received the prompts in submit order"
+    );
+    drop(supervisor);
+}
+
+/// A submit that outlived its session (the backgrounded round trip
+/// straddled a `/switch`): the outcome stays SILENT on the newly mounted
+/// session — no turn bookkeeping, no loader, no error row, no draft
+/// clobber — while the daemon still ran the submitted turn for the
+/// switched-away session (TS's staleness guard: a superseded submit's
+/// success never touches the new session; interactive-mode.ts guards
+/// the catch on `promptStashSessionId`/`inputSubmissionGeneration`).
+#[tokio::test]
+async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The switched-away session's reply is slow enough that its turn
+    // finishes AFTER the switch has completed: the reply is provably
+    // post-switch, so a stale-outcome leak would render it on the new
+    // session.
+    let script = serde_json::json!({ "responses": [
+        { "text": "a turn reply", "delayMs": 400 },
+    ] });
+    let script_path = dir.path().join("script.json");
+    let first = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let second_script = serde_json::json!({ "responses": [
+        { "text": "b turn reply" },
+    ] });
+    let second_script_path = dir.path().join("script-b.json");
+    let second = create_session_via_daemon(
+        &supervisor.socket,
+        &second_script_path,
+        &second_script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::Attach(first.clone()),
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    };
+    // The submit's round trip straddles the switch: the switch step
+    // applies one headless step after the submit, long before the
+    // outcome's ack lands.
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("for a".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit(format!("/switch {second}")),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            pa_tui::interactive::HeadlessStep::Submit("for b".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    assert_eq!(
+        outcome.active_session_id, second,
+        "the run ended attached to the switched session"
+    );
+    assert!(
+        rendered.contains("b turn reply"),
+        "the post-switch prompt ran on the new session:\n{rendered}"
+    );
+    // The outlived submit's outcome never touched the new session: the
+    // switched-away session's reply (provably post-switch) never
+    // rendered, and no error row surfaced for a submit that succeeded.
+    assert!(
+        !rendered.contains("a turn reply"),
+        "the stale outcome never leaked the old session's turn:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("\u{26a0} Error"),
+        "a stale succeeded submit stays silent:\n{rendered}"
+    );
+    // The daemon still ran the outlived submit's turn for the
+    // switched-away session: the submitted prompt was never lost. The
+    // reply lands ~400ms in, so poll the session file for it.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut ran = false;
+    while Instant::now() < deadline {
+        let mut content = String::new();
+        for entry in std::fs::read_dir(&session_dir)
+            .expect("read session dir")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                content.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+        if content.contains("for a") && content.contains("a turn reply") {
+            ran = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        ran,
+        "the daemon ran the outlived submit's turn for the switched-away session"
+    );
+}
+
+/// A headless run whose plan completes while the submitted turn is still
+/// settling: the driver drops its input sender after `HeadlessDone`, and a
+/// closed `ui_rx` is select-ready forever. The loop must park the closed arm
+/// (the run's exit gate waits on the turn's events) — an unparked
+/// always-ready arm hot-spins the select and starves the very turn events the
+/// gate needs (the outlived-submit stall), while the pending streamed reply
+/// still lands and the run ends on its own.
+#[tokio::test]
+async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The reply lands well after the plan's only step, so `HeadlessDone`
+    // arrives while the turn is provably still active.
+    let script = serde_json::json!({ "responses": [
+        { "text": "slow scripted reply", "delayMs": 400 },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::New,
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    };
+    // No trailing WaitIdle: the plan ends at the submit, and the run's
+    // exit gate must hold on its own until the turn settles.
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![pa_tui::interactive::HeadlessStep::Submit(
+            "hello there".to_string(),
+        )],
+        width: 100,
+        height: 30,
+    };
+    let started = Instant::now();
+    let mode = pa_tui::interactive::UiMode::Headless(plan);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(120),
+        pa_tui::interactive::run_interactive(options, mode),
+    )
+    .await
+    .expect("the parked loop still services events and ends on its own")
+    .expect("interactive run");
+    let elapsed = started.elapsed();
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("slow scripted reply"),
+        "the pending turn's events proceeded and rendered:\n{rendered}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the parked closed channel never hot-spins the loop: {elapsed:?}"
+    );
+    drop(supervisor);
+}
+
+/// A refused submit restores the draft through the backgrounded outcome:
+/// killing the session's worker (and removing its file, so the durable-id
+/// rebind cannot resurrect it) makes the prompt's round trip settle as a
+/// refusal, and the outcome folds back as the `⚠ Error` row plus the
+/// draft back in the editor (TS `onSubmit`'s catch: showError + the
+/// restore/retain ladder) — the turn never ran.
+#[tokio::test]
+async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "never runs" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+
+    // Kill the worker and remove its file AFTER the TUI attached but
+    // BEFORE the submit: the harness task lands at +400ms (the attach
+    // completed at run start), and the plan's WaitMs(900) holds the
+    // submit until long after the kill's stop resolved — the prompt then
+    // settles as a refusal (the durable-id rebind cannot resume a session
+    // with no file), never as a turn.
+    let kill_socket = supervisor.socket.clone();
+    let kill_session_dir = session_dir.clone();
+    let kill_session_id = session_id.clone();
+    let kill_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&kill_socket)
+            .await
+            .expect("connect supervisor");
+        client
+            .request_ok(DaemonCommand::Kill {
+                id: None,
+                active_session_id: kill_session_id.clone(),
+                rest: serde_json::Map::default(),
+            })
+            .await
+            .expect("kill session worker");
+        client.close();
+        for entry in std::fs::read_dir(&kill_session_dir)
+            .expect("read session dir")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                std::fs::remove_file(&path).expect("remove the session file");
+            }
+        }
+    });
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::Attach(session_id.clone()),
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::WaitMs(900),
+            pa_tui::interactive::HeadlessStep::Submit("lost prompt".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    kill_task.await.expect("the kill task");
+    let rendered = outcome.frames.join("\n");
+    // The refusal surfaced as the error row, and the draft returned to the
+    // editor (the restore arm: empty editor, own generation, same session).
+    assert!(
+        rendered.contains("\u{26a0} Error"),
+        "the refused submit surfaced the error row:\n{rendered}"
+    );
+    let last = outcome.frames.last().expect("a final frame");
+    assert!(
+        last.contains("lost prompt"),
+        "the refused draft returned to the editor:\n{last}"
+    );
+    assert!(
+        !rendered.contains("never runs"),
+        "the refused prompt never ran:\n{rendered}"
     );
     drop(supervisor);
 }

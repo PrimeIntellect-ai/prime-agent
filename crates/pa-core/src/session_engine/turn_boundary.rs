@@ -15,7 +15,7 @@ use std::sync::Arc;
 use pa_agent::agent::Agent;
 use pa_types::session::FileEntry;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 use crate::session::manager::SessionManager;
@@ -79,7 +79,11 @@ pub struct ContextUsage {
 /// observe the same cells.
 #[derive(Default)]
 pub struct TurnBoundaryRequests {
-    runtime: OnceCell<Arc<TurnBoundaryRuntime>>,
+    /// The late-bound runtime; `bind` is first-wins (the session assembles
+    /// once), `rebind_model_facts` swaps the model facts after a live
+    /// model switch (the registered handlers read through `bound()` on
+    /// every request, so they follow the model the session now runs).
+    runtime: std::sync::RwLock<Option<Arc<TurnBoundaryRuntime>>>,
     compaction: Mutex<Option<PendingCompaction>>,
     refine: Mutex<Option<PendingRefine>>,
 }
@@ -91,12 +95,41 @@ impl TurnBoundaryRequests {
 
     /// Bind the assembled session runtime (first bind wins).
     pub fn bind(&self, runtime: TurnBoundaryRuntime) {
-        let _ = self.runtime.set(Arc::new(runtime));
+        let mut cell = self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cell.is_none() {
+            *cell = Some(Arc::new(runtime));
+        }
     }
 
     /// The bound runtime (`None` until the session is assembled).
     pub fn bound(&self) -> Option<Arc<TurnBoundaryRuntime>> {
-        self.runtime.get().cloned()
+        self.runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Re-bind the runtime's model facts after a live model switch
+    /// (the agent and session cells stay; `model.info` and the context
+    /// window follow the new model — the TS runtime reads both from the
+    /// model the session runs, not the assembly-time one).
+    pub fn rebind_model_facts(&self, model_info: ModelInfo, context_window: Option<u64>) {
+        let Some(current) = self.bound() else {
+            return;
+        };
+        let updated = TurnBoundaryRuntime {
+            agent: Arc::clone(&current.agent),
+            session: Arc::clone(&current.session),
+            context_window,
+            model_info,
+        };
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(updated));
     }
 
     /// Take the pending compaction (the turn boundary consumes it once).
@@ -230,9 +263,9 @@ impl TurnBoundaryRequests {
                     let scheduled = requests.compaction_scheduled().await;
                     let (tokens, window, percent) = match usage {
                         Some(usage) => (
-                            usage.tokens.map(Value::from).unwrap_or(Value::Null),
+                            usage.tokens.map_or(Value::Null, Value::from),
                             Value::from(usage.context_window),
-                            usage.percent.map(Value::from).unwrap_or(Value::Null),
+                            usage.percent.map_or(Value::Null, Value::from),
                         ),
                         None => (Value::Null, Value::Null, Value::Null),
                     };
@@ -503,6 +536,11 @@ fn compaction_request_skip_reason(
 /// the estimate; messages after it are added with the chars/4 heuristic.
 /// `None` when the context window is unknown; `tokens`/`percent` `None`
 /// right after a compaction without a usable post-compaction usage.
+///
+/// # Panics
+///
+/// The `expect` on the anchoring usage cannot fire: the index came from a
+/// search restricted to messages with a valid usage.
 pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Option<ContextUsage> {
     let context_window = context_window.filter(|window| *window > 0)?;
 
@@ -517,9 +555,8 @@ pub fn context_usage(entries: &[FileEntry], context_window: Option<u64>) -> Opti
             .iter()
             .filter_map(message_value)
             .find_map(|message| valid_assistant_usage(&message));
-        let usable = post_compaction_usage
-            .map(|usage| calculate_context_tokens(&usage) > 0)
-            .unwrap_or(false);
+        let usable =
+            post_compaction_usage.is_some_and(|usage| calculate_context_tokens(&usage) > 0);
         if !usable {
             return Some(ContextUsage {
                 tokens: None,
@@ -601,7 +638,7 @@ mod tests {
             provider: "faux".to_string(),
             base_url: "http://localhost".to_string(),
             reasoning: false,
-            cost: Default::default(),
+            cost: pa_agent::types::UsageCost::default(),
             context_window: 100_000,
             max_tokens: 1_000,
         }
@@ -611,7 +648,7 @@ mod tests {
         SessionMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -620,7 +657,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "test".to_string(),
             provider: "faux".to_string(),
@@ -634,13 +671,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 50,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -1150,7 +1187,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 130,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         session.append_message(assistant).unwrap();
         session

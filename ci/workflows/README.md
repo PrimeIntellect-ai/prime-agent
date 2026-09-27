@@ -12,6 +12,16 @@ Promotion state (2026-09-23):
   clippy-test gate set, PR gating on every pull_request against main/rust
   plus the tip gates: the same checks run on every push to main/rust, so
   the tip always compiles its test targets and passes the test suites.
+  The test phase is sharded four ways (2026-09-25): every test binary the
+  serial `cargo test --workspace` ran is assigned to exactly one of four
+  parallel shard jobs by a stable `crc32(unit) % 4` hash
+  (`scripts/ci_test_shard.py`; the assignment never rebalances, so flake
+  attribution stays put across runs), and the `test summary` job audits
+  the shard manifests — same enumeration everywhere, disjoint shards,
+  every assigned unit executed — and merges the failure reports into one
+  table naming the failing binaries. The gate is green only when all
+  shards are green; `make check` remains the serial local mirror of the
+  same suite.
 - STAGED here, waiting for readiness: this `ci.yml` holds the
   windows-cross / windows / deny jobs (promote the windows gates when
   windows-readiness lands and windows-cross is validated green at the tip;

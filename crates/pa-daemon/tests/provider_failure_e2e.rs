@@ -6,6 +6,7 @@
 //! success-after-retry path must settle the same loop with `success: true`.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -159,7 +160,7 @@ fn serve(
         chunk(json!({"role": "assistant", "content": answer}), None),
         chunk(json!({}), Some("stop")),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -240,7 +241,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -308,7 +309,7 @@ impl Client {
                     last_line = Instant::now();
                 }
                 Err(_) => {
-                    if Instant::now() - last_line >= quiet_ms {
+                    if last_line.elapsed() >= quiet_ms {
                         return;
                     }
                 }

@@ -148,11 +148,19 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.cursorDocStart",
-        def!(&["ctrl+home", "super+up"], "Move to start of text", scope "editor"),
+        def!(
+            &["ctrl+home", "super+home", "super+up"],
+            "Move to start of text",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.cursorDocEnd",
-        def!(&["ctrl+end", "super+down"], "Move to end of text", scope "editor"),
+        def!(
+            &["ctrl+end", "super+end", "super+down"],
+            "Move to end of text",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.cursorParagraphUp",
@@ -299,6 +307,20 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "tui.select.pageDown",
         def!(&["pageDown"], "Selection page down"),
     ),
+    (
+        "tui.select.top",
+        def!(
+            &["home", "ctrl+home", "super+home", "super+up"],
+            "Selection to first item"
+        ),
+    ),
+    (
+        "tui.select.bottom",
+        def!(
+            &["end", "ctrl+end", "super+end", "super+down"],
+            "Selection to last item"
+        ),
+    ),
     ("tui.select.confirm", def!(&["enter"], "Confirm selection")),
     (
         "tui.select.cancel",
@@ -317,7 +339,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.input.clear",
         def!(&["escape"], "Interrupt response or clear prompt"),
     ),
-    ("app.shortcuts", def!(&["?"], "Show keyboard shortcuts")),
     ("app.exit", def!(&["ctrl+d"], "Exit when editor is empty")),
     ("app.suspend", def!(&["ctrl+z"], "Suspend to background")),
     ("app.model.select", def!(&["ctrl+l"], "Open model selector")),
@@ -338,10 +359,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         def!(&["ctrl+o"], "Cycle conversation detail", scope "editor"),
     ),
     ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
-    (
-        "app.heartbeats.open",
-        def!(&["ctrl+r"], "Manage heartbeats"),
-    ),
     (
         "app.heartbeats.openSelected",
         def!(&["right"], "Open selected heartbeat"),
@@ -609,7 +626,7 @@ fn legacy_migration(id: &str) -> Option<&'static str> {
         .map(|(_, current)| *current)
 }
 
-/// The config object as an ordered entry list (serde_json maps sort keys,
+/// The config object as an ordered entry list (`serde_json` maps sort keys,
 /// so the TS object order — definition ids first, extras sorted after — is
 /// carried by this vector; [`write_json_object`] renders it in order).
 pub type OrderedConfig = Vec<(String, serde_json::Value)>;
@@ -775,6 +792,11 @@ fn stringify_value(value: &serde_json::Value, indent: usize) -> Result<String> {
 /// with migrated names (and the definition-first ordering) when any legacy
 /// id was found; a missing or malformed file is a no-op. Returns whether
 /// the file was rewritten.
+///
+/// # Errors
+///
+/// Returns `Err` when serializing or writing the rewritten
+/// `keybindings.json` fails.
 pub fn migrate_keybindings_file(agent_dir: &Path) -> Result<bool> {
     let config_path = agent_dir.join("keybindings.json");
     let Some(raw) = load_raw_config(&config_path) else {
@@ -1242,14 +1264,48 @@ mod tests {
         assert!(kb.matches("ctrl+shift+c", "tui.editor.copySelection"));
         assert!(kb.matches("ctrl+home", "tui.editor.cursorDocStart"));
         assert!(kb.matches("ctrl+end", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("super+home", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+end", "tui.editor.cursorDocEnd"));
         // A user rebind replaces the default set.
         let rebound =
             KeybindingsManager::with_user_bindings(cfg(&[("tui.editor.redo", &["ctrl+r"])]));
         assert!(rebound.matches("ctrl+r", "tui.editor.redo"));
         assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
-        // The same-scope freeing still applies: ctrl+r is the heartbeats
-        // key in the app scope, so it keeps its binding there.
-        assert!(rebound.matches("ctrl+r", "app.heartbeats.open"));
+    }
+
+    /// The list-edge jump defaults (the operator's top/bottom
+    /// navigation): home/end and their ctrl/super variants select the
+    /// first/last row. The agents view handles them; home/end stay line
+    /// motion for every editor-scope consumer.
+    #[test]
+    fn list_edge_jump_defaults_resolve() {
+        let kb = KeybindingsManager::new();
+        for key in ["home", "ctrl+home", "super+home", "super+up"] {
+            assert!(
+                kb.matches(key, "tui.select.top"),
+                "{key} selects the first row"
+            );
+        }
+        for key in ["end", "ctrl+end", "super+end", "super+down"] {
+            assert!(
+                kb.matches(key, "tui.select.bottom"),
+                "{key} selects the last row"
+            );
+        }
+        assert!(kb.matches("home", "tui.editor.cursorLineStart"));
+        assert!(kb.matches("end", "tui.editor.cursorLineEnd"));
+    }
+
+    /// The heartbeats shortcut is gone (the operator's 2026-09-24
+    /// directive: "Remove the shortcut of ctrl+r for heartbeats btw"):
+    /// ctrl+r binds nothing by default (the /heartbeats command and the
+    /// activity dock's heartbeats group own the open paths), and the
+    /// rebind-freeing test no longer keeps an app-scope claim for it.
+    #[test]
+    fn ctrl_r_is_unbound_by_default() {
+        let kb = KeybindingsManager::new();
+        assert!(kb.get_keys("app.heartbeats.open").is_empty());
+        assert!(!kb.matches("ctrl+r", "app.heartbeats.open"));
     }
 
     #[test]
@@ -1451,10 +1507,6 @@ mod tests {
             vec!["up".to_string(), "ctrl+o".to_string()]
         );
         assert!(kb.get_keys("app.tools.expand").is_empty());
-        assert_eq!(
-            kb.get_keys("app.heartbeats.open"),
-            vec!["ctrl+r".to_string()]
-        );
         // No scope => a claim never frees its default.
         assert_eq!(kb.get_keys("app.agents.new"), vec!["ctrl+n".to_string()]);
     }

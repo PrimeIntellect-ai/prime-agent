@@ -220,7 +220,7 @@ mod tests {
     use serde_json::json;
 
     /// One test at a time over the global faux registry (the same contract
-    /// print_goal and print_boundary tests hold).
+    /// `print_goal` and `print_boundary` tests hold).
     static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -300,7 +300,7 @@ mod tests {
                     payload.custom_type.clone(),
                     match &payload.content {
                         pa_types::ai::UserContent::Text(text) => text.clone(),
-                        _ => String::new(),
+                        pa_types::ai::UserContent::Blocks(_) => String::new(),
                     },
                 )),
                 _ => None,
@@ -321,7 +321,7 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// The faux engine bed (the print_goal test pattern): a persisted
+    /// The faux engine bed (the `print_goal` test pattern): a persisted
     /// session over its own tempdir, the wired goal surface with a capture
     /// sink, and the default autonomous state.
     async fn bed(script: Value) -> Bed {
@@ -340,6 +340,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
@@ -377,6 +378,7 @@ mod tests {
                     cli_extension_sources: Vec::new(),
                     extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
+                    on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
                     steering_mode: None,
@@ -418,7 +420,7 @@ mod tests {
         parse_session_command(&registry, text).expect("the test text is a session command")
     }
 
-    /// The driver's session-command branch (print_runtime's loop body).
+    /// The driver's session-command branch (`print_runtime`'s loop body).
     async fn run_command(bed: &Bed, text: &str) -> Option<String> {
         let execution = execute_prompt_session_command(
             &bed.engine,
@@ -554,6 +556,60 @@ mod tests {
         assert!(rows.iter().any(|row| row.0 == "goal_context"));
     }
 
+    /// The clear's reply reflects the action it took (the operator's
+    /// 2026-09-25 bug report): clearing a goal record answers
+    /// "Goal cleared." — never the nothing-to-clear "No active goal."
+    /// the TS post-state read produces — and clearing with nothing to
+    /// clear keeps the plain status text.
+    #[tokio::test]
+    async fn goal_clear_answers_the_action_it_took() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        // One scripted reply: the start's continuation turn consumes it,
+        // the next mint hits the exhausted faux queue, and the goal fails
+        // — a goal record (objective held) is exactly what a clear
+        // removes.
+        let test = bed(script(json!([{"text": "goal turn reply"}]))).await;
+        assert_eq!(run_command(&test, "/goal ship it").await, None);
+        let rows = custom_rows(&test.engine).await;
+        assert_eq!(rows[1].1, "Goal active: ship it");
+
+        let last_result = |rows: &[(String, String)]| -> String {
+            rows.iter()
+                .rev()
+                .find(|(custom_type, _)| custom_type == "session_slash_command_result")
+                .map(|(_, text)| text.clone())
+                .expect("a result row")
+        };
+
+        // Clearing the held goal record answers the action.
+        let trace_before_clear = trace(&test.frames).len();
+        assert_eq!(run_command(&test, "/goal clear").await, None);
+        assert_eq!(
+            last_result(&custom_rows(&test.engine).await),
+            "Goal cleared."
+        );
+        // The clear's forced publish announced the empty state (TS
+        // `_emitGoalUpdate` inside the goal command arms).
+        assert!(
+            trace(&test.frames)[trace_before_clear..].contains(&"goal_update:idle".to_string()),
+            "the clear never published the empty state: {:?}",
+            trace(&test.frames)
+        );
+
+        // Clearing again (nothing to clear) and the plain status both
+        // answer the unchanged status text.
+        assert_eq!(run_command(&test, "/goal clear").await, None);
+        assert_eq!(
+            last_result(&custom_rows(&test.engine).await),
+            "No active goal."
+        );
+        assert_eq!(run_command(&test, "/goal status").await, None);
+        assert_eq!(
+            last_result(&custom_rows(&test.engine).await),
+            "No active goal."
+        );
+    }
+
     #[tokio::test]
     async fn compact_skip_warns_without_a_row() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -592,14 +648,20 @@ mod tests {
         let long_seed = "seed turn one ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed, Default::default())
+            .prompt(
+                &long_seed,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;
         let long_seed_two = "seed turn two ".to_string() + &"x".repeat(15000);
         test.engine
             .session
-            .prompt(&long_seed_two, Default::default())
+            .prompt(
+                &long_seed_two,
+                pa_core::session_engine::PromptOptions::default(),
+            )
             .await
             .unwrap();
         test.engine.session.agent().wait_for_idle().await;

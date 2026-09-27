@@ -22,6 +22,13 @@ impl UpdateReport {
                 "Updated, but could not restart the daemon ({}).",
                 status.message.as_deref().unwrap_or("unknown error")
             ));
+            // TS #2515: the failed restart leaves the OLD daemon running
+            // (the update is on disk but not live) - say what to do next
+            // instead of leaving a vague warning.
+            report.warnings.push(
+                "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update."
+                    .to_string(),
+            );
         }
         if status.state != UpdateState::Complete && status.state != UpdateState::Failed {
             return report;
@@ -96,7 +103,7 @@ mod tests {
             started_at: "a".to_string(),
             updated_at: "b".to_string(),
             heartbeat_at: None,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -137,7 +144,12 @@ mod tests {
         let report = UpdateReport::build(&failed);
         assert_eq!(
             report.warnings,
-            vec!["Updated, but could not restart the daemon (boot timed out)."]
+            vec![
+                "Updated, but could not restart the daemon (boot timed out).",
+                // TS #2515: the second warning names the shutdown+restart
+                // hint (the old daemon is still running).
+                "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
+            ]
         );
         let running =
             UpdateReport::build(&status(UpdateState::Booting, UpdateStatusCounts::default()));

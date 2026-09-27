@@ -18,7 +18,7 @@ struct AcpChild {
     lines: Receiver<String>,
     next_id: u64,
     /// Held (never read) so the child's cwd directory outlives the process:
-    /// dropping the tempdir deletes it and the child's current_dir fails.
+    /// dropping the tempdir deletes it and the child's `current_dir` fails.
     _home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
 }
@@ -120,9 +120,10 @@ impl AcpChild {
         let mut notifications = Vec::new();
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for response {id}");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for response {id}"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
@@ -856,10 +857,10 @@ fn acp_daemon_attached_cancels_mid_turn() {
 /// Stop the sandboxed supervisor a test spawned (the shared-daemon
 /// product behavior leaves it running; a test owns its sandbox).
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
+    use std::io::Write as _;
     let Ok(mut stream) = pa_types::platform::transport::connect_blocking(socket) else {
         return;
     };
-    use std::io::Write as _;
     let frame = format!(
             "{{\"type\":\"command\",\"id\":\"shutdown-test\",\"protocol\":{{\"name\":\"prime-agent.daemon\",\"version\":{}}},\"command\":{{\"type\":\"shutdown\"}}}}\n",
             pa_types::daemon::DAEMON_PROTOCOL_VERSION
@@ -1346,7 +1347,7 @@ fn compaction_metas(updates: &[Value]) -> Vec<Value> {
 /// threshold arm, binary level).
 ///
 /// Two turns over a 500-token combined ceiling (the f14 battery shape:
-/// the window minus the faux harness model's 4_096 per-request output
+/// the window minus the faux harness model's `4_096` per-request output
 /// budget and the reserve): the single-turn compaction skips (nothing
 /// before the turn to summarize — the skip publishes the empty payload,
 /// proving the arm ran), then the second turn's boundary compaction
@@ -1390,10 +1391,9 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     let metas = compaction_metas(&updates);
     assert!(!metas.is_empty(), "the threshold arm ran: {updates:?}");
     assert!(
-        metas.iter().all(|meta| meta
-            .as_object()
-            .map(serde_json::Map::is_empty)
-            .unwrap_or(false)),
+        metas
+            .iter()
+            .all(|meta| meta.as_object().is_some_and(serde_json::Map::is_empty)),
         "the single-turn compaction skipped: {metas:?}"
     );
 

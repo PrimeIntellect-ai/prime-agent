@@ -1,6 +1,6 @@
-//! AgentSession: the turn admission layer over the pa-agent loop.
+//! `AgentSession`: the turn admission layer over the pa-agent loop.
 //! First slice of core/agent-session.ts: prompt normalization (templates),
-//! busy-admission rules (steer/follow-up), and SessionManager persistence.
+//! busy-admission rules (steer/follow-up), and `SessionManager` persistence.
 //!
 //! Design note: the TS class runs an internal action-store with admission
 //! epochs/tickets. The Rust port keeps the observable contract instead: the
@@ -10,10 +10,12 @@
 pub mod agent_messaging;
 pub mod auto_refine_trigger;
 pub mod auto_retry;
+pub mod auxiliary_model;
 pub mod branch_summarization;
 pub mod compact_session;
 pub mod compaction;
 pub mod compaction_exec;
+pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
 pub mod goal_boundary;
@@ -28,13 +30,16 @@ pub mod provider_failover;
 pub mod provider_park;
 pub mod provider_retry;
 pub mod refine;
+pub mod request_timing;
 pub mod rlm_host;
 pub mod rlm_notices;
 pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod session_commands;
+pub mod session_events;
 pub mod side_question;
+pub mod skills_unavailable_notice;
 pub mod slash_commands;
 pub mod state_restore_notice;
 pub mod telemetry;
@@ -72,7 +77,7 @@ pub enum PromptOutcome {
     SessionCommand(SessionSlashCommand),
 }
 
-/// Options for `AgentSession::prompt`. Port of PromptOptions (used fields).
+/// Options for `AgentSession::prompt`. Port of `PromptOptions` (used fields).
 #[derive(Debug, Default)]
 pub struct PromptOptions {
     pub streaming_behavior: Option<StreamingBehavior>,
@@ -85,6 +90,13 @@ pub struct PromptOptions {
     /// steering batch). Each row rides the turn after the primary, with
     /// its own text and images, like the primary.
     pub batch: Vec<PromptBatchRow>,
+    /// TS `returnAfterAccepted: true`: the admitted model turn runs
+    /// detached and the admission returns once its run registers (the TS
+    /// in-process connection's prompt shape: `preflightResult` fires at
+    /// the delivered ticket, the run settles on its own and its events
+    /// follow on the session stream) instead of awaiting the run's
+    /// completion.
+    pub return_after_accepted: bool,
 }
 
 /// One co-delivered user row of a batched prompt admission.
@@ -130,7 +142,13 @@ pub struct AgentSession {
     /// `_performCompaction` reads `getCompactionSettings()` on every
     /// compaction path, `/compact` included); defaults until the engine
     /// wiring resolves them.
-    compaction: compaction::CompactionSettings,
+    compaction: std::sync::RwLock<compaction::CompactionSettings>,
+    /// The auxiliary-model routing context (TS `_resolveAuxiliaryModel`'s
+    /// settings/registry access): compaction summaries resolve their model
+    /// through the `auxiliaryModel` setting, falling back to the session
+    /// model. `None` keeps every summarizer on the session model
+    /// (verification harnesses building the session directly).
+    auxiliary_model: Option<auxiliary_model::AuxiliaryModelContext>,
     /// Whether the session may run auto-refinement at all (TS
     /// `_autoRefineAllowedForSession`: depth 0 with a local harness state
     /// dir — the same gate that registers the `refine.*` host requests).
@@ -163,10 +181,27 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The live compaction summary-delta sink
+    /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
+    /// delta the session's compactions stream reaches it, in arrival
+    /// order — the daemon's `compaction_summary_delta` broadcast seam for
+    /// the expanded TUI's live block. Interior-mutable so the embedding
+    /// can install it on the assembled session (`&self`, not the
+    /// `&mut self` the build-time setters take: the daemon wires it after
+    /// the build from the worker's event pump). `None` (the default,
+    /// including every non-daemon embedding) keeps the one-shot
+    /// summarizer completion — no deltas, no broadcast, no behavior
+    /// change.
+    compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
 }
 
 impl AgentSession {
     /// Build a session around a running agent loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying session-assembly error (see
+    /// [`AgentSession::from_session_arc`]).
     pub async fn new(
         agent: Arc<Agent>,
         session: SessionManager,
@@ -183,6 +218,11 @@ impl AgentSession {
 
     /// Build a session from an already-shared session manager handle, so the
     /// kernel host-request handlers can reach the same persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when subscribing the persistence listener fails or
+    /// the initial session context cannot be read.
     #[allow(clippy::too_many_arguments)]
     pub async fn from_session_arc(
         agent: Arc<Agent>,
@@ -207,7 +247,8 @@ impl AgentSession {
             slash_commands: SlashCommandRegistry::builtin(),
             harness_digest,
             digest_pending: std::sync::atomic::AtomicBool::new(false),
-            compaction: compaction::CompactionSettings::default(),
+            compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
+            auxiliary_model: None,
             auto_refine_allowed: false,
             auto_refine: refine::AutoRefineGates::default(),
             compact_auto_refine: std::sync::Mutex::default(),
@@ -215,6 +256,7 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            compaction_summary_sink: std::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -224,8 +266,31 @@ impl AgentSession {
     /// settings (TS `getCompactionSettings`); the engine wiring calls this
     /// so `/compact` honors `compaction.keepRecentTokens`/`reserveTokens`
     /// like the TS product instead of the defaults.
-    pub fn set_compaction_settings(&mut self, settings: compaction::CompactionSettings) {
-        self.compaction = settings;
+    pub fn set_compaction_settings(&self, settings: compaction::CompactionSettings) {
+        *self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+    }
+
+    /// Toggle automatic compaction for this session (TS
+    /// `setAutoCompactionEnabled`): the live settings the auto-compaction
+    /// arms and `/compact` read.
+    pub fn set_auto_compaction_enabled(&self, enabled: bool) {
+        let mut settings = self
+            .compaction
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        settings.enabled = enabled;
+    }
+
+    /// Install the auxiliary-model routing context (TS #2411's
+    /// `_resolveAuxiliaryModel` settings/registry access); the engine
+    /// wiring calls this so compaction summaries resolve through the
+    /// `auxiliaryModel` setting. Without it every summarizer stays on the
+    /// session model.
+    pub fn set_auxiliary_model_context(&mut self, context: auxiliary_model::AuxiliaryModelContext) {
+        self.auxiliary_model = Some(context);
     }
 
     /// Install the skill inventory `/skill:<name>` submissions expand
@@ -264,6 +329,24 @@ impl AgentSession {
         self.kernel_state = probe;
     }
 
+    /// Install the live compaction summary-delta sink (the daemon's
+    /// `compaction_summary_delta` broadcast seam): every summarizer text
+    /// delta the session's compactions stream reaches the sink while the
+    /// summary generates, in arrival order. The daemon wires this onto
+    /// the assembled session (the worker's event pump); every other
+    /// embedding leaves it unset — the one-shot summarizer completion,
+    /// byte-identical to the pre-seam behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink slot's mutex is poisoned.
+    pub fn set_compaction_summary_sink(&self, sink: compaction_exec::SummaryDeltaSink) {
+        *self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock") = Some(sink);
+    }
+
     /// Whether the session may run auto-refinement (TS
     /// `_autoRefineAllowedForSession`).
     pub fn auto_refine_allowed(&self) -> bool {
@@ -279,15 +362,21 @@ impl AgentSession {
     /// `getCompactionSettings().enabled` gate the automatic arms check
     /// before any trigger).
     pub fn auto_compaction_enabled(&self) -> bool {
-        self.compaction.enabled
+        self.compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled
     }
 
     /// The resolved compaction settings (TS `getCompactionSettings`): the
     /// in-run continuation consult reads the threshold headroom without
     /// owning the session (a compaction in flight owns it across its
     /// model turn).
-    pub fn compaction_settings(&self) -> &compaction::CompactionSettings {
-        &self.compaction
+    pub fn compaction_settings(&self) -> compaction::CompactionSettings {
+        *self
+            .compaction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The latest compaction boundary in the live loop context, if any
@@ -333,7 +422,7 @@ impl AgentSession {
                 model,
                 provider_adapter::model_thinking_level(state.thinking_level),
             ),
-            &self.compaction,
+            &self.compaction_settings(),
         )
     }
 
@@ -386,6 +475,16 @@ impl AgentSession {
     /// untouched, matching the TS `CompactionSkippedError` flow. `abort`
     /// is the run's abort signal (TS `_performCompaction`'s `signal`):
     /// an aborted run returns the abort error and never commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the abort error when the run was aborted, or the compaction
+    /// failure when the summarizer call or the compaction entry's persist
+    /// fails. A skip is a normal `Ok` outcome carrying the skip message.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the compaction summary sink slot's mutex is poisoned.
     pub async fn compact(
         &self,
         custom_instructions: Option<&str>,
@@ -396,23 +495,38 @@ impl AgentSession {
         // TS `_performCompaction` captures `this._harnessDigest()` at the
         // commit: relevance terms from the live (pre-compaction) context,
         // harness state read fresh from disk when the snapshot renders.
+        compaction_trace::trace(
+            "compact.enter",
+            serde_json::json!({
+                "customInstructions": custom_instructions.is_some(),
+            }),
+        );
         let digest_inputs = self.harness_digest_inputs().await;
+        compaction_trace::trace("compact.digest_captured", serde_json::Value::Null);
         let mut outcome = {
             let mut session = self.session.lock().await;
+            let summary_delta = self
+                .compaction_summary_sink
+                .lock()
+                .expect("compaction summary sink lock")
+                .clone();
             crate::session_engine::compact_session::execute_compaction(
                 &mut session,
                 crate::session_engine::compact_session::CompactOptions {
                     model: model.clone(),
                     api_key,
                     custom_instructions,
-                    settings: self.compaction,
+                    settings: self.compaction_settings(),
                     abort,
                     harness_digest: digest_inputs,
+                    auxiliary: self.auxiliary_model.as_ref(),
+                    summary_delta,
                 },
             )
             .await?
         };
         if matches!(outcome, CompactOutcome::Skipped(_)) {
+            compaction_trace::trace("compact.skipped", serde_json::Value::Null);
             return Ok(outcome);
         }
         // Rebuild the loop context from the post-compaction session.
@@ -427,7 +541,12 @@ impl AgentSession {
                 serde_json::from_value::<AgentMessage>(value).ok()
             })
             .collect();
+        let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
+        compaction_trace::trace(
+            "compact.rebuilt_context",
+            serde_json::json!({ "messages": rebuilt_message_count }),
+        );
         // TS `_performCompaction` ends with
         // `_syncKernelStateAfterCompaction()`: a kernel that survived the
         // compaction gets its persistence notice — a durable
@@ -443,9 +562,16 @@ impl AgentSession {
             }
             None => None,
         };
+        let notice_landed = kernel_state.is_some();
         if let CompactOutcome::Ran(run) = &mut outcome {
             run.ipython_state = kernel_state;
         }
+        compaction_trace::trace(
+            "compact.returned",
+            serde_json::json!({
+                "notice": notice_landed,
+            }),
+        );
         Ok(outcome)
     }
 
@@ -461,6 +587,11 @@ impl AgentSession {
     /// fails, so every in-process context rebuild (compaction, tree
     /// navigation) keeps the disclosure — the TS `_unpersistedOutcomes`
     /// guarantee, held structurally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the disclosure row cannot be appended or
+    /// surfaced to the live loop; the row is retained in memory either way.
     pub async fn record_compaction_outcome(
         &self,
         reason: crate::session_engine::messages::CompactionOutcomeReason,
@@ -501,6 +632,10 @@ impl AgentSession {
     /// then `agent.state.messages = buildSessionContext().messages`). The
     /// session adopts the branch entries and the agent's message list is
     /// rebuilt from the post-navigation session state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the post-navigation history cannot be read.
     pub async fn rebuild_branch_context(
         &self,
         branch_entries: Vec<FileEntry>,
@@ -524,6 +659,11 @@ impl AgentSession {
     /// Execute `/refine`: plan, re-read, apply, and persist the continual
     /// harness state for this session. The conversation snapshot comes from
     /// the session entries (what the model would see on a rebuild).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conversation history cannot be read, or
+    /// when the refinement plan, apply, or persist fails.
     pub async fn refine(
         &self,
         options: &refine::RefineOptions,
@@ -592,6 +732,11 @@ impl AgentSession {
 
     /// Submit a prompt. Session commands (compact/refine/goal/autonomous)
     /// are recognized before admission and never reach the model.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying prompt admission error (see
+    /// [`AgentSession::prompt_with_images`]).
     pub async fn prompt(
         &self,
         text: &str,
@@ -609,6 +754,12 @@ impl AgentSession {
     /// `convert_to_llm` conversion, TS `convertToLlm`). The injected
     /// content is never template-expanded or command-parsed (TS injected
     /// turns skip `_normalizeSubmission`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is already busy, when the pending
+    /// digest row cannot be captured, or when the agent rejects the
+    /// injected prompt.
     pub async fn prompt_injected_message(
         &self,
         message: &pa_types::session::CustomMessage,
@@ -648,6 +799,13 @@ impl AgentSession {
     /// Prompt with images attached (the ACP prompt-capability path). Busy
     /// sessions queue the text and images together as one follow-up batch,
     /// so an admitted prompt never loses its images to a queue race.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prompt fails validation, the session is
+    /// busy under its admission rule, or the agent rejects the turn (with
+    /// [`PromptOptions::return_after_accepted`], a rejection after the run
+    /// registers rides the events instead of this result).
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -688,10 +846,9 @@ impl AgentSession {
                 let source = if busy {
                     match options.streaming_behavior {
                         Some(StreamingBehavior::Steer) => "steer",
-                        Some(StreamingBehavior::FollowUp) => "follow_up",
                         // The busy-without-behavior case errors below; the
                         // queued label is the honest fallback.
-                        None => "follow_up",
+                        Some(StreamingBehavior::FollowUp) | None => "follow_up",
                     }
                 } else {
                     "prompt"
@@ -742,9 +899,19 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+            if options.return_after_accepted {
+                // TS `returnAfterAccepted: true` — the connection's prompt
+                // returns once the admitted turn delivers.
+                self.agent
+                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
+                        prompt_messages,
+                    ))
+                    .await?;
+            } else {
+                self.agent
+                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                    .await?;
+            }
         }
         Ok(PromptOutcome::Prompt)
     }
@@ -841,6 +1008,11 @@ impl AgentSession {
     /// Model change bookkeeping (mirrors appendModelChange). The resolved
     /// model is forwarded to the loop; pa-agent and pa-types serialize to the
     /// same camelCase wire shape, so the boundary converts through JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model cannot be converted to the loop wire
+    /// shape, or when the model-change row cannot be persisted.
     pub async fn set_model(
         &self,
         model: &pa_types::ai::Model,
@@ -858,6 +1030,11 @@ impl AgentSession {
     }
 
     /// Thinking level bookkeeping (mirrors appendThinkingLevelChange).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the thinking-level change row cannot be
+    /// persisted.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) -> anyhow::Result<()> {
         self.agent.set_thinking_level(level).await;
         let mut session = self.session.lock().await;
@@ -957,8 +1134,7 @@ pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<A
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -1102,6 +1278,22 @@ mod tests {
     /// the engine-level `convert_to_llm` plus a harness-digest context, so
     /// the deferred first-turn digest rides the first prompt.
     async fn digest_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
+            global_dir: tmp.path().join("harness"),
+            local_dir: None,
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        };
+        let session = digest_session_with_harness(provider, harness).await;
+        (session, tmp)
+    }
+
+    async fn digest_session_with_harness(
+        provider: Arc<ScriptedProvider>,
+        harness: crate::session_engine::harness_digest::HarnessDigestContext,
+    ) -> AgentSession {
         let agent = Agent::new(AgentOptions {
             initial_state: AgentInitialState {
                 model: Some(test_model()),
@@ -1112,14 +1304,7 @@ mod tests {
             ..Default::default()
         });
         let tmp = tempfile::tempdir().unwrap();
-        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
-            global_dir: tmp.path().join("harness"),
-            local_dir: None,
-            include_ipython: false,
-            include_shell_examples: false,
-            include_refine: false,
-        };
-        let session = AgentSession::from_session_arc(
+        AgentSession::from_session_arc(
             Arc::new(agent),
             Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
                 tmp.path(),
@@ -1128,8 +1313,253 @@ mod tests {
             Some(harness),
         )
         .await
-        .unwrap();
-        (session, tmp)
+        .unwrap()
+    }
+
+    /// A resumed session over the entries of a prior session (the engine's
+    /// resume wiring: the loop context is the converted built context, the
+    /// manager adopts the same entries).
+    async fn resumed_digest_session(
+        entries: Vec<FileEntry>,
+        harness: crate::session_engine::harness_digest::HarnessDigestContext,
+    ) -> AgentSession {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        let context = crate::session::build_session_context(&entries, None);
+        let loop_messages: Vec<pa_agent::types::AgentMessage> =
+            crate::session_engine::messages::convert_to_llm(&context.messages)
+                .into_iter()
+                .filter_map(|message| {
+                    serde_json::to_value(&message)
+                        .ok()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                })
+                .collect();
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                messages: Some(loop_messages),
+                ..Default::default()
+            },
+            convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        });
+        let mut manager = SessionManager::in_memory(&std::env::temp_dir());
+        manager.adopt_entries(entries);
+        AgentSession::from_session_arc(
+            Arc::new(agent),
+            Arc::new(tokio::sync::Mutex::new(manager)),
+            vec![],
+            Some(harness),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The digest rows in the live loop context (custom wire rows and the
+    /// user turns a rebuild converted) with their fingerprint, when known.
+    async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>)> {
+        let state = session.agent().state().await;
+        state
+            .messages
+            .iter()
+            .filter_map(|message| {
+                crate::session_engine::harness_digest::latest_context_digest_details(
+                    std::slice::from_ref(message),
+                )
+                .map(|details| (details.digest, details.state_fingerprint))
+            })
+            .collect()
+    }
+
+    /// TS #2400 + #2394 at the resume boundary: unchanged harness state
+    /// does not re-deliver a digest that drifted query terms made look
+    /// stale (the state fingerprint matches), and a state change
+    /// re-delivers exactly one digest, replacing the superseded copy
+    /// instead of stacking.
+    #[tokio::test]
+    async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path().join("harness");
+        // Seeded global state: entries whose ranked order differs once the
+        // resume-time query terms mention one of them.
+        let mut state = crate::refinement::empty_harness_state();
+        for (id, title) in [
+            ("alpha_relevant", "Alpha note"),
+            ("middle_plain", "Middle plain note"),
+            ("zeta_relevant", "Zeta note"),
+        ] {
+            state
+                .entries
+                .get_mut(&crate::refinement::RefinementKind::Memory)
+                .unwrap()
+                .insert(
+                    id.to_string(),
+                    crate::refinement::HarnessEntry {
+                        id: id.to_string(),
+                        kind: crate::refinement::RefinementKind::Memory,
+                        title: title.to_string(),
+                        content: format!("{title} about the worktree parity lane."),
+                        path: "general".to_string(),
+                        scope: Some(crate::refinement::HarnessScope::Global),
+                        reference: serde_json::Map::default(),
+                        arguments: serde_json::Map::default(),
+                        metadata: serde_json::Map::default(),
+                        source: "test".to_string(),
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                        version: 1,
+                    },
+                );
+        }
+        crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
+        let harness = crate::session_engine::harness_digest::HarnessDigestContext {
+            global_dir: harness_dir.clone(),
+            local_dir: None,
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        };
+
+        // First session: the deferred first-turn digest rides the turn and
+        // persists (unranked: the pre-turn context has no task signal yet).
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("noted");
+        let session = digest_session_with_harness(Arc::clone(&provider), harness.clone()).await;
+        session
+            .prompt("hello alpha", PromptOptions::default())
+            .await
+            .unwrap();
+        session.agent().wait_for_idle().await;
+        let entries = session.entries().await;
+        let digest_rows: Vec<&FileEntry> = entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry, FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
+            })
+            .collect();
+        assert_eq!(
+            digest_rows.len(),
+            1,
+            "the first turn persisted one digest row"
+        );
+        let FileEntry::CustomMessage {
+            payload: first_row, ..
+        } = digest_rows[0]
+        else {
+            panic!("expected a digest custom entry");
+        };
+        let Some(first_fingerprint) = first_row
+            .details
+            .as_ref()
+            .and_then(|details| details.get("stateFingerprint"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            panic!("the persisted digest row carries its state fingerprint");
+        };
+
+        // Resume over the same entries (converted loop context, adopted
+        // manager): the fresh render ranks `alpha_relevant` first because
+        // the context's task signal mentions it, so only the state
+        // fingerprint can dedupe. The unchanged state must NOT re-deliver.
+        let resumed = resumed_digest_session(entries.clone(), harness.clone()).await;
+        let rows = loop_digest_rows(&resumed).await;
+        assert_eq!(
+            rows,
+            vec![(
+                // The converted user frame carries no fingerprint of its
+                // own; the recovery view is exercised by the no-append.
+                digest_of_entries(&entries),
+                None
+            )],
+            "an unchanged state must not re-deliver at the resume boundary"
+        );
+
+        // Changed disk state: the fingerprint moves, so the boundary
+        // re-delivers — and the fresh row replaces the superseded copy
+        // instead of stacking (TS #2394).
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "resume_test_memory".to_string(),
+                crate::refinement::HarnessEntry {
+                    id: "resume_test_memory".to_string(),
+                    kind: crate::refinement::RefinementKind::Memory,
+                    title: "Resume test memory".to_string(),
+                    content: "Written between resumes.".to_string(),
+                    path: "general".to_string(),
+                    scope: Some(crate::refinement::HarnessScope::Global),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "test".to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    version: 1,
+                },
+            );
+        crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
+        let refreshed = resumed_digest_session(entries.clone(), harness).await;
+        let rows = loop_digest_rows(&refreshed).await;
+        assert_eq!(rows.len(), 1, "the fresh digest replaces the old copy");
+        assert!(
+            rows[0].1.is_some(),
+            "the delivered custom row carries its state fingerprint"
+        );
+        assert!(rows[0].0.contains("Resume test memory"));
+        // The delivered row persisted with its fingerprint. The persisted
+        // transcript keeps every copy (TS #2394: the newest digest remains
+        // authoritative), so the retained row plus the fresh one ride the
+        // file while the live context carries exactly one.
+        let persisted: Vec<String> = refreshed
+            .entries()
+            .await
+            .iter()
+            .filter_map(|entry| match entry {
+                FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type
+                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
+                {
+                    payload
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("stateFingerprint"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0], first_fingerprint);
+        assert_ne!(persisted[1], first_fingerprint);
+        assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
+    }
+
+    /// The digest body of the newest digest custom entry (fixture lookup).
+    fn digest_of_entries(entries: &[FileEntry]) -> String {
+        entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type
+                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
+                {
+                    payload
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("digest"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }
+                _ => None,
+            })
+            .expect("a digest custom entry")
     }
 
     fn user_text(message: &pa_agent::types::Message) -> String {
@@ -1142,7 +1572,7 @@ mod tests {
                 .iter()
                 .filter_map(|part| match part {
                     pa_agent::types::UserPart::Text(text) => Some(text.text.clone()),
-                    _ => None,
+                    pa_agent::types::UserPart::Image(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -1189,8 +1619,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     AgentEvent::TurnStart => Some("turn_start".to_string()),
-                    AgentEvent::MessageStart { message } => Some(message.role().to_string()),
-                    AgentEvent::MessageEnd { message } => Some(message.role().to_string()),
+                    AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
+                        Some(message.role().to_string())
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1307,7 +1738,7 @@ mod tests {
                 "sessionName": "lane",
             })),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         session.prompt_injected_message(&notice).await.unwrap();
         session.agent().wait_for_idle().await;
@@ -1406,7 +1837,7 @@ mod tests {
                 "target": { "activeSessionId": "parent-1" },
             })),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         row_session.prompt_injected_message(&row).await.unwrap();
         row_session.agent().wait_for_idle().await;
@@ -1439,10 +1870,10 @@ mod tests {
     async fn prompt_persists_tool_results() {
         struct EchoTool;
         impl pa_agent::types::AgentTool for EchoTool {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "echo"
             }
-            fn description(&self) -> &str {
+            fn description(&self) -> &'static str {
                 "echo the call"
             }
             fn parameters(&self) -> &serde_json::Value {
@@ -1756,7 +2187,7 @@ mod slash_session_tests {
                 assert_eq!(command.name, "compact");
                 assert_eq!(command.args, "focus on tests");
             }
-            _ => panic!("expected a session command"),
+            PromptOutcome::Prompt => panic!("expected a session command"),
         }
         // No model call and no persisted user message.
         assert!(provider.calls().is_empty());
@@ -1810,12 +2241,12 @@ mod compaction_outcome_tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 

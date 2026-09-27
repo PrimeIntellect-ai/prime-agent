@@ -143,7 +143,7 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
 /// marked stale. A 404 is the exception: a live model briefly 404s on routing
 /// blips, so it counts as transient unavailability, not a permanent rejection.
 /// Safety filters deterministically reject identical requests, so they never
-/// retry (TS #2472: a content_filter rejection surfaces immediately).
+/// retry (TS #2472: a `content_filter` rejection surfaces immediately).
 pub fn is_permanent_provider_failure_kind(
     kind: Option<&str>,
     retries_performed: u32,
@@ -185,8 +185,9 @@ pub fn retry_jitter_rand01() -> f64 {
     let count = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos() as u64 ^ (duration.as_secs() << 32))
-        .unwrap_or(0);
+        .map_or(0, |duration| {
+            duration.subsec_nanos() as u64 ^ (duration.as_secs() << 32)
+        });
     let mut x = nanos ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 12;
     x ^= x << 25;
@@ -227,6 +228,10 @@ pub fn provider_retry_delay(
 ///
 /// The wait future is injectable so deterministic callers (scripts, tests)
 /// can avoid real timers; poll it with any executor (`futures` works).
+///
+/// # Errors
+///
+/// Returns the `attempt` future's error when the completion attempt fails.
 pub async fn complete_with_provider_retry<A, AF, W, WF>(
     policy: &ProviderRetryPolicy,
     signal: Option<&AbortSignal>,
