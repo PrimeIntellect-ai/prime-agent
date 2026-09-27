@@ -1,0 +1,1 @@
+- Fixed Gemma 4 thinking on Google Vertex: disabled thinking now sends `thinkingLevel: MINIMAL` instead of an unsupported `thinkingBudget: 0`, and reasoning levels map to `MINIMAL` (minimal/low) or `HIGH` (medium/high) like the Google Generative AI provider.
