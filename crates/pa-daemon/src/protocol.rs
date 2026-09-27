@@ -1163,9 +1163,22 @@ mod tests {
         );
     }
 
-    /// The standalone response line byte-orders its keys exactly like the
+/// The standalone response line byte-orders its keys exactly like the
     /// TS daemon wire bytes (`daemon-protocol.ts` `success`/`failure`):
     /// id?, type, command, success, then data or error/errorInfo.
+    #[test]
+    fn response_line_serializes_in_the_ts_key_order() {
+        let success = response_success(Some("k1"), "compact", Some(json!({"x": 1})));
+        assert_eq!(
+            serde_json::to_string(&response_line(&success)).unwrap(),
+            "{\"id\":\"k1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"x\":1}}"
+        );
+        let failure = response_failure(Some("k2"), "compact", "boom", None);
+        assert_eq!(
+            serde_json::to_string(&response_line(&failure)).unwrap(),
+            "{\"id\":\"k2\",\"type\":\"response\",\"command\":\"compact\",\"success\":false,\"error\":\"boom\"}"
+        );
+    }
 
     /// The zero-copy response-line serializer must be byte-identical to the
     /// reference `response_line` + `to_vec` path over every response
