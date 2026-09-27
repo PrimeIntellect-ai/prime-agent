@@ -327,7 +327,7 @@ mod tests {
             (
                 "queued label",
                 json!({ "activity": "working", "statusLabel": "queued" }),
-                ["s", "queued", "classifying", "", "", ""],
+                ["s", "queued", "working", "", "", ""],
             ),
             (
                 "recovering label",
@@ -347,7 +347,7 @@ mod tests {
             (
                 "staleness",
                 json!({ "activity": "working", "lastHeardFromAt": STALE_AT }),
-                ["s", "running", "classifying", "10m", "", ""],
+                ["s", "running", "working", "10m", "", ""],
             ),
             (
                 "usage compact",
