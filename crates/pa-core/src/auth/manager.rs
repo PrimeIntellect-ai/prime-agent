@@ -1178,8 +1178,9 @@ mod tests {
             None,
             "the marked value is gated"
         );
-        // A changed value rebuilds the candidate: the stale token's value
-        // fingerprint no longer matches, so the new key resolves.
+        // A changed value changes the memo key: the rebuilt candidate's
+        // value fingerprint differs from the stale token's, so the new
+        // value resolves.
         auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
             "ANTHROPIC_API_KEY".to_string(),
             "sk-two".to_string(),
@@ -1189,7 +1190,7 @@ mod tests {
             Some("sk-two"),
             "the memo must not serve the superseded candidate"
         );
-        // Switching back re-serves the marked material's candidate.
+        // The marked material's candidate re-serves when its value returns.
         auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
             "ANTHROPIC_API_KEY".to_string(),
             "sk-one".to_string(),
