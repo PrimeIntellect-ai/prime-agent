@@ -146,16 +146,6 @@ where
         // TS `_handleRetryableError` bumps the attempt counter before
         // deciding, so the exhaustion check compares past `max_retries`.
         retries_performed += 1;
-        if retries_performed > policy.max_retries {
-            emit(AutoRetryEvent::End {
-                success: false,
-                attempt: retries_performed - 1,
-                final_error: Some(final_error_of(&message)),
-                restored_model: None,
-            })
-            .await?;
-            return Ok(message);
-        }
         let delay = provider_retry_delay(
             retries_performed,
             provider_stream_failure_retry_after_ms(&message),
@@ -167,6 +157,22 @@ where
             // interactive countdown stays honest while a fleet of retried
             // sessions spreads off the same exponential-ladder ticks.
             ProviderRetryDelay::Wait { delay_ms } => {
+                // TS routes the server-requested-wait arms to the bounded
+                // wait path BEFORE the quick-retry exhaustion check (the
+                // `waitClass === "quota"` arm precedes the maxRetries
+                // give-up), so the exhaustion arm never preempts the
+                // park decision: a quota-blocked attempt on the final
+                // retry still parks when the reset is too far.
+                if retries_performed > policy.max_retries {
+                    emit(AutoRetryEvent::End {
+                        success: false,
+                        attempt: retries_performed - 1,
+                        final_error: Some(final_error_of(&message)),
+                        restored_model: None,
+                    })
+                    .await?;
+                    return Ok(message);
+                }
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {

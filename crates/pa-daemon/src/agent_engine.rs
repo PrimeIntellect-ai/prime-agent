@@ -2453,6 +2453,14 @@ impl AgentSessionEngine {
             }
         };
         let resume_at_ms = now_ms.saturating_add(resume_after_ms);
+        // TS always cancels the existing wake before arming the
+        // replacement (`_cancelQuotaParkWake(existing)` runs for a stale
+        // park AND for one whose scheduled job has not fired yet), so an
+        // expired park's lagging job can never race the replacement into
+        // a second marker turn.
+        if let Some(job_id) = existing.as_ref().and_then(|park| park.job_id.as_deref()) {
+            self.cancel_quota_resume_job(job_id);
+        }
         // Arm the durable wake first: without a wake the park would be a
         // silent death, so a failed job creation declines the park.
         let job_id = self.create_quota_resume_job(resume_at_ms).await?;
