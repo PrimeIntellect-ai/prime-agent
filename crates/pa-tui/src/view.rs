@@ -1919,6 +1919,12 @@ impl AgentView {
     ///
     /// `self.flushed_frame` (the row texts of the last flush) is the diff
     /// base for the next flush, exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the write error when `out` rejects a chunk (a terminal
+    /// that went away mid-flush): the rows already written have scrolled,
+    /// so the flush is not retried — the exit tail restores the terminal.
     pub fn stream_flush_to(
         &mut self,
         out: &mut dyn std::io::Write,
@@ -1981,11 +1987,7 @@ struct FlushSink {
 
 impl FlushSink {
     /// Feed one section of the inline frame.
-    fn feed(
-        &mut self,
-        out: &mut dyn std::io::Write,
-        rows: &[crate::Line],
-    ) -> std::io::Result<()> {
+    fn feed(&mut self, out: &mut dyn std::io::Write, rows: &[crate::Line]) -> std::io::Result<()> {
         for row in rows {
             let index = self.texts.len();
             let text = row_text_of(row);
@@ -2005,7 +2007,10 @@ impl FlushSink {
                     self.ring_push(row);
                 } else {
                     self.appending = true;
-                    crate::interactive::write_flush_rows(&mut self.chunk, std::slice::from_ref(row));
+                    crate::interactive::write_flush_rows(
+                        &mut self.chunk,
+                        std::slice::from_ref(row),
+                    );
                 }
                 self.texts.push(text);
             } else {
@@ -2047,7 +2052,6 @@ impl FlushSink {
         Ok(())
     }
 }
-
 
 /// Concatenated span contents of a row (includes zero-width OSC zone
 /// markers, which must persist into scrollback).
@@ -2695,7 +2699,8 @@ mod tests {
         // single-span fragments, not strings spanning a style boundary.
         assert!(joined.contains("0.0.0"));
         assert!(joined.contains("first turn"));
-        assert!(first.windows(crate::osc133::ZONE_START.len())
+        assert!(first
+            .windows(crate::osc133::ZONE_START.len())
             .any(|w| w == crate::osc133::ZONE_START.as_bytes()));
         // Every appended row starts at column 0 and ends CRLF.
         assert!(first.starts_with(b"\r") && first.ends_with(b"\r\n"));
@@ -2710,7 +2715,10 @@ mod tests {
             text: "second turn".to_string(),
         });
         let repaint = flush_bytes(&mut v, 80, 24);
-        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"), "a repaint erases first");
+        assert!(
+            repaint.starts_with(b"\x1b[2J\x1b[H"),
+            "a repaint erases first"
+        );
         let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("second turn"));
         assert!(joined.contains("first turn"));
@@ -2718,7 +2726,10 @@ mod tests {
         // repaints only the tail.
         let mut long = filled(view(), 30);
         let appended = flush_bytes(&mut long, 80, 10);
-        assert!(!appended.is_empty() && !appended.starts_with(b"\x1b[2J"), "first flush appends");
+        assert!(
+            !appended.is_empty() && !appended.starts_with(b"\x1b[2J"),
+            "first flush appends"
+        );
         long.push(TranscriptItem::UserMessage {
             text: "late turn".to_string(),
         });
