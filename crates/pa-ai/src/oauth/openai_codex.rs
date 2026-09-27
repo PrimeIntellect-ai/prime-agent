@@ -711,6 +711,20 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Stage the app registration's redirect port busy for a
+    /// dead-callback flow. `Some(listener)` means the caller actively
+    /// holds the port, so the flow's own bind cannot succeed against it
+    /// (an active listener blocks the same-address bind — both sockets
+    /// set `SO_REUSEADDR`, neither sets `SO_REUSEPORT`) and the flow's
+    /// callback server is dead by construction; `None` means the port
+    /// cannot be staged this run and the caller skips — a login run
+    /// against a port the test does not own waits on a live callback
+    /// server to the settle bound (the registered dead-callback red's
+    /// mechanism).
+    fn stage_busy_registered_port() -> Option<std::net::TcpListener> {
+        std::net::TcpListener::bind(("127.0.0.1", 1455)).ok()
+    }
+
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
         let _registered_port = REDIRECT_PORT.lock().await;
@@ -917,11 +931,20 @@ mod tests {
     async fn a_dead_callback_falls_to_the_prompt_without_a_paste_surface() {
         let _registered_port = REDIRECT_PORT.lock().await;
         // The app registration's redirect port is the flow's wire
-        // contract (a bind-anywhere test would not exercise it): it is
-        // held here deliberately — a busy port leaves the flow's server
-        // dead either way, so the test stays deterministic — and the
-        // paste surface is absent, so the prompt is the only path.
-        let held = std::net::TcpListener::bind(("127.0.0.1", 1455));
+        // contract (a bind-anywhere test would not exercise it): the
+        // staged listener blocks the flow's own bind, so its server is
+        // dead by construction and the paste-free prompt is the only
+        // path, settling in microseconds — and when the port cannot be
+        // staged this run the test skips rather than race a login
+        // against a listener it does not own. The blind form of this
+        // staging (the bind result ignored) carried the registered
+        // settle red: a staging bind that silently lost the port left
+        // the flow's server live, and the no-paste login waited on it
+        // to this test's bound (openai_codex.rs:932 `Elapsed(())` — run
+        // 36212547619 job 108322024076, run 36268944011 shard 4).
+        let Some(held) = stage_busy_registered_port() else {
+            return; // the registered port is busy: this run cannot stage it.
+        };
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(None, ScriptedAnswer::value("the-code"));
         let credentials = tokio::time::timeout(
@@ -939,6 +962,33 @@ mod tests {
         drop(held);
     }
 
+    /// The staging contract, pinned with the flow's own bind call: a
+    /// listener from `stage_busy_registered_port` actively holds the
+    /// registered port, so the flow's callback bind fails against it —
+    /// the dead-server premise is a fact, not an assumption — and the
+    /// released port hosts the bind again. Any staging that stops
+    /// blocking (a probe-and-release shape, a freed port) reds here
+    /// deterministically: that is the load window the registered
+    /// settle red came from.
+    #[tokio::test]
+    async fn the_staged_registered_port_blocks_the_flow_bind() {
+        let _registered_port = REDIRECT_PORT.lock().await;
+        let Some(held) = stage_busy_registered_port() else {
+            return; // the registered port is busy: this run cannot stage it.
+        };
+        let blocked = CodexCallbackServer::bind("127.0.0.1", 1455, "the-state").await;
+        assert!(
+            blocked.is_err(),
+            "the staged port must block the flow's callback bind"
+        );
+        drop(held);
+        let live = CodexCallbackServer::bind("127.0.0.1", 1455, "the-state").await;
+        assert!(
+            live.is_ok(),
+            "the released port hosts the flow's callback bind again"
+        );
+    }
+
     /// The cancellation-aware-wait regression: a dead callback server
     /// plus a paste that never resolves — the surface's cancel flag (set
     /// by the paste's own first poll, standing in for the pane exit)
@@ -946,7 +996,12 @@ mod tests {
     #[tokio::test]
     async fn a_pending_paste_never_holds_a_cancelled_flow() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        let held = std::net::TcpListener::bind(("127.0.0.1", 1455));
+        // The same verified staging as the dead-callback test: the
+        // premise must not be silent, and an unstaged port skips rather
+        // than leaves the flow a listener of its own.
+        let Some(held) = stage_busy_registered_port() else {
+            return; // the registered port is busy: this run cannot stage it.
+        };
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::PendingMarksCancel),
@@ -962,6 +1017,36 @@ mod tests {
         assert_eq!(error, LOGIN_CANCELLED);
         assert!(http.seen_bodies(TOKEN_URL).is_empty());
         drop(held);
+    }
+
+    /// The registered settle red's lesson, pinned: a login without a
+    /// paste surface has no settle of its own while its callback server
+    /// waits (the browser path is the only settler, live or dead), so
+    /// the surface's cancel flag is the only bound. The flag flips from
+    /// outside the flow here — the pane-exit shape (#2770) — and the
+    /// login must end cancelled inside the poll bound with no exchange;
+    /// the blind-staging form of the dead-callback test had no such
+    /// carrier, which is how its premise break ran to the settle
+    /// timeout.
+    #[tokio::test]
+    async fn a_cancelled_surface_ends_a_login_without_a_paste_surface() {
+        let _registered_port = REDIRECT_PORT.lock().await;
+        let http = token_http(&account_jwt(Some("acct-1")));
+        let ui = ScriptedUi::new(None, ScriptedAnswer::Pending);
+        let cancel = Arc::clone(&ui.cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel.store(true, Ordering::Relaxed);
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR),
+        )
+        .await
+        .expect("the no-paste login ends on the surface's cancel")
+        .unwrap_err();
+        assert_eq!(error, LOGIN_CANCELLED);
+        assert!(http.seen_bodies(TOKEN_URL).is_empty());
     }
 
     #[tokio::test]
