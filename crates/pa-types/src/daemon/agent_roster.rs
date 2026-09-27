@@ -200,7 +200,7 @@ pub fn session_activity_detail(summary: &Value, options: &SessionActivityOptions
         return "replied".to_string();
     }
     if str_field("activity") == Some("working") {
-        return "classifying".to_string();
+        return "working".to_string();
     }
     if str_field("taskState") == Some("error") {
         return "error".to_string();
@@ -393,7 +393,7 @@ mod tests {
             detail(json!({ "runtimeKind": "subagent", "repliedSinceTask": true })),
             "replied"
         );
-        assert_eq!(detail(json!({ "activity": "working" })), "classifying");
+        assert_eq!(detail(json!({ "activity": "working" })), "working");
         assert_eq!(detail(json!({ "taskState": "error" })), "error");
         assert_eq!(detail(json!({ "taskState": "completed" })), "completed");
         // No branch fires: the surface's idle fallback.
@@ -457,7 +457,7 @@ mod tests {
                 ),
                 &options,
             ),
-            "classifying"
+            "working"
         );
         // Without the mark, a non-ready worker is the story.
         assert_eq!(
