@@ -260,6 +260,10 @@ pub(crate) struct SessionUi {
     trim_after_frame: bool,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot model provider for the next rebuild (the attach state's
+    /// `model.provider`; `None` when the daemon reports none): the picker
+    /// resolves the current-model catalog entry by provider plus id.
+    pending_model_provider: Option<String>,
     /// Snapshot tray effort suffix for the next rebuild (the attach
     /// state's level; `None` clears it).
     pending_thinking_suffix: Option<String>,
@@ -691,6 +695,7 @@ impl SessionUi {
             pending_snapshot: None,
             trim_after_frame: false,
             pending_model: None,
+            pending_model_provider: None,
             pending_thinking_suffix: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
@@ -1083,6 +1088,7 @@ impl SessionUi {
             DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
         }
         self.pending_model = reconstructed.model_id;
+        self.pending_model_provider = reconstructed.model_provider;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
         self.last_assistant_text = reconstructed
             .chat
@@ -1434,6 +1440,7 @@ impl SessionUi {
         }
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
+            view.chrome.model_provider = self.pending_model_provider.take();
         }
         // The tray's effort suffix moves with the same snapshot: an
         // attach's state either carries the session's level or reports a
