@@ -88,6 +88,11 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first selection copy (`tui selection used`): `lines` is
     /// the copied text's line count.
     fn selection_used(&self, lines: usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first click-driven interaction (`tui click used`):
+    /// `surface` is `transcript` (a card or condensed-run expand click)
+    /// / `editor` (a prompt-bar caret placement) / `picker` (a menu row
+    /// select).
+    fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A builtin client command was submitted (`agent command used`):
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.
@@ -1888,7 +1893,7 @@ async fn run_interactive_surface(
     // so the respawned worker serves the session again.
     let mut session_reconnect: Option<SessionReconnect> = None;
 
-    while running {
+    'run: while running {
         // The enhanced-key modes settle once per run: the kitty probe
         // answered, or the modifyOtherKeys fallback fired. One adoption
         // event reports the established combination.
@@ -2233,8 +2238,24 @@ async fn run_interactive_surface(
                 // `/resume`, `/exit`): in terminal mode the teardown below must
                 // run this iteration, not after the select's 50ms idle tick
                 // parks the loop — that park reads directly as switch latency
-                // (TS's event loop leaves on the key). Headless runs keep the
-                // tail pass so captured frames stay identical.
+                // (TS's event loop leaves on the key). A HANDOFF takes the
+                // leave now: the bare `break` below only leaves the
+                // input-drain loop, and the select after it parks the exit
+                // for the tick — measured as ~50ms of chat->agents switch
+                // latency on every handoff. The handoff's next surface owns
+                // the pane (its mount clears the alt screen), so nothing the
+                // tail pass paints can reach the user. A non-handoff exit
+                // (`/exit`, `/quit`) keeps the tail pass: its frame gate
+                // paints the final chat frame the exit's main-screen flush
+                // shows. Headless runs keep the tail pass so captured
+                // frames stay identical.
+                if renderer.is_terminal()
+                    && session.exit_requested
+                    && (session.open_agents_view || session.pending_selection.is_some())
+                {
+                    session.exit_reason = "session_request";
+                    break 'run;
+                }
                 if session.exit_requested && renderer.is_terminal() {
                     session.exit_reason = "session_request";
                     break;
@@ -3017,6 +3038,16 @@ async fn run_interactive_surface(
                     last_render_at = Some(Instant::now());
                     last_pulse_phase = view.pulse_frame;
                     render_deadline = None;
+                    // The attach fold arms this once: the first frame
+                    // that renders the rebuilt transcript materializes
+                    // its visible window (the wrap/render churn on top
+                    // of the fold's parse churn), so return that freed
+                    // heap right after the frame paints instead of
+                    // keeping the resume's peak resident for the
+                    // process lifetime.
+                    if session.take_trim_after_frame() {
+                        pa_types::memory_release::trim_freed_heap();
+                    }
                 } else {
                     render_deadline = Some(last_render_at.unwrap() + MIN_RENDER_INTERVAL);
                 }

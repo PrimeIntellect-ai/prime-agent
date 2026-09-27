@@ -16,6 +16,7 @@ use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
 };
+use crate::click_dispatch::PressedClick;
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::daemon_reconnect::RecoveryKind;
 use crate::effort_picker::{self, EffortPickerAction};
@@ -457,6 +458,11 @@ pub(crate) struct SessionUi {
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     /// Snapshot chat entries to fold into the view on the next rebuild.
     pending_snapshot: Option<Vec<ChatEntry>>,
+    /// One-shot: return the freed heap of the first frame that renders
+    /// after an attach fold (the fold itself trims the wire/parse churn;
+    /// the first frame's visible-window materialization is its own,
+    /// bigger transient — see the draw loop's post-frame trim).
+    trim_after_frame: bool,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
     /// Snapshot tray effort suffix for the next rebuild (the attach
@@ -730,13 +736,22 @@ pub(crate) struct SessionUi {
     pub(crate) copies: Vec<String>,
     /// TS `fullscreenPressedHyperlink`: the link under the last plain left
     /// press; a release without a drag opens it.
-    pressed_hyperlink: Option<String>,
+    pub(crate) pressed_hyperlink: Option<String>,
     /// TS `fullscreenLeftMouseDragged`: the left press turned into a drag,
-    /// so its release ends the selection instead of opening the link.
-    left_mouse_dragged: bool,
+    /// so its release ends the selection instead of opening the link or
+    /// firing the pressed click.
+    pub(crate) left_mouse_dragged: bool,
     /// Links opened by clicks this run (headless runs have no terminal to
     /// hand a browser to; the verifier reads these).
     pub(crate) opened_urls: Vec<String>,
+    /// The click target under the last plain left press (TS
+    /// `fullscreenPressedClick`): the release fires it when it lands on
+    /// the same row without a drag between and no hyperlink covers the
+    /// press.
+    pub(crate) pressed_click: Option<PressedClick>,
+    /// Whether this run already reported its first click-driven
+    /// interaction.
+    click_adoption_emitted: bool,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
@@ -905,6 +920,7 @@ impl SessionUi {
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
+            trim_after_frame: false,
             pending_model: None,
             pending_thinking_suffix: None,
             pending_queue: None,
@@ -994,6 +1010,8 @@ impl SessionUi {
             pressed_hyperlink: None,
             left_mouse_dragged: false,
             opened_urls: Vec::new(),
+            pressed_click: None,
+            click_adoption_emitted: false,
         };
         session
             .attach_session(&active_session_id, DockFold::FirstFrame)
@@ -1323,7 +1341,18 @@ impl SessionUi {
         // return their freed heap to the OS instead of keeping the load's
         // peak resident for the TUI's lifetime.
         pa_types::memory_release::trim_freed_heap();
+        // The rebuild's first frame materializes the visible window —
+        // its wrap/render churn is the TUI's own transient on top of the
+        // fold's; arm the post-frame trim so that churn returns too
+        // instead of riding the arenas for the process lifetime.
+        self.trim_after_frame = true;
         Ok(())
+    }
+
+    /// Take the one-shot post-first-frame trim request (the draw loop
+    /// consumes it right after the frame it armed paints).
+    pub(crate) fn take_trim_after_frame(&mut self) -> bool {
+        std::mem::take(&mut self.trim_after_frame)
     }
 
     /// Subscribe this client to the live agent roster (TS
@@ -5516,7 +5545,7 @@ impl SessionUi {
     /// later chat opens at it. A failed save only lands in the settings
     /// store's own diagnostics (TS `save` -> `recordError`): the chat
     /// keeps the applied level either way, so the keybind shows no error.
-    fn save_chat_detail(&self, view: &AgentView) {
+    pub(crate) fn save_chat_detail(&self, view: &AgentView) {
         if let Some(settings) = &self.client_settings {
             let _ = settings.set_chat_detail(view.detail.wire_name());
         }
@@ -6662,13 +6691,18 @@ impl SessionUi {
     /// 52. A release without a drag opens the link under the press
     /// position (TS `fullscreenPressedHyperlink`: terminals gate native
     /// link handling while mouse reporting is active, so clicks the TUI
-    /// consumes must open their OSC 8 targets themselves). Reports are
-    /// consumed even while a picker, selector, or loader owns the frame
-    /// (the TS overlay-focus gate) — the wheel never scrolls behind one,
-    /// but its rows select; while tracking is inactive every report is
-    /// consumed without a dispatch. The onboarding pane owns the frame the
-    /// same way (TS's splash is a 100% overlay): its rows select as frame
-    /// regions and its links open, but no transcript scrolls behind it.
+    /// consumes must open their OSC 8 targets themselves), and with no
+    /// link there it fires the click target under the press (TS
+    /// `dispatchFullscreenClick`, the `click_dispatch` module): cards and
+    /// condensed run blocks cycle the conversation detail, the editor's
+    /// content rows place the caret, and a picker's rows move its
+    /// selection. Reports are consumed even while a picker, selector, or
+    /// loader owns the frame (the TS overlay-focus gate) — the wheel
+    /// never scrolls behind one, but its rows select; while tracking is
+    /// inactive every report is consumed without a dispatch. The
+    /// onboarding pane owns the frame the same way (TS's splash is a
+    /// 100% overlay): its rows select as frame regions and its links
+    /// open, but no transcript scrolls behind it.
     pub(crate) fn handle_mouse(&mut self, event: crate::mouse::MouseEvent, view: &mut AgentView) {
         if !crate::mouse_tracking::active() {
             return;
@@ -6717,11 +6751,13 @@ impl SessionUi {
             // frame (its rows are the selectable spans), then the window.
             self.stop_selection_auto_scroll();
             if left_press && !event.motion {
+                self.record_pressed_click(view, &event);
                 if !view.begin_frame_selection(row, col) {
                     view.begin_selection(row, col);
                 }
                 self.dirty = true;
             } else if left_press && event.motion {
+                self.left_mouse_dragged = true;
                 view.extend_active_selection(row, col);
                 self.dirty = true;
             } else if !event.press && view.has_selection() {
@@ -6736,12 +6772,14 @@ impl SessionUi {
             }
         } else if left_press && !event.motion {
             self.stop_selection_auto_scroll();
+            self.record_pressed_click(view, &event);
             // TS `beginSelection` then the `beginFrameSelection` fallback.
             if !view.begin_selection(row, col) {
                 view.begin_frame_selection(row, col);
             }
             self.dirty = true;
         } else if left_press && event.motion {
+            self.left_mouse_dragged = true;
             view.extend_active_selection(row, col);
             self.update_selection_auto_scroll(view, row, col);
             self.dirty = true;
@@ -6760,7 +6798,8 @@ impl SessionUi {
         // TS opens `fullscreenPressedHyperlink ?? hyperlinkAt(release)`
         // on a plain left release: the pressed position wins, and a
         // release over another link still opens that link (a plain click
-        // moves no cells).
+        // moves no cells). With no link there, the release fires the
+        // click target recorded at the press (TS `dispatchFullscreenClick`).
         if open_pressed_link {
             let url = self
                 .pressed_hyperlink
@@ -6768,13 +6807,19 @@ impl SessionUi {
                 .or_else(|| view.hyperlink_at(row, col));
             if let Some(url) = url {
                 self.open_hyperlink(&url);
+            } else if !event.shift && !event.alt && !event.ctrl {
+                // TS gates the click dispatch on the release's
+                // modifiers too: modified clicks stay selection-only.
+                self.dispatch_plain_click(view, row);
             }
         }
         // TS clears the press state after every left release, so a later
-        // release can never open a stale press.
+        // release can never open a stale press — the click target rides
+        // the same cleanup (a drag-selection release consumes nothing).
         if left && !event.press {
             self.left_mouse_dragged = false;
             self.pressed_hyperlink = None;
+            self.pressed_click = None;
         }
     }
 
@@ -8307,6 +8352,20 @@ impl SessionUi {
         }
     }
 
+    /// The run's first click-driven interaction (`tui click used`,
+    /// adoption; later clicks in the same run are not reported).
+    pub(crate) fn track_click(&mut self, surface: &'static str) {
+        if self.click_adoption_emitted {
+            return;
+        }
+        self.click_adoption_emitted = true;
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.click_used(surface).await;
+            });
+        }
+    }
+
     /// Take a pending `app.suspend` request (TS `handleCtrlZ`): the
     /// interactive loop performs the process-group suspend cycle; only
     /// the loop owns the renderer that hands the terminal over.
@@ -8672,17 +8731,8 @@ impl SessionUi {
         }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
-            // detail: overview -> details -> all -> overview, and #2709
-            // saves the new level as the `chatDetail` setting.
-            view.detail = view.detail.next();
-            self.save_chat_detail(view);
-            // TS `applyChatExpansion` also re-flags the side-question pane
-            // (the pane has no bash rows here, so the flag is the only
-            // carried state).
-            if let Some(pane) = view.side_pane.as_mut() {
-                pane.expanded = view.detail == crate::chat::Detail::All;
-            }
-            self.dirty = true;
+            // detail: overview -> details -> all -> overview.
+            self.cycle_detail(view);
             return Ok(());
         }
         // TS `app.subagents.focus` (default alt+a): the dock takes focus

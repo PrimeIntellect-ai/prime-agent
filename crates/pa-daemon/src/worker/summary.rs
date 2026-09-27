@@ -372,56 +372,29 @@ pub(crate) fn session_summary(
                     .unwrap_or_default(),
             )
         });
-    let messages = store
-        .map(crate::session_store::SessionFile::messages)
+    // The scalars derive from one borrowed walk of the same windowed
+    // sequence `SessionFile::messages` folds (scan and fold share the
+    // walk), so the summary never materializes the retained transcript.
+    let scalars = store
+        .map(crate::session_store::SessionFile::scan_message_scalars)
         .unwrap_or_default();
-    let last_activity_at = messages
-        .iter()
-        .rev()
-        .find_map(crate::types::message_timestamp_ms)
+    let last_activity_at = scalars
+        .last_timestamp_ms
         .map(crate::util::iso_from_unix_ms)
         .or_else(|| modified.clone())
         .or_else(|| store.map(|store| store.header.timestamp.clone()));
     // Usage: summed assistant usage (`sessionUsageSummaryFrom`), absent
     // when everything is zero.
-    let mut input_tokens = 0u64;
-    let mut output_tokens = 0u64;
-    let mut cost = 0.0f64;
-    for message in &messages {
-        if crate::types::message_role(message) != Some("assistant") {
-            continue;
-        }
-        let Some(usage) = message.get("usage") else {
-            continue;
-        };
-        input_tokens += usage
-            .get("input")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        input_tokens += usage
-            .get("cacheRead")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        input_tokens += usage
-            .get("cacheWrite")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        output_tokens += usage
-            .get("output")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        cost += usage
-            .get("cost")
-            .and_then(|cost| cost.get("total"))
-            .and_then(Value::as_f64)
-            .unwrap_or_default();
-    }
+    let input_tokens = scalars.input_tokens;
+    let output_tokens = scalars.output_tokens;
+    let cost = scalars.cost;
     let usage = (input_tokens > 0 || output_tokens > 0 || cost > 0.0).then(
         || json!({ "inputTokens": input_tokens, "outputTokens": output_tokens, "cost": cost }),
     );
     SessionSummary {
         id: core.active_session_id.clone(),
-        lifecycle: active_lifecycle(&core.runtime_kind, messages.is_empty(), streaming).to_string(),
+        lifecycle: active_lifecycle(&core.runtime_kind, scalars.message_count == 0, streaming)
+            .to_string(),
         activity: if streaming || compacting {
             "working"
         } else {
