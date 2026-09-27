@@ -1181,16 +1181,22 @@ mod tests {
                 None,
                 "attach",
                 "refused",
-                Some(DaemonErrorInfo::MissingSessionCwd { issue: json!({"sessionId": "s1"}) }),
+                Some(DaemonErrorInfo::MissingSessionCwd {
+                    issue: json!({"sessionId": "s1"}),
+                }),
             ),
-            response_success(Some("u1"), "get_messages", Some(json!({
-                "messages": [
-                    {"role": "user", "content": "quotes \" backslash \\ newline \n tab \t emoji 🚀"},
-                    {"role": "assistant", "content": ["part one", "part two"]},
-                    {"role": "custom", "n": 3, "nested": {"deep": [1, 2, {"x": null}]}}
-                ],
-                "count": 3,
-            }))),
+            response_success(
+                Some("u1"),
+                "get_messages",
+                Some(json!({
+                    "messages": [
+                        {"role": "user", "content": "quotes \" backslash \\ newline \n tab \t emoji 🚀"},
+                        {"role": "assistant", "content": ["part one", "part two"]},
+                        {"role": "custom", "n": 3, "nested": {"deep": [1, 2, {"x": null}]}}
+                    ],
+                    "count": 3,
+                })),
+            ),
             // data wins over error, exactly like the reference match arms
             DaemonResponse {
                 id: Some("both".to_string()),

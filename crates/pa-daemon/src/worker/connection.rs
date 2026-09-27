@@ -467,8 +467,7 @@ impl Worker {
                             PEER_COMMAND_NOT_ALLOWED,
                             None,
                         );
-                        self.write_response_frame(&sink, &request_id, failure)
-                            .await;
+                        self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
                     // Session-plane commands run concurrently for the same
@@ -506,8 +505,7 @@ impl Worker {
                             PEER_COMMAND_NOT_ALLOWED,
                             None,
                         );
-                        self.write_response_frame(&sink, &request_id, failure)
-                            .await;
+                        self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
                     // Delivery runs concurrently, like the other planes.
@@ -701,7 +699,10 @@ impl Worker {
         // payload; the wire bytes are identical to the tree-built line.
         let payload = crate::protocol::response_line_bytes(&response);
         let payload_len = payload.len();
-        if let Err(error) = self.write_frame_segments(&sink.writer, &header, &payload).await {
+        if let Err(error) = self
+            .write_frame_segments(&sink.writer, &header, &payload)
+            .await
+        {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
         // A large frame (an attach snapshot, a full-history tree) carried
