@@ -75,11 +75,20 @@ impl Supervisor {
         let mut line = String::new();
         let mut events = self.events.subscribe();
         let connection_id = client_id.clone();
+        // Session events ride this per-connection queue (the subscriber
+        // registry resolves delivery at publish time, TS `handleWorkerFrame`
+        // parity); broadcast-class events keep the ring above.
+        let (targeted_tx, mut targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(
+            crate::backpressure::TARGETED_EVENT_QUEUE_CAPACITY,
+        );
         // Connection state shared with the per-command dispatch tasks: the
-        // envelope-overridden client id and the attached-session list (the
-        // event arm reads the latter to route session events).
-        let attached: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        // envelope-overridden client id and the attached-session handle
+        // (attach/detach keep the registry and the session list consistent;
+        // the registry insertion is the delivery boundary).
+        let attached = super::subscribers::ClientSubscriptions::new(
+            connection_id.clone(),
+            targeted_tx,
+        );
         let effective_client_id: Arc<std::sync::Mutex<String>> =
             Arc::new(std::sync::Mutex::new(client_id.clone()));
         // Roster subscription flag shared with the per-command dispatch
@@ -201,6 +210,34 @@ impl Supervisor {
                         break;
                     }
                 }
+                targeted = targeted_rx.recv() => {
+                    // A session event routed by the subscriber registry at
+                    // publish time: the delivery decision already ran, the
+                    // frame only writes (the queue preserves per-session
+                    // publish order).
+                    if let Some(payload) = targeted {
+                        if let Err(error) = write_line(&mut writer, &payload).await {
+                            // An event-write failure must not strand an
+                            // accepted shutdown: if this connection owns
+                            // the stop, it still starts the pass.
+                            let is_shutdown_owner = self
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && self.shutting_down.load(Ordering::SeqCst)
+                                && !self.accept_exit.load(Ordering::SeqCst)
+                            {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 event = events.recv() => {
                     match event {
                         Ok((routing, payload)) => {
@@ -209,9 +246,6 @@ impl Supervisor {
                                 ClientRouting::BroadcastExcept {
                                     connection_id: excluded,
                                 } => excluded.as_str() != connection_id.as_str(),
-                                ClientRouting::AttachedSession { active_session_id } => {
-                                    attached.lock().unwrap().iter().any(|id| id == active_session_id)
-                                }
                                 ClientRouting::RosterSubscribers => {
                                     roster_subscribed.load(std::sync::atomic::Ordering::SeqCst)
                                 }
@@ -269,8 +303,12 @@ impl Supervisor {
             self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
-        // not stop the session; the worker keeps running).
-        let attached_sessions = attached.lock().unwrap().clone();
+        // not stop the session; the worker keeps running). The registry
+        // entries go first — no session event may be enqueued for a
+        // connection whose loop has exited — then the worker-side detach
+        // routes run as before.
+        attached.detach_all(&self.session_subscribers);
+        let attached_sessions = attached.session_ids();
         for active_session_id in &attached_sessions {
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 let payload = json!({ "type": "detach", "clientId": effective_client_id.lock().unwrap().clone() });
@@ -304,7 +342,7 @@ impl Supervisor {
         self: &Arc<Self>,
         line: &str,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
@@ -443,7 +481,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
@@ -736,7 +774,7 @@ impl Supervisor {
                 // marked sessions once it answered (TS supervisor detach
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
-                let attached_ids = attached.lock().unwrap().clone();
+                let attached_ids = attached.session_ids();
                 let marked = self
                     .begin_detach_pause_bookkeeping(
                         connection,

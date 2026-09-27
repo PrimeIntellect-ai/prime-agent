@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The OSC 52 payload channel: stdout in the terminal, a captured buffer in
 /// headless verification runs.
@@ -89,10 +90,12 @@ impl Env {
 /// waiting on a compositor that never focuses — dies at the deadline
 /// instead of hanging the input loop that copied.
 const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5_000);
+/// The bounded wait's poll cadence.
+const PIPE_POLL: Duration = Duration::from_millis(20);
 
-/// Run `program` with `text` on its stdin (the pipe write plus process
-/// wait are quick enough that a synchronous call matches the TS
-/// behavior).
+/// Run `program` with `text` on its stdin (TS `execSyncHidden`'s
+/// deadline): a helper that does not finish inside the cap is killed
+/// and reported as a failed copy.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     let Ok(mut child) = Command::new(program)
         .args(args)
@@ -103,22 +106,45 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     else {
         return false;
     };
-    let wrote = child
-        .stdin
-        .take()
-        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    // The whole payload reaches the helper (TS `execSyncHidden` writes
+    // the entire input under its 5s cap, with no size prefilter: `/copy`
+    // and the selection copy carry arbitrary chat text, not just URLs
+    // and keys). The write rides its own thread so a helper that never
+    // reads a payload larger than the pipe buffer cannot hang the input
+    // loop: the deadline below kills the child, the closed pipe fails
+    // the blocked write, and the detached writer ends on its own.
+    let write_result = {
+        let stdin = child.stdin.take();
+        let payload = text.as_bytes().to_vec();
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let _ = tx.send(stdin.is_some_and(|mut stdin| stdin.write_all(&payload).is_ok()));
+        });
+        rx
+    };
+    // The bounded wait (std carries no `Child::wait_timeout`): poll the
+    // exit until the deadline, then kill the hung helper and reap it.
     let deadline = std::time::Instant::now() + HELPER_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success() && wrote,
-            Ok(None) => {}
+            Ok(Some(status)) => {
+                // The helper read the payload before exiting; a helper
+                // that closed its stdin without reading fails the write
+                // promptly, and a wedged reader loses the rest of the
+                // deadline instead of hanging the caller.
+                let wrote = write_result
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(false);
+                return status.success() && wrote;
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(PIPE_POLL),
             Err(_) => return false,
         }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
