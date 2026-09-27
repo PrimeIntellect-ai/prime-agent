@@ -133,6 +133,11 @@ pub enum AgentsStep {
     Key(String),
     /// Hold until the roster settles (or the deadline passes).
     WaitSettle { timeout_ms: u64 },
+    /// Hold until a frame rendered after this step contains `needle`
+    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
+    /// rows (the saved catalog's rows), which arrive on the event
+    /// cadence rather than a known wall-clock delay.
+    WaitRender { needle: String, timeout_ms: u64 },
     /// A plain left click on one screen cell (zero-based): the verifier
     /// drives the click grammar with the same SGR press/release pair a
     /// terminal sends.
@@ -160,6 +165,11 @@ pub struct AgentsViewOutcome {
     /// `resolveAgentsViewScopeFrames` dropping a frame): the flow drops the
     /// scope frame.
     pub scope_dropped: bool,
+    /// The scoped panel handed the pane back to its scope root's chat
+    /// (the parent key with pop, escape without — TS `scope_back` in
+    /// both arms): the reopened chat starts with the dock focused on the
+    /// panel's own group (the Subagents item), not the prompt bar.
+    pub scope_back: bool,
     /// Session ids of the opened row's ancestors, root-most first (TS
     /// `expandedAncestorSessionIds`): the flow feeds the next view run so
     /// the tree re-expands to the drilled row.
@@ -217,6 +227,14 @@ fn saved_catalog_timeout_ms() -> u64 {
 
 enum UiInput {
     Key(String),
+    /// The headless plan's `WaitRender` barrier: the loop holds the
+    /// queued plan batch behind it until a frame rendered after arming
+    /// contains the needle (the interactive harness's condition-wait
+    /// contract, view-scoped).
+    WaitRender {
+        needle: String,
+        timeout_ms: u64,
+    },
     /// A decoded SGR mouse report (the click grammar's input).
     Mouse(crate::mouse::MouseEvent),
     Resize,
@@ -568,6 +586,11 @@ struct AgentsViewMode {
     /// The view exited through its parent key (TS `scope_back`): the flow
     /// pops the scope frame.
     scope_popped: bool,
+    /// The scoped panel handed the pane back to its scope root's chat
+    /// (the parent key with pop, escape without): the reopened chat
+    /// restores the dock focus on the panel's own group instead of the
+    /// prompt bar.
+    scope_back: bool,
     /// The open action the run ended with (`None` while the view runs).
     opened: Option<OpenedRow>,
     /// ctrl+n requested a fresh session (TS `app.agents.new`).
@@ -690,6 +713,7 @@ impl AgentsViewMode {
             pulse: 0,
             running: true,
             scope_popped: false,
+            scope_back: false,
             opened: None,
             new_session: false,
             saved_fetch_failed: false,
@@ -1502,6 +1526,7 @@ impl AgentsViewMode {
             return;
         };
         self.scope_popped = pop;
+        self.scope_back = true;
         let summary = self
             .records()
             .iter()
@@ -2257,18 +2282,16 @@ impl AgentsViewMode {
             let indent = "  ".repeat(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
             let text = format!("{indent}{marker} {}", row.title);
-            // The running line bills the descendant tree in the Cost
-            // column (the operator's 2026-09-26 ask; TS renders no cost
-            // on the summary row): the title spans the Session + Model
-            // zone — every row yields its leading cells to the cost
-            // column — and the aggregate rides the same right-aligned
-            // `${:.2}` cell the agent rows print, leaving the Age
-            // column blank behind it. The inactive line keeps its
-            // full-width title, unbilled.
-            if row
-                .identity
-                .starts_with(crate::agents_view_forest::SUMMARY_ROW_PREFIX)
-            {
+            // BOTH summary lines bill the descendant tree in the Cost
+            // column (the operator's 2026-09-26 ask, then the follow-up:
+            // an all-done tree renders no running line, so the inactive
+            // line — the row the operator actually sees then — carries
+            // the same aggregate; TS renders no cost on the summary
+            // row): each title spans the Session + Model zone — every
+            // row yields its leading cells to the cost column — and the
+            // aggregate rides the same right-aligned `${:.2}` cell the
+            // agent rows print, leaving the Age column blank behind it.
+            if crate::agents_view_forest::is_summary_row_identity(&row.identity) {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
                 let pad = zone.saturating_sub(str_width(&title));
@@ -2644,6 +2667,14 @@ impl Renderer {
                                 let _ = ui_tx.send(UiInput::Settled);
                                 tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
                             }
+                            AgentsStep::WaitRender { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitRender { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                             AgentsStep::Click { row, col } => {
                                 // The SGR press/release pair a click sends
                                 // (the report cells are one-based):
@@ -2748,6 +2779,15 @@ impl Renderer {
                 }
                 None
             }
+        }
+    }
+
+    /// The headless capture's frames (None on a terminal renderer): the
+    /// headless plan's render barrier waits on these.
+    fn headless_frames(&self) -> Option<&[String]> {
+        match self {
+            Renderer::Headless { frames, .. } => Some(frames),
+            Renderer::Terminal { .. } => None,
         }
     }
 
@@ -3088,10 +3128,89 @@ async fn run_agents_view_surface(
     // loop's client close would take the connection down before a
     // detached task ever sent).
     let mut delete_dispatches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // The headless plan's render barrier (`AgentsStep::WaitRender`, the
+    // interactive harness's condition-wait contract): an armed hold's
+    // deadline, and the frames captured at arming (the condition scans
+    // only frames rendered after the barrier reached the queue head, so
+    // a needle that already scrolled out of an older frame still
+    // satisfies it — except the newest frame at arming time, which pops
+    // immediately instead of stalling on a repaint that may never
+    // come).
+    let mut wait_render_deadline: Option<tokio::time::Instant> = None;
+    let mut wait_render_baseline: usize = 0;
 
     while mode.running {
         let mut redraw = false;
-        if let Some(input) = first_input(&mut pending) {
+        // The headless plan's render barrier: `WaitRender` holds the
+        // queued PLAN batch behind it until a frame rendered after
+        // arming contains the needle — daemon-driven rows (the saved
+        // catalog's rows) land on the event cadence rather than a known
+        // wall-clock delay, so the condition wait rides out any load
+        // latency where a fixed sleep only wins on an idle machine. The
+        // daemon-driven answers jump the hold (the promotion below):
+        // the catalog's landing is the very event the needle waits on,
+        // so queueing it behind the barrier would wedge the wait on its
+        // own condition. The barrier sits at the queue head until it
+        // pops, so `first_input` below never sees it.
+        let mut barrier_holds = false;
+        if wait_render_deadline.is_some() {
+            if let Some(index) = pending.iter().position(is_daemon_answer) {
+                let input = pending.remove(index);
+                pending.insert(0, input);
+            }
+        }
+        while let Some(UiInput::WaitRender { needle, timeout_ms }) = pending.first() {
+            let needle = needle.clone();
+            let timeout_ms = *timeout_ms;
+            let frames = renderer.headless_frames();
+            if let Some(deadline) = wait_render_deadline {
+                let satisfied = frames.is_some_and(|frames| {
+                    frames
+                        .get(wait_render_baseline..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|frame| frame.contains(&needle))
+                });
+                if satisfied {
+                    wait_render_deadline = None;
+                    pending.remove(0);
+                    continue;
+                }
+                if tokio::time::Instant::now() > deadline {
+                    wait_render_deadline = None;
+                    pending.remove(0);
+                    // The hold's honest failure bound: the deadline
+                    // pops it and the plan proceeds; the status note
+                    // reports the wait that never satisfied (never the
+                    // needle itself — the note renders into frames, and
+                    // quoting the needle would satisfy the very
+                    // condition that failed).
+                    mode.status =
+                        Some("timed out waiting for the headless render condition".to_string());
+                    redraw = true;
+                    continue;
+                }
+            } else {
+                let holds_now = frames.is_some_and(|frames| {
+                    frames.last().is_some_and(|frame| frame.contains(&needle))
+                });
+                if holds_now {
+                    pending.remove(0);
+                    continue;
+                }
+                wait_render_baseline = frames.map_or(0, <[String]>::len);
+                wait_render_deadline =
+                    Some(tokio::time::Instant::now() + Duration::from_millis(timeout_ms));
+            }
+            barrier_holds = true;
+            break;
+        }
+        let popped = if barrier_holds {
+            None
+        } else {
+            first_input(&mut pending)
+        };
+        if let Some(input) = popped {
             match input {
                 UiInput::Key(key) => {
                     mode.handle_key(&key);
@@ -3132,7 +3251,11 @@ async fn run_agents_view_surface(
                 UiInput::Mouse(event) => {
                     mode.handle_mouse(&event);
                 }
-                UiInput::Resize | UiInput::Settled => {}
+                // `Settled` is the plan's own settle no-op;
+                // `WaitRender` never reaches the batch pop (the
+                // pre-pass at the loop head owns it — an armed hold
+                // skips this pop entirely).
+                UiInput::Resize | UiInput::Settled | UiInput::WaitRender { .. } => {}
                 UiInput::DeleteResult {
                     message,
                     deleted_saved_path,
@@ -3275,6 +3398,18 @@ async fn run_agents_view_surface(
                 // below the select does the refresh, so the arm only ends
                 // the wait (the pulse arm's shape).
                 () = tokio::time::sleep_until(incident_poll_at) => {}
+                // The render barrier's deadline: an armed hold whose
+                // needle never lands still pops here — the plan proceeds
+                // and the assertion then reports the actual frame — so a
+                // quiet daemon (a catalog answer that never comes)
+                // cannot wedge the loop waiting on events that never
+                // arrive.
+                () = async {
+                    match wait_render_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
         }
         // Coalesce a due animation pulse with the input or roster frame,
@@ -3394,6 +3529,7 @@ async fn run_agents_view_surface(
             query: (!mode.query.is_empty()).then(|| mode.query.clone()),
             scope_popped: mode.scope_popped,
             scope_dropped: mode.scope_dropped,
+            scope_back: mode.scope_back,
             expanded_ancestors: opened
                 .as_ref()
                 .map(|row| row.expanded_ancestors.clone())
@@ -3427,6 +3563,17 @@ fn advance_running_pulse(
     } else {
         false
     }
+}
+
+/// The daemon-driven answers that jump an armed render barrier: the
+/// saved catalog's landing (or its terminal failure) and the
+/// stop-or-delete dispatch results are the events the plan's needles
+/// wait on — they must never queue behind the hold they satisfy.
+fn is_daemon_answer(input: &UiInput) -> bool {
+    matches!(
+        input,
+        UiInput::SavedLoaded { .. } | UiInput::SavedFailed { .. } | UiInput::DeleteResult { .. }
+    )
 }
 
 /// Pop the next queued input, or `None` when the queue is empty.
@@ -6006,11 +6153,12 @@ the holder exits.";
         );
     }
 
-    /// The operator's 2026-09-26 ask: the collapsed running line renders
+    /// The operator's 2026-09-26 ask: BOTH collapsed summary lines render
     /// the descendant-tree aggregate in the SAME Cost column the agent
     /// rows bill — the right-aligned `${:.2}` cell, the Age column blank
-    /// behind it — while the inactive line keeps its unbilled full-width
-    /// title. TS renders no cost on the summary row
+    /// behind it. The running line first, then the follow-up: an all-done
+    /// tree renders no running line, so the inactive line carries the same
+    /// aggregate. TS renders no cost on the summary row
     /// (`createSubagentSummaryRow` pins `recursiveCost: 0`): the
     /// aggregate is a deliberate Rust divergence.
     #[test]
@@ -6056,13 +6204,24 @@ the holder exits.";
             running.trim_end().ends_with("$4.75"),
             "the Age column stays blank behind the aggregate: {running:?}"
         );
+        // The inactive line bills the SAME descendant tree aggregate at
+        // the same right-aligned column (the operator's follow-up: the
+        // aggregate must stay visible in the all-done state, where no
+        // running line renders), Age blank behind it.
         let inactive = flat_lines
             .iter()
             .find(|line| line.contains("inactive subagents"))
             .expect("inactive line renders");
+        let inactive_cost_at = inactive
+            .find("$4.75")
+            .expect("the inactive aggregate prints");
+        assert_eq!(
+            inactive_cost_at, cost_at,
+            "the inactive line shares the agent rows' Cost column"
+        );
         assert!(
-            !inactive.contains('$'),
-            "the inactive line keeps its unbilled full-width title: {inactive:?}"
+            inactive.trim_end().ends_with("$4.75"),
+            "the Age column stays blank behind the inactive aggregate: {inactive:?}"
         );
     }
 
@@ -6083,5 +6242,157 @@ the holder exits.";
             running.contains("$0.00"),
             "the zero aggregate prints in the Cost column: {running:?}"
         );
+    }
+
+    /// The all-done state — the frame the operator actually inspects
+    /// after work completes: no descendant runs, so NO running line
+    /// renders and the inactive line is the only summary row. Its Cost
+    /// cell carries the same descendant-tree aggregate the running line
+    /// billed mid-run (#2843's regression: the aggregate rode a row
+    /// that vanished the moment the children finished, and the
+    /// full-width unbilled inactive line left the Cost column blank
+    /// behind it).
+    #[test]
+    fn inactive_line_renders_the_aggregate_in_the_all_done_state() {
+        let mut parent = parent_summary("p");
+        parent["usage"] = serde_json::json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
+        let mut inactive_child = child_summary("x1", "p", "old worker");
+        inactive_child["usage"] = serde_json::json!({ "cost": 0.75 });
+        let mut mode = mode_with_parent_and_child();
+        mode.roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("i1", "idle", idle_child),
+            roster_entry("x1", "inactive", inactive_child),
+        ];
+        mode.rebuild_rows();
+        assert!(
+            !mode.rows.iter().any(|row| row.title.contains("running")),
+            "no running line renders when nothing runs"
+        );
+        let (lines, _) = mode.render_frame(120, 36);
+        let flat_lines: Vec<String> = lines.iter().map(flat).collect();
+        let inactive = flat_lines
+            .iter()
+            .find(|line| line.contains("2 inactive subagents"))
+            .expect("the inactive line renders");
+        let parent_line = flat_lines
+            .iter()
+            .find(|line| line.contains("p name"))
+            .expect("parent row renders");
+        let cost_at = inactive.find("$2.00").expect("the aggregate prints");
+        let parent_cost_at = parent_line.find("$2.25").expect("the parent total prints");
+        assert_eq!(
+            cost_at, parent_cost_at,
+            "the inactive line shares the agent rows' Cost column"
+        );
+        assert!(
+            inactive.trim_end().ends_with("$2.00"),
+            "the Age column stays blank behind the aggregate: {inactive:?}"
+        );
+    }
+
+    /// The aggregate survives the #2866 incident-notice render path: a
+    /// notice rides the header above the list, the list window shrinks,
+    /// and the inactive line's Cost cell still prints the aggregate in
+    /// the same frame.
+    #[test]
+    fn aggregate_survives_the_incident_notice_render_path() {
+        let mut parent = parent_summary("p");
+        parent["usage"] = serde_json::json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
+        let mut mode = mode_with_parent_and_child();
+        mode.roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("i1", "idle", idle_child),
+        ];
+        mode.rebuild_rows();
+        mode.incident_notice_state.notice = Some(crate::incident_notices::IncidentNotice {
+            kind: crate::incident_notices::IncidentNoticeKind::WorkerCrash,
+            key: "worker-crash|w1".to_string(),
+            severity: pa_types::incident::IncidentSeverity::Error,
+            subject: "w1".to_string(),
+            time_ms: 1_000,
+            text: "worker w1 crashed at 00:00".to_string(),
+        });
+        let (lines, _) = mode.render_frame(120, 36);
+        let text: Vec<String> = lines.iter().map(flat).collect();
+        assert!(
+            text.iter().any(|line| line.contains("worker w1 crashed")),
+            "the notice renders: {text:?}"
+        );
+        let inactive = text
+            .iter()
+            .find(|line| line.contains("1 inactive subagent"))
+            .expect("the inactive line renders behind the notice");
+        assert!(
+            inactive.contains("$1.25"),
+            "the aggregate prints under the incident notice: {inactive:?}"
+        );
+    }
+
+    /// The aggregate survives the #2865 click surface: the rendered
+    /// frame records its clickable rows (the summary row among them) in
+    /// the same pass that bills the Cost cell, and a plain click on the
+    /// inactive line expands its list while the aggregate stays put.
+    #[test]
+    fn aggregate_survives_the_click_surface_render_path() {
+        // Mouse tracking is process-global state: the click grammar's
+        // tests serialize through its lock and leave it off.
+        let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+        let mut parent = parent_summary("p");
+        parent["usage"] = serde_json::json!({ "cost": 0.25 });
+        let mut idle_child = child_summary("i1", "p", "idle worker");
+        idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
+        let mut mode = mode_with_parent_and_child();
+        mode.roster = vec![
+            roster_entry("p", "idle", parent),
+            roster_entry("i1", "idle", idle_child),
+        ];
+        mode.rebuild_rows();
+        let (lines, _) = mode.render_frame(120, 36);
+        let flat_lines: Vec<String> = lines.iter().map(flat).collect();
+        let inactive = flat_lines
+            .iter()
+            .find(|line| line.contains("1 inactive subagent"))
+            .expect("the inactive line renders");
+        assert!(
+            inactive.contains("$1.25"),
+            "the aggregate prints in the click-recorded frame: {inactive:?}"
+        );
+        let summary_index = mode
+            .rows
+            .iter()
+            .position(|row| row.kind == RowKind::SubagentSummary)
+            .expect("the summary row");
+        let (row, _) = mode
+            .click_rows
+            .iter()
+            .find(|(_, index)| *index == summary_index)
+            .copied()
+            .expect("the summary row is clickable in the same frame");
+        mode.handle_mouse(&mouse_report(row, true, false));
+        mode.handle_mouse(&mouse_report(row, false, false));
+        let (lines, _) = mode.render_frame(120, 36);
+        let flat_lines: Vec<String> = lines.iter().map(flat).collect();
+        assert!(
+            flat_lines.iter().any(|line| line.contains("idle worker")),
+            "the click expanded the inactive list"
+        );
+        let inactive = flat_lines
+            .iter()
+            .find(|line| line.contains("1 inactive subagent"))
+            .expect("the inactive line still renders expanded");
+        assert!(
+            inactive.contains("$1.25"),
+            "the aggregate stays on the expanded line: {inactive:?}"
+        );
+        crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
     }
 }

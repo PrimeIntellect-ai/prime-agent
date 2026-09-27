@@ -15,7 +15,7 @@ use std::sync::Arc;
 use pa_agent::agent::Agent;
 use pa_types::session::FileEntry;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 use crate::session::manager::SessionManager;
@@ -79,7 +79,11 @@ pub struct ContextUsage {
 /// observe the same cells.
 #[derive(Default)]
 pub struct TurnBoundaryRequests {
-    runtime: OnceCell<Arc<TurnBoundaryRuntime>>,
+    /// The late-bound runtime; `bind` is first-wins (the session assembles
+    /// once), `rebind_model_facts` swaps the model facts after a live
+    /// model switch (the registered handlers read through `bound()` on
+    /// every request, so they follow the model the session now runs).
+    runtime: std::sync::RwLock<Option<Arc<TurnBoundaryRuntime>>>,
     compaction: Mutex<Option<PendingCompaction>>,
     refine: Mutex<Option<PendingRefine>>,
 }
@@ -91,12 +95,41 @@ impl TurnBoundaryRequests {
 
     /// Bind the assembled session runtime (first bind wins).
     pub fn bind(&self, runtime: TurnBoundaryRuntime) {
-        let _ = self.runtime.set(Arc::new(runtime));
+        let mut cell = self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cell.is_none() {
+            *cell = Some(Arc::new(runtime));
+        }
     }
 
     /// The bound runtime (`None` until the session is assembled).
     pub fn bound(&self) -> Option<Arc<TurnBoundaryRuntime>> {
-        self.runtime.get().cloned()
+        self.runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Re-bind the runtime's model facts after a live model switch
+    /// (the agent and session cells stay; `model.info` and the context
+    /// window follow the new model — the TS runtime reads both from the
+    /// model the session runs, not the assembly-time one).
+    pub fn rebind_model_facts(&self, model_info: ModelInfo, context_window: Option<u64>) {
+        let Some(current) = self.bound() else {
+            return;
+        };
+        let updated = TurnBoundaryRuntime {
+            agent: Arc::clone(&current.agent),
+            session: Arc::clone(&current.session),
+            context_window,
+            model_info,
+        };
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(updated));
     }
 
     /// Take the pending compaction (the turn boundary consumes it once).

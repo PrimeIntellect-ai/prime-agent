@@ -413,6 +413,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -844,6 +845,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
             let Some(api_key) = panel
                 .paste_prompt(
                     "Paste a Prime API key below:",
+                    pa_tui::auth_panel::PastePromptTone::Muted,
                     pa_tui::auth_panel::PasteStyle::Visible,
                 )
                 .await
@@ -1294,6 +1296,7 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // The interactive runtime's own launch sequence, minus the TTY: spawn
@@ -1386,6 +1389,7 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1588,6 +1592,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1718,6 +1723,7 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -1821,6 +1827,7 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1962,6 +1969,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let ctrl_o = || {
@@ -2161,6 +2169,7 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let key = |code: KeyCode| {
@@ -2359,6 +2368,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // 45s per turn is the throughput bound: the producer finishes each
@@ -2493,6 +2503,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let key = |code: KeyCode, modifiers: KeyModifiers| {
@@ -2665,6 +2676,7 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -2799,6 +2811,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -2818,8 +2831,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
             .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("must be configured externally")
-            && rendered.contains("prime-inference"),
+        rendered.contains("must be configured externally") && rendered.contains("prime-inference"),
         "the pick against the empty auth-scoped catalog routes the sign-in flow (no provider-auth hook in this composition, so the TS external-config error):\n{rendered}"
     );
     assert!(
@@ -2935,6 +2947,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
@@ -3007,6 +3020,7 @@ fn base_options(
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
         provider_auth: None,
         traces: None,
@@ -3476,6 +3490,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let enter = || {
         pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -3620,6 +3635,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         prompt_stash: prompt_stash.clone(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
 
     // Run one: the draft is typed, then the resume key hands the pane to
@@ -3800,6 +3816,7 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
         session_has_children: false,
+        restore_dock_focus: false,
     };
     let ctrl_v = || {
         pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(
@@ -4192,6 +4209,7 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // Two submits with NO barrier between them: the second's round trip is
@@ -4321,6 +4339,7 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // The submit's round trip straddles the switch: the switch step
@@ -4443,6 +4462,7 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     // No trailing WaitIdle: the plan ends at the submit, and the run's
@@ -4568,6 +4588,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
