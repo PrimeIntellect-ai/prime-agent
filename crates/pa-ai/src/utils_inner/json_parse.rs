@@ -673,7 +673,7 @@ mod tests {
             "x".repeat(150 * 1024)
         );
         let delta_count = 10_000usize;
-        let delta_len = (payload.len() + delta_count - 1) / delta_count;
+        let delta_len = payload.len().div_ceil(delta_count);
 
         let mut parses = 0usize;
         let mut parsed_bytes = 0usize;

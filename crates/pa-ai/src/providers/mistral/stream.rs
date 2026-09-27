@@ -400,7 +400,7 @@ impl MistralStreamState {
     /// Port of the TS catch settle: finalize tool-call blocks whose parsed
     /// preview may lag the accumulated text under the growth throttle.
     fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
-        for (block_index, accumulator) in self.tool_partial_args.iter_mut() {
+        for (block_index, accumulator) in &mut self.tool_partial_args {
             let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*block_index)
             else {
                 continue;

@@ -119,7 +119,7 @@ impl IndexedBlocks {
             };
             let Some(parsed) = partial_json
                 .get_mut(position)
-                .and_then(|scratch| scratch.flush())
+                .and_then(StreamingJsonAccumulator::flush)
             else {
                 continue;
             };

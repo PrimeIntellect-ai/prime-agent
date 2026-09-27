@@ -444,7 +444,7 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
 /// Port of the TS catch settle: finalize tool-call blocks whose parsed
 /// preview may lag the accumulated text under the growth throttle.
 fn settle_partial_tool_calls(state: &mut StreamingState) {
-    for (index, accumulator) in state.tool_call_partial_args.iter_mut() {
+    for (index, accumulator) in &mut state.tool_call_partial_args {
         let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(*index) else {
             continue;
         };

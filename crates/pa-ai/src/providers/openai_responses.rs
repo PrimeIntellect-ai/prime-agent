@@ -354,7 +354,7 @@ async fn run_stream(
         })),
     };
 
-    let mut stream_result: Result<(), ProviderError> = Ok(());
+    let stream_result: Result<(), ProviderError>;
     {
         let mut processor =
             crate::providers::openai_responses_shared::ResponsesStreamProcessor::new(
