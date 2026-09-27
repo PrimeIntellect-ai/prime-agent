@@ -1,5 +1,5 @@
 //! Headless e2e for the `/tier` service-tier command (TS #2144's UX half):
-//! a mock supervisor serves one attached session with an OpenRouter
+//! a mock supervisor serves one attached session with an `OpenRouter`
 //! completions model, and the plan drives the command through the same
 //! editor submit path a user's keystrokes take.
 //!
@@ -24,7 +24,7 @@ struct MockSupervisor {
     listener: UnixListener,
 }
 
-/// The OpenRouter catalog entry as the daemon's `get_model_catalog` answer
+/// The `OpenRouter` catalog entry as the daemon's `get_model_catalog` answer
 /// carries it: completions API, so flex and priority are both eligible for
 /// the model. The same json seeds `InteractiveOptions::model_catalog` (the
 /// composition-root snapshot the picker serves before the fetch lands).
@@ -191,7 +191,7 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result: one session on an OpenRouter completions model
+/// The slim attach result: one session on an `OpenRouter` completions model
 /// (the catalog entry the eligibility predicate reads).
 fn attach_data(id: &str) -> Value {
     json!({
@@ -241,7 +241,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: openrouter_catalog(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -264,7 +264,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         client_settings: None,
     }
