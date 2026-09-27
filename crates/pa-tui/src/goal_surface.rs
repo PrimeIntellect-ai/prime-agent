@@ -257,7 +257,7 @@ pub fn render_goal_panel(
         shown -= 1;
         clipped = true;
     }
-    for line in wrapped[..shown].iter() {
+    for line in &wrapped[..shown] {
         let mut row: Line = vec![Span::raw("  ")];
         row.extend(line.iter().cloned());
         lines.push(crate::width::truncate_line(&row, width, ""));
@@ -296,10 +296,10 @@ pub fn render_goal_panel(
             "",
         ));
     }
-    let close = kb
-        .first_key("tui.select.cancel")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_else(|| "Esc".to_string());
+    let close = kb.first_key("tui.select.cancel").map_or_else(
+        || "Esc".to_string(),
+        |key| crate::keybindings::format_key_text(&key),
+    );
     lines.push(Vec::new());
     lines.push(crate::menu_panel::hint_row(
         theme,

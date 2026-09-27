@@ -9,7 +9,7 @@
 //! Writers: the supervisor appends at admission moments (spawn at child
 //! create, rename at subagent rename, delete at subagent delete). Readers:
 //! every roster surface that must show non-resident children (`list --all`,
-//! the saved-session catalog). Appends are single small O_APPEND writes
+//! the saved-session catalog). Appends are single small `O_APPEND` writes
 //! whose atomicity we rely on for cross-process interleaving; reads re-read
 //! the whole file behind a stat guard, so staleness is bounded to in-flight
 //! appends.
@@ -162,7 +162,6 @@ fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
     let child_id = || str_field(&record, "childId");
     let child = || str_field(&record, "child");
     match op {
-        "meta" => Ok(None),
         "spawn" => {
             let (Some(child_id), Some(parent), Some(child), Some(name)) = (
                 child_id(),
@@ -433,6 +432,14 @@ impl RlmSpawnLedger {
 
     /// Record a spawn admission. The child session path must be unique among
     /// live edges (a per-process advisory check, exactly like the TS writer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the spawn input is invalid (an empty child
+    /// id, parent, or child session path, or a zero depth), when another
+    /// live edge already claims the child session path, when the ledger
+    /// replay fails (an oversized or malformed ledger), or when the
+    /// record cannot be appended.
     pub fn append_spawn(&self, input: RlmSpawnInput) -> Result<()> {
         if input.child_id.is_empty()
             || input.parent.is_empty()
@@ -475,6 +482,11 @@ impl RlmSpawnLedger {
     }
 
     /// Record a rename for a known child edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rename record cannot be appended (the
+    /// ledger directory, open, serialization, write, or sync fails).
     pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
         self.append_record(json!({
@@ -489,6 +501,11 @@ impl RlmSpawnLedger {
 
     /// Rename by child session path alone (an offline rename knows no
     /// childId): one rename record for every live edge at that path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails (an oversized or malformed
+    /// ledger) or one of the rename records cannot be appended.
     pub fn append_rename_by_child_path(&self, child: &str, name: &str) -> Result<()> {
         let target = canonical_session_path(Path::new(child));
         let state = self.replay_cached()?;
@@ -508,6 +525,12 @@ impl RlmSpawnLedger {
     }
 
     /// Tombstone a child's edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tombstone record cannot be appended
+    /// (the ledger directory, open, serialization, write, or sync
+    /// fails).
     pub fn append_delete(
         &self,
         child_id: &str,
@@ -532,6 +555,13 @@ impl RlmSpawnLedger {
     /// snapshot; replay's last-writer-wins merges it into the tombstoned
     /// edge, so the spend survives the transcript's removal, a saved-
     /// session delete, and daemon restarts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the usage snapshot cannot be serialized or
+    /// the tombstone record cannot be appended; a snapshot replay would
+    /// reject (a non-finite or negative cost) rides as absent — the
+    /// bare tombstone still lands.
     pub fn append_delete_with_usage(
         &self,
         child_id: &str,
@@ -549,7 +579,7 @@ impl RlmSpawnLedger {
         // preserves it), so a snapshot the reader would reject rides as
         // absent - the tombstone still lands bare (the historical-gap
         // zero).
-        if !(usage.cost.is_finite() && !usage.cost.is_sign_negative()) {
+        if !usage.cost.is_finite() || usage.cost.is_sign_negative() {
             return self.append_delete(child_id, child, reason);
         }
         let usage = serde_json::to_value(usage)
@@ -568,6 +598,11 @@ impl RlmSpawnLedger {
     /// Tombstone every edge for one child session path (a path may hold
     /// duplicate edges from raced or corrupt appends; a live one would
     /// resurrect a later recreation at that path as a subagent).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails or one of the tombstone
+    /// records cannot be appended.
     pub fn tombstone_child_path(
         &self,
         child: &str,
@@ -579,6 +614,11 @@ impl RlmSpawnLedger {
     /// The saved-session delete's tombstone with the captured usage
     /// snapshot (the file dies right after this, so the snapshot must ride
     /// the tombstone: the bucket's lazy file fallback has nothing to read).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails or one of the per-edge
+    /// tombstones cannot be appended.
     pub fn tombstone_child_path_with_usage(
         &self,
         child: &str,
@@ -596,7 +636,7 @@ impl RlmSpawnLedger {
         for edge in &matching {
             match usage {
                 Some(usage) => {
-                    self.append_delete_with_usage(&edge.child_id, &edge.child, reason, usage)?
+                    self.append_delete_with_usage(&edge.child_id, &edge.child, reason, usage)?;
                 }
                 None => self.append_delete(&edge.child_id, &edge.child, reason)?,
             }
@@ -618,6 +658,11 @@ impl RlmSpawnLedger {
     /// tombstones that predate the capture - a path with neither a snapshot
     /// nor a readable transcript is the documented historical gap (no
     /// fabricated backfill: zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger).
     pub fn deleted_descendant_usage_by_parent(
         &self,
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
@@ -748,6 +793,11 @@ impl RlmSpawnLedger {
 
     /// Replay edges without liveness reconciliation. Deleted edges are
     /// filtered by default; tombstones carry their delete reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger); a missing ledger replays empty.
     pub fn edges(&self, include_deleted: bool) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -767,6 +817,12 @@ impl RlmSpawnLedger {
     /// same session under a different root — and the returned edge
     /// carries the resolved path, so a restart-era child never anchors to
     /// a stale path. Only a session with no live file anywhere is dead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger); a missing ledger replays empty, and only the
+    /// liveness resolution drops edges.
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -891,30 +947,27 @@ impl RlmSpawnLedger {
                     name,
                 } => {
                     let key = edge_key(&child_id, &child);
-                    match state.index.get(&key).copied() {
-                        Some(at) => {
-                            state.edges[at] = RlmLedgerEdge {
-                                child_id,
-                                parent,
-                                child,
-                                depth,
-                                name,
-                                deleted: None,
-                                deleted_usage: None,
-                            };
-                        }
-                        None => {
-                            state.index.insert(key.clone(), state.edges.len());
-                            state.edges.push(RlmLedgerEdge {
-                                child_id,
-                                parent,
-                                child,
-                                depth,
-                                name,
-                                deleted: None,
-                                deleted_usage: None,
-                            });
-                        }
+                    if let Some(at) = state.index.get(&key).copied() {
+                        state.edges[at] = RlmLedgerEdge {
+                            child_id,
+                            parent,
+                            child,
+                            depth,
+                            name,
+                            deleted: None,
+                            deleted_usage: None,
+                        };
+                    } else {
+                        state.index.insert(key.clone(), state.edges.len());
+                        state.edges.push(RlmLedgerEdge {
+                            child_id,
+                            parent,
+                            child,
+                            depth,
+                            name,
+                            deleted: None,
+                            deleted_usage: None,
+                        });
                     }
                 }
                 LedgerRecord::Rename {
@@ -997,9 +1050,8 @@ impl RlmSpawnLedger {
         if self.path.exists() {
             return Ok(());
         }
-        let root_entries = match fs::read_dir(&self.canonical_sessions_dir) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(()),
+        let Ok(root_entries) = fs::read_dir(&self.canonical_sessions_dir) else {
+            return Ok(());
         };
         let mut queue: Vec<(PathBuf, u32)> = root_entries
             .flatten()
@@ -1131,7 +1183,7 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
 }
 
 fn is_file(path: &Path) -> bool {
-    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    fs::metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// One legacy `rlm-subagents.jsonl` registry entry (the pre-ledger topology
@@ -1215,6 +1267,13 @@ pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagent
 /// Atomically write one child's display entry. A non-delete write over a
 /// deletion tombstone is refused (the deleted child stays deleted), exactly
 /// like the TS display writer.
+///
+/// # Errors
+///
+/// Returns an error when the display directory cannot be created, the
+/// entry cannot be serialized, or the atomic temp write or rename onto
+/// the display file fails; a refused write over a tombstone answers
+/// `Ok(false)`.
 pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<bool> {
     if entry.status != "deleted"
         && read_rlm_subagent_display(Path::new(&entry.session_dir))
@@ -1249,12 +1308,30 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     Ok(true)
 }
 
+/// The bounded header read cap for the legacy registry probe: the header
+/// id the probe extracts rides the file's first line, so the read stays
+/// bounded to a line instead of the parent transcript's whole bytes (a
+/// multi-megabyte parent's registry probe must not read megabytes to
+/// extract one id). A first line longer than the cap reads as absent -
+/// the same judgment `read_first_line_bounded`'s callers make, and far
+/// past any real session header (the 512-byte list gate's class).
+const LEGACY_REGISTRY_HEADER_READ_MAX_BYTES: usize = 64 * 1024;
+
 /// The legacy registry path for one parent session file (TS
 /// `legacyRlmSubagentRegistryPath`): the parent's artifacts dir, keyed by
-/// the session header id.
+/// the session header id. The id rides the file's first line, so the
+/// probe reads that line bounded instead of the whole transcript: the
+/// passive roster walk probes every live child's parent once per walk,
+/// and the whole-file read made each catalog fetch linear in the
+/// family's total transcript bytes (a deep tree of large parents re-read
+/// every parent transcript per `list_saved_sessions`).
 fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
-    let content = fs::read_to_string(session_file).ok()?;
-    let header: Value = serde_json::from_str(content.lines().next()?).ok()?;
+    let line = crate::session_store::read_first_line_bounded(
+        session_file,
+        LEGACY_REGISTRY_HEADER_READ_MAX_BYTES,
+    )?;
+    let text = std::str::from_utf8(&line).ok()?;
+    let header: Value = serde_json::from_str(text.trim()).ok()?;
     let header_id = header.get("id")?.as_str()?;
     // TS `getSessionArtifactsRoot`: the artifacts tree is the sibling of
     // the session file's directory, keyed by the session header id.
@@ -1312,6 +1389,60 @@ mod tests {
         RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {})
     }
 
+    /// The legacy registry probe reads the parent's FIRST line bounded
+    /// (the header id), never the whole transcript: a parent far past the
+    /// cap still resolves, and an over-long first line reads as absent.
+    #[test]
+    fn legacy_registry_probe_reads_the_header_line_bounded() {
+        let dir = temp_dir("legacy-bounded");
+        let parent = dir.join("p.jsonl");
+        let mut content = json!({"type": "session", "id": "p1"}).to_string();
+        content.push('\n');
+        content.push_str(&"x".repeat(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES * 2));
+        fs::write(&parent, content).unwrap();
+        let registry = legacy_registry_path(&parent).expect("registry path");
+        assert!(
+            registry
+                .to_string_lossy()
+                .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
+            "the header id resolves without reading the padded tail"
+        );
+
+        let mut over_long = String::from("{\"id\":\"");
+        over_long.push_str(&"p".repeat(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES));
+        over_long.push_str("\"}");
+        fs::write(dir.join("long.jsonl"), over_long).unwrap();
+        assert_eq!(
+            legacy_registry_path(&dir.join("long.jsonl")),
+            None,
+            "a first line longer than the cap is not judged on truncated bytes"
+        );
+    }
+
+    /// The bounded probe resolves a readable header over a corrupt tail:
+    /// the whole-file read the probe replaced failed on any invalid UTF-8
+    /// in the file; the first-line read judges the header alone (a torn
+    /// write mid-file no longer masks a live parent - display-grade
+    /// metadata either way, disclosed in the bounded probe's commit).
+    #[test]
+    fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
+        let dir = temp_dir("legacy-corrupt-tail");
+        let parent = dir.join("p.jsonl");
+        let mut bytes = json!({"type": "session", "id": "p1"})
+            .to_string()
+            .into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0xff_u8; 4096]);
+        fs::write(&parent, bytes).unwrap();
+        let registry = legacy_registry_path(&parent).expect("registry path over a corrupt tail");
+        assert!(
+            registry
+                .to_string_lossy()
+                .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
+            "a torn-write tail no longer masks the readable header"
+        );
+    }
+
     #[test]
     fn ledger_path_hashes_the_canonical_sessions_dir() {
         let dir = temp_dir("path");
@@ -1347,7 +1478,7 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].name, "renamed");
         assert_eq!(edges[0].depth, 1);
-        assert!(ledger.live_edges().unwrap().len() == 1);
+        assert_eq!(ledger.live_edges().unwrap().len(), 1);
         ledger
             .append_delete(
                 "sub-1",
@@ -1958,7 +2089,7 @@ mod tests {
         // (its grandchild's fold) - inert: no row exists at a tombstoned
         // child's path to consume it. Live descendants never enter.
         assert!(
-            (bucket.get(&child_key).map(|d| d.cost).unwrap_or(0.0) - 0.10).abs() < 1e-9,
+            (bucket.get(&child_key).map_or(0.0, |d| d.cost) - 0.10).abs() < 1e-9,
             "the tombstoned intermediate keeps its inert TS key"
         );
         assert_eq!(bucket.len(), 2, "live descendants contribute no bucket");
@@ -2077,7 +2208,11 @@ mod tests {
                 "childId": "x2", "child": child.to_string_lossy(), "reason": "user",
             }),
         ];
-        let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let body = lines.iter().fold(String::new(), |mut body, line| {
+            use std::fmt::Write;
+            writeln!(body, "{line}").expect("write to String");
+            body
+        });
         let path = rlm_ledger_path(&dir, &sessions);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();

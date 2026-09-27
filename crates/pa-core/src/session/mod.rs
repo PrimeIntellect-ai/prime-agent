@@ -57,8 +57,7 @@ fn timeparse(timestamp: &str) -> Option<u64> {
     if rest.starts_with('.') {
         let fraction_end = rest[1..]
             .find(|c: char| !c.is_ascii_digit())
-            .map(|idx| idx + 1)
-            .unwrap_or(rest.len());
+            .map_or(rest.len(), |idx| idx + 1);
         let fraction = &rest[1..fraction_end];
         let millis_part: u64 = fraction
             .chars()
@@ -224,7 +223,6 @@ fn entry_base_mut(entry: &mut FileEntry) -> Option<&mut EntryBase> {
         | FileEntry::Label { base, .. }
         | FileEntry::SessionInfo { base, .. }
         | FileEntry::SessionState { base, .. }
-        | FileEntry::AgentStatus { base, .. }
         | FileEntry::GitState { base, .. }
         | FileEntry::CustomMessage { base, .. } => Some(base),
     }
@@ -235,7 +233,6 @@ fn migrate_v2_to_v3(entries: &mut [FileEntry]) {
     for entry in entries.iter_mut() {
         if let FileEntry::Header { header } = entry {
             header.version = Some(3);
-            continue;
         }
         // hookMessage -> custom: AgentMessage deserializes unknown roles into
         // Unknown variant, where the rewrite happens through raw JSON. The
@@ -365,18 +362,16 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         .and_then(|compaction_index| path.iter().position(|&index| index == compaction_index));
     // True when the compaction snapshot is the newest digest in context, so
     // every digest custom message is older and skipped entirely.
-    let snapshot_outranks_digest = compaction
-        .map(|compaction_index| {
-            let has_snapshot = matches!(
-                &entries[compaction_index],
-                FileEntry::Compaction { payload, .. } if payload.harness_digest.is_some()
-            );
-            has_snapshot
-                && newest_digest_path_idx.is_none_or(|digest_idx| {
-                    compaction_path_idx.is_some_and(|compaction_idx| digest_idx < compaction_idx)
-                })
-        })
-        .unwrap_or(false);
+    let snapshot_outranks_digest = compaction.is_some_and(|compaction_index| {
+        let has_snapshot = matches!(
+            &entries[compaction_index],
+            FileEntry::Compaction { payload, .. } if payload.harness_digest.is_some()
+        );
+        has_snapshot
+            && newest_digest_path_idx.is_none_or(|digest_idx| {
+                compaction_path_idx.is_some_and(|compaction_idx| digest_idx < compaction_idx)
+            })
+    });
     let keep_digest_entry_id = if snapshot_outranks_digest {
         None
     } else {

@@ -25,7 +25,7 @@ pub enum SinkOutcome {
 /// the future to the sink borrow, so implementations can borrow `&self`.
 ///
 /// `install_id` is the pseudonymous installation id used as the sink-side
-/// identity (PostHog `distinct_id`).
+/// identity (`PostHog` `distinct_id`).
 pub trait TelemetrySink: Send + Sync {
     /// Send one batch. Called serially by the telemetry worker, so at most one
     /// `send_batch` future per sink is in flight at a time.

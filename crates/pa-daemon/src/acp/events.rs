@@ -168,7 +168,6 @@ pub fn acp_updates_for_event(
             state.start_assistant_message();
             Vec::new()
         }
-        AcpEngineEvent::MessageStart { .. } => Vec::new(),
         AcpEngineEvent::AssistantDelta {
             thinking: true,
             delta,
@@ -187,12 +186,13 @@ pub fn acp_updates_for_event(
                 content: TextBlock::new(delta.clone()),
             }]
         }
-        AcpEngineEvent::AssistantDelta { .. } => Vec::new(),
         AcpEngineEvent::MessageEnd { role } if role == "assistant" => {
             state.active_assistant_message_id = None;
             Vec::new()
         }
-        AcpEngineEvent::MessageEnd { .. } => Vec::new(),
+        AcpEngineEvent::MessageStart { .. }
+        | AcpEngineEvent::AssistantDelta { .. }
+        | AcpEngineEvent::MessageEnd { .. } => Vec::new(),
         AcpEngineEvent::ToolExecutionStart {
             tool_call_id,
             tool_name,
@@ -458,10 +458,8 @@ fn ipython_rich_output(result: &Value) -> Option<Value> {
 fn base64_byte_length(data: &str) -> usize {
     let padding = if data.ends_with("==") {
         2
-    } else if data.ends_with('=') {
-        1
     } else {
-        0
+        usize::from(data.ends_with('='))
     };
     ((data.len() * 3) / 4).saturating_sub(padding)
 }

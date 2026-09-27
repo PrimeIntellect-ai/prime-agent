@@ -38,8 +38,7 @@ impl HeadlessPrimary {
                         pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                         _ => None,
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
                 Some(text)
             }
             HeadlessPrimary::SlashCommandResult { content, .. } => Some(content.clone()),
@@ -125,7 +124,6 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                         },
                     );
                     index -= 1;
-                    continue;
                 }
                 // A corrupt outcome is still part of the suffix; skip it
                 // without letting it hide earlier valid outcomes.
@@ -133,12 +131,9 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                 | REFINEMENT_NOTICE_CUSTOM_TYPE
                 | HARNESS_DIGEST_CUSTOM_TYPE => {
                     index -= 1;
-                    continue;
                 }
-                SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE => break,
                 _ => break,
             },
-            AgentMessage::Assistant(_) => break,
             _ => break,
         }
     }
@@ -197,7 +192,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "openai-completions".to_string(),
             provider: "test".to_string(),
@@ -205,12 +200,12 @@ mod tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -225,7 +220,7 @@ mod tests {
             display: true,
             details: Some(details),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -235,7 +230,7 @@ mod tests {
             AgentMessage::User(UserMessage {
                 content: UserContent::Text("go".to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
             text_assistant("first", StopReason::Stop),
             text_assistant("final answer", StopReason::Stop),
@@ -313,7 +308,7 @@ mod tests {
                 display: true,
                 details: Some(serde_json::json!({ "success": true })),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }),
         ];
         let result = select_headless_terminal_result(&messages);

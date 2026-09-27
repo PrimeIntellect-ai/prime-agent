@@ -36,6 +36,10 @@ fn shared() -> &'static Mutex<HashMap<Option<PathBuf>, Arc<ModelCatalog>>> {
 /// in-memory registry, no disk caches): one [`ModelCatalog`] per models
 /// dir, so every registry in the process sees the same snapshots and a
 /// refresh any of them triggers serves the rest.
+///
+/// # Panics
+///
+/// Panics if the shared catalog registry mutex is poisoned.
 pub fn catalog_for(models_json_path: Option<&Path>) -> Arc<ModelCatalog> {
     let key = models_json_path.map(models_dir);
     let mut shared = shared().lock().unwrap();
@@ -48,6 +52,10 @@ pub fn catalog_for(models_json_path: Option<&Path>) -> Arc<ModelCatalog> {
 
 /// Install `catalog` as the process-shared catalog for `models_json_path`
 /// (hermetic tests: a catalog whose fetch URLs point at a local server).
+///
+/// # Panics
+///
+/// Panics if the shared catalog registry mutex is poisoned.
 pub fn install_catalog(models_json_path: &Path, catalog: Arc<ModelCatalog>) {
     shared()
         .lock()

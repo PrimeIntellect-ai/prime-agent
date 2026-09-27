@@ -15,6 +15,10 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 
 /// Make a file owner-readable/writable only (`chmod 0o600`). Best-effort:
 /// callers decide whether a failure is fatal.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the permission change fails.
 #[cfg(unix)]
 pub fn restrict_file(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -28,6 +32,10 @@ pub fn restrict_file(_path: &Path) -> std::io::Result<()> {
 }
 
 /// Make a directory owner-accessible only (`chmod 0o700`).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the permission change fails.
 #[cfg(unix)]
 pub fn restrict_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -70,9 +78,7 @@ pub fn file_mode(_path: &Path) -> Option<u32> {
 #[cfg(unix)]
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
@@ -99,6 +105,11 @@ pub fn is_readable_writable(path: &Path) -> bool {
 
 /// True when the current user may read the file, mirroring Node
 /// `fs.access(path, R_OK)` error-code semantics used by the edit preview.
+///
+/// # Errors
+///
+/// Returns the metadata I/O error, or an EACCES error when the permission
+/// bits deny a read for the effective user.
 #[cfg(unix)]
 pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

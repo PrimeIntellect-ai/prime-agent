@@ -29,6 +29,12 @@ pub struct BranchSummaryResult {
     pub aborted: bool,
     pub error: Option<String>,
     pub usage: Option<pa_types::ai::Usage>,
+    /// The model that served the summary call (TS #2411's routed
+    /// auxiliary model, or the session model when no auxiliary is
+    /// configured): the caller persists it on the entry so the per-model
+    /// cost fold bills the spend on the model that billed it, not the
+    /// branch's `model_change` timeline.
+    pub model: Option<(String, String)>,
 }
 
 /// Prepared summarization inputs.
@@ -118,7 +124,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 display: payload.display,
                 details: payload.details.clone(),
                 timestamp: super::super::session::timestamp_to_millis(entry.timestamp()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
@@ -219,7 +225,7 @@ pub fn build_branch_summary_request(
         vec![AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(prompt_text),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]
     };
     (messages, preparation)
@@ -244,6 +250,7 @@ pub fn finalize_branch_summary(
         aborted: false,
         error: None,
         usage: None,
+        model: None,
     }
 }
 
@@ -470,6 +477,7 @@ pub async fn generate_branch_summary(
         .join("\n");
     let mut result = finalize_branch_summary(&response_text, &preparation);
     result.usage = (response.usage.total_tokens > 0).then_some(response.usage);
+    result.model = Some((model.provider.clone(), model.id.clone()));
     result
 }
 
@@ -490,7 +498,7 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: parent.map(str::to_string),
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -499,7 +507,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -582,7 +590,7 @@ mod tests {
                 id: Some("c0".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         let message = get_message_from_entry(&compaction).unwrap();
@@ -604,7 +612,7 @@ mod tests {
             let _guard = FAUX_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pa_ai::faux::register_faux_provider(Default::default())
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default())
         };
         let model = registration.get_model();
         let response = pa_ai::faux::faux_assistant_text_message(
@@ -677,7 +685,9 @@ mod tests {
                 let _guard = FAUX_LOCK
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pa_ai::faux::register_faux_provider(Default::default())
+                pa_ai::faux::register_faux_provider(
+                    pa_ai::faux::RegisterFauxProviderOptions::default(),
+                )
             };
             let model = registration.get_model();
             let tmp = tempfile::tempdir().unwrap();
@@ -693,7 +703,8 @@ mod tests {
                 cwd: tmp.path().to_path_buf(),
                 agent_dir: tmp.path().to_path_buf(),
             };
-            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+                std::sync::Arc::default();
             let recorder = seen_models.clone();
             registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
                 std::sync::Arc::new(

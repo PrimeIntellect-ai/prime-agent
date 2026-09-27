@@ -42,7 +42,6 @@ pub fn digest_query_terms(
     goal_objective: Option<&str>,
     recent_texts_newest_first: &[String],
 ) -> HarnessQueryTerms {
-    let mut terms: HarnessQueryTerms = std::collections::HashMap::new();
     fn add_text(terms: &mut HarnessQueryTerms, text: &str, weight: f64) {
         for raw in harness_query_terms(text) {
             if terms.len() >= 48 && !terms.contains_key(&raw) {
@@ -51,6 +50,7 @@ pub fn digest_query_terms(
             terms.entry(raw).or_insert(weight);
         }
     }
+    let mut terms: HarnessQueryTerms = std::collections::HashMap::new();
     add_text(&mut terms, goal_objective.unwrap_or_default(), 3.0);
     let mut recency_weight = 2.0;
     for text in recent_texts_newest_first.iter().take(4) {
@@ -152,6 +152,11 @@ pub fn harness_digest_message_text(digest: &str) -> String {
 /// the run's prompt messages (so it appears in `agent_end.messages` and
 /// persists through its `message_end`) and converts to a user turn at the
 /// loop's LLM boundary.
+///
+/// # Panics
+///
+/// Panics if serializing the digest row payload fails, which cannot happen
+/// for the plain message struct.
 pub fn harness_digest_prompt_row(
     digest: &str,
     timestamp: u64,
@@ -166,7 +171,7 @@ pub fn harness_digest_prompt_row(
             "stateFingerprint": state_fingerprint,
         })),
         timestamp,
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     };
     AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
         role: "custom".to_string(),
@@ -177,6 +182,10 @@ pub fn harness_digest_prompt_row(
 /// The digest as a session message payload for persistence
 /// (`append_custom_message` with `display: false` and the digest plus its
 /// state fingerprint in details).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the durable append fails.
 pub fn persist_digest(
     session: &mut crate::session::manager::SessionManager,
     digest: &str,
@@ -227,7 +236,7 @@ fn is_digest_row(message: &AgentMessage, latest_digest: Option<&str>) -> bool {
         AgentMessage::Standard(Message::User(user)) => latest_digest.is_some_and(|digest| {
             loop_user_text(&user.content) == harness_digest_message_text(digest)
         }),
-        _ => false,
+        AgentMessage::Standard(_) => false,
     }
 }
 
@@ -289,7 +298,6 @@ pub struct LatestContextDigest {
 }
 
 pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<LatestContextDigest> {
-    let mut latest: Option<LatestContextDigest> = None;
     fn consider(
         latest: &mut Option<LatestContextDigest>,
         timestamp: i64,
@@ -307,6 +315,7 @@ pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<Latest
             });
         }
     }
+    let mut latest: Option<LatestContextDigest> = None;
     for message in messages {
         match message {
             AgentMessage::Standard(Message::User(user)) => {
@@ -316,7 +325,7 @@ pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<Latest
                         .iter()
                         .find_map(|part| match part {
                             UserPart::Text(text) => Some(text.text.as_str()),
-                            _ => None,
+                            UserPart::Image(_) => None,
                         })
                         .unwrap_or(""),
                 };
@@ -353,7 +362,7 @@ pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<Latest
                     state_fingerprint,
                 );
             }
-            _ => continue,
+            AgentMessage::Standard(_) => {}
         }
     }
     latest
@@ -367,7 +376,6 @@ pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<Latest
 /// dropped those payloads; this typed view is where a fingerprint-less
 /// latest recovers its fingerprint from.
 fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<LatestContextDigest> {
-    let mut latest: Option<LatestContextDigest> = None;
     fn consider(
         latest: &mut Option<LatestContextDigest>,
         timestamp: u64,
@@ -385,6 +393,7 @@ fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<Lates
             });
         }
     }
+    let mut latest: Option<LatestContextDigest> = None;
     for message in messages {
         match message {
             SessionAgentMessage::Custom(custom) => {
@@ -417,7 +426,7 @@ fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<Lates
                     summary.harness_state_fingerprint.as_deref(),
                 );
             }
-            _ => continue,
+            _ => {}
         }
     }
     latest
@@ -455,7 +464,7 @@ pub fn digest_session_message(entry: &FileEntry) -> Option<SessionAgentMessage> 
             display: payload.display,
             details: payload.details.clone(),
             timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         },
     ))
 }
@@ -650,7 +659,7 @@ fn loop_user_text(content: &pa_agent::types::UserContent) -> String {
             .iter()
             .filter_map(|part| match part {
                 pa_agent::types::UserPart::Text(text) => Some(text.text.clone()),
-                _ => None,
+                pa_agent::types::UserPart::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join(" "),

@@ -56,9 +56,8 @@ impl AgentSessionEngine {
         // Bedrock" in a prime-inference session), so the arm follows the
         // target. A session without a resolvable model never crosses a
         // threshold.
-        let model = match self.session_model() {
-            Ok(model) => model,
-            Err(_) => return AutoCompactionRun::NotDue,
+        let Ok(model) = self.session_model() else {
+            return AutoCompactionRun::NotDue;
         };
         let due = {
             let guard = self.session.blocking_lock();
@@ -82,6 +81,10 @@ impl AgentSessionEngine {
         }) {
             return AutoCompactionRun::Cancelled;
         }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.threshold_start_emitted",
+            serde_json::Value::Null,
+        );
         // TS assigns `_autoCompactionAbortController` for the run's
         // duration: an `abort_compaction` command lands in the slot and
         // cancels the in-flight summarizer.
@@ -115,6 +118,27 @@ impl AgentSessionEngine {
             self.clear_auto_compaction_abort(&controller);
             outcome
         };
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.compact_returned",
+            match &outcome {
+                Ok(Ok(CompactOutcome::Ran(_))) => {
+                    serde_json::json!({ "outcome": "ran" })
+                }
+                Ok(Ok(CompactOutcome::Skipped(_))) => {
+                    serde_json::json!({ "outcome": "skipped" })
+                }
+                // The abort arm mirrors the emit match's order: the
+                // abort marker (from either layer) is checked before the
+                // generic failure, so a cancelled run traces "cancelled",
+                // never "failed".
+                Ok(Err(error)) | Err(error) if pa_agent::abort::is_abort_error(error) => {
+                    serde_json::json!({ "outcome": "cancelled" })
+                }
+                Ok(Err(_)) | Err(_) => {
+                    serde_json::json!({ "outcome": "failed" })
+                }
+            },
+        );
         match &outcome {
             Ok(Ok(CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the
@@ -127,6 +151,10 @@ impl AgentSessionEngine {
                     )) {
                         return AutoCompactionRun::Cancelled;
                     }
+                    pa_core::session_engine::compaction_trace::trace(
+                        "auto.notice_emitted",
+                        serde_json::Value::Null,
+                    );
                 }
                 // Adoption telemetry (TS `compaction_end` handling counts
                 // every completed compaction into the active run).
@@ -153,6 +181,10 @@ impl AgentSessionEngine {
                 if !emit(EngineEvent::Compaction { entry, event }) {
                     return AutoCompactionRun::Cancelled;
                 }
+                pa_core::session_engine::compaction_trace::trace(
+                    "auto.end_emitted",
+                    serde_json::Value::Null,
+                );
             }
             // A skip consumed the check (TS `CompactionSkippedError`): the
             // durable disclosure row goes out with its message pair, then

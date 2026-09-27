@@ -82,7 +82,7 @@ fn reference_wrap_line(line: &Line, width: usize) -> Vec<Line> {
             }
             let mut chunk: Line = Vec::new();
             let mut chunk_width = 0usize;
-            for span in token.iter() {
+            for span in token {
                 for c in span.content.chars() {
                     let w = char_width(c);
                     if chunk_width + w > width {

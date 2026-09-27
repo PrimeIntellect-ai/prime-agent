@@ -1,5 +1,5 @@
 //! The cron scheduler: wake-timer loop, claim-due dispatch, per-session
-//! dispatch lanes. Port of the AgentCronScheduler half of core/cron-jobs.ts.
+//! dispatch lanes. Port of the `AgentCronScheduler` half of core/cron-jobs.ts.
 //!
 //! Deviation from TS, documented: a failing job backs off. TS re-fires a job
 //! at its full cadence no matter how many consecutive fires fail (a dead
@@ -125,6 +125,11 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     }
 
     /// Claim all due jobs and dispatch them. Returns how many ran.
+    ///
+    /// # Errors
+    ///
+    /// The underlying pass never fails in the current implementation, so this
+    /// always returns `Ok` with the number of dispatches that ran.
     pub async fn run_due(&self) -> anyhow::Result<usize> {
         self.core.run_due_at(self.core.hooks.now()).await
     }
@@ -141,6 +146,14 @@ impl Drop for RunningGuard<'_> {
 }
 
 impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
+    /// Run one dispatch pass for jobs due at or before `now`, returning how
+    /// many dispatches ran. Returns `Ok(0)` without dispatching when the
+    /// scheduler is stopped or another pass is already running.
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`; every pass reports its
+    /// dispatch count in `Ok`.
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
         // The pass claim is atomic: exactly one pass runs at a time (a
         // concurrent caller returns before touching another pass's
@@ -345,8 +358,8 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                     next.saturating_sub(now).clamp(1, MAX_TIMEOUT_MS),
                 );
                 tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = &mut notified => continue,
+                    () = tokio::time::sleep(delay) => {}
+                    () = &mut notified => continue,
                 }
                 if core.stopped.load(Ordering::SeqCst) {
                     return;
@@ -447,9 +460,10 @@ mod tests {
         impl AgentCronSchedulerHooks for PanickingHooks {
             async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
                 self.runs.fetch_add(1, Ordering::SeqCst);
-                if self.panic_first.swap(false, Ordering::SeqCst) {
-                    panic!("the first dispatch unwinds");
-                }
+                assert!(
+                    !self.panic_first.swap(false, Ordering::SeqCst),
+                    "the first dispatch unwinds"
+                );
                 Ok(Some("ran"))
             }
             fn now(&self) -> u64 {

@@ -18,6 +18,7 @@ import http.server
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -154,7 +155,10 @@ class SyntheticRepo:
         (root / "skills").mkdir(parents=True)
         (root / "skills" / "skill.md").write_text("# skill\n")
         (root / "docs").mkdir()
-        (root / "docs" / "MODEL-SURFACE.md").write_text("# models\n")
+        # Every user-facing doc SHIPPED_DOC_ENTRIES requires (fail-closed
+        # packaging gate): the synthetic repo stages all four.
+        for doc in ("MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md", "FEATURE_PARITY.md"):
+            (root / "docs" / doc).write_text("# doc\n")
         (root / "LICENSE").write_text("license\n")
         (root / "README.md").write_text("readme\n")
         runtime = root / "runtime"
@@ -166,18 +170,27 @@ class SyntheticRepo:
         (kernel / "src" / "rlm").mkdir(parents=True)
         (kernel / "pyproject.toml").write_text("[project]\nname='rlm'\n")
         (kernel / "src" / "rlm" / "repl.py").write_text("# repl\n")
-        # The fake binary: prints the version the verifier expects.
         printed = version if sha is None else f"{version}-continuous.{sha}"
         (runtime / "src" / "repl.py").write_text("# repl\n")
+        source = root / "prime-agent.c"
+        source.write_text(f'#include <stdio.h>\nint main(void) {{ puts("{printed}"); return 0; }}\n')
+        self.raw_binary = root / "bin" / "cargo-prime-agent"
+        self.raw_binary.parent.mkdir()
+        subprocess.run(["gcc", "-g", "-Wl,--build-id", "-o",
+                        str(self.raw_binary), str(source)], check=True)
         self.binary = root / "bin" / "prime-agent"
-        self.binary.parent.mkdir()
-        self.binary.write_text(f"#!/bin/sh\necho {printed}\n")
-        self.binary.chmod(0o755)
+        self.decoder = root / "bin" / f"prime-agent-{version}-{HOST_ARCHIVE_PLATFORM}.debug.gz"
+        split = run_cli(SCRIPTS_DIR / "split_debug.py", [
+            "--binary", str(self.raw_binary), "--shipped", str(self.binary),
+            "--out", str(self.binary.parent), "--version", version, "--target", HOST_TARGET])
+        if split.returncode:
+            raise AssertionError(split.stderr)
 
     def assemble(self, out_dir, catalog_assets=None, sha=None, target=HOST_TARGET):
         args = [
             "--repo-root", str(self.root), "--version", self.version,
             "--target", target, "--binary", str(self.binary),
+            "--decoder", str(self.decoder),
             "--runtime-dir", str(self.root / "runtime"),
             "--out-dir", str(out_dir),
         ]
@@ -595,6 +608,94 @@ class PackerGates(unittest.TestCase):
             (out / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz").exists())
         self.assertFalse((out / "manifest.json").exists())
 
+    def test_assembler_fails_on_each_missing_user_doc(self):
+        """The user-facing docs are REQUIRED payload content: each curated
+        doc missing from the repo must fail the assembly (fail-closed)."""
+        for doc in ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md", "FEATURE_PARITY.md"):
+            with self.subTest(doc=doc):
+                repo = SyntheticRepo(self.tmp / f"repo-missing-{doc}")
+                (repo.root / "docs" / doc).unlink()
+                result = repo.assemble(
+                    self.tmp / f"dist-missing-{doc}", catalog_assets=self.assets)
+                self.assertNotEqual(result.returncode, 0, doc)
+                self.assertIn(f"user-facing doc '{doc}' missing", result.stderr, doc)
+
+    def test_local_packer_fails_on_each_missing_user_doc(self):
+        """package_release.py must fail closed on every missing curated doc
+        (REQUIRED_FILES gate), never silently ship a diminished docs entry."""
+        for doc in ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md", "FEATURE_PARITY.md"):
+            with self.subTest(doc=doc):
+                repo = SyntheticRepo(self.tmp / f"pkrepo-missing-{doc}")
+                (repo.root / "docs" / doc).unlink()
+                args = ["--root", str(repo.root), "--version", "9.9.9",
+                        "--binary", str(repo.binary), "--decoder", str(repo.decoder),
+                        "--skip-build",
+                        "--catalog-assets", str(self.assets),
+                        "--out-dir", str(self.tmp / f"pkout-{doc}")]
+                result = run_cli(PACKER, args)
+                self.assertNotEqual(result.returncode, 0, doc)
+                self.assertIn(f"missing binary asset: docs/{doc}", result.stderr, doc)
+
+    def test_shipped_doc_relative_links_resolve(self):
+        for doc in ("MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md", "FEATURE_PARITY.md"):
+            shutil.copy2(REPO / "docs" / doc, self.repo.root / "docs" / doc)
+        assembled = self.repo.assemble(self.tmp / "assembled-docs", catalog_assets=self.assets)
+        self.assertEqual(assembled.returncode, 0, assembled.stderr)
+        archive = self.tmp / "assembled-docs" / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz"
+        packaged = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
+                                    "--binary", str(self.repo.binary),
+                                    "--decoder", str(self.repo.decoder), "--skip-build",
+                                    "--catalog-assets", str(self.assets),
+                                    "--out-dir", str(self.tmp / "packaged-docs")])
+        self.assertEqual(packaged.returncode, 0, packaged.stderr)
+        for source in (archive, self.tmp / "packaged-docs" / "prime-agent-9.9.9-linux-x64.tar.gz"):
+            with self.subTest(source=source), tarfile.open(source) as tar:
+                members = set(tar.getnames())
+                for doc in ("MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md", "FEATURE_PARITY.md"):
+                    text = tar.extractfile(f"docs/{doc}").read().decode()
+                    for target in re.findall(r"(?<!!)\[[^]]*\]\(([^)]+)\)", text):
+                        filename = target.split("#", 1)[0]
+                        if filename and not filename.startswith(("http:", "https:", "mailto:")):
+                            self.assertIn((Path("docs") / filename).as_posix(), members,
+                                          f"{doc} links to missing installed file {target}")
+
+    def test_packers_never_ship_generated_skill_caches(self):
+        cache = self.repo.root / "skills" / "__pycache__"
+        cache.mkdir()
+        (cache / "skill.cpython-311.pyc").write_bytes(b"generated bytecode")
+        (self.repo.root / "skills" / "stale.pyc").write_bytes(b"generated bytecode")
+        assembled = self.repo.assemble(self.tmp / "assemble-caches", catalog_assets=self.assets)
+        self.assertEqual(assembled.returncode, 0, assembled.stderr)
+        archive = self.tmp / "assemble-caches" / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz"
+        with tarfile.open(archive) as tar:
+            self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in tar.getnames()))
+        poisoned = self.tmp / "poisoned"
+        poisoned.mkdir()
+        shutil.copy2(archive, poisoned / archive.name)
+        with tarfile.open(poisoned / archive.name) as original:
+            items = [(member, original.extractfile(member).read() if member.isfile() else None)
+                     for member in original.getmembers()]
+        with tarfile.open(poisoned / archive.name, "w:gz") as bad:
+            for member, payload in items:
+                bad.addfile(member, io.BytesIO(payload) if payload is not None else None)
+            extra = tarfile.TarInfo("skills/__pycache__/skill.cpython-311.pyc")
+            extra.size = 1
+            bad.addfile(extra, io.BytesIO(b"x"))
+        checked = run_cli(VERIFIER, ["--dist-dir", str(poisoned), "--version", "9.9.9",
+                                     "--target", HOST_TARGET])
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("development cache entry", checked.stderr)
+        args = ["--root", str(self.repo.root), "--version", "9.9.9",
+                "--binary", str(self.repo.binary),
+                "--decoder", str(self.repo.decoder), "--skip-build",
+                "--catalog-assets", str(self.assets),
+                "--out-dir", str(self.tmp / "package-caches")]
+        packaged = run_cli(PACKER, args)
+        self.assertEqual(packaged.returncode, 0, packaged.stderr)
+        staged = self.tmp / "package-caches" / "prime-agent-9.9.9-linux-x64" / "skills"
+        self.assertFalse(any("__pycache__" in str(path) or path.suffix == ".pyc"
+                             for path in staged.rglob("*")))
+
     def test_packer_fails_on_invalid_assets(self):
         cases = {
             "corrupt-json": ("{\n", "{\n"),
@@ -670,8 +771,8 @@ class PackerGates(unittest.TestCase):
         # package_release.py (the exe-adjacent kernel packaging) fails without
         # assets and ships them beside the binary when they are valid.
         args = ["--root", str(self.repo.root), "--version", "9.9.9",
-                "--binary", str(self.repo.binary), "--skip-build",
-                "--out-dir", str(self.tmp / "release-package")]
+                "--binary", str(self.repo.binary), "--decoder", str(self.repo.decoder),
+                "--skip-build", "--out-dir", str(self.tmp / "release-package")]
         without = run_cli(PACKER, args)
         self.assertNotEqual(without.returncode, 0)
         self.assertIn("missing bundled catalog assets", without.stderr)
@@ -680,6 +781,53 @@ class PackerGates(unittest.TestCase):
         staged = self.tmp / "release-package" / "prime-agent-9.9.9-linux-x64"
         self.assertTrue((staged / "models.bundled.json").is_file())
         self.assertTrue((staged / "mcp-services.bundled.json").is_file())
+
+    def test_kernel_packer_rejects_decoder_leak(self):
+        leaked = self.repo.root / "prime-agent-runtime" / "leak.debug.gz"
+        leaked.write_bytes(b"decoder-like payload")
+        out = self.tmp / "release-package-leak"
+        result = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
+                                  "--binary", str(self.repo.binary),
+                                  "--decoder", str(self.repo.decoder), "--out-dir", str(out),
+                                  "--catalog-assets", str(self.assets)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("decoder-like sidecar", result.stderr)
+        self.assertFalse(list(out.glob("*.tar.gz")))
+
+    def test_kernel_packer_requires_decoder_for_explicit_linux_binary(self):
+        result = run_cli(PACKER, ["--root", str(self.repo.root), "--version", "9.9.9",
+                                  "--binary", str(self.repo.binary),
+                                  "--out-dir", str(self.tmp / "release-package-raw"),
+                                  "--catalog-assets", str(self.assets)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --decoder", result.stderr)
+
+    def test_linux_assembler_requires_split_binary_and_decoder(self):
+        base = ["--repo-root", str(self.repo.root), "--version", "9.9.9",
+                "--target", HOST_TARGET, "--runtime-dir", str(self.repo.root / "runtime"),
+                "--catalog-assets", str(self.assets), "--out-dir", str(self.tmp / "invalid")]
+        wrong_dir = self.tmp / "wrong-decoder"
+        wrong_dir.mkdir()
+        wrong_source = wrong_dir / "wrong.c"
+        wrong_source.write_text('int main(void) { return 17; }\n')
+        wrong_raw = wrong_dir / "cargo-prime-agent"
+        subprocess.run(["gcc", "-g", "-Wl,--build-id", "-o", str(wrong_raw),
+                        str(wrong_source)], check=True)
+        split = run_cli(SCRIPTS_DIR / "split_debug.py", [
+            "--binary", str(wrong_raw), "--shipped", str(wrong_dir / "prime-agent"),
+            "--out", str(wrong_dir), "--version", "9.9.9", "--target", HOST_TARGET])
+        self.assertEqual(split.returncode, 0, split.stderr)
+        wrong_decoder = wrong_dir / self.repo.decoder.name
+        for flags, error in (([], "requires explicit --binary"),
+                             (["--binary", str(self.repo.binary)], "requires explicit --binary"),
+                             (["--binary", str(self.repo.raw_binary),
+                               "--decoder", str(self.repo.decoder)], "still has DWARF"),
+                             (["--binary", str(self.repo.binary),
+                               "--decoder", str(wrong_decoder)], "build ID does not match")):
+            result = run_cli(ASSEMBLER, [*base, *flags])
+            self.assertNotEqual(result.returncode, 0, flags)
+            self.assertIn(error, result.stderr)
+        self.assertFalse(list((self.tmp / "invalid").glob("*.tar.gz")))
 
 
 if __name__ == "__main__":

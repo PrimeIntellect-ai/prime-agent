@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success};
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
@@ -146,23 +147,19 @@ impl Supervisor {
                 &format!("Session is detaching: {active_session_id}"),
             );
         }
-        let resident = match self.registry.resolve(active_session_id).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                // The wake-aware resolution of the generic route: a
-                // restore pass may still be bringing the session up.
-                self.await_restore_target(active_session_id).await;
-                match self.registry.resolve(active_session_id).await {
-                    Ok(resident) => resident,
-                    Err(_) => {
-                        let message =
-                            self.restore_failure_for(active_session_id)
-                                .unwrap_or_else(|| {
-                                    format!("Unknown active session: {active_session_id}")
-                                });
-                        return self.pause_failure(command_id, type_name, &message);
-                    }
-                }
+        let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
+            resident
+        } else {
+            // The wake-aware resolution of the generic route: a
+            // restore pass may still be bringing the session up.
+            self.await_restore_target(active_session_id).await;
+            if let Ok(resident) = self.registry.resolve(active_session_id).await {
+                resident
+            } else {
+                let message = self
+                    .restore_failure_for(active_session_id)
+                    .unwrap_or_else(|| format!("Unknown active session: {active_session_id}"));
+                return self.pause_failure(command_id, type_name, &message);
             }
         };
         let resolved = resident.worker_id.clone();
@@ -199,11 +196,12 @@ impl Supervisor {
             "clientId": owner_connection,
         });
         let mut response = match self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "acquire_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
+                RouteAdmission::ClientRequest,
             )
             .await
         {
@@ -311,11 +309,12 @@ impl Supervisor {
             "clientId": entry.owner_connection_id,
         });
         let response = self
-            .route_command(
+            .route_command_typed(
                 &resident,
                 "release_session_input_pause",
                 payload,
                 ROUTE_TIMEOUT_MS,
+                RouteAdmission::ClientRequest,
             )
             .await;
         let mut response = match response {
@@ -383,15 +382,15 @@ impl Supervisor {
                     "clientId": entry.owner_connection_id,
                 });
                 let released = self
-                    .route_command(
+                    .route_command_typed(
                         &resident,
                         "release_session_input_pause",
                         payload,
                         ROUTE_TIMEOUT_MS,
+                        RouteAdmission::SupervisorInternal,
                     )
                     .await
-                    .map(|response| response.success)
-                    .unwrap_or(false);
+                    .is_ok_and(|response| response.success);
                 if released {
                     self.input_pauses.leases.lock().await.remove(&pause_id);
                     continue;

@@ -165,9 +165,10 @@ fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     {
         return single_line(id);
     }
-    session_path
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "this session".to_string())
+    session_path.map_or_else(
+        || "this session".to_string(),
+        |path| path.display().to_string(),
+    )
 }
 
 /// The session's name from its durable file, for the footer (best-effort:
@@ -233,34 +234,31 @@ fn take_over_lines(
     holder_exe: Option<&Path>,
 ) -> Vec<String> {
     let mut lines = vec!["• Take over on this daemon:".to_string()];
-    match hold.pid {
-        Some(pid) => {
-            // The kill line names what would be killed when the resolved
-            // image is known: a stale pid could belong to a reused pid by
-            // the time the user runs it, and the annotation lets a human
-            // sanity-check before the signal (the retry path needs no
-            // kill at all once the holder exits - the lease unlocks).
-            // The annotation rides behind a `#`, so pasting the WHOLE
-            // line still runs exactly `kill <pid>` - the shell stops at
-            // the comment instead of parsing the image name as arguments.
-            let kill = match holder_exe
-                .and_then(|exe| exe.file_name())
-                .map(|name| name.to_string_lossy().to_string())
-                // An image with control characters cannot ride in the
-                // comment at all (a newline would make the next line a
-                // new pasted command): those names stay anonymous.
-                .filter(|image| image.chars().all(|c| !c.is_control()))
-            {
-                Some(image) => format!("  kill {pid} # the holder is {image}"),
-                None => format!("  kill {pid}"),
-            };
-            lines.push(kill);
-            lines.push("  Then retry — the file unlocks when the holder exits.".to_string());
-        }
-        None => {
-            lines.push(format!("  {sweep_binary} shutdown --force"));
-            lines.push("  Then retry — it stops every daemon in the state root.".to_string());
-        }
+    if let Some(pid) = hold.pid {
+        // The kill line names what would be killed when the resolved
+        // image is known: a stale pid could belong to a reused pid by
+        // the time the user runs it, and the annotation lets a human
+        // sanity-check before the signal (the retry path needs no
+        // kill at all once the holder exits - the lease unlocks).
+        // The annotation rides behind a `#`, so pasting the WHOLE
+        // line still runs exactly `kill <pid>` - the shell stops at
+        // the comment instead of parsing the image name as arguments.
+        let kill = match holder_exe
+            .and_then(|exe| exe.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            // An image with control characters cannot ride in the
+            // comment at all (a newline would make the next line a
+            // new pasted command): those names stay anonymous.
+            .filter(|image| image.chars().all(|c| !c.is_control()))
+        {
+            Some(image) => format!("  kill {pid} # the holder is {image}"),
+            None => format!("  kill {pid}"),
+        };
+        lines.push(kill);
+        lines.push("  Then retry — the file unlocks when the holder exits.".to_string());
+    } else {
+        lines.push(format!("  {sweep_binary} shutdown --force"));
+        lines.push("  Then retry — it stops every daemon in the state root.".to_string());
     }
     lines
 }
@@ -306,23 +304,21 @@ the same daemon, so this build cannot open the file while that process holds it.
             ));
             lines.push(String::new());
             lines.push("• Continue where you left off:".to_string());
-            match id {
-                Some(id) => {
-                    lines.push(format!(
-                        "  prime-agent --resume {}",
-                        shell_quote(&single_line(id))
-                    ));
-                    lines.push(
-                        "  (switch to the TypeScript product — its daemon owns this session)"
-                            .to_string(),
-                    );
-                }
-                None => {
-                    lines.push("  prime-agent --resume".to_string());
-                    lines
-                        .push("  (switch to the TypeScript product and pick the session — its daemon owns this session)"
-                            .to_string());
-                }
+            if let Some(id) = id {
+                lines.push(format!(
+                    "  prime-agent --resume {}",
+                    shell_quote(&single_line(id))
+                ));
+                lines.push(
+                    "  (switch to the TypeScript product — its daemon owns this session)"
+                        .to_string(),
+                );
+            } else {
+                lines.push("  prime-agent --resume".to_string());
+                lines.push(
+                    "  (switch to the TypeScript product and pick the session — its daemon owns this session)"
+                        .to_string(),
+                );
             }
             lines.push(String::new());
             lines.extend(take_over_lines(hold, "prime-agent", holder_exe));
@@ -335,26 +331,23 @@ runtime lease."
             ));
             lines.push(String::new());
             lines.push("• Continue where you left off:".to_string());
-            match id {
-                Some(id) => {
-                    lines.push(format!(
-                        "  prime-agent-rust --daemon-socket <socket> --resume {}",
-                        shell_quote(&single_line(id))
-                    ));
-                    lines.push(
-                        "  (<socket> is that instance's daemon socket, from the shell where \
+            if let Some(id) = id {
+                lines.push(format!(
+                    "  prime-agent-rust --daemon-socket <socket> --resume {}",
+                    shell_quote(&single_line(id))
+                ));
+                lines.push(
+                    "  (<socket> is that instance's daemon socket, from the shell where \
 you started it — that daemon owns this session)"
-                            .to_string(),
-                    );
-                }
-                None => {
-                    lines.push("  prime-agent-rust --resume".to_string());
-                    lines.push(
-                        "  (switch to the window or shell where that instance is running — its \
+                        .to_string(),
+                );
+            } else {
+                lines.push("  prime-agent-rust --resume".to_string());
+                lines.push(
+                    "  (switch to the window or shell where that instance is running — its \
 daemon owns this session)"
-                            .to_string(),
-                    );
-                }
+                        .to_string(),
+                );
             }
             lines.push(String::new());
             lines.extend(take_over_lines(hold, "prime-agent-rust", holder_exe));

@@ -335,7 +335,7 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -357,8 +357,9 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }
@@ -418,9 +419,10 @@ fn run_plan_with_selection(
     let _ = handle.join();
     Ok(RunOutcome {
         frames: outcome.frames,
-        prompt_requests: Arc::try_unwrap(prompt_requests)
-            .map(|locked| locked.into_inner().unwrap())
-            .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        prompt_requests: Arc::try_unwrap(prompt_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
         return_to_agents_view: outcome.return_to_agents_view,
         agents_view_notice: outcome.agents_view_notice,
     })

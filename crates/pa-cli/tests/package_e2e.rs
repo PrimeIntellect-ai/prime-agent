@@ -12,6 +12,7 @@
 //! accepts https/ssh/git protocol URLs for git sources).
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -454,13 +455,14 @@ fn drive(binary: &Path, base: &Path, fixtures: &Fixtures) -> (String, Sandbox) {
                 let output = run(binary, args, &sandbox);
                 let cwd = sandbox.cwd.clone();
                 let base_path = cwd.parent().unwrap().to_path_buf();
-                transcript.push_str(&format!(
+                let _ = write!(
+                    transcript,
                     ">>> {} (exit {:?})\nSTDOUT:\n{}STDERR:\n{}",
                     args.join(" "),
                     output.exit_code,
                     normalize(&output.stdout, &base_path),
                     normalize(&output.stderr, &base_path)
-                ));
+                );
             }
             Step::Setup("bump-npm-version") => {
                 let version_file = fixtures

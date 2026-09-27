@@ -1,7 +1,7 @@
 //! http2 transport-failure classification for the bedrock h2 transports.
 //!
 //! The TS bedrock client's default transport is the AWS SDK's
-//! NodeHttp2Handler on bun's `node:http2`: HTTP/2 with h2c prior knowledge
+//! `NodeHttp2Handler` on bun's `node:http2`: HTTP/2 with h2c prior knowledge
 //! over cleartext (and h2-only ALPN over TLS). When the transport fails, the
 //! observable surface is bun's `node:http2` error text and codes — which the
 //! provider-error probe pinned byte-for-byte against the TS binary. This
@@ -41,7 +41,7 @@ pub(crate) fn nghttp2_code_name(reason: h2::Reason) -> String {
 pub(crate) enum H2ErrorShape {
     /// A GOAWAY frame received from the peer (connection-level failure).
     RemoteGoAway { code: u32 },
-    /// A RST_STREAM frame received from the peer (stream-level failure).
+    /// A `RST_STREAM` frame received from the peer (stream-level failure).
     RemoteReset { reason: h2::Reason },
     /// An h2 library-detected protocol violation (e.g. an HTTP/1.1 answer at
     /// a prior-knowledge peer surfaces as a locally-initiated GOAWAY with the
@@ -60,7 +60,7 @@ pub(crate) fn h2_error_shape(error: &h2::Error) -> H2ErrorShape {
     if error.is_go_away() {
         if error.is_remote() {
             return H2ErrorShape::RemoteGoAway {
-                code: error.reason().map(u32::from).unwrap_or(0),
+                code: error.reason().map_or(0, u32::from),
             };
         }
         if error.is_library() {
@@ -95,9 +95,8 @@ pub(crate) fn classify_h2_shape(shape: &H2ErrorShape) -> H2Failure {
         H2ErrorShape::RemoteReset { reason } => H2Failure::StreamReset {
             nghttp2_code: nghttp2_code_name(*reason),
         },
-        H2ErrorShape::LibraryViolation { .. } => H2Failure::Protocol,
+        H2ErrorShape::LibraryViolation { .. } | H2ErrorShape::Other => H2Failure::Protocol,
         H2ErrorShape::Io => H2Failure::Canceled,
-        H2ErrorShape::Other => H2Failure::Protocol,
     }
 }
 

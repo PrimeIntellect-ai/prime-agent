@@ -16,7 +16,7 @@ fn status_name(status: DaemonStatus) -> String {
     }
 }
 
-/// ANSI wrapper honoring chalk's enable rule (TTY + no NO_COLOR).
+/// ANSI wrapper honoring chalk's enable rule (TTY + no `NO_COLOR`).
 fn paint(code: &str, text: &str) -> String {
     if use_color() {
         format!(
