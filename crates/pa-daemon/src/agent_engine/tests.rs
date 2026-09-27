@@ -5932,12 +5932,14 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         // The shared open's extraction (adopt_built_session's block):
         // the window's snapshot goal when the window serves, else the
         // loaded store's active-branch scan.
-        let shared = match pa_core::session::window::WindowedSessionStore::open(&path) {
-            Ok(Some(window)) => window.goal_state().cloned(),
-            Ok(None) | Err(_) => crate::session_store::SessionFile::open(&path)
+        let shared = if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(&path)
+        {
+            window.goal_state().cloned()
+        } else {
+            crate::session_store::SessionFile::open(&path)
                 .ok()
                 .as_ref()
-                .and_then(crate::goal_state_persist::goal_state_in_session_file),
+                .and_then(crate::goal_state_persist::goal_state_in_session_file)
         };
         assert_eq!(
             shared,

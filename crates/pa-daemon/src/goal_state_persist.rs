@@ -15,12 +15,14 @@ use std::path::Path;
 
 use crate::session_store::SessionFile;
 
-/// The session's last persisted goal state: the latest valid
-/// `thread_goal_state` custom entry on the file's branch (TS
-/// `_loadPersistedGoalState`, which scans the branch newest-first).
-/// `None` when the file is missing, unreadable, or carries no valid goal
-/// entry — the caller keeps the fresh driver's empty state, exactly the
-/// TS fallthrough to `emptyGoalState()`.
+/// The standalone goal reader (the TS `_loadPersistedGoalState`
+/// reference): the window's snapshot goal, else the full reader's
+/// active-branch scan. The open path now shares ONE windowed open
+/// between the goal seed and the adoption
+/// (`agent_engine::adopt_built_session`), so in production this reader
+/// has no caller - it stays compiled as the differential oracle's
+/// reference (`agent_engine/tests.rs`) so it cannot bit-rot.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn persisted_goal_state(path: Option<&Path>) -> Option<GoalState> {
     let path = path?;
     if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(path) {
