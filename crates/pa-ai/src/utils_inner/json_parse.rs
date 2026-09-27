@@ -485,6 +485,71 @@ pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
     Value::Object(Map::new())
 }
 
+const EAGER_PARSE_LENGTH: usize = 8 * 1024;
+
+/// Streamed tool-call argument JSON with a best-effort parsed preview (port of
+/// the TS `StreamingJsonAccumulator`).
+///
+/// Re-parsing the whole buffer on every delta is quadratic in the argument
+/// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
+/// buffer grew by 1/16 since the last parse, keeping total parse work linear.
+/// Callers still parse `text` with [`parse_streaming_json`] when the block
+/// ends.
+pub struct StreamingJsonAccumulator {
+    text: String,
+    /// Buffer length in UTF-16 code units, the metric of the TS reference
+    /// (`String::length`); maintained incrementally so `append` stays O(delta).
+    len_utf16: usize,
+    parsed_length: usize,
+}
+
+impl StreamingJsonAccumulator {
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let len_utf16 = text.chars().map(char::len_utf16).sum();
+        Self {
+            text,
+            len_utf16,
+            parsed_length: 0,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Appends a delta and returns a fresh partial parse, or `None` while the
+    /// refresh is throttled (the caller keeps the previous preview).
+    pub fn append(&mut self, delta: &str) -> Option<Value> {
+        self.text.push_str(delta);
+        self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
+        let length = self.len_utf16;
+        // `length - parsed_length < parsed_length / 16` (the TS float
+        // comparison) in exact integer form.
+        if length > EAGER_PARSE_LENGTH && 16 * (length - self.parsed_length) < self.parsed_length {
+            return None;
+        }
+        Some(self.parse())
+    }
+
+    /// Parses text not covered by the last returned parse; `None` when the
+    /// preview is already current.
+    pub fn flush(&mut self) -> Option<Value> {
+        (self.parsed_length != self.len_utf16).then(|| self.parse())
+    }
+
+    fn parse(&mut self) -> Value {
+        self.parsed_length = self.len_utf16;
+        parse_streaming_json(Some(&self.text))
+    }
+}
+
+impl Default for StreamingJsonAccumulator {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +616,97 @@ mod tests {
         assert_eq!(parse_streaming_json(None), json!({}));
         assert_eq!(parse_streaming_json(Some("  ")), json!({}));
         assert_eq!(parse_streaming_json(Some("garbage {")), json!({}));
+    }
+
+    #[test]
+    fn accumulator_keeps_exact_live_parse_while_small() {
+        let mut acc = StreamingJsonAccumulator::default();
+        assert_eq!(acc.flush(), None);
+        // `\q` is an invalid escape and the raw newline is invalid JSON: the
+        // preview must still track the repaired partial parse exactly.
+        let text = concat!(
+            r#"{"command":"say \"hi\"","note":"bad \q escape","#,
+            r#""multi":"line"#,
+            "\n",
+            r#"break"}"#
+        );
+        for ch in text.chars() {
+            let mut one = [0u8; 4];
+            let preview = acc.append(ch.encode_utf8(&mut one));
+            assert_eq!(preview, Some(parse_streaming_json(Some(acc.text()))));
+        }
+    }
+
+    #[test]
+    fn accumulator_throttles_large_buffers_to_linear_parse_work_and_flushes_the_tail() {
+        let mut acc = StreamingJsonAccumulator::default();
+        let payload = format!(r#"{{"content":"{}"}}"#, "x".repeat(256 * 1024));
+        let mut last_parsed_length = 0usize;
+        let mut parses = 0usize;
+        for offset in (0..payload.len()).step_by(16) {
+            let delta = &payload[offset..(offset + 16).min(payload.len())];
+            if acc.append(delta).is_some() {
+                parses += 1;
+                last_parsed_length = acc.text().len();
+            } else {
+                // The ASCII payload makes byte length equal the TS
+                // `text.length` (UTF-16 code units).
+                assert!(acc.text().len() - last_parsed_length < last_parsed_length / 16 + 1);
+            }
+        }
+        assert!(parses < 700);
+        assert_eq!(acc.flush(), Some(parse_streaming_json(Some(acc.text()))));
+        assert_eq!(acc.flush(), None);
+    }
+
+    #[test]
+    #[ignore = "run with cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture"]
+    fn accumulator_benchmark_10k_deltas() {
+        // Synthetic tool-call arguments through a 10k-delta stream: the
+        // per-delta whole-buffer reparse (pre-PR behavior) vs the
+        // growth-throttled accumulator.
+        let payload = format!(
+            r#"{{"content":"{}","path":"/tmp/stream.json"}}"#,
+            "x".repeat(150 * 1024)
+        );
+        let delta_count = 10_000usize;
+        let delta_len = (payload.len() + delta_count - 1) / delta_count;
+
+        let mut parses = 0usize;
+        let mut parsed_bytes = 0usize;
+        let started = std::time::Instant::now();
+        let mut buffer = String::new();
+        for offset in (0..payload.len()).step_by(delta_len) {
+            buffer.push_str(&payload[offset..(offset + delta_len).min(payload.len())]);
+            let _ = parse_streaming_json(Some(&buffer));
+            parses += 1;
+            parsed_bytes += buffer.len();
+        }
+        let per_delta_reparse = started.elapsed();
+
+        let mut parses_after = 0usize;
+        let mut parsed_bytes_after = 0usize;
+        let started = std::time::Instant::now();
+        let mut acc = StreamingJsonAccumulator::default();
+        for offset in (0..payload.len()).step_by(delta_len) {
+            if acc
+                .append(&payload[offset..(offset + delta_len).min(payload.len())])
+                .is_some()
+            {
+                parses_after += 1;
+                parsed_bytes_after += acc.text().len();
+            }
+        }
+        let accumulator = started.elapsed();
+
+        eprintln!(
+            "accumulator_benchmark_10k_deltas payload_bytes={} deltas={} \
+             per_delta_reparse parses={parses} parsed_bytes={parsed_bytes} elapsed_ms={:.1} \
+             accumulator parses={parses_after} parsed_bytes={parsed_bytes_after} elapsed_ms={:.1}",
+            payload.len(),
+            delta_count,
+            per_delta_reparse.as_secs_f64() * 1000.0,
+            accumulator.as_secs_f64() * 1000.0,
+        );
     }
 }

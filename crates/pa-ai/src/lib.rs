@@ -61,7 +61,9 @@ pub mod utils {
 }
 mod utils_inner;
 
-pub use utils::json_parse::{parse_json_with_repair, parse_partial_json, parse_streaming_json};
+pub use utils::json_parse::{
+    parse_json_with_repair, parse_partial_json, parse_streaming_json, StreamingJsonAccumulator,
+};
 pub use utils::overflow::is_context_overflow;
 pub use utils::stream_failure::{
     classify_stream_failure, format_stream_failure_message, stream_failure_from_stop_reason,

@@ -118,7 +118,7 @@ pub struct ProxyStreamOptions {
 /// no partial-JSON field).
 struct ProxyReconstruction {
     partial: AssistantMessage,
-    partial_json: HashMap<usize, String>,
+    partial_json: HashMap<usize, StreamingJsonAccumulator>,
 }
 
 fn empty_usage() -> Usage {
@@ -172,10 +172,12 @@ pub fn stream_proxy(
         )
         .await;
 
-        // TS catch block: encode the failure as a terminal error event.
+        // TS catch block: encode the failure as a terminal error event. The
+        // catch settles partial tool calls first (TS PR #2783).
         match result {
             Ok(()) => {
                 if signal.is_aborted() {
+                    settle_partial_tool_calls(&mut reconstruction);
                     reconstruction.partial.stop_reason = StopReason::Aborted;
                     reconstruction.partial.error_message =
                         Some("Request aborted by user".to_string());
@@ -192,6 +194,7 @@ pub fn stream_proxy(
                 } else {
                     StopReason::Error
                 };
+                settle_partial_tool_calls(&mut reconstruction);
                 reconstruction.partial.stop_reason = reason;
                 reconstruction.partial.error_message = Some(error_message);
                 task_handle.push(AssistantMessageEvent::Error {
@@ -464,7 +467,9 @@ fn process_proxy_event(
                 arguments: serde_json::Value::Object(serde_json::Map::new()),
                 thought_signature: None,
             });
-            state.partial_json.insert(content_index, String::new());
+            state
+                .partial_json
+                .insert(content_index, StreamingJsonAccumulator::default());
             Ok(Some(AssistantMessageEvent::ToolCallStart {
                 content_index,
                 partial: partial.clone(),
@@ -475,9 +480,14 @@ fn process_proxy_event(
             delta,
         } => match partial.content.get_mut(content_index) {
             Some(AssistantContent::ToolCall(tool_call)) => {
-                let json = state.partial_json.entry(content_index).or_default();
-                json.push_str(&delta);
-                tool_call.arguments = parse_streaming_json(json);
+                let parsed = state
+                    .partial_json
+                    .entry(content_index)
+                    .or_default()
+                    .append(&delta);
+                if let Some(parsed) = parsed {
+                    tool_call.arguments = parsed;
+                }
                 Ok(Some(AssistantMessageEvent::ToolCallDelta {
                     content_index,
                     delta,
@@ -489,7 +499,15 @@ fn process_proxy_event(
         ProxyAssistantMessageEvent::ToolcallEnd { content_index } => {
             match partial.content.get_mut(content_index) {
                 Some(AssistantContent::ToolCall(tool_call)) => {
-                    state.partial_json.remove(&content_index);
+                    // TS PR #2783: the throttled preview can lag the final
+                    // text; `toolcall_end` finalizes the arguments.
+                    let flushed = state
+                        .partial_json
+                        .remove(&content_index)
+                        .and_then(|mut accumulator| accumulator.flush());
+                    if let Some(parsed) = flushed {
+                        tool_call.arguments = parsed;
+                    }
                     Ok(Some(AssistantMessageEvent::ToolCallEnd {
                         content_index,
                         tool_call: tool_call.clone(),
@@ -517,16 +535,39 @@ fn process_proxy_event(
             error_message,
             usage,
         } => {
-            partial.stop_reason = match reason {
+            let stop_reason = match reason {
                 ProxyErrorReason::Aborted => StopReason::Aborted,
                 ProxyErrorReason::Error => StopReason::Error,
             };
-            partial.error_message = error_message;
-            partial.usage = usage;
+            // TS PR #2783: the error result settles the partial tool calls
+            // (the throttled preview can lag the accumulated text).
+            settle_partial_tool_calls(state);
+            state.partial.stop_reason = stop_reason;
+            state.partial.error_message = error_message;
+            state.partial.usage = usage;
             Ok(Some(AssistantMessageEvent::Error {
-                reason: partial.stop_reason,
-                error: partial.clone(),
+                reason: state.partial.stop_reason,
+                error: state.partial.clone(),
             }))
+        }
+    }
+}
+
+/// Port of the TS `settlePartialToolCalls`: finalize tool-call blocks whose
+/// parsed preview may lag the accumulated text under the growth throttle.
+/// Error paths call this before the error event carries the message.
+fn settle_partial_tool_calls(state: &mut ProxyReconstruction) {
+    let keys: Vec<usize> = state.partial_json.keys().copied().collect();
+    for key in keys {
+        let Some(parsed) = state
+            .partial_json
+            .get_mut(&key)
+            .and_then(|accumulator| accumulator.flush())
+        else {
+            continue;
+        };
+        if let Some(AssistantContent::ToolCall(tool_call)) = state.partial.content.get_mut(key) {
+            tool_call.arguments = parsed;
         }
     }
 }
@@ -815,4 +856,243 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+const EAGER_PARSE_LENGTH: usize = 8 * 1024;
+
+/// Streamed tool-call argument JSON with a best-effort parsed preview (port
+/// of the TS `StreamingJsonAccumulator`; `pa-agent` keeps its own copy of the
+/// json-parse utilities because it does not depend on `pa-ai`).
+///
+/// Re-parsing the whole buffer on every delta is quadratic in the argument
+/// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
+/// buffer grew by 1/16 since the last parse, keeping total parse work linear.
+/// Callers still parse `text` with [`parse_streaming_json`] when the call ends.
+pub struct StreamingJsonAccumulator {
+    text: String,
+    /// Buffer length in UTF-16 code units, the metric of the TS reference
+    /// (`String::length`); maintained incrementally so `append` stays O(delta).
+    len_utf16: usize,
+    parsed_length: usize,
+}
+
+impl StreamingJsonAccumulator {
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let len_utf16 = text.chars().map(char::len_utf16).sum();
+        Self {
+            text,
+            len_utf16,
+            parsed_length: 0,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Appends a delta and returns a fresh partial parse, or `None` while the
+    /// refresh is throttled (the caller keeps the previous preview).
+    pub fn append(&mut self, delta: &str) -> Option<serde_json::Value> {
+        self.text.push_str(delta);
+        self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
+        let length = self.len_utf16;
+        // `length - parsed_length < parsed_length / 16` (the TS float
+        // comparison) in exact integer form.
+        if length > EAGER_PARSE_LENGTH && 16 * (length - self.parsed_length) < self.parsed_length {
+            return None;
+        }
+        Some(self.parse())
+    }
+
+    /// Parses text not covered by the last returned parse; `None` when the
+    /// preview is already current.
+    pub fn flush(&mut self) -> Option<serde_json::Value> {
+        (self.parsed_length != self.len_utf16).then(|| self.parse())
+    }
+
+    fn parse(&mut self) -> serde_json::Value {
+        self.parsed_length = self.len_utf16;
+        parse_streaming_json(&self.text)
+    }
+}
+
+impl Default for StreamingJsonAccumulator {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abort::AbortSignal;
+    use crate::stream::{LlmContext, ModelStream, StreamRequestOptions};
+    use crate::types::ThinkingLevel;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve the SSE body for the proxy's POST. `truncate` claims a larger
+    /// Content-Length than the bytes actually sent, so the client's body
+    /// stream errors mid-response (the TS stub's mid-stream failure).
+    async fn serve_proxy_sse(body: String, truncate: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Read the full request: headers, then Content-Length body bytes.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let headers_end = loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(position) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..headers_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .flatten()
+                .unwrap_or(0);
+            while request.len() < headers_end + content_length {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let claimed = if truncate {
+                body.len() + 8192
+            } else {
+                body.len()
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {claimed}\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn proxy_options(proxy_url: String) -> ProxyStreamOptions {
+        ProxyStreamOptions {
+            auth_token: "test-token".to_string(),
+            proxy_url,
+            signal: AbortSignal::never(),
+        }
+    }
+
+    fn request_options() -> StreamRequestOptions {
+        StreamRequestOptions {
+            temperature: None,
+            max_tokens: None,
+            reasoning: ThinkingLevel::Off,
+            session_id: None,
+            api_key: None,
+            signal: AbortSignal::never(),
+            on_payload: None,
+            on_response: None,
+        }
+    }
+
+    /// Port of the TS proxy.test.ts "finalizes throttled large tool-call
+    /// arguments" test: 20 KiB arguments streamed in 16-byte deltas stay past
+    /// the eager-parse threshold, so the per-delta preview lags and only the
+    /// `toolcall_end` flush (ends cleanly) or the error settle (mid-stream
+    /// failure) carries the full parse.
+    async fn finalize_throttled_tool_call_arguments(ends_cleanly: bool) {
+        let arguments = serde_json::json!({"content": "x".repeat(20 * 1024)}).to_string();
+        let mut events = vec![
+            r#"{"type":"start"}"#.to_string(),
+            r#"{"type":"toolcall_start","contentIndex":0,"id":"call","toolName":"write"}"#
+                .to_string(),
+        ];
+        for delta in arguments.as_bytes().chunks(16) {
+            let delta = String::from_utf8_lossy(delta);
+            events.push(
+                serde_json::json!({"type": "toolcall_delta", "contentIndex": 0, "delta": delta})
+                    .to_string(),
+            );
+        }
+        if ends_cleanly {
+            events.push(r#"{"type":"toolcall_end","contentIndex":0}"#.to_string());
+            events.push(r#"{"type":"done","reason":"toolUse","usage":{}}"#.to_string());
+        }
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+
+        let base_url = serve_proxy_sse(body, !ends_cleanly).await;
+        let (_handle, mut stream) = stream_proxy(
+            test_model(base_url),
+            LlmContext {
+                system_prompt: None,
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            request_options(),
+            proxy_options(base_url),
+        );
+
+        let final_message = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let Some(event) = stream.next_event().await else {
+                    break None;
+                };
+                if let Some(message) = event.terminal_message() {
+                    break Some(message.clone());
+                }
+            }
+        })
+        .await
+        .expect("terminal event within the timeout");
+        let message = final_message.expect("terminal done/error event");
+        let expected_stop_reason = if ends_cleanly {
+            StopReason::ToolUse
+        } else {
+            StopReason::Error
+        };
+        assert_eq!(message.stop_reason, expected_stop_reason);
+        let Some(AssistantContent::ToolCall(tool_call)) = message.content.first() else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.arguments,
+            serde_json::json!({"content": "x".repeat(20 * 1024)})
+        );
+    }
+
+    fn test_model(base_url: String) -> Model {
+        Model {
+            id: "proxy-model".into(),
+            name: "Proxy Model".into(),
+            api: "proxy".into(),
+            provider: "proxy".into(),
+            base_url,
+            reasoning: false,
+            cost: crate::types::UsageCost::default(),
+            context_window: 128_000,
+            max_tokens: 8_192,
+        }
+    }
+
+    #[tokio::test]
+    async fn finalizes_throttled_large_tool_call_arguments_when_the_call_ends_cleanly() {
+        finalize_throttled_tool_call_arguments(true).await;
+    }
+
+    #[tokio::test]
+    async fn finalizes_throttled_large_tool_call_arguments_when_the_stream_fails_mid_call() {
+        finalize_throttled_tool_call_arguments(false).await;
+    }
 }

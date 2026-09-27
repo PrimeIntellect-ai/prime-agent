@@ -25,7 +25,9 @@ use crate::types::{
 };
 use crate::utils_inner::diagnostics::now_ms;
 use crate::utils_inner::http::{send, HttpResponse, RequestOptions};
-use crate::utils_inner::json_parse::{parse_json_with_repair, parse_streaming_json};
+use crate::utils_inner::json_parse::{
+    parse_json_with_repair, parse_streaming_json, StreamingJsonAccumulator,
+};
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 use crate::utils_inner::sse::SseDecoder;
 use crate::utils_inner::stream_failure::{
@@ -318,12 +320,26 @@ async fn run_stream(
     });
 
     let mut state = MistralStreamState::new();
-    let mut decoder = SseDecoder::new();
-    loop {
-        let Some(chunk) = response.next_text().await? else {
-            break;
-        };
-        for sse in decoder.push_text(&chunk) {
+    // The TS try/catch encloses this whole streaming section, including the
+    // abort and stop-reason checks; the catch settles partial tool calls
+    // before the error event carries the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = SseDecoder::new();
+        loop {
+            let Some(chunk) = response.next_text().await? else {
+                break;
+            };
+            for sse in decoder.push_text(&chunk) {
+                if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
+                    continue;
+                }
+                let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
+                    ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
+                })?;
+                state.handle_chunk(&parsed, model, output, writer);
+            }
+        }
+        for sse in decoder.finish() {
             if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
                 continue;
             }
@@ -332,30 +348,29 @@ async fn run_stream(
             })?;
             state.handle_chunk(&parsed, model, output, writer);
         }
-    }
-    for sse in decoder.finish() {
-        if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
-            continue;
-        }
-        let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
-            ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
-        })?;
-        state.handle_chunk(&parsed, model, output, writer);
-    }
-    state.finish(output, writer);
+        state.finish(output, writer);
 
-    if options
-        .base
-        .signal
-        .as_ref()
-        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-    {
-        return Err(ProviderError::Aborted);
+        if options
+            .base
+            .signal
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ProviderError::Aborted);
+        }
+        if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            return Err(ProviderError::StreamFailure(
+                stream_failure_from_stop_reason(output.stop_reason_raw.as_deref(), None),
+            ));
+        }
+
+        Ok(())
     }
-    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(ProviderError::StreamFailure(
-            stream_failure_from_stop_reason(output.stop_reason_raw.as_deref(), None),
-        ));
+    .await;
+
+    if let Err(error) = stream_result {
+        state.settle_partial_tool_calls(output);
+        return Err(error);
     }
 
     Ok(())
@@ -365,7 +380,7 @@ async fn run_stream(
 struct MistralStreamState {
     current_block: Option<CurrentBlock>,
     tool_blocks_by_key: HashMap<String, usize>,
-    tool_partial_args: HashMap<usize, String>,
+    tool_partial_args: HashMap<usize, StreamingJsonAccumulator>,
 }
 
 enum CurrentBlock {
@@ -379,6 +394,20 @@ impl MistralStreamState {
             current_block: None,
             tool_blocks_by_key: HashMap::new(),
             tool_partial_args: HashMap::new(),
+        }
+    }
+
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
+    /// preview may lag the accumulated text under the growth throttle.
+    fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
+        for (block_index, accumulator) in self.tool_partial_args.iter_mut() {
+            let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*block_index)
+            else {
+                continue;
+            };
+            if let Some(parsed) = accumulator.flush() {
+                block.arguments = json_object(parsed);
+            }
         }
     }
 
@@ -649,16 +678,15 @@ impl MistralStreamState {
                 Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
                 None => "{}".to_string(),
             };
-            let partial = self
+            let parsed = self
                 .tool_partial_args
                 .entry(block_index)
                 .or_default()
-                .clone();
-            let partial = format!("{partial}{args_delta}");
-            self.tool_partial_args.insert(block_index, partial.clone());
-            let parsed = parse_streaming_json(Some(&partial));
-            if let AssistantContent::ToolCall(block) = &mut output.content[block_index] {
-                block.arguments = json_object(parsed);
+                .append(&args_delta);
+            if let Some(parsed) = parsed {
+                if let AssistantContent::ToolCall(block) = &mut output.content[block_index] {
+                    block.arguments = json_object(parsed);
+                }
             }
             writer.push(AssistantMessageEvent::ToolcallDelta {
                 content_index: block_index as u64,
@@ -678,12 +706,10 @@ impl MistralStreamState {
             let Some(AssistantContent::ToolCall(_)) = output.content.get(index) else {
                 continue;
             };
-            let partial_args = self
-                .tool_partial_args
-                .get(&index)
-                .cloned()
-                .unwrap_or_default();
-            let parsed = parse_streaming_json(Some(partial_args.as_str()));
+            let parsed = match self.tool_partial_args.get(&index) {
+                Some(accumulator) => parse_streaming_json(Some(accumulator.text())),
+                None => parse_streaming_json(None),
+            };
             if let AssistantContent::ToolCall(block) = &mut output.content[index] {
                 block.arguments = json_object(parsed);
             }

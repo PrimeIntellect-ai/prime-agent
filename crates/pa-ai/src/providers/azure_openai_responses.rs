@@ -378,18 +378,34 @@ async fn run_stream(
         partial: output.clone(),
     });
 
+    let mut stream_result: Result<(), ProviderError> = Ok(());
     {
         let hooks = ResponsesStreamHooks::default();
         let mut processor =
             crate::providers::openai_responses_shared::ResponsesStreamProcessor::new(
                 model, output, writer, hooks,
             );
-        let mut decoder = SseDecoder::new();
-        loop {
-            let Some(chunk) = response.next_text().await? else {
-                break;
-            };
-            for sse in decoder.push_text(&chunk) {
+        // The TS try/catch encloses the streaming section and the abort and
+        // stop-reason checks; the catch settles partial tool calls before the
+        // error event carries the message (TS PR #2783).
+        stream_result = async {
+            let mut decoder = SseDecoder::new();
+            loop {
+                let Some(chunk) = response.next_text().await? else {
+                    break;
+                };
+                for sse in decoder.push_text(&chunk) {
+                    if sse.data.trim().is_empty() {
+                        continue;
+                    }
+                    let event = match parse_json_with_repair(&sse.data) {
+                        Ok(event) => event,
+                        Err(_) => parse_streaming_json(Some(&sse.data)),
+                    };
+                    processor.handle_event(&event)?;
+                }
+            }
+            for sse in decoder.finish() {
                 if sse.data.trim().is_empty() {
                     continue;
                 }
@@ -399,36 +415,31 @@ async fn run_stream(
                 };
                 processor.handle_event(&event)?;
             }
-        }
-        for sse in decoder.finish() {
-            if sse.data.trim().is_empty() {
-                continue;
+            processor.finish()?;
+            if options
+                .base
+                .signal
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                return Err(ProviderError::Aborted);
             }
-            let event = match parse_json_with_repair(&sse.data) {
-                Ok(event) => event,
-                Err(_) => parse_streaming_json(Some(&sse.data)),
-            };
-            processor.handle_event(&event)?;
+            if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+                return Err(ProviderError::StreamFailure(
+                    stream_failure_from_stop_reason(
+                        output.stop_reason_raw.as_deref(),
+                        request_id.as_deref(),
+                    ),
+                ));
+            }
+            Ok(())
         }
-        processor.finish()?;
+        .await;
+        if stream_result.is_err() {
+            processor.settle_partial_tool_calls();
+        }
     }
-
-    if options
-        .base
-        .signal
-        .as_ref()
-        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-    {
-        return Err(ProviderError::Aborted);
-    }
-    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(ProviderError::StreamFailure(
-            stream_failure_from_stop_reason(
-                output.stop_reason_raw.as_deref(),
-                request_id.as_deref(),
-            ),
-        ));
-    }
+    stream_result?;
 
     Ok(())
 }

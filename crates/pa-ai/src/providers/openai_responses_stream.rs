@@ -26,7 +26,7 @@ use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, TextSignaturePhase,
     ThinkingContent, ToolCall, Usage, UsageCost,
 };
-use crate::utils_inner::json_parse::parse_streaming_json;
+use crate::utils_inner::json_parse::{parse_streaming_json, StreamingJsonAccumulator};
 use crate::utils_inner::stream_failure::{
     classify_stream_failure, ProviderError, StreamFailureError, StreamFailureInfo,
     StreamFailureKind,
@@ -37,7 +37,7 @@ struct Slot {
     /// The provider's item object (reasoning/message), kept for replay.
     item: Value,
     /// Scratch for tool-call argument accumulation.
-    partial_json: String,
+    partial_json: StreamingJsonAccumulator,
     /// Assistant content index for this slot.
     content_index: usize,
 }
@@ -136,7 +136,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: String::new(),
+                                    partial_json: StreamingJsonAccumulator::default(),
                                     content_index,
                                 },
                             );
@@ -159,7 +159,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: String::new(),
+                                    partial_json: StreamingJsonAccumulator::default(),
                                     content_index,
                                 },
                             );
@@ -201,7 +201,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 index,
                                 Slot {
                                     item,
-                                    partial_json: initial_arguments,
+                                    partial_json: StreamingJsonAccumulator::new(initial_arguments),
                                     content_index,
                                 },
                             );
@@ -463,15 +463,17 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     .map(|slot| slot.content_index);
                 if let Some(content_index) = content_index {
                     if self.block_kind(content_index) == Some("toolCall") {
-                        let mut parsed = Value::Null;
+                        let mut parsed: Option<Value> = None;
                         if let Some(slot) = self.current_slot(output_index) {
-                            slot.partial_json.push_str(delta);
-                            parsed = parse_streaming_json(Some(&slot.partial_json));
+                            parsed = slot.partial_json.append(delta);
                         }
-                        if let Some(AssistantContent::ToolCall(tool_call)) =
-                            self.output.content.get_mut(content_index)
-                        {
-                            tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
+                        if let Some(parsed) = parsed {
+                            if let Some(AssistantContent::ToolCall(tool_call)) =
+                                self.output.content.get_mut(content_index)
+                            {
+                                tool_call.arguments =
+                                    parsed.as_object().cloned().unwrap_or_default();
+                            }
                         }
                         self.writer.push(AssistantMessageEvent::ToolcallDelta {
                             content_index: content_index as u64,
@@ -493,9 +495,10 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     if self.block_kind(content_index) == Some("toolCall") {
                         let (previous_partial, parsed) = match self.current_slot(output_index) {
                             Some(slot) => {
-                                let previous = slot.partial_json.clone();
-                                slot.partial_json = arguments.to_string();
-                                (previous, parse_streaming_json(Some(&slot.partial_json)))
+                                let previous = slot.partial_json.text().to_string();
+                                slot.partial_json =
+                                    StreamingJsonAccumulator::new(arguments.to_string());
+                                (previous, parse_streaming_json(Some(arguments)))
                             }
                             None => (String::new(), parse_streaming_json(Some(arguments))),
                         };
@@ -647,7 +650,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             if self.block_kind(content_index) == Some("toolCall") {
                                 let slot_json =
                                     match self.slots.get(&output_index.unwrap_or_default()) {
-                                        Some(slot) => slot.partial_json.clone(),
+                                        Some(slot) => slot.partial_json.text().to_string(),
                                         None => String::new(),
                                     };
                                 let arguments_text = item
@@ -911,6 +914,23 @@ impl<'a> ResponsesStreamProcessor<'a> {
         }
 
         Ok(())
+    }
+
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
+    /// preview may lag the accumulated text under the growth throttle. The
+    /// outer providers call this on their error paths before the error event
+    /// carries the message.
+    pub fn settle_partial_tool_calls(&mut self) {
+        for slot in self.slots.values_mut() {
+            let Some(parsed) = slot.partial_json.flush() else {
+                continue;
+            };
+            if let Some(AssistantContent::ToolCall(tool_call)) =
+                self.output.content.get_mut(slot.content_index)
+            {
+                tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
+            }
+        }
     }
 
     /// Check invariants after the stream ended (port of the trailing checks).
