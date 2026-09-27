@@ -649,11 +649,18 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
 
 /// TS `shutdown` prints the dim resume hint (`formatResumeHint`) to stdout
 /// after the TUI is restored; agents-view returns suppress it. Dim is the
-/// TS `chalk.dim` styling (`ESC[2m` ... `ESC[22m`).
+/// TS `chalk.dim` styling (`ESC[2m` ... `ESC[22m`). The print is the last
+/// exit-path write before the fixed pre-exit delay below, and on a slow
+/// terminal it blocks behind the flush still draining the pty: its
+/// completion is exit-path progress (the exit guard's watchdog holds its
+/// force-quit while progress lands — a draining terminal is not a stalled
+/// shutdown), and the stamp it leaves carries the fixed delay inside the
+/// guard's grace window.
 fn print_resume_hint(hint: &Option<String>) {
     if let Some(hint) = hint {
         println!("\x1b[2m{hint}\x1b[22m");
     }
+    pa_tui::exit_guard::note_exit_progress();
 }
 
 /// The agents-view loop: open the view, run the session it opens, and return

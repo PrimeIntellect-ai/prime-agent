@@ -1,16 +1,26 @@
-//! Real-pty e2e for the kitty key-release contract around the
-//! chat->agents handoff (the `enhanced_keys` drain): with the kitty
-//! keyboard protocol armed (the harness answers the probe query like a
-//! kitty terminal would), the LEFT press that triggers the handoff has
-//! its companion release event in flight during the teardown, and later
-//! releases arrive on the adopting surface. The contract under test is
-//! that NO release ever becomes user-visible input on either side of
-//! the handoff: the teardown consumes what is already buffered, the
-//! adopting reader drops the rest at dispatch (TS tui.ts), and the
-//! exit restore leaves the parent shell with the kitty flags popped
-//! (no `>7u` push after the final `<u` pop, no echoed release bytes).
-//! The harness answers the probe over the raw pty and audits the child's
-//! whole byte stream, like the cursor-visibility e2e.
+//! Real-pty e2e for the slow-drain exit-guard contract: the exit flush
+//! streams the whole transcript into native scrollback, and on a terminal
+//! that consumes it slowly (a laggy ssh, a parsing tap) the drain outlasts
+//! the 1500ms force-quit deadline that arms at the second Ctrl+C. The
+//! contract under test has two sides:
+//!
+//! 1. A DRAINING terminal is not a stalled shutdown: the flush writer
+//!    reports progress per completed chunk (view.rs `FlushSink`), the
+//!    release tail and the resume hint report theirs, and the watchdog
+//!    holds its fire while progress lands — the flush completes
+//!    byte-identically (the frozen scrollback contract), the restore
+//!    tail lands after the last flushed row, and `shutdown stalled`
+//!    never prints (TS semantics: TS has no watchdog at all and simply
+//!    waits for its writes).
+//! 2. A genuinely stalled drain still fires: a terminal that stops
+//!    consuming mid-flush produces no progress for the whole grace
+//!    window, and the watchdog force-quits with the same message and
+//!    exit code as ever.
+//!
+//! The harness drives the REAL chat surface over a pty (the child is
+//! this binary re-executed against a mock supervisor socket, the
+//! kitty-release e2e's pattern) and paces its own reads of the pty
+//! master — the terminal's drain rate is the test's knob.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -24,52 +34,51 @@ use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
 use nix::pty::{openpty, Winsize};
 use serde_json::{json, Value};
 
-use pa_tui::agents_view::{AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
-/// The kitty flags push this app writes when the probe answers (flags
-/// `1|2|4` — the TS `ProcessTerminal` set): proof the protocol is armed.
-const KITTY_FLAGS_PUSH: &[u8] = b"\x1b[>7u";
-/// The kitty flags pop every teardown writes.
-const KITTY_FLAGS_POP: &[u8] = b"\x1b[<u";
-/// The probe's capability query (`supports_keyboard_enhancement` sends
-/// the flags query followed by the primary-device-attributes query).
+/// The kitty probe query and answer (the kitty-release e2e's pair): the
+/// child's startup asks for keyboard enhancements; answering like a
+/// kitty terminal keeps the probe's bounded wait from adding its full
+/// budget to the test.
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
-/// The harness's answer: flags `1|2|4` supported, then the primary
-/// device attributes (what a kitty terminal replies with).
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
-/// The kitty CSI-u release of the LEFT arrow (functional key code
-/// 57417, no modifiers, event type 3): the companion release of the
-/// handoff-triggering press, injected in flight around the teardown.
-const LEFT_RELEASE: &[u8] = b"\x1b[57417;1:3u";
-/// Releases of the Up/Down arrows and `a` (the search editor's plain
-/// key): late arrivals on the adopting surface.
-const UP_RELEASE: &[u8] = b"\x1b[57419;1:3u";
-const DOWN_RELEASE: &[u8] = b"\x1b[57420;1:3u";
-const A_RELEASE: &[u8] = b"\x1b[97;1:3u";
-/// The alt-screen leave (the real-exit restore tail).
+/// The alt-screen leave the exit flush begins with.
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
+/// The release tail's first two writes (synchronized output off, SGR
+/// reset) — the boundary between the flushed rows and the restore.
+const TAIL_MARK: &[u8] = b"\x1b[?2026l\x1b[0m";
+/// The watchdog's user-visible line, printed only on a genuine forced
+/// exit.
+const STALL_MSG: &[u8] = b"shutdown stalled; forced exit.";
+/// The transcript rows this harness seeds: `row <index>` text, the same
+/// needle family the kitty-release e2e drives. The startup paint shows
+/// the viewport tail only, so the mount needle is the LAST seeded row;
+/// the exit flush writes the whole transcript, so the completeness
+/// assertion checks the FIRST row appears after the exit.
+const FIRST_ROW: &[u8] = b"row 0";
+const CHILD_SOCKET_ENV: &str = "PA_SLOW_DRAIN_CHILD_SOCKET";
+/// The exit flush of the seeded transcript, at the paced read rate,
+/// must still be draining when the 1500ms deadline passes: the flush is
+/// sized (messages x wrapped rows) and the rate picked so the drain
+/// runs well past the deadline with chunk completions inside the guard's
+/// grace window.
+const READ_RATE_BYTES_PER_S: f64 = 96.0 * 1024.0;
+/// The seed size: pairs of user/assistant messages whose wrapped rows
+/// flush to well over the drain the deadline covers at the paced rate.
+const SEED_MESSAGES: usize = 1_600;
+/// The LAST seeded row: the startup viewport paints the transcript tail,
+/// so this is the mount needle; the first row only ever appears in the
+/// exit flush (the completeness assertion).
+const LAST_ROW: &[u8] = b"row 1599";
 
-/// The child-mode socket: set (with the socket path) only when this very
-/// binary is re-executed as the product-under-test.
-const CHILD_SOCKET_ENV: &str = "PA_KITTY_CHILD_SOCKET";
-
-/// The child half of the e2e: runs the real chat surface in terminal
-/// mode against the harness's mock supervisor, then hands the terminal
-/// to the agents view exactly like the CLI composition does
-/// (`interactive_mode`'s `return_to_agents_view` arm). A plain
-/// `cargo test` run (no `CHILD_SOCKET_ENV`) passes trivially — only the
-/// parent test drives the real path.
 #[test]
-fn kitty_child_mode() {
+fn slow_drain_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
         return;
     };
     let options = child_options(PathBuf::from(socket));
-    // A current-thread runtime keeps the child's thread count down (the
-    // suspend e2e's observation).
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -78,158 +87,146 @@ fn kitty_child_mode() {
         let outcome = run_interactive(options.clone(), UiMode::Terminal)
             .await
             .expect("the chat surface ran");
-        // TS `main.ts`'s agents-back arm: the session hands the terminal
-        // to the agents view anchored on the session just left.
-        if outcome.return_to_agents_view {
-            let anchor = (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
-            let view_options = AgentsViewOptions {
-                socket_path: options.socket_path.clone(),
-                cwd: options.cwd.clone(),
-                session_dir: options.session_dir.clone(),
-                theme: options.theme.clone(),
-                version: options.version.clone(),
-                anchor_session_id: anchor,
-                scope: None,
-                query: None,
-                expanded_ancestors: Vec::new(),
-                selected_row_identity: None,
-                selected_key: None,
-                status_message: outcome.agents_view_notice.clone(),
-                keybindings: options.keybindings.clone(),
-                show_hardware_cursor: false,
-                incident_notice_state: None,
-            };
-            let view_run = pa_tui::agents_view::run_agents_view(
-                view_options,
-                AgentsViewUiMode::Terminal,
-                None,
-            )
-            .await
-            .expect("the agents view ran");
-            if let Some(link) = view_run.link {
-                link.close();
-            }
+        // The composition root's exit tail (pa-cli `interactive_mode`):
+        // the resume hint print, its exit-progress report, and the
+        // fixed pre-exit delay. Replicated here because the child drives
+        // the surface directly, not the CLI composition.
+        if let Some(hint) = outcome.resume_hint {
+            println!("\x1b[2m{hint}\x1b[22m");
         }
+        pa_tui::exit_guard::note_exit_progress();
+        std::thread::sleep(Duration::from_millis(300));
     });
 }
 
 /// The pty harnesses serialize: each drives process-group signals and a
-/// raw pty; concurrent byte-level waits flake on the shared sandbox CPUs.
+/// raw pty; concurrent byte-level waits flake on the shared test CPUs.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
-fn releases_around_the_handoff_never_become_visible() {
+fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let mut harness = HandoffHarness::start();
+    let mut harness = SlowDrainHarness::start();
 
-    // The probe's query: answer it like a kitty terminal, and require
-    // the app to push the flags (the arm proof) before anything else.
     harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
     harness.write(KITTY_ANSWER);
-    harness.wait_from_start(KITTY_FLAGS_PUSH, "the kitty flags push");
+    harness.wait_from_start(LAST_ROW, "the attach snapshot rendered");
+    harness.settle();
 
-    // The chat surface is up once the attach snapshot paints.
-    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    // The exit gesture: a Ctrl+C pair inside the exit window arms the
+    // force-quit deadline at the second press (exit_guard.rs); the loop
+    // consumes the pair and runs the exit, whose flush the paced drain
+    // keeps busy well past the deadline.
+    let mark = harness.mark();
+    harness.write(b"\x03");
+    std::thread::sleep(Duration::from_millis(400));
+    let keys_sent = Instant::now();
+    harness.write(b"\x03");
 
-    // The handoff: the LEFT press with its companion release injected
-    // in flight — the exact window the teardown drain guards. The view
-    // must mount normally regardless of who consumes the release.
-    let mark_left = harness.mark();
-    harness.write(b"\x1b[D");
-    harness.write(LEFT_RELEASE);
-    harness.wait_from(mark_left, b"Search sessions", "the agents view mounts");
-    // The child is alive and the view processes fresh input after the
-    // handoff: releases must not have wedged or killed the surface.
-    assert!(
-        harness.child_alive(),
-        "the child survived the handoff with an in-flight release"
+    // Pace the drain: the terminal consumes at READ_RATE_BYTES_PER_S,
+    // so the 1500ms deadline lands mid-flush and the guard must hold its
+    // fire on the writer's per-chunk progress.
+    let drained = harness.pump_until_exit(READ_RATE_BYTES_PER_S, Duration::from_secs(120));
+    let exit_wall = keys_sent.elapsed();
+    assert_eq!(
+        harness.wait_child_exit(Duration::from_secs(5)),
+        Some(0),
+        "the child exits cleanly through its own exit path"
     );
+    let output = harness.output();
+    let _ = mark;
 
-    // Late releases on the adopting surface: dropped at dispatch (TS
-    // tui.ts), so nothing repaints. The settle window keeps the
-    // assert away from the mount's own trailing paints.
-    harness.drain_until_quiet(40);
-    let mark_late = harness.mark();
-    harness.write(UP_RELEASE);
-    harness.write(DOWN_RELEASE);
-    harness.write(A_RELEASE);
-    harness.drain_until_quiet(20);
-    let after_late = harness.output_since(mark_late);
+    // The drain really ran past the deadline mid-flush: a fast drain
+    // would finish before the 1500ms force-quit window even matters.
     assert!(
-        after_late.is_empty(),
-        "late key releases produced output ({} bytes) — a release leaked          into the view's dispatch",
-        after_late.len()
+        exit_wall >= Duration::from_millis(1_800),
+        "the paced drain must outlast the 1500ms deadline (wall {exit_wall:?}, {}KiB drained)",
+        drained / 1024
     );
-
-    // A real press still works: the search editor repaints on input,
-    // proving the surface is interactive after the release burst. The
-    // frame paints typed cells one styled positioned cell at a time (an
-    // escape byte rides between the characters), so the needle is the
-    // painted `z` cell, not the two adjacent bytes.
-    let mark_query = harness.mark();
-    harness.write(b"zz");
-    harness.wait_from(mark_query, b"z", "the search editor repaints");
-    harness.write(b"\x7f\x7f");
-    harness.drain_until_quiet(20);
-
-    // Exit through the real restore (escape with an empty query), and
-    // inject one more release around the exit's own drain window. With
-    // disambiguate armed a kitty terminal sends its Esc presses as the
-    // CSI-u form, so the exit drives the same encoding a real kitty
-    // session would (a raw lone ESC byte is the legacy form this guard
-    // arms its meta-wrapper hold for).
-    harness.drain_until_quiet(10);
-    let mark_exit = harness.mark();
-    harness.write(b"\x1b[27u");
-    harness.drain_until_quiet(10);
-    harness.write(LEFT_RELEASE);
-    harness.wait_from(mark_exit, ALT_SCREEN_LEAVE, "the exit restore ran");
-    let exit = harness.wait_child_exit(Duration::from_secs(20));
-    harness.drain_until_quiet(10);
-    let stream = harness.output();
-
-    // Stream hygiene across the whole session: the LAST kitty-mode byte
-    // is a pop (a probe answer landing around the exit must not re-arm
-    // CSI-u on the parent shell — the `release_for_exit` guard).
-    let last_push =
-        find_subsequence_last(&stream, KITTY_FLAGS_PUSH).expect("the flags push is in the stream");
-    let last_pop =
-        find_subsequence_last(&stream, KITTY_FLAGS_POP).expect("the flags pop is in the stream");
+    // TS semantics on a healthy exit: no forced-quit line ever prints.
     assert!(
-        last_pop > last_push,
-        "the stream's last kitty-mode write is a push at {last_push} after          the last pop at {last_pop} — the exit left CSI-u reporting armed"
+        !find_subsequence(&output, STALL_MSG).is_some(),
+        "a draining terminal must never read as a stalled shutdown"
     );
-    // No release bytes echo back after the alt-screen leave: the exit
-    // consumed them (raw mode still held them silent through the drain,
-    // and the restore handed a quiet terminal to the shell).
-    let leave = find_subsequence_last(&stream, ALT_SCREEN_LEAVE)
-        .expect("the alt-screen leave is in the stream");
+    // The whole transcript flushed: the first and last seeded rows are
+    // both in the post-exit stream (the frozen scrollback contract).
+    let first_row_at = find_subsequence(&output, FIRST_ROW)
+        .expect("the flush wrote the transcript's first row");
+    let last_row = format!("row {}", SEED_MESSAGES - 1).into_bytes();
+    let last_row_at = find_subsequence(&output, &last_row)
+        .expect("the flush wrote the transcript's last row");
+    let leave_at = find_subsequence(&output, ALT_SCREEN_LEAVE)
+        .expect("the exit left the alternate screen");
     assert!(
-        !contains(&stream[leave..], LEFT_RELEASE),
-        "the release sequence echoed into the restored terminal's output"
+        leave_at < first_row_at && first_row_at < last_row_at,
+        "the flushed rows follow the alt-screen leave"
     );
+    // The restore tail lands after the flushed rows: the terminal is
+    // handed back whole, not mid-transcript.
+    let tail_at = find_subsequence_last(&output, TAIL_MARK)
+        .expect("the release tail wrote its restore sequence");
     assert!(
-        exit.is_some_and(|code| code == 0),
-        "the child exited cleanly (code {exit:?})"
+        tail_at > last_row_at,
+        "the terminal restore must follow the last flushed row"
     );
-
-    harness.finish();
 }
 
-/// One pty-backed product child plus the mock supervisor it attaches to.
-struct HandoffHarness {
+#[test]
+fn a_stalled_drain_still_fires_the_force_quit() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut harness = SlowDrainHarness::start();
+
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(LAST_ROW, "the attach snapshot rendered");
+    harness.settle();
+
+    // The exit gesture arms the 1500ms deadline; then the terminal
+    // stops consuming entirely: the writer blocks inside its chunk, no
+    // progress lands, and the grace window expiring must fire the
+    // watchdog exactly as before the drain-awareness existed.
+    harness.write(b"\x03");
+    std::thread::sleep(Duration::from_millis(400));
+    let keys_sent = Instant::now();
+    harness.write(b"\x03");
+
+    // The stall: nothing is read while the deadline (and the progress
+    // grace window) passes.
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert!(
+        harness.child_alive(),
+        "the force-quit's restore writes block on the full pty until the drain resumes"
+    );
+
+    // Resume the drain: the queued restore bytes and the forced-exit
+    // line land, and the process dies with the guard's exit code.
+    let _ = harness.pump_until_exit(READ_RATE_BYTES_PER_S, Duration::from_secs(60));
+    let exit_wall = keys_sent.elapsed();
+    assert_eq!(
+        harness.wait_child_exit(Duration::from_secs(5)),
+        Some(0),
+        "the forced exit ends the process with the guard's exit code"
+    );
+    assert!(
+        find_subsequence(&harness.output(), STALL_MSG).is_some(),
+        "a stalled drain is a stalled shutdown: the watchdog must still fire (wall {exit_wall:?})"
+    );
+}
+
+struct SlowDrainHarness {
     child: Child,
-    /// The mock-supervisor server thread's join handle (it exits with
-    /// the child's connection).
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
 }
 
-impl HandoffHarness {
-    fn start() -> HandoffHarness {
+impl SlowDrainHarness {
+    fn start() -> SlowDrainHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let supervisor = MockSupervisor::bind(&socket);
@@ -237,8 +234,8 @@ impl HandoffHarness {
 
         let pty = openpty(
             Some(&Winsize {
-                ws_row: 24,
-                ws_col: 80,
+                ws_row: 40,
+                ws_col: 120,
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             }),
@@ -247,11 +244,10 @@ impl HandoffHarness {
         .expect("open pty");
 
         let child = spawn_child(&socket, &pty.slave);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies
-        // with the child at teardown.
+        // The child needs the socket for its lifetime; the tree dies with
+        // it at teardown.
         std::mem::forget(dir);
-        HandoffHarness {
+        SlowDrainHarness {
             child,
             _server: server,
             master: PtyReader::new(pty.master),
@@ -270,20 +266,15 @@ impl HandoffHarness {
         self.master.wait_from(0, needle, what);
     }
 
-    fn wait_from(&mut self, mark: usize, needle: &[u8], what: &str) {
-        self.master.wait_from(mark, needle, what);
-    }
-
-    fn drain_until_quiet(&mut self, quiet_polls: usize) {
-        self.master.drain_until_quiet(quiet_polls);
+    /// Let the surface settle: drain until the pty goes quiet (the mount
+    /// paint and the snapshot render are small; the drain here is fast
+    /// because the transcript never paints outside the viewport).
+    fn settle(&mut self) {
+        self.master.drain_until_quiet(20);
     }
 
     fn output(&self) -> Vec<u8> {
         self.master.output.clone()
-    }
-
-    fn output_since(&self, mark: usize) -> Vec<u8> {
-        self.master.output[mark..].to_vec()
     }
 
     fn child_alive(&mut self) -> bool {
@@ -303,18 +294,39 @@ impl HandoffHarness {
         }
     }
 
-    fn finish(mut self) {
-        let _ = self.child.kill();
-        // Reap the child so no zombie is left behind.
-        let _ = self.child.wait();
+    /// Read the pty master at a fixed byte rate until the child exits:
+    /// the terminal's consumption pace, modeled with a token bucket that
+    /// refills at `rate` and allows one read per token slice.
+    fn pump_until_exit(&mut self, rate: f64, deadline: Duration) -> usize {
+        let deadline = Instant::now() + deadline;
+        let slice = Duration::from_millis(4);
+        let slice_bytes = (rate * slice.as_secs_f64()).max(1.0) as usize;
+        let mut drained = 0usize;
+        loop {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return drained;
+            }
+            if Instant::now() > deadline {
+                return drained;
+            }
+            let mut buffer = [0u8; 4096];
+            let want = buffer.len().min(slice_bytes.max(1));
+            match self.master.file.read(&mut buffer[..want]) {
+                Ok(0) | Err(_) => std::thread::sleep(slice),
+                Ok(n) => {
+                    self.master.output.extend_from_slice(&buffer[..n]);
+                    drained += n;
+                }
+            }
+            std::thread::sleep(slice);
+        }
     }
 }
 
-impl Drop for HandoffHarness {
+impl Drop for SlowDrainHarness {
     fn drop(&mut self) {
-        // A panicking wait must never leak the pty child: it owns the
-        // controlling terminal of its own session and outlives the
-        // harness (the cursor e2e reaps only on its success path).
+        // A panicking wait must never leak the pty child (it owns the
+        // controlling terminal of its own session).
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -345,9 +357,6 @@ impl PtyReader {
         self.file.write_all(payload).expect("write to the pty");
     }
 
-    /// Drain the master until it goes quiet for `quiet_polls` consecutive
-    /// polls: a settle window keeps every later byte (the pty driver
-    /// drops writes that find its kernel-side buffer full).
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         let mut quiet = 0;
         while quiet < quiet_polls {
@@ -363,8 +372,6 @@ impl PtyReader {
         }
     }
 
-    /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline.
     fn wait_from(&mut self, mark: usize, needle: &[u8], what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -372,8 +379,7 @@ impl PtyReader {
                 return;
             }
             let mut buffer = [0u8; 8192];
-            let result = self.file.read(&mut buffer);
-            match result {
+            match self.file.read(&mut buffer) {
                 Ok(0) | Err(_) => {}
                 Ok(n) => self.output.extend_from_slice(&buffer[..n]),
             }
@@ -397,10 +403,6 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    find_subsequence(haystack, needle).is_some()
-}
-
 fn find_subsequence_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return None;
@@ -413,14 +415,11 @@ fn find_subsequence_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// A child of this very binary, re-executed in child mode with the pty
-/// slave as its terminal — and the pty as its CONTROLLING terminal
-/// (`setsid` + `TIOCSCTTY`): crossterm's raw-mode and event reads go
-/// through `/dev/tty`, which must be the pty regardless of the runner's
-/// own session (the harness must behave the same under a detached
-/// runner and an interactive shell).
+/// slave as its terminal — and as its CONTROLLING terminal (`setsid` +
+/// `TIOCSCTTY`): crossterm's raw-mode and event reads go through
+/// `/dev/tty`, which must be the pty regardless of the runner's own
+/// environment (the kitty-release e2e's harness pattern).
 fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
-    // Runs between fork and exec in the child: become a session leader
-    // and claim the pty slave as the controlling terminal.
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
@@ -433,7 +432,7 @@ fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command
         .arg("--exact")
-        .arg("kitty_child_mode")
+        .arg("slow_drain_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
         .env_remove("TMUX")
         .stdin(slave_as_stdio(slave))
@@ -489,8 +488,8 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// One attached session behind a mock supervisor socket (the same frame
-/// contract the suspend e2e harness serves).
+/// One attached session behind a mock supervisor socket (the kitty-release
+/// e2e's frame contract; every connection served in turn).
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
@@ -502,9 +501,6 @@ impl MockSupervisor {
         }
     }
 
-    /// One listener, every connection served in turn: the chat surface
-    /// holds one connection and the agents view opens its own after the
-    /// handoff — a single-accept mock would refuse the second.
     fn serve(self) {
         for stream in self.listener.incoming() {
             match stream {
@@ -589,12 +585,21 @@ fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
+/// The seeded transcript: `SEED_MESSAGES` rows of chat, alternating
+/// user/assistant, each text long enough to wrap at the harness's 120
+/// columns — a flush the paced drain cannot finish inside the 1500ms
+/// force-quit window.
 fn attach_data(id: &str) -> Value {
-    let messages: Vec<Value> = (0..4)
+    let messages: Vec<Value> = (0..SEED_MESSAGES)
         .map(|index| {
             json!({
                 "role": if index % 2 == 0 { "user" } else { "assistant" },
-                "content": [{ "type": "text", "text": format!("row {index}") }],
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "row {index} the slow-drain exit guard harness wraps this text at the terminal width so each seeded message renders as several flushed rows"
+                    ),
+                }],
             })
         })
         .collect();
@@ -613,7 +618,7 @@ fn attach_data(id: &str) -> Value {
                     "activeSessionId": "s1",
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
-                    "sessionName": "kitty release e2e",
+                    "sessionName": "slow drain exit guard e2e",
                     "model": null,
                     "isStreaming": false,
                     "isCompacting": false,
@@ -621,11 +626,8 @@ fn attach_data(id: &str) -> Value {
                 },
                 "messages": messages,
                 "lastEventSequence": 0,
-                "lastEventCursor": null,
             },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
+            "replay": null,
         },
     })
 }
