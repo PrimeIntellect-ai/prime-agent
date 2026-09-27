@@ -29,7 +29,138 @@ mod tests;
 pub(super) struct EntryLayout {
     /// The [`AgentView::entry_spacing`] decision the rows render under.
     pub(super) spacing: bool,
-    pub(super) rows: std::sync::Arc<Vec<Line>>,
+    pub(super) rows: std::sync::Arc<RowPack>,
+}
+
+/// One span's packed record: its content range in [`RowPack::blob`] plus
+/// its style.
+#[derive(Debug, Clone, Copy)]
+struct PackedSpan {
+    offset: u32,
+    len: u32,
+    style: ratatui::style::Style,
+}
+
+/// Packed row storage for one cached layout: the entry's rendered rows
+/// as a single content blob plus dense per-span records, expanded
+/// byte-exactly on demand.
+///
+/// The layout cache keeps every visited entry's rows for the process
+/// lifetime, and a scroll walk over a large transcript retains hundreds
+/// of thousands of fragment-sized spans (the tui-scroll-retain census:
+/// a 2600-key walk retained 713k spans holding 9.6MB of text — most of
+/// the retained heap was per-span `Vec`/`String` chunk overhead, not
+/// text). Packing stores the same rows — the same span boundaries, the
+/// same styles, the same content bytes — as one blob plus 20-byte
+/// records, and [`RowPack::range`] rebuilds the exact `Vec<Line>` form
+/// for any row range, so every consumer (frame composition, selection
+/// walks, the exit-flush inline scrollback) sees byte-identical rows:
+/// the compaction is storage-only, invisible to every output path.
+/// Expansion allocates only the requested range, so a frame inside a
+/// huge entry (the transcript's pad row set) pays only its visible rows
+/// — the same clones the sliced form always cost per frame.
+#[derive(Debug, Clone)]
+pub(super) struct RowPack {
+    /// Row i's spans are `spans[first[i]..first[i + 1]]`; the final
+    /// element is the span count.
+    first: Vec<u32>,
+    spans: Vec<PackedSpan>,
+    blob: String,
+}
+
+impl RowPack {
+    /// Pack freshly rendered rows (byte-exact: boundaries, styles, and
+    /// content bytes are preserved; empty spans keep their records).
+    pub(super) fn pack(rows: &[Line]) -> Self {
+        let span_count: usize = rows.iter().map(Line::len).sum();
+        debug_assert!(span_count <= u32::MAX as usize, "row pack offsets fit u32");
+        let content_bytes: usize = rows
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|span| span.content.len())
+            .sum();
+        let mut first = Vec::with_capacity(rows.len() + 1);
+        let mut spans = Vec::with_capacity(span_count);
+        let mut blob = String::with_capacity(content_bytes);
+        for line in rows {
+            first.push(spans.len() as u32);
+            for span in line {
+                spans.push(PackedSpan {
+                    offset: blob.len() as u32,
+                    len: span.content.len() as u32,
+                    style: span.style,
+                });
+                blob.push_str(&span.content);
+            }
+        }
+        first.push(spans.len() as u32);
+        Self { first, spans, blob }
+    }
+
+    /// The number of packed rows.
+    pub(super) fn len(&self) -> usize {
+        self.first.len().saturating_sub(1)
+    }
+
+    /// Rebuild rows `[from, to)` in the expanded `Vec<Line>` form
+    /// (byte-exact to the rows that were packed).
+    pub(super) fn range(&self, from: usize, to: usize) -> Vec<Line> {
+        let rows = self.len();
+        let from = from.min(rows);
+        let to = to.min(rows);
+        let mut expanded = Vec::with_capacity(to.saturating_sub(from));
+        for row in from..to {
+            let start = self.first[row] as usize;
+            let end = self.first[row + 1] as usize;
+            let mut line = Vec::with_capacity(end - start);
+            for packed in &self.spans[start..end] {
+                let content = &self.blob
+                    [packed.offset as usize..packed.offset as usize + packed.len as usize];
+                line.push(crate::Span {
+                    style: packed.style,
+                    content: content.to_string(),
+                });
+            }
+            expanded.push(line);
+        }
+        expanded
+    }
+}
+
+/// One entry's readable rows: a cacheable entry's packed storage or a
+/// transient entry's freshly rendered rows (never stored).
+#[derive(Debug, Clone)]
+pub(super) enum EntryRows {
+    Packed(std::sync::Arc<RowPack>),
+    Fresh(std::sync::Arc<Vec<Line>>),
+}
+
+impl EntryRows {
+    /// The row count (the sparse walk's section lengths).
+    pub(super) fn len(&self) -> usize {
+        match self {
+            EntryRows::Packed(pack) => pack.len(),
+            EntryRows::Fresh(rows) => rows.len(),
+        }
+    }
+
+    /// Whether the section holds no rows (the touch surface's
+    /// shows-tail peek skips empty trailing sections).
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Rows `[from, to)` in the expanded `Vec<Line>` form.
+    pub(super) fn range(&self, from: usize, to: usize) -> Vec<Line> {
+        match self {
+            EntryRows::Packed(pack) => pack.range(from, to),
+            EntryRows::Fresh(rows) => {
+                let from = from.min(rows.len());
+                let to = to.min(rows.len());
+                rows[from..to].to_vec()
+            }
+        }
+    }
 }
 
 /// Exact transcript geometry plus the small splash/status surfaces. Entry
@@ -331,7 +462,7 @@ impl AgentView {
             }
             let source = self.sparse_entry_rows(index, self.layout_width);
             let from = rows.len();
-            Self::slice_rows(&source, &mut rows, offset, start, end);
+            Self::slice_entry_rows(&source, &mut rows, offset, start, end);
             // The entry's visible span feeds the click surface's window
             // map (view/click.rs) — bounded by the rows on screen.
             if from < rows.len() {
@@ -366,6 +497,24 @@ impl AgentView {
         let to = end.saturating_sub(offset).min(source.len());
         if from < to {
             out.extend_from_slice(&source[from..to]);
+        }
+        offset + source.len()
+    }
+
+    /// [`Self::slice_rows`] for one entry's rows: only the intersecting
+    /// range is expanded (a packed entry pays its visible rows, not the
+    /// whole row set).
+    fn slice_entry_rows(
+        source: &EntryRows,
+        out: &mut Vec<Line>,
+        offset: usize,
+        start: usize,
+        end: usize,
+    ) -> usize {
+        let from = start.saturating_sub(offset).min(source.len());
+        let to = end.saturating_sub(offset).min(source.len());
+        if from < to {
+            out.extend(source.range(from, to));
         }
         offset + source.len()
     }

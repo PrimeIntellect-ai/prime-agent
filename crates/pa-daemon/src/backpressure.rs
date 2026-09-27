@@ -44,6 +44,15 @@ pub(crate) const WORKER_INFLIGHT_CAPACITY: usize = 128;
 /// loop's lag arm makes every drop observable in the daemon log.
 pub(crate) const EVENT_RING_CAPACITY: usize = 4096;
 
+/// Capacity of one client connection's targeted session-event queue (the
+/// subscriber registry's delivery path). The ring above bounds the
+/// broadcast-class window per connection; this bounds the session-event
+/// window: a slow reader fills it, drops are logged (one line per stall
+/// cycle), and the supervisor never blocks on one client. Same magnitude
+/// as the ring so a client receives comparable buffering headroom for
+/// each class.
+pub(crate) const TARGETED_EVENT_QUEUE_CAPACITY: usize = 4096;
+
 /// Outbound response bundles one client connection may hold before its
 /// senders stall. A wedged client (reading nothing) stalls only its own
 /// dispatch tasks at this bound — worker slots free as replies arrive, so

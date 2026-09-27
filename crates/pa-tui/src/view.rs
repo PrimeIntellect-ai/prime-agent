@@ -215,6 +215,25 @@ pub struct AgentView {
     dock_cursor: Option<(usize, usize)>,
     /// Window height of the last composed frame (cursor positioning).
     pub(crate) window_rows: usize,
+    /// Whether the last composed frame's transcript window reached the
+    /// transcript tail (operator directive 2026-09-26: the follow hint
+    /// composites only when following would actually scroll — a window
+    /// that already shows the tail is at the bottom, not paused above
+    /// new content).
+    pub(crate) window_shows_tail: bool,
+    /// A detail change whose window `resolve_sparse_geometry` consumed
+    /// before its first composition: the next window build's dense arm
+    /// re-derives the follow state from the post-transition geometry
+    /// (operator directive 2026-09-26).
+    pub(crate) detail_transition: bool,
+    /// The screen cell the mouse currently hovers, set while its row is
+    /// a clickable card row (operator directive 2026-09-26: the hovered
+    /// card row brightens so clickability is discoverable). One cell of
+    /// state — a motion report never costs more than one re-style —
+    /// revalidated against every composed frame so a scroll, a resize,
+    /// or streaming never leaves the affordance on a row that stopped
+    /// being the hovered card.
+    pub(crate) hover_pos: Option<(usize, usize)>,
     /// Plain text of the last frame's rows: OSC zone-marker emission only
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
@@ -395,6 +414,9 @@ impl AgentView {
             terminal_rows: 24,
             dock_cursor: None,
             window_rows: 0,
+            window_shows_tail: false,
+            detail_transition: false,
+            hover_pos: None,
             osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
@@ -1738,9 +1760,33 @@ impl AgentView {
         for line in dock {
             frame.push(pad_row(line, width));
         }
+        // The hover affordance (operator directive 2026-09-26): the
+        // hovered clickable card row brightens — Muted text to the
+        // theme's foreground, Dim to Muted, the "opacity shift" that
+        // signals the row is clickable. One row, only while hovered —
+        // and revalidated against THIS frame's just-recorded click
+        // surface, so a scroll, a resize, or streaming that moves other
+        // content onto the hovered row clears the affordance instead of
+        // brightening whatever landed there (the review bots' finding:
+        // the state is a screen coordinate, the layout moves).
+        if let Some((row, col)) = self.hover_pos {
+            if matches!(
+                self.click_target_at(row, col),
+                Some(click::ClickAction::ToggleCardExpansion)
+            ) {
+                if let Some(line) = frame.get_mut(row) {
+                    apply_hover_affordance(line, &self.theme);
+                }
+            } else {
+                self.hover_pos = None;
+            }
+        }
         // A paused viewport carries the follow hint over the last transcript
-        // window row (TS composites it above the dock, below overlays).
-        if !self.following {
+        // window row (TS composites it above the dock, below overlays) —
+        // but only when following would actually scroll: a window that
+        // already shows the transcript tail is at the bottom, not paused
+        // above new content (operator directive 2026-09-26).
+        if !self.following && !self.window_shows_tail {
             if let Some(row) = frame.get_mut(window_height) {
                 let key = self
                     .editor
@@ -2078,8 +2124,31 @@ fn split_at_chars(text: &str, at: usize) -> (&str, &str) {
 }
 
 /// One scroll-indicator surface row (`↑ N more` on the editor background).
+/// The hover affordance's row restyle (operator directive 2026-09-26):
+/// Muted spans brighten to the theme's foreground and Dim spans to
+/// Muted — the "text opacity changes a little bit" the operator asked
+/// for. Accent paint (the status glyphs, errors, links) keeps its own
+/// color, so the row stays legible and only its dim text brightens.
+fn apply_hover_affordance(row: &mut Line, theme: &crate::theme::Theme) {
+    let muted = theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+    let dim = theme.fg_style(crate::theme::ThemeColor::Dim).fg;
+    let text = theme.fg_style(crate::theme::ThemeColor::Text);
+    let bright = theme.fg_style(crate::theme::ThemeColor::Muted);
+    for span in row.iter_mut() {
+        if span.style.fg == muted {
+            span.style = span.style.patch(text);
+        } else if span.style.fg == dim {
+            span.style = span.style.patch(bright);
+        }
+    }
+}
+
 fn indicator_row(indicator: &str, bg: Style, border: Style, width: usize) -> Line {
-    let mut row: Line = vec![Span::styled(indicator.to_string(), border)];
+    // The indicator text paints on the editor surface's background too
+    // (operator directive 2026-09-26): the bar's `↑/↓ N more` rows read
+    // as part of the prompt bar, not as text floating on the terminal's
+    // bare background.
+    let mut row: Line = vec![Span::styled(indicator.to_string(), border.patch(bg))];
     let used = str_width(indicator);
     row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
     row
@@ -2649,6 +2718,288 @@ mod tests {
         let top_frame = v.render_frame(80, 24);
         assert!(!v.is_following());
         assert!(top_frame.iter().any(|l| row_text(l).contains("to follow")));
+    }
+
+    /// A transcript with thinking blocks: long in `all`/`details` (the
+    /// thinking renders, far past a page above the tail), and short
+    /// enough in `overview` (thinking hidden) that the whole
+    /// conversation fits the window.
+    fn thinking_filled(v: AgentView, turns: usize) -> AgentView {
+        let mut v = filled(v, 0);
+        for index in 0..turns {
+            v.push(TranscriptItem::UserMessage {
+                text: format!("user line {index}"),
+            });
+            v.push(TranscriptItem::Assistant {
+                blocks: vec![crate::chat::MessageBlock::Thinking(format!(
+                    "thinking {index} {} the expanded mode dwarfs the collapsed one",
+                    "reasoning word ".repeat(56)
+                ))],
+                has_tool_calls: false,
+            });
+        }
+        v
+    }
+
+    /// The mode-exit follow recompute (operator directive 2026-09-26):
+    /// pausing in an expanded mode and collapsing back to `overview`
+    /// when the collapsed transcript fits the window resumes following —
+    /// the view already shows the transcript tail, so the follow hint
+    /// does not render and the tail keeps following new content.
+    #[test]
+    fn collapse_resumes_following_when_the_tail_is_in_view() {
+        let mut v = thinking_filled(view(), 2);
+        v.detail = Detail::All;
+        v.render_frame(80, 24);
+        assert!(v.is_following());
+        // Pause a page up in the expanded mode (thinking rows on end).
+        v.scroll_by(-(v.page_size() as isize));
+        assert!(!v.is_following());
+        // Collapse: the hidden thinking shrinks the transcript below the
+        // window — the re-walked window shows the tail.
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(v.is_following(), "the collapse re-derived the follow state");
+        assert!(
+            !collapsed.iter().any(|l| row_text(l).contains("to follow")),
+            "the tail-in-view window carries no follow hint: {collapsed:?}"
+        );
+        assert_eq!(v.scroll_info().lines_below, 0);
+    }
+
+    /// The height-exact boundary (the review bots' finding): a window
+    /// whose bottom lands exactly on the transcript's final chat row —
+    /// with the empty tail section below it — is at the bottom, not
+    /// paused above new content: the follow state re-derives and the
+    /// hint does not render.
+    #[test]
+    fn a_window_ending_exactly_at_the_tail_shows_no_hint() {
+        let mut v = thinking_filled(view(), 8);
+        v.render_frame(80, 24);
+        // The scroll distance to the exact bottom (a following window
+        // sits at `last_max_scroll`, which `lines_above` reports; the
+        // resolve happens before the top pin, so the walked window below
+        // stays sparse).
+        let bottom = v.scroll_info().lines_above;
+        v.scroll_to_top();
+        // The render establishes the walked top window; each row step
+        // keeps the walk (the sparse path), so the final window is a
+        // walked Top anchor sitting exactly on the bottom.
+        v.render_frame(80, 24);
+        for _ in 0..bottom {
+            v.scroll_by(1);
+        }
+        let frame = v.render_frame(80, 24);
+        assert_eq!(
+            v.scroll_info().lines_below,
+            0,
+            "the window sits exactly at the bottom"
+        );
+        assert!(
+            !frame.iter().any(|l| row_text(l).contains("to follow")),
+            "the at-the-bottom window carries no follow hint (following \
+             would scroll nothing)"
+        );
+    }
+
+    /// The recompute is not a blanket un-pause: a collapse that leaves
+    /// real rows below the window keeps following paused and the hint
+    /// rendered (following would actually scroll).
+    #[test]
+    fn collapse_keeps_the_hint_when_rows_remain_below() {
+        let mut v = filled(view(), 30);
+        v.render_frame(80, 24);
+        v.scroll_by(-2);
+        assert!(!v.is_following());
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(!v.is_following());
+        assert!(
+            collapsed
+                .iter()
+                .any(|l| row_text(l).contains("ctrl+shift+down to follow")),
+            "the paused window with rows below keeps the hint"
+        );
+    }
+
+    /// The prompt bar's scroll indicators paint on the editor surface's
+    /// background (operator directive 2026-09-26): the `↑ N more` row
+    /// reads as part of the bar, not as text floating on the terminal's
+    /// bare background.
+    #[test]
+    fn the_more_indicator_carry_the_bar_background() {
+        let bg = ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(10, 11, 12));
+        let border = ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
+        for label in [" ↑ 14 more", " ↓ 3 more"] {
+            let row = indicator_row(label, bg, border, 20);
+            for span in &row {
+                assert_eq!(
+                    span.style.bg,
+                    Some(ratatui::style::Color::Rgb(10, 11, 12)),
+                    "every span of {label:?} carries the bar background"
+                );
+            }
+        }
+    }
+
+    /// The hover affordance (operator directive 2026-09-26): a
+    /// buttonless motion over a clickable card row brightens that row —
+    /// Muted spans to the theme's foreground, Dim to Muted — and only
+    /// the state change costs a render; a motion across the same row
+    /// re-styles nothing.
+    #[test]
+    fn the_hover_affordance_brightens_the_hovered_card_row() {
+        // The condensed run block paints its summary row Muted (the
+        // count text) and its breakdown Dim — the affordance's exact
+        // input.
+        let mut view = condensed_view(run_cards(3));
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        // The block's summary row (the "3 tool calls" count row), not the
+        // entry's leading spacer: the affordance's visible surface.
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(
+            plain[block_row].iter().any(|span| span.style.fg == muted),
+            "the block's summary row paints muted: {:?}",
+            plain[block_row]
+        );
+        // Hovering onto the block row changes the state and the paint.
+        assert!(view.note_hover(block_row, 2));
+        assert_eq!(view.hover_pos, Some((block_row, 2)));
+        let hovered = view.render_frame(80, 24);
+        let dim = view.theme.fg_style(crate::theme::ThemeColor::Dim).fg;
+        let bright = view.theme.fg_style(crate::theme::ThemeColor::Muted);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the hovered row's muted span brightened to the theme fg"
+                );
+            } else if plain_span.style.fg == dim {
+                assert_eq!(
+                    hovered_span.style.fg, bright.fg,
+                    "the hovered row's dim span stepped up to muted"
+                );
+            }
+        }
+        // A motion across the same row changes nothing (the cell rides
+        // along; the affordance is row-level).
+        assert!(!view.note_hover(block_row, 5));
+        assert_eq!(view.hover_pos, Some((block_row, 5)));
+        // Moving onto a non-clickable row clears the hover and restores
+        // the paint with the next frame.
+        assert!(view.note_hover(0, 2));
+        assert_eq!(view.hover_pos, None);
+        let restored = view.render_frame(80, 24);
+        assert!(
+            restored[block_row]
+                .iter()
+                .any(|span| span.style.fg == muted),
+            "the block's muted paint returns with the hover"
+        );
+        // The block's breakdown row (the dim branch gutter below the
+        // summary) pins the Dim -> Muted conversion on its own paint:
+        // the entry's whole span is the clickable target, and hovering
+        // it steps the dim spans up exactly one tier.
+        let breakdown_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 bash"))
+            })
+            .expect("the block's breakdown row renders");
+        assert!(
+            plain[breakdown_row].iter().any(|span| span.style.fg == dim),
+            "the breakdown row paints dim: {:?}",
+            plain[breakdown_row]
+        );
+        assert!(view.note_hover(breakdown_row, 2));
+        let hovered_breakdown = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered_breakdown[breakdown_row]
+            .iter()
+            .zip(&plain[breakdown_row])
+        {
+            if plain_span.style.fg == dim {
+                assert_eq!(
+                    hovered_span.style.fg, bright.fg,
+                    "the hovered breakdown's dim span stepped up to muted"
+                );
+            }
+        }
+    }
+
+    /// The render-side revalidation (the review bots' finding): the
+    /// hover is a screen coordinate, and the layout moves — a scroll
+    /// that brings other content onto the hovered row clears the
+    /// affordance with the next frame instead of brightening whatever
+    /// landed there.
+    #[test]
+    fn a_scrolled_layout_revalidates_the_hover() {
+        // A transcript TALLER than the window (the run's block at the
+        // top, user rows below): the window can actually scroll, so the
+        // revalidation is exercised by a real layout move, not a clamp.
+        let mut entries = run_cards(3);
+        for index in 0..10 {
+            entries.push(crate::chat::ChatEntry::User {
+                text: format!("later user line {index}"),
+            });
+        }
+        let mut view = condensed_view(entries);
+        view.render_frame(80, 24);
+        view.scroll_to_top();
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(view.note_hover(block_row, 2));
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        let hovered = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the muted spans brightened on the hovered row"
+                );
+            }
+        }
+        // Scroll down past the block's whole span: user rows land on the
+        // recorded screen row, and the revalidation clears the hover
+        // with the next frame (a stale coordinate never brightens the
+        // user content that moved onto it).
+        view.scroll_by(6);
+        let scrolled = view.render_frame(80, 24);
+        assert_eq!(
+            view.hover_pos, None,
+            "the scroll cleared the stale hover coordinate"
+        );
+        // The position the block vacated carries different content
+        // (the user block's rows moved onto it — border, text, border):
+        // no hover affordance survives the move onto non-card rows.
+        assert!(
+            !scrolled[block_row]
+                .iter()
+                .any(|span| span.content.contains("3 tool calls")),
+            "the block's summary vacated the recorded position: {:?}",
+            scrolled[block_row]
+        );
+        assert!(
+            (0..scrolled.len()).any(|row| scrolled[row]
+                .iter()
+                .any(|span| span.content.contains("user line"))),
+            "the user rows moved into the window with the scroll"
+        );
     }
 
     #[test]

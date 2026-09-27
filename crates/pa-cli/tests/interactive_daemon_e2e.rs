@@ -844,6 +844,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
             let Some(api_key) = panel
                 .paste_prompt(
                     "Paste a Prime API key below:",
+                    pa_tui::auth_panel::PastePromptTone::Muted,
                     pa_tui::auth_panel::PasteStyle::Visible,
                 )
                 .await
@@ -2818,8 +2819,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
             .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("must be configured externally")
-            && rendered.contains("prime-inference"),
+        rendered.contains("must be configured externally") && rendered.contains("prime-inference"),
         "the pick against the empty auth-scoped catalog routes the sign-in flow (no provider-auth hook in this composition, so the TS external-config error):\n{rendered}"
     );
     assert!(

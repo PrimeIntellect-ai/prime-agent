@@ -23,7 +23,7 @@ use pa_core::auth::{
     PrimeInferenceLoginCallbacks, PrimeInferenceLoginOptions, PrimeInferenceLoginResult,
     PrimeTeamAssignment, PrimeTeamCredential, StoredPrimeTeam, DEFAULT_REQUEST_TIMEOUT_MS,
 };
-use pa_tui::auth_panel::{PasteStyle, PrimeTeamOption, PrimeTeamPick};
+use pa_tui::auth_panel::{PastePromptTone, PasteStyle, PrimeTeamOption, PrimeTeamPick};
 use pa_tui::provider_auth::ProviderAuthOutcome;
 
 /// The result of the team selection (TS `PrimeTeamSelectorComponent`'s
@@ -47,8 +47,15 @@ const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 /// keeps the flow scriptable in tests; `Send + Sync` because the race's
 /// boxed arms are `Send`.
 pub(crate) trait PrimeLoginUi: Send + Sync {
-    /// TS `onProgress` / `dialog.showProgress`.
+    /// TS the `onProgress` callback's step chatter (`dialog.showProgress`
+    /// behind the `if (!this.isOnboarding())` guard — "onboarding
+    /// narrates itself; step chatter stays in the chat flows").
     fn progress(&self, message: &str);
+    /// TS a direct `dialog.showProgress` line (the browser-sign-in
+    /// fallback arm): renders on every surface, onboarding included.
+    fn direct_progress(&self, message: &str) {
+        self.progress(message);
+    }
     /// The driving surface's cooperative cancel state: `true` once the
     /// pane that mounted the login exited. The flow checks it before
     /// its auth-store writes — a `JoinHandle::abort` cannot reach a
@@ -165,7 +172,10 @@ pub(crate) async fn run_prime_inference_login(
                 // TS the browser-unavailable fallback: keep the dialog
                 // open and fall back to plain API key entry.
                 login_dead = true;
-                ui.progress(&format!("Browser sign-in unavailable ({error})."));
+                // TS the fallback arm's direct `dialog.showProgress` —
+                // the one progress line the onboarding narration keeps
+                // (it explains the paste prompt under it).
+                ui.direct_progress(&format!("Browser sign-in unavailable ({error})."));
                 if manual.is_none() {
                     arm_seen = true;
                     manual = Some(Box::pin(prompt_non_empty(ui, FALLBACK_PROMPT)));
@@ -375,6 +385,10 @@ impl PrimeLoginUi for PanelPrimeLoginUi {
         self.panel.progress(message);
     }
 
+    fn direct_progress(&self, message: &str) {
+        self.panel.progress_line(message);
+    }
+
     fn on_auth(&self, url: &str, instructions: &str) {
         self.panel.auth_url(url, Some(instructions));
         pa_core::platform::browser::open_in_browser(url);
@@ -390,7 +404,11 @@ impl PrimeLoginUi for PanelPrimeLoginUi {
     ) -> Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
         let panel = self.panel.clone();
         let prompt = prompt.to_string();
-        Box::pin(async move { panel.paste_prompt(&prompt, PasteStyle::Visible).await })
+        Box::pin(async move {
+            panel
+                .paste_prompt(&prompt, PastePromptTone::Muted, PasteStyle::Visible)
+                .await
+        })
     }
 
     fn select_team(
