@@ -318,7 +318,7 @@ impl TerminalCompactionJournal {
             .filter(|record| record.active_session_id != active_session_id)
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        crate::journal::rewrite_records(&self.path, &records, crate::journal::Finalize::Bare)?;
+        crate::journal::rewrite_records(&self.path, &records, crate::journal::Finalize::Synced)?;
         self.latest.remove(active_session_id);
         Ok(())
     }
