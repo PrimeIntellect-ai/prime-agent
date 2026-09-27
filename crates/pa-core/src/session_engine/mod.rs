@@ -297,25 +297,21 @@ impl AgentSession {
         };
         let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
         let route = (router.decide)(carries_images).map_err(anyhow::Error::msg)?;
-        match &route {
-            Some(resolved) => {
-                (router.swap_target)(Some(resolved));
-                let agent_model =
-                    crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
-                        .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
-                self.agent
-                    .set_model_override(Some(pa_agent::agent::AgentModelOverride {
-                        model: agent_model,
-                        thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
-                            resolved.thinking_level,
-                        ),
-                    }));
-            }
-            None => {
-                (router.swap_target)(None);
-                self.agent.set_model_override(None);
-            }
-        }
+        let Some(resolved) = route.as_ref() else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Ok(());
+        };
+        (router.swap_target)(Some(resolved));
+        let agent_model = crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+        self.agent
+            .set_model_override(Some(pa_agent::agent::AgentModelOverride {
+                model: agent_model,
+                thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
+                    resolved.thinking_level,
+                ),
+            }));
         Ok(())
     }
 

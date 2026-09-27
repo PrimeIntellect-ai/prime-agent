@@ -77,6 +77,11 @@ pub struct ImageModelRoutingInputs<'a> {
 /// Returns the actionable refusal when the turn cannot be served honestly:
 /// a text-only session model would otherwise downgrade the images to an
 /// "(image omitted)" placeholder (TS `resolveImageModelOverride`).
+///
+/// # Errors
+///
+/// Returns the actionable refusal message when the turn cannot be served
+/// honestly (a text-only session model with no usable image model).
 pub fn resolve_image_model_override(
     inputs: &ImageModelRoutingInputs<'_>,
 ) -> Result<Option<ResolvedImageModel>, String> {
