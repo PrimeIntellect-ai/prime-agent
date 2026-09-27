@@ -33,6 +33,10 @@ pub(crate) const WHEEL_UP: u8 = 64;
 pub(crate) const WHEEL_DOWN: u8 = 65;
 /// SGR left-button code.
 pub(crate) const BUTTON_LEFT: u8 = 0;
+/// SGR buttonless-motion button code (`?1003` any-event tracking reports
+/// the mouse's position as base code 3 with the motion bit and no
+/// button): the hover affordance's report.
+pub(crate) const BUTTON_NONE: u8 = 3;
 
 const MODIFIER_SHIFT: u32 = 4;
 const MODIFIER_ALT: u32 = 8;

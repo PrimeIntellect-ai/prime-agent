@@ -6744,6 +6744,17 @@ impl SessionUi {
             }
             return;
         }
+        // A buttonless motion report is the hover (operator directive
+        // 2026-09-26: `?1003` any-event tracking delivers it): the
+        // hovered clickable card row records its hover state, and the
+        // frame re-renders only when that state changed — a motion burst
+        // across one row never schedules a render per report.
+        if event.button == crate::mouse::BUTTON_NONE && event.motion {
+            if view.note_hover(row, col) {
+                self.dirty = true;
+            }
+            return;
+        }
         let left_press = event.press && left;
         let mut open_pressed_link = false;
         if overlay_focused {

@@ -226,6 +226,11 @@ pub struct AgentView {
     /// re-derives the follow state from the post-transition geometry
     /// (operator directive 2026-09-26).
     pub(crate) detail_transition: bool,
+    /// The screen row the mouse currently hovers, set while the row is a
+    /// clickable card row (operator directive 2026-09-26: the hovered
+    /// card row brightens so clickability is discoverable). One row of
+    /// state — a motion report never costs more than one re-style.
+    pub(crate) hover_row: Option<usize>,
     /// Plain text of the last frame's rows: OSC zone-marker emission only
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
@@ -408,6 +413,7 @@ impl AgentView {
             window_rows: 0,
             window_shows_tail: false,
             detail_transition: false,
+            hover_row: None,
             osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
@@ -1751,6 +1757,15 @@ impl AgentView {
         for line in dock {
             frame.push(pad_row(line, width));
         }
+        // The hover affordance (operator directive 2026-09-26): the
+        // hovered clickable card row brightens — Muted text to the
+        // theme's foreground, Dim to Muted, the "opacity shift" that
+        // signals the row is clickable. One row, only while hovered.
+        if let Some(hover) = self.hover_row {
+            if let Some(row) = frame.get_mut(hover) {
+                apply_hover_affordance(row, &self.theme);
+            }
+        }
         // A paused viewport carries the follow hint over the last transcript
         // window row (TS composites it above the dock, below overlays) —
         // but only when following would actually scroll: a window that
@@ -2094,6 +2109,25 @@ fn split_at_chars(text: &str, at: usize) -> (&str, &str) {
 }
 
 /// One scroll-indicator surface row (`↑ N more` on the editor background).
+/// The hover affordance's row restyle (operator directive 2026-09-26):
+/// Muted spans brighten to the theme's foreground and Dim spans to
+/// Muted — the "text opacity changes a little bit" the operator asked
+/// for. Accent paint (the status glyphs, errors, links) keeps its own
+/// color, so the row stays legible and only its dim text brightens.
+fn apply_hover_affordance(row: &mut Line, theme: &crate::theme::Theme) {
+    let muted = theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+    let dim = theme.fg_style(crate::theme::ThemeColor::Dim).fg;
+    let text = theme.fg_style(crate::theme::ThemeColor::Text);
+    let bright = theme.fg_style(crate::theme::ThemeColor::Muted);
+    for span in row.iter_mut() {
+        if span.style.fg == muted {
+            span.style = span.style.patch(text);
+        } else if span.style.fg == dim {
+            span.style = span.style.patch(bright);
+        }
+    }
+}
+
 fn indicator_row(indicator: &str, bg: Style, border: Style, width: usize) -> Line {
     // The indicator text paints on the editor surface's background too
     // (operator directive 2026-09-26): the bar's `↑/↓ N more` rows read
@@ -2791,6 +2825,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The hover affordance (operator directive 2026-09-26): a
+    /// buttonless motion over a clickable card row brightens that row —
+    /// Muted spans to the theme's foreground, Dim to Muted — and only
+    /// the state change costs a render; a motion across the same row
+    /// re-styles nothing.
+    #[test]
+    fn the_hover_affordance_brightens_the_hovered_card_row() {
+        // The condensed run block paints its summary row Muted (the
+        // count text) and its breakdown Dim — the affordance's exact
+        // input.
+        let mut view = condensed_view(run_cards(3));
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        // The block's summary row (the "3 tool calls" count row), not the
+        // entry's leading spacer: the affordance's visible surface.
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(
+            plain[block_row].iter().any(|span| span.style.fg == muted),
+            "the block's summary row paints muted: {:?}",
+            plain[block_row]
+        );
+        // Hovering onto the block row changes the state and the paint.
+        assert!(view.note_hover(block_row, 2));
+        assert_eq!(view.hover_row, Some(block_row));
+        let hovered = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the hovered row's muted span brightened to the theme fg"
+                );
+            }
+        }
+        // A motion across the same row changes nothing.
+        assert!(!view.note_hover(block_row, 5));
+        assert_eq!(view.hover_row, Some(block_row));
+        // Moving onto a non-clickable row clears the hover and restores
+        // the paint with the next frame.
+        assert!(view.note_hover(0, 2));
+        assert_eq!(view.hover_row, None);
+        let restored = view.render_frame(80, 24);
+        assert!(
+            restored[block_row]
+                .iter()
+                .any(|span| span.style.fg == muted),
+            "the block's muted paint returns with the hover"
+        );
     }
 
     #[test]
