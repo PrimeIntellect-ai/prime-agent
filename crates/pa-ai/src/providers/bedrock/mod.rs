@@ -660,44 +660,57 @@ async fn run_stream(
         .or_else(|| response.header("x-amzn-request-id"));
 
     let mut state = BedrockStreamState::new();
-    let mut decoder = EventStreamDecoder::new();
-    let mut stream_error: Option<ProviderError> = None;
-    loop {
-        let Some(chunk) = response.next_bytes().await? else {
-            break;
-        };
-        for message in decoder.push(&chunk) {
-            match handle_event(&message, model, output, writer, &mut state, &request_id) {
-                Ok(()) => {}
-                Err(error) => {
-                    stream_error = Some(error);
-                    break;
+    // The TS try/catch encloses this whole streaming section, including the
+    // abort and stop-reason checks; the catch settles partial tool calls
+    // before the error event carries the message (TS PR #2783).
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = EventStreamDecoder::new();
+        let mut stream_error: Option<ProviderError> = None;
+        loop {
+            let Some(chunk) = response.next_bytes().await? else {
+                break;
+            };
+            for message in decoder.push(&chunk) {
+                match handle_event(&message, model, output, writer, &mut state, &request_id) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        stream_error = Some(error);
+                        break;
+                    }
                 }
             }
+            if stream_error.is_some() {
+                break;
+            }
         }
-        if stream_error.is_some() {
-            break;
+        if let Some(error) = stream_error {
+            return Err(error);
         }
-    }
-    if let Some(error) = stream_error {
-        return Err(error);
-    }
 
-    if options
-        .base
-        .signal
-        .as_ref()
-        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-    {
-        return Err(ProviderError::Aborted);
+        if options
+            .base
+            .signal
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ProviderError::Aborted);
+        }
+        if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+            return Err(ProviderError::StreamFailure(
+                stream_failure_from_stop_reason(
+                    output.stop_reason_raw.as_deref(),
+                    request_id.as_deref(),
+                ),
+            ));
+        }
+
+        Ok(())
     }
-    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(ProviderError::StreamFailure(
-            stream_failure_from_stop_reason(
-                output.stop_reason_raw.as_deref(),
-                request_id.as_deref(),
-            ),
-        ));
+    .await;
+
+    if let Err(error) = stream_result {
+        state.settle_partial_tool_calls(output);
+        return Err(error);
     }
 
     Ok(())

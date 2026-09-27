@@ -18,9 +18,16 @@ pub struct FauxScript {
     pub model: FauxModelDefinition,
     pub tokens_per_second: Option<f64>,
     pub responses: Vec<FauxResponseStep>,
+    /// The `repeatLastResponse` script key: once the queued responses run
+    /// out, the provider re-serves the last one on every further call
+    /// instead of erroring. Opt-in for harnesses whose flow keeps calling
+    /// the model past the script's depth (an active goal's continuation
+    /// churn); the default stays the finite response budget.
+    pub repeat_last_response: bool,
 }
 
-/// Parse a `{"responses": [...], "modelId": ..., "tokensPerSecond": ...}` script.
+/// Parse a `{"responses": [...], "modelId": ..., "tokensPerSecond": ...,
+/// "repeatLastResponse": ...}` script.
 ///
 /// Entry forms: a plain string, `{"text": "..."}`, or
 /// `{"content": [{"type": "thinking"|"text"|"toolCall", ...}], "stopReason"?}`.
@@ -90,10 +97,15 @@ pub fn parse_faux_script(script: &Value) -> Result<FauxScript, String> {
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err("the faux script responses must be an array".to_string()),
     };
+    let repeat_last_response = object
+        .get("repeatLastResponse")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Ok(FauxScript {
         model,
         tokens_per_second,
         responses,
+        repeat_last_response,
     })
 }
 
@@ -205,5 +217,6 @@ pub fn register_faux_provider_from_script(script: &FauxScript) -> FauxProviderRe
         token_size_max: None,
     });
     registration.set_responses(script.responses.clone());
+    registration.set_repeat_last_response(script.repeat_last_response);
     registration
 }

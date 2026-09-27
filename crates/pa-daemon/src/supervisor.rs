@@ -13,6 +13,7 @@ mod clients;
 mod launch_budget;
 mod options;
 mod routing;
+pub(crate) mod subscribers;
 
 use adoption::AdoptionBoot;
 use launch_budget::{
@@ -112,6 +113,12 @@ pub struct Supervisor {
     /// event — the refcount bump is the whole cost for non-matching
     /// connections.
     pub(crate) events: broadcast::Sender<(ClientRouting, std::sync::Arc<Value>)>,
+    /// Session-event subscribers: the send-time routing index (TS parity —
+    /// `handleWorkerFrame` evaluates the attached set in the same pass that
+    /// writes the socket). Session events enqueue to the attached
+    /// connections' per-connection queues here instead of waking every
+    /// connection's ring arm; broadcast-class events keep the ring above.
+    pub(crate) session_subscribers: subscribers::SessionSubscribers,
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
@@ -220,6 +227,7 @@ impl Supervisor {
             telemetry: std::sync::Mutex::new(None),
             registry: SessionRegistry::new(),
             events,
+            session_subscribers: subscribers::SessionSubscribers::new(),
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -314,12 +322,7 @@ impl Supervisor {
                     "sessionId": binding.session_id,
                     "sessionFile": binding.session_file,
                 });
-                let _ = self.events.send((
-                    ClientRouting::AttachedSession {
-                        active_session_id: previous,
-                    },
-                    std::sync::Arc::new(event),
-                ));
+                self.publish_session_event(&previous, std::sync::Arc::new(event));
             }
         }
     }
@@ -339,24 +342,14 @@ impl Supervisor {
         &self,
         selector: &str,
         resident: &Arc<ResidentWorker>,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<subscribers::ClientSubscriptions>,
     ) -> String {
         let current = resident.worker_id.clone();
         self.log_line(&format!(
             "rebinding stale session id {selector} -> {current}"
         ));
         self.note_daemon_event("session_rebound", None);
-        let was_attached = {
-            let mut attached = attached.lock().unwrap();
-            let was = attached.iter().any(|id| id == selector);
-            if was {
-                attached.retain(|id| id != selector);
-                if !attached.iter().any(|id| id == &current) {
-                    attached.push(current.clone());
-                }
-            }
-            was
-        };
+        let was_attached = attached.rebind(&self.session_subscribers, selector, &current);
         if was_attached {
             let (session_id, session_file) = {
                 let descriptor = resident.descriptor.lock().await;
@@ -365,10 +358,8 @@ impl Supervisor {
                     descriptor.session_file.clone(),
                 )
             };
-            let _ = self.events.send((
-                ClientRouting::AttachedSession {
-                    active_session_id: current.clone(),
-                },
+            self.publish_session_event(
+                &current,
                 std::sync::Arc::new(json!({
                     "type": "session_binding",
                     "previousActiveSessionId": selector,
@@ -376,9 +367,24 @@ impl Supervisor {
                     "sessionId": session_id,
                     "sessionFile": session_file,
                 })),
-            ));
+            );
         }
         current
+    }
+
+    /// Publish one session event to the session's attached connections
+    /// (the send-time delivery pass — TS `handleWorkerFrame`'s fan-out
+    /// evaluates the attached set in the same pass that writes). A full
+    /// queue drops the frame and the stall-cycle transition lands in the
+    /// daemon log (finding 4a visibility).
+    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
+        let outcome = self.session_subscribers.publish(active_session_id, payload);
+        if !outcome.lagged.is_empty() {
+            self.log_line(&format!(
+                "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",
+                outcome.lagged.join(", ")
+            ));
+        }
     }
 
     /// The current resident a superseded selector rebinds to (the
@@ -1703,6 +1709,13 @@ impl Supervisor {
                 ))];
             }
         };
+        // The scan's per-line parse trees folded and freed inside the
+        // blocking task; return their arena high-water to the OS at the
+        // phase boundary instead of letting every grown catalog's scan
+        // peak stay resident for the daemon's lifetime (the #2872
+        // phase-boundary pattern). The per-file cached scan states are
+        // live cache and stay untouched.
+        pa_types::memory_release::trim_freed_heap();
         // The current-cwd scope keeps only the session's own rows in the
         // terminal array (the stream above already skipped the others'
         // frames): the response is the authoritative catalog.

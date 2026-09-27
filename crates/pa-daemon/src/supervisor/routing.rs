@@ -271,7 +271,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: String,
         type_name: String,
         // The connection's raw outbound queue, when the caller is the
@@ -336,7 +336,7 @@ impl Supervisor {
                         // supervisor retires the stale address
                         // itself and answers the detach.
                         if matches!(command, DaemonCommand::Detach { .. }) {
-                            attached.lock().unwrap().retain(|id| id != &selector);
+                            attached.detach(&self.session_subscribers, &selector);
                             return (
                                 vec![response_line(&response_success(
                                     Some(&command_id),
@@ -628,10 +628,7 @@ impl Supervisor {
                     session_id.as_deref(),
                     session_file.as_deref(),
                 );
-                let mut attached = attached.lock().unwrap();
-                if !attached.iter().any(|id| id == &active_id) {
-                    attached.push(active_id);
-                }
+                attached.attach(&self.session_subscribers, &active_id);
             }
             let line = spliced_client_line(&command_id, payload);
             if let Some(raw_out) = raw_out {
@@ -699,10 +696,7 @@ impl Supervisor {
                                 session_id.as_deref(),
                                 session_file.as_deref(),
                             );
-                            let mut attached = attached.lock().unwrap();
-                            if !attached.iter().any(|id| id == &active_id) {
-                                attached.push(active_id.clone());
-                            }
+                            attached.attach(&self.session_subscribers, &active_id);
                             // The client's own capability set, not the
                             // supervisor's worker-facing one, is echoed in
                             // the attach result.
@@ -730,14 +724,13 @@ impl Supervisor {
                     if response.success {
                         self.note_daemon_event("detach", None);
                         // The retire removes the RESIDENT's active id - the
-                        // id the attached vec actually holds (the selector
+                        // id the attached list actually holds (the selector
                         // may be a durable-id alias for the same session).
                         // A rebound detach never reaches this handler; the
                         // rebind seam retires its superseded address itself.
-                        attached
-                            .lock()
-                            .unwrap()
-                            .retain(|id| id != &resident.worker_id);
+                        // The registry entry goes first: delivery stops at
+                        // the detach instant (TS send-time semantics).
+                        attached.detach(&self.session_subscribers, &resident.worker_id);
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
