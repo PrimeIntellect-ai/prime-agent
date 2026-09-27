@@ -13,7 +13,7 @@ use crate::packages::source::SourceScope;
 use crate::packages::{PackageManager, PackageManagerOptions, ResolveExtensionOptions};
 use crate::settings::SettingsManager;
 
-/// Environment mutations (HOME, PI_OFFLINE) are process-wide: tests that
+/// Environment mutations (HOME, `PI_OFFLINE`) are process-wide: tests that
 /// touch them, and tests that read the env-sensitive update flows,
 /// serialize through the shared packages lock.
 use crate::packages::test_support::ENV_MUTEX;

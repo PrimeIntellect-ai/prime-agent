@@ -43,7 +43,7 @@ pub struct AcpSession {
     /// The automatic compaction arm state (the overflow recovery machine
     /// and the in-flight compaction abort slot), TS session-lifetime
     /// state. Shared with the arm implementation
-    /// (compaction_arms.rs).
+    /// (`compaction_arms.rs`).
     pub(super) arms: Arc<CompactionArms>,
     /// Whether the latest turn's usage crossed the goal's token budget
     /// (the usage listener arms it on `BudgetReached`, the settle loop's
@@ -189,7 +189,7 @@ impl AcpSession {
 
 /// Map the engine loop events onto ACP updates for the session lifetime.
 ///
-/// Message-end hooks mirror the TS session's message_end listeners:
+/// Message-end hooks mirror the TS session's `message_end` listeners:
 /// per-message autonomous usage accounting, and goal usage recording with a
 /// `_meta.goal` update whenever the goal state changes mid-turn.
 #[allow(clippy::too_many_arguments)]

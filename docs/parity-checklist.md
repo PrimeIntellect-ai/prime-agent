@@ -408,13 +408,12 @@ Categories: visual/behavior/protocol/timing.
   (same run): normalized prompts are identical; golden test
   `crates/pa-core/tests/golden/system_prompt.rs` pins the assembly against
   the TS `buildSystemPrompt` over the vendored skills.
-- B-7 (protocol, f2/f5) - RESOLVED: TS issues a post-turn status-line request
-  to a small model (`qwen/qwen3-30b-a3b-instruct-2507`); Rust now issues the
-  same request (daemon-session-summarizer port in
-  `crates/pa-daemon/src/status_line.rs`: same trigger, model, system prompt,
-  and max_tokens; recap broadcast as `session_status`). Verified by run
+- B-7 (protocol, f2/f5) - REMOVED 2026-09-25 by operator directive: the
+  Rust port drops the status-line recap (the qwen request, the
+  `session_status` broadcast, and its surfaces) end to end; the TS product
+  keeps `daemon-session-summarizer.ts` per its own decisions. Historical
+  evidence of the pre-removal parity:
   `runs/20260916T221725Z/{ts,rust}/f5_side_questions/statusline-requests.json`.
-  Historical evidence: `runs/20260916T210320Z/extras/ts-statusline-request.json`.
 - B-8 (protocol, f3/f8): FIXED (run `runs/20260917T041145Z/`). Session
   entry sets now match on both sides: `service_tier_change` is emitted in
   the creation prefix (fresh + resume, settings default, engine and daemon

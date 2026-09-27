@@ -39,9 +39,6 @@ const PREFERRED_VISIBLE: usize = 8;
 /// ruling).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The command column's width cap.
-const COMMAND_CAP: usize = 44;
-
 /// The lines the open detail asks for first (the lazy tail: the pane
 /// shows the newest output and loads more of it on upward scroll, so a
 /// finished task's full output never loads up front).
@@ -73,10 +70,14 @@ impl BashActivity {
 
 /// Accept either the daemon response's `activities` array or the array
 /// itself. Rows without a nonempty string id are ignored; ids are never
-/// interpreted as pids.
+/// interpreted as pids. Running shells ride the top (the operator's
+/// running-first ruling, 2026-09-25): the stable sort keeps the
+/// registry's own order within each side, the idle, stopped, and dead
+/// rows follow the live work.
 pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     let rows = data.get("activities").unwrap_or(data);
-    rows.as_array()
+    let mut activities: Vec<BashActivity> = rows
+        .as_array()
         .into_iter()
         .flatten()
         .filter_map(|row| {
@@ -109,7 +110,9 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
             })
         })
-        .collect()
+        .collect();
+    activities.sort_by_key(|activity| !activity.running());
+    activities
 }
 
 /// The pane's interactive mode: the columned list, or a row's detail
@@ -662,7 +665,7 @@ impl BashView {
                 // the command's tail is what a clip drops.
                 shown = command_rows.saturating_sub(1);
             }
-            for line in command_wrapped[..shown].iter() {
+            for line in &command_wrapped[..shown] {
                 let mut row = vec![Span::raw("  ")];
                 row.extend(line.iter().cloned());
                 lines.push(truncate_line(&row, width, ""));
@@ -766,18 +769,29 @@ impl BashView {
         self.detail_region_rows.set(rendered);
         lines
     }
-    /// The list's bottom hint line.
+    /// The list's bottom hint line: the back and cancel keys both close
+    /// from the list while both are bound, and an override that empties
+    /// the back binding drops its key (the hint never advertises a key
+    /// the handler does not take; the cancel fallback is the pane's
+    /// core key).
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
+        let close = match kb.first_key("app.modal.back") {
+            Some(back) => format!(
+                "{}/{}",
+                format_key_text(&back),
+                key("tui.select.cancel", "Esc")
+            ),
+            None => key("tui.select.cancel", "Esc"),
+        };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {} close",
+            "{}/{} move \u{b7} {} open \u{b7} {close} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
             key("tui.select.confirm", "Enter"),
-            key("tui.select.cancel", "Esc"),
         )
     }
 
@@ -837,6 +851,7 @@ struct Columns {
     command: usize,
     duration: usize,
     pid: usize,
+    status: usize,
 }
 
 impl Columns {
@@ -866,20 +881,18 @@ impl Columns {
             .unwrap_or(0);
         // The fixed cells: the indent, the three two-column gaps, and
         // the duration, pid, and status columns.
-        let fixed = 2 + 2 + 2 + 2 + 2 + duration_content + pid + status;
-        let command_content = activities
-            .iter()
-            .map(|activity| str_width(&activity.command))
-            .chain([str_width("Command")])
-            .max()
-            .unwrap_or(0);
-        let command = command_content
-            .min(COMMAND_CAP)
-            .min(width.saturating_sub(fixed));
+        let fixed = 2 + 2 + 2 + 2 + duration_content + pid + status;
+        // The command column carries the full remaining width (the
+        // operator's width-distribution ruling, 2026-09-25): the fixed
+        // fact columns hug their content, the command prose column
+        // absorbs the rest, so the columns together span the terminal —
+        // no dead space past the last column.
+        let command = width.saturating_sub(fixed);
         Self {
             command,
             duration: duration_content,
             pid,
+            status,
         }
     }
 
@@ -892,7 +905,7 @@ impl Columns {
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, plain_cell("PID", self.pid)));
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(ThemeColor::Dim, "Status".to_string()));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Status", self.status)));
         truncate_line(&row, width, "")
     }
 
@@ -940,7 +953,10 @@ impl Columns {
         );
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&activity.status);
-        row.push(theme.fg_span(status_color, format!("{dot} {}", activity.status)));
+        row.push(theme.fg_span(
+            status_color,
+            plain_cell(&format!("{dot} {}", activity.status), self.status),
+        ));
         fill_row(theme, row, selected, width)
     }
 }
@@ -1195,6 +1211,22 @@ mod tests {
         assert_eq!(rows[0].id, "z");
     }
 
+    /// Running shells ride the top (the operator's running-first
+    /// ruling, 2026-09-25): a finished row that arrives first in the
+    /// registry moves below the live work, and the registry's own order
+    /// survives within each side.
+    #[test]
+    fn running_shells_ride_the_top_of_the_list() {
+        let rows = parse_bash_activities(&json!({"activities": [
+            {"id":"done-1","command":"echo one","status":"finished","exitCode":0},
+            {"id":"live-1","command":"sleep 10","status":"running"},
+            {"id":"done-2","command":"echo two","status":"finished","exitCode":1},
+            {"id":"live-2","command":"sleep 20","status":"running"},
+        ]}));
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["live-1", "live-2", "done-1", "done-2"]);
+    }
+
     /// The list is a columned table: a dim header naming the columns, the
     /// rows aligned under it, and one bottom hint line.
     #[test]
@@ -1222,21 +1254,39 @@ mod tests {
             1,
             "the close hint appears once: {text:?}"
         );
-        assert!(text
-            .iter()
-            .any(|row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")));
+        assert!(text.iter().any(|row| row
+            .contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} \u{2190}/Esc close")));
         for line in &frame {
             assert!(crate::width::spans_width(line) <= 70);
         }
     }
 
-    /// The table fills the full width of the TUI (the operator's
-    /// 2026-09-24 ruling) while the columns keep their content-hug
-    /// geometry: the selected row's wash spans the terminal width, the
-    /// plain rows' text stops well short of the edge, and no column
-    /// ever stretches its text to the terminal edge.
+    /// An override that empties the back binding drops its key from the
+    /// list hint (the hint never advertises a key the handler does not
+    /// take); the pane's core keys keep their labels.
     #[test]
-    fn the_table_fills_the_full_width_columns_hug_their_content() {
+    fn the_list_hint_drops_unbound_keys() {
+        let mut cfg = crate::keybindings::KeybindingsConfig::new();
+        cfg.insert("app.modal.back".to_string(), Vec::new());
+        let kb = KeybindingsManager::with_user_bindings(cfg);
+        let view = BashView::new(activities(), 24);
+        let frame = view.render(&theme(), 70, &kb);
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(
+                |row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")
+            ),
+            "the emptied back binding drops the arrow: {text:?}"
+        );
+    }
+
+    /// The columns distribute across the full TUI width (the operator's
+    /// 2026-09-25 ruling): the command column carries the remaining
+    /// width, so the header and every row — selected or plain — span
+    /// the terminal edge to edge; the fixed fact columns (duration,
+    /// pid, status) keep their content-hug geometry inside it.
+    #[test]
+    fn the_columns_distribute_across_the_full_width() {
         let view = BashView::new(activities(), 24);
         let frame = view.render(&theme(), 120, &kb());
         let selected = frame
@@ -1255,15 +1305,20 @@ mod tests {
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("Duration")))
             .expect("the column header");
-        assert!(
-            crate::width::spans_width(header) < 120,
-            "the columns never stretch their text to the edge"
+        assert_eq!(
+            crate::width::spans_width(header),
+            120,
+            "the columns span the terminal edge to edge"
         );
         let plain = frame
             .iter()
             .find(|line| line.iter().any(|span| span.content.contains("echo hi")))
             .expect("the other row");
-        assert!(crate::width::spans_width(plain) < 120);
+        assert_eq!(
+            crate::width::spans_width(plain),
+            120,
+            "every row spans the distributed width"
+        );
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
     }
 
@@ -1287,6 +1342,36 @@ mod tests {
                 "the wash fills {width}"
             );
         }
+    }
+
+    /// The selected row's wash is the theme's shared selection and it
+    /// READS (the operator's 2026-09-26 directive: the shell-runs
+    /// selection was barely visible): the whole-row band is the same wash
+    /// the `›`-marker rows carry, and its rendered luminance clears the
+    /// theme's visibility bar over the editor surface.
+    #[test]
+    fn the_selected_row_wash_reads_off_the_surface() {
+        let theme = theme();
+        let frame = BashView::new(activities(), 24).render(&theme, 90, &kb());
+        let selected = frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains("cargo")))
+            .expect("the selected row");
+        let wash = theme.soft_selection_style().bg.expect("the wash");
+        assert!(
+            selected.iter().all(|span| span.style.bg == Some(wash)),
+            "every span of the selected row carries the shared wash: {selected:?}"
+        );
+        let surface = theme
+            .bg_color(crate::theme::ThemeBg::UserMessageBg)
+            .expect("the editor surface");
+        let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
+        let surface_lum =
+            crate::theme::quantized_luminance(surface).expect("the surface evaluates");
+        assert!(
+            (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+            "the shell-runs wash must read off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        );
     }
 
     /// The status column color-codes the rows (the operator's
@@ -1467,7 +1552,7 @@ mod tests {
             "the output rides under the command"
         );
         assert!(joined.contains("red"));
-        assert!(!joined.contains("\x1b"));
+        assert!(!joined.contains('\x1b'));
         // The cancel action and the scroll hint.
         assert!(text.iter().any(|row| row.contains("Cancel command")));
         assert!(text.iter().any(|row| row.contains(

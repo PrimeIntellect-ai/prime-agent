@@ -377,7 +377,7 @@ impl TurnBoundary {
             .await
     }
 
-    /// TS `_assistantTurnsSinceAutoRefine` (the message_end increments): the
+    /// TS `_assistantTurnsSinceAutoRefine` (the `message_end` increments): the
     /// settled non-error, non-aborted assistant turns appended since the
     /// last boundary call, added to the counter the review prompt's trigger
     /// line carries.
@@ -477,7 +477,10 @@ impl TurnBoundary {
         let turns = self.assistant_turns_since_review;
         let outcome = engine
             .session
-            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns)
+            // The headless print boundary never moves branches (the
+            // session is single-branch for the run), so the branch
+            // invalidation version stays at its initial 0.
+            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns, 0)
             .await;
         // Every review attempt stamps the cooldown and resets the turn
         // counter (TS stamps decline, success, and failure alike).
@@ -976,8 +979,8 @@ mod tests {
     use pa_types::session::FileEntry;
     use serde_json::json;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -1070,6 +1073,7 @@ mod tests {
                 ..Default::default()
             });
         registration.set_responses(parsed.responses);
+        registration.set_repeat_last_response(parsed.repeat_last_response);
         let model = registration.get_model();
         let stream_fn =
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
@@ -1111,6 +1115,7 @@ mod tests {
             cli_extension_sources: Vec::new(),
             extension_tool_allow_list: None,
             prewarm_ipython_kernel: None,
+            on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
         })
@@ -1162,7 +1167,7 @@ mod tests {
         boundary.run_pre_turn(engine, model, None).await?;
         engine
             .session
-            .prompt(&prompt, Default::default())
+            .prompt(&prompt, pa_core::session_engine::PromptOptions::default())
             .await
             .expect("the prompt admits");
         engine.session.agent().wait_for_idle().await;
@@ -1185,7 +1190,7 @@ mod tests {
     ) -> Result<(), String> {
         engine
             .session
-            .prompt(&prompt, Default::default())
+            .prompt(&prompt, pa_core::session_engine::PromptOptions::default())
             .await
             .expect("the prompt admits");
         engine.session.agent().wait_for_idle().await;
@@ -1358,8 +1363,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "recovered reply");
         assert_eq!(last.stop_reason, pa_types::ai::StopReason::Stop);
         assert_eq!(user_texts(&engine).await.len(), 2);
@@ -1592,8 +1596,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "recovered reply");
         // The CLI prompt plus the injected continuation; the overflow
         // retry re-issued without re-adding a user message.
@@ -2215,8 +2218,7 @@ mod tests {
                 pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         assert_eq!(text, "next reply");
     }
 
@@ -2231,7 +2233,7 @@ mod tests {
         let _faux = FAUX_TEST_LOCK.lock().await;
         // Run one: compaction disabled, the crossing turn settles above
         // the headroom (20000-token window, reserve 1) with no compaction.
-        let (engine_a, dir_a, _model_a) = faux_engine_with_settings(
+        let (engine_a, dir_a, model_a) = faux_engine_with_settings(
             json!({
                 "contextWindow": 20000,
                 // A small output budget keeps the combined input+output
@@ -2246,13 +2248,13 @@ mod tests {
         )
         .await;
         let mut boundary = TurnBoundary::new(false);
-        admit(&mut boundary, &engine_a, &_model_a, "seed turn".to_string())
+        admit(&mut boundary, &engine_a, &model_a, "seed turn".to_string())
             .await
             .unwrap();
         admit(
             &mut boundary,
             &engine_a,
-            &_model_a,
+            &model_a,
             format!("crossing turn {}", "x".repeat(100_000)),
         )
         .await

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::engine::{CompactionOutcome, CompactionRequest, SessionEngine};
 use crate::protocol::DaemonOutbound;
@@ -90,6 +90,10 @@ impl CompactionManager {
         }
         let start = compaction_start_event("manual", custom_instructions.as_deref());
         let _ = self.emit_session_event(start);
+        pa_core::session_engine::compaction_trace::trace(
+            "manual.start_emitted",
+            serde_json::Value::Null,
+        );
 
         let engine = Arc::clone(&self.engine);
         let request = CompactionRequest {
@@ -109,8 +113,29 @@ impl CompactionManager {
             let mut core = self.core.lock().unwrap();
             core.compacting = false;
         }
+        // Every settle-waiting flag clear must wake the waits parked on
+        // it: `await_session_work_settled` and the replacement teardown
+        // register their `idle_notify` permit BEFORE checking the flags,
+        // so a clear without a `notify_waiters` parks them forever. A
+        // shutdown arriving mid-compaction (the refused-registration
+        // self-heal's graceful close aborts the live run) would
+        // otherwise never observe the cleared `compacting` and the
+        // worker stays alive as the invisible lease-holder this PR
+        // exists to retire.
+        idle_notify.notify_waiters();
         if let CompactionOutcome::Compacted { run } = &outcome {
+            pa_core::session_engine::compaction_trace::trace(
+                "manual.compact_returned",
+                serde_json::Value::Null,
+            );
+            let persist_started = std::time::Instant::now();
             self.persist_compaction(run, custom_instructions.as_deref());
+            pa_core::session_engine::compaction_trace::trace(
+                "manual.compaction_persisted",
+                serde_json::json!({
+                    "micros": persist_started.elapsed().as_micros(),
+                }),
+            );
             // The post-compaction kernel notice (TS
             // `_syncKernelStateAfterCompaction` runs inside
             // `_performCompaction`, so its `message_start`/`message_end`
@@ -122,6 +147,10 @@ impl CompactionManager {
         }
         let end = compaction_end_event(&outcome, custom_instructions.as_deref());
         let _ = self.emit_session_event(end);
+        pa_core::session_engine::compaction_trace::trace(
+            "manual.end_emitted",
+            serde_json::Value::Null,
+        );
         {
             let mut slot = self.abort.lock().unwrap();
             if slot
@@ -299,7 +328,7 @@ impl CompactionManager {
             active_session_id: self.active_session_id.clone(),
             event,
             meta: Some(meta),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
         drop(core);
@@ -319,6 +348,18 @@ pub(crate) fn compaction_start_event(reason: &str, custom_instructions: Option<&
         event["customInstructions"] = json!(custom_instructions);
     }
     event
+}
+
+/// The `compaction_summary_delta` event payload (the live compaction
+/// block, the operator's "stream the compacted summary" feature): one
+/// frame per summarizer text delta, between the owning
+/// `compaction_start` and the settling `compaction_end`. The frames are
+/// ephemeral — never persisted, never replayed, absent from the roster
+/// triggers — and the `compaction_end` result stays the summary's only
+/// durable source: a client that missed deltas (a late attach, a lost
+/// frame) still resolves the same final summary row.
+pub(crate) fn compaction_summary_delta_event(delta: &str) -> Value {
+    json!({ "type": "compaction_summary_delta", "delta": delta })
 }
 
 /// The client-facing `CompactionResult` of a successful compaction (TS
@@ -559,6 +600,13 @@ mod tests {
         assert_eq!(
             compaction_start_event("manual", None),
             json!({ "type": "compaction_start", "reason": "manual" })
+        );
+        // The live streamed-summary delta (the operator's "stream the
+        // compacted summary" feature): one frame per summarizer text
+        // delta, verbatim, nothing else on the frame.
+        assert_eq!(
+            compaction_summary_delta_event("one chunk of the summary"),
+            json!({ "type": "compaction_summary_delta", "delta": "one chunk of the summary" })
         );
         assert_eq!(
             compaction_end_event(

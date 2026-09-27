@@ -33,6 +33,10 @@ pub(crate) const WHEEL_UP: u8 = 64;
 pub(crate) const WHEEL_DOWN: u8 = 65;
 /// SGR left-button code.
 pub(crate) const BUTTON_LEFT: u8 = 0;
+/// SGR buttonless-motion button code (`?1003` any-event tracking reports
+/// the mouse's position as base code 3 with the motion bit and no
+/// button): the hover affordance's report.
+pub(crate) const BUTTON_NONE: u8 = 3;
 
 const MODIFIER_SHIFT: u32 = 4;
 const MODIFIER_ALT: u32 = 8;
@@ -102,11 +106,13 @@ pub(crate) fn wheel_scroll_delta(event: &MouseEvent) -> Option<isize> {
 /// Lines the transcript scrolls per wheel turn (TS `TUI.WHEEL_SCROLL_LINES`).
 const WHEEL_SCROLL_LINES: isize = 3;
 
-/// A report read back from a crossterm mouse event: wheel turns and
-/// left-button presses, drags, and releases — the report classes the TS
-/// dispatch reasons about. `None` for other buttons and hover motion:
-/// those reports are consumed at the source without a dispatch (the
-/// in-frame selection surface is not ported yet).
+/// A report read back from a crossterm mouse event: wheel turns,
+/// left-button presses, drags, and releases, and the buttonless motion
+/// of `?1003` any-event tracking (crossterm's `Moved`, the hover
+/// affordance's report — operator directive 2026-09-26) — the report
+/// classes the TS dispatch and the hover branch reason about. `None`
+/// for other buttons: those reports are consumed at the source without a
+/// dispatch.
 pub(crate) fn from_crossterm(event: &crossterm::event::MouseEvent) -> Option<MouseEvent> {
     let (button, press, motion) = match event.kind {
         crossterm::event::MouseEventKind::ScrollUp => (WHEEL_UP, true, false),
@@ -120,6 +126,7 @@ pub(crate) fn from_crossterm(event: &crossterm::event::MouseEvent) -> Option<Mou
         crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
             (BUTTON_LEFT, true, true)
         }
+        crossterm::event::MouseEventKind::Moved => (BUTTON_NONE, true, true),
         _ => return None,
     };
     Some(MouseEvent {
@@ -144,6 +151,27 @@ pub(crate) fn from_crossterm(event: &crossterm::event::MouseEvent) -> Option<Mou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production path the headless driver bypasses (the review
+    /// bots' finding): crossterm parses `?1003` buttonless motion as
+    /// `Moved`, and the live terminal path flows through
+    /// `from_crossterm` — the hover affordance's report must map
+    /// through it, not drop.
+    #[test]
+    fn crossterm_moved_maps_to_the_buttonless_motion_report() {
+        let event = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 6,
+            row: 8,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let report = from_crossterm(&event).expect("the hover motion maps through");
+        assert_eq!(report.button, BUTTON_NONE);
+        assert!(report.motion);
+        assert!(report.press);
+        assert_eq!(report.x, 7);
+        assert_eq!(report.y, 9);
+    }
 
     #[test]
     fn decodes_a_wheel_up_press() {

@@ -134,9 +134,21 @@ impl EffortPicker {
         }
     }
 
-    /// The picker's rendered frame (the inline-picker's bordered list).
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        self.selector.render(theme, width)
+    /// The picker's rendered frame (the shared menu-panel grammar).
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        self.selector.render(theme, width, kb)
+    }
+
+    /// The level rows the picker's list window renders (the click
+    /// surface's item-row span).
+    pub fn visible_window(&self) -> (usize, usize) {
+        self.selector.visible_window()
+    }
+
+    /// Move the selection to one filtered row (the click grammar's row
+    /// select — the arrow keys' exact movement, no apply).
+    pub fn select_position(&mut self, position: usize) {
+        self.selector.select_position(position);
     }
 }
 
@@ -217,7 +229,7 @@ mod tests {
     #[test]
     fn the_frame_lists_levels_and_their_descriptions() {
         let picker = EffortPicker::new(&levels(), None);
-        let frame = picker.render(&theme(), 60);
+        let frame = picker.render(&theme(), 60, &kb());
         let text: Vec<String> = frame
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())

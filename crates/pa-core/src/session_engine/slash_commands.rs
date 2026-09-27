@@ -42,6 +42,11 @@ pub struct RefineCommandOptions {
 }
 
 /// Parse `/refine [--global] [instructions]` and `/refine rollback <id>`.
+///
+/// # Errors
+///
+/// Returns a usage-error string when `rollback` is given without a
+/// refinement id.
 pub fn parse_refine_command_options(args: &str) -> Result<RefineCommandOptions, String> {
     let mut rest = args.trim();
     let mut global = false;

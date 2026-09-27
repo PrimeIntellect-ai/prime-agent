@@ -368,8 +368,7 @@ impl PtyReader {
         while quiet < quiet_polls {
             let mut buffer = [0u8; 8192];
             match self.file.read(&mut buffer) {
-                Ok(0) => quiet += 1,
-                Err(_) => quiet += 1,
+                Ok(0) | Err(_) => quiet += 1,
                 Ok(n) => {
                     self.output.extend_from_slice(&buffer[..n]);
                     quiet = 0;
@@ -461,7 +460,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         script_path: None,
         model_selection: ModelSelection::default(),
         model_catalog: Vec::new(),
-        model_configured_providers: Default::default(),
+        model_configured_providers: std::collections::HashSet::default(),
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
@@ -483,8 +482,9 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
-        prompt_stash: Default::default(),
+        prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
+        restore_dock_focus: false,
         client_settings: None,
     }
 }
@@ -519,9 +519,8 @@ impl MockSupervisor {
     }
 
     fn serve(self) {
-        let (stream, _) = match self.listener.accept() {
-            Ok(accept) => accept,
-            Err(_) => return,
+        let Ok((stream, _)) = self.listener.accept() else {
+            return;
         };
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;

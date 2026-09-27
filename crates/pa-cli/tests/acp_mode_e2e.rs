@@ -18,7 +18,7 @@ struct AcpChild {
     lines: Receiver<String>,
     next_id: u64,
     /// Held (never read) so the child's cwd directory outlives the process:
-    /// dropping the tempdir deletes it and the child's current_dir fails.
+    /// dropping the tempdir deletes it and the child's `current_dir` fails.
     _home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
 }
@@ -120,9 +120,10 @@ impl AcpChild {
         let mut notifications = Vec::new();
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
-            if timeout_left.is_zero() {
-                panic!("timed out waiting for response {id}");
-            }
+            assert!(
+                !timeout_left.is_zero(),
+                "timed out waiting for response {id}"
+            );
             match self.lines.recv_timeout(timeout_left) {
                 Ok(line) => {
                     let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
@@ -1346,7 +1347,7 @@ fn compaction_metas(updates: &[Value]) -> Vec<Value> {
 /// threshold arm, binary level).
 ///
 /// Two turns over a 500-token combined ceiling (the f14 battery shape:
-/// the window minus the faux harness model's 4_096 per-request output
+/// the window minus the faux harness model's `4_096` per-request output
 /// budget and the reserve): the single-turn compaction skips (nothing
 /// before the turn to summarize — the skip publishes the empty payload,
 /// proving the arm ran), then the second turn's boundary compaction

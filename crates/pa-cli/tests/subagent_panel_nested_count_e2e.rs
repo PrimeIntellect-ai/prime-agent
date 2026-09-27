@@ -74,7 +74,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// Minimal JSONL supervisor client (roster_subscribe / list).
+/// Minimal JSONL supervisor client (`roster_subscribe` / list).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,

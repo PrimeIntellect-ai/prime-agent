@@ -40,6 +40,12 @@ fn assert_frame_length(name: &str, value: usize, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// Encode one length-prefixed private frame.
+///
+/// # Errors
+///
+/// Returns an error if serializing `header` fails, if the encoded header is
+/// empty, or if the header or payload length exceeds `limits`.
 pub fn encode_private_frame(
     header: &serde_json::Value,
     payload: &[u8],
@@ -78,6 +84,14 @@ impl PrivateFrameDecoder {
         self.buffer.len()
     }
 
+    /// Feed one socket chunk in; returns every frame the chunk completed.
+    /// Incomplete trailing bytes stay buffered for the next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a buffered frame's length prefix exceeds
+    /// `limits`, its header length is zero, or its header bytes are not a
+    /// JSON object.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<PrivateFrame>> {
         self.buffer.extend_from_slice(chunk);
         let mut frames = Vec::new();
@@ -118,6 +132,11 @@ impl PrivateFrameDecoder {
     }
 
     /// Errors when the channel ended mid-frame, like `PrivateFrameDecoder.finish`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when buffered bytes remain, i.e. the channel ended
+    /// mid-frame.
     pub fn finish(&self) -> Result<()> {
         if !self.buffer.is_empty() {
             return Err(anyhow!(
@@ -130,6 +149,11 @@ impl PrivateFrameDecoder {
 }
 
 /// Write one frame to a byte sink.
+///
+/// # Errors
+///
+/// Returns an error if encoding the frame fails or if writing or flushing
+/// it on `writer` fails.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     header: &serde_json::Value,
@@ -166,6 +190,14 @@ impl<R: AsyncRead + Unpin> PrivateFrameReader<R> {
         self.decoder.buffered_bytes()
     }
 
+    /// Read the next frame; `Ok(None)` means clean EOF at a frame boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading from the underlying stream fails, the
+    /// stream ends mid-frame, or a received frame is malformed (length
+    /// prefix over `limits`, zero header length, or a header that is not a
+    /// JSON object).
     pub async fn read_frame(&mut self) -> Result<Option<PrivateFrame>> {
         let mut chunk = [0u8; 8192];
         loop {

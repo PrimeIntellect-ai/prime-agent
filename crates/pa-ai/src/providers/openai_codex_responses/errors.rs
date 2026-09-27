@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::types::{AssistantMessage, Usage};
 use crate::utils::stream_failure::parse_retry_after_ms;
@@ -314,7 +314,7 @@ fn code_regex_match(code: &str) -> bool {
 
 /// Port of `parseErrorResponse`: map an HTTP error response to a
 /// [`CodexApiError`], honoring usage-limit friendly messages and the
-/// max(Retry-After header, resets_at) rule.
+/// max(Retry-After header, `resets_at`) rule.
 pub async fn parse_error_response(response: &mut HttpResponse) -> CodexApiError {
     let status = response.status;
     let mut message;
@@ -487,7 +487,7 @@ fn normalize_codex_status(status: &Value) -> Option<&'static str> {
     }
 }
 
-/// Multipliers per https://developers.openai.com/api/docs/pricing
+/// Multipliers per <https://developers.openai.com/api/docs/pricing>
 /// (retrieved 2026-08-21). Takes the wire-tier string to match the shared
 /// Responses hook signature.
 pub fn get_codex_service_tier_cost_multiplier(model_id: &str, service_tier: Option<&str>) -> f64 {
@@ -560,7 +560,7 @@ pub fn append_transport_failure_diagnostic(
             code: error.close_code().map(|code| {
                 crate::types::DiagnosticCode::Num(crate::types::JsNumber::from(u64::from(code)))
             }),
-            rest: Default::default(),
+            rest: Map::default(),
         }),
         Some(transport_failure_details(
             configured_transport,
@@ -845,7 +845,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         append_transport_failure_diagnostic(&mut output, &close, "auto", false, 23_377);
         append_transport_failure_diagnostic(&mut output, &runtime, "auto", true, 23_361);
@@ -914,7 +914,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: Some(error.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         crate::utils_inner::stream_failure::record_stream_failure(
             ("openai-codex", "gpt-5-codex", API_OPENAI_CODEX_RESPONSES),

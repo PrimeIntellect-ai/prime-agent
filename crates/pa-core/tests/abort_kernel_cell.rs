@@ -24,7 +24,8 @@ fn kernel_python() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.exists(),
-            "PA_CORE_KERNEL_PYTHON {explicit:?} not found"
+            "PA_CORE_KERNEL_PYTHON {} not found",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -35,7 +36,10 @@ fn kernel_python() -> Option<PathBuf> {
     if candidate.exists() {
         return Some(candidate);
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    eprintln!(
+        "kernel python {} not found; skipping live kernel test",
+        candidate.display()
+    );
     None
 }
 
@@ -46,7 +50,8 @@ fn release_dir() -> Option<PathBuf> {
         let explicit = PathBuf::from(explicit);
         assert!(
             explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {explicit:?} has no prime-agent-runtime"
+            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -55,7 +60,10 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
@@ -196,6 +204,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         extension_tool_allow_list: None,
         mcp_manager: None,
         prewarm_ipython_kernel: None,
+        on_background_work_settled: None,
         queued_goal_context_purge: None,
         queued_steering_probe: None,
     })

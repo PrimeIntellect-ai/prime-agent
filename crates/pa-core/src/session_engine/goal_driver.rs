@@ -69,7 +69,7 @@ impl GoalDriver {
         Self {
             state: empty_goal_state(),
             accounting_started_at: None,
-            accounted_messages: Default::default(),
+            accounted_messages: std::collections::HashSet::default(),
             owed_continuation_for_rlm_work: false,
         }
     }
@@ -152,6 +152,11 @@ impl GoalDriver {
     }
 
     /// Start a new goal (validates objective and budget).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the objective or budget fails validation, or
+    /// when the new goal state cannot be persisted.
     pub fn start(
         &mut self,
         session: &mut SessionManager,
@@ -192,6 +197,10 @@ impl GoalDriver {
     }
 
     /// Clear the goal entirely (empty state).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cleared goal state cannot be persisted.
     pub fn clear(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         self.set_state(session, empty_goal_state())?;
         self.accounting_started_at = None;
@@ -235,6 +244,10 @@ impl GoalDriver {
 
     /// Account one assistant turn's usage. Double-counts are suppressed by
     /// message id. Returns whether the budget was reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the accounted goal state cannot be persisted.
     pub fn record_assistant_usage(
         &mut self,
         session: &mut SessionManager,
@@ -284,6 +297,10 @@ impl GoalDriver {
     }
 
     /// Pause the goal (no-op when not active).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paused goal state cannot be persisted.
     pub fn pause(&mut self, session: &mut SessionManager, reason: &str) -> anyhow::Result<()> {
         if self.state.status != GoalStatus::Active {
             return Ok(());
@@ -309,6 +326,11 @@ impl GoalDriver {
 
     /// Resume a paused/budget-limited goal. Returns the continuation context
     /// message when the goal becomes active again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resumed goal state or its continuation
+    /// message cannot be persisted.
     pub fn resume(
         &mut self,
         session: &mut SessionManager,
@@ -352,6 +374,10 @@ impl GoalDriver {
     }
 
     /// Complete the goal (host `goal.complete()`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the completed goal state cannot be persisted.
     pub fn complete(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         if self.state.objective.is_none() || self.state.status == GoalStatus::Idle {
             return Ok(());
@@ -370,6 +396,10 @@ impl GoalDriver {
     }
 
     /// Terminal-assistant handling: `aborted` keeps the goal, `error` fails it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal goal state cannot be persisted.
     pub fn finish_for_terminal_message(
         &mut self,
         session: &mut SessionManager,
@@ -404,6 +434,11 @@ impl GoalDriver {
     /// and `_maybeResumeGoalContinuationAfterRlmWork` both run the mint
     /// through `_setGoalState`, which appends the `thread_goal_state`
     /// entry before the continuation turn is admitted).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the continuation-consumed goal state or its
+    /// context message cannot be persisted or built.
     pub fn next_continuation_message(
         &mut self,
         session: &mut SessionManager,
@@ -443,6 +478,11 @@ impl GoalDriver {
     /// mints; a failed mint restores the deferral so the boundary
     /// retries. `None` when no continuation was owed or the goal
     /// cannot mint.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mint error of the owed continuation (the deferral is
+    /// restored for the next boundary).
     pub fn take_owed_continuation(
         &mut self,
         session: &mut SessionManager,
@@ -468,6 +508,11 @@ impl GoalDriver {
     /// restores the goal snapshot when new session input arrived during the
     /// mint; the threshold-cancel rollback decrements the same way): the
     /// next boundary re-mints instead of double-counting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rolled-back goal state cannot be
+    /// persisted.
     pub fn rollback_continuation_mint(
         &mut self,
         session: &mut SessionManager,
@@ -509,6 +554,7 @@ mod tests {
     use crate::goals::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
     use crate::session::manager::SessionManager;
     use pa_types::ai::UserContent;
+    use std::fmt::Write as _;
 
     fn persisted_session() -> SessionManager {
         let dir = tempfile::TempDir::new().unwrap();
@@ -547,7 +593,10 @@ mod tests {
             serde_json::json!({"type":"compaction","id":"compact","parentId":"kept","summary":"summary","firstKeptEntryId":"kept","tokensBefore":1000}),
             serde_json::json!({"type":"custom","id":"invalid","parentId":"compact","customType":GOAL_STATE_CUSTOM_TYPE,"data":{"active":true}}),
         ];
-        let original: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let original: String = rows.iter().fold(String::new(), |mut output, row| {
+            let _ = writeln!(output, "{row}");
+            output
+        });
         std::fs::write(&path, &original).unwrap();
         let mut session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
@@ -898,7 +947,7 @@ mod tests {
                 pa_types::ai::UserMessage {
                     content: UserContent::Text("hi".to_string()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .unwrap();
@@ -1092,7 +1141,7 @@ mod tests {
                 pa_types::ai::UserMessage {
                     content: UserContent::Text("no goal here".to_string()),
                     timestamp: 0,
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             ))
             .unwrap();

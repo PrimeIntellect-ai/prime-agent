@@ -216,9 +216,9 @@ impl Inner {
             // execution timeout.
             let deadline = Instant::now() + Duration::from_millis(SNAPSHOT_EXECUTION_TIMEOUT_MS);
             let drained = loop {
-                if let Ok(_guard) = self.execution_queue.try_lock() {
+                if let Ok(guard) = self.execution_queue.try_lock() {
                     // Release immediately: the snapshot's own request takes the slot next.
-                    drop(_guard);
+                    drop(guard);
                     break true;
                 }
                 if Instant::now() >= deadline {

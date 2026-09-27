@@ -183,7 +183,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: "working".to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "faux".to_string(),
             provider: "faux".to_string(),
@@ -196,7 +196,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         }
     }
 
@@ -320,7 +320,7 @@ mod tests {
         match after_turn(&driver, &mut state).await {
             AutonomousFollowUp::Stop { reason, status } => {
                 assert_eq!(reason, AutonomousStopReason::GatePassed);
-                assert!(status.gate_attempts["make check"] == 0);
+                assert_eq!(status.gate_attempts["make check"], 0);
             }
             other => panic!("expected stop, got {other:?}"),
         }

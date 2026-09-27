@@ -69,9 +69,8 @@ pub enum GhAuthStatus {
 /// a non-zero exit means not logged in, a spawn failure means not
 /// installed. The probe never opens a window (hidden spawn).
 pub fn probe_gh_auth() -> GhAuthStatus {
-    let output = match gh_probe_command().args(["auth", "status"]).output() {
-        Ok(output) => output,
-        Err(_) => return GhAuthStatus::NotInstalled,
+    let Ok(output) = gh_probe_command().args(["auth", "status"]).output() else {
+        return GhAuthStatus::NotInstalled;
     };
     if output.status.success() {
         GhAuthStatus::Ok
@@ -93,6 +92,12 @@ pub struct GistOutcome {
 /// result (TS: stdout is the gist URL; stderr is the failure message).
 /// Both pipes drain concurrently (`wait_with_output`), so a chatty `gh`
 /// cannot deadlock the wait.
+///
+/// # Errors
+///
+/// Returns `Err` with the wait failure, the trimmed `gh` stderr (or
+/// `Unknown error` when it printed none) on a non-zero exit, or a parse
+/// failure when the gist id cannot be extracted from stdout.
 pub async fn gist_outcome(child: tokio::process::Child) -> Result<GistOutcome, String> {
     let output = child
         .wait_with_output()
@@ -120,6 +125,11 @@ pub async fn gist_outcome(child: tokio::process::Child) -> Result<GistOutcome, S
 /// Spawn `gh gist create --public=false <file>` (TS `spawnHidden`): output
 /// is piped, no terminal window on Windows. The child is killed when
 /// dropped mid-wait, so aborting the upload task terminates `gh`.
+///
+/// # Errors
+///
+/// Returns `Err` when the OS cannot spawn the `gh` process (not installed,
+/// not executable, or another spawn error).
 pub fn spawn_gist_create(file: &Path) -> std::io::Result<tokio::process::Child> {
     gh_command()
         .args(["gist", "create", "--public=false"])

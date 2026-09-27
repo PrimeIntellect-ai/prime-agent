@@ -450,11 +450,13 @@ mod tests {
             access: "a".to_string(),
             refresh: Some("r".to_string()),
             expires: 123,
+            account_id: None,
             endpoint: Some("https://fixture.example/mcp".to_string()),
             token_endpoint: Some("https://fixture.example/token".to_string()),
             client_id: Some("fixture-client".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let value = serde_json::to_value(&credential).unwrap();
         assert_eq!(value["type"], "oauth");

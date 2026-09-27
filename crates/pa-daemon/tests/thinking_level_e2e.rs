@@ -8,6 +8,7 @@
 //! provider 400 for the unsupported effort.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -107,7 +108,7 @@ fn serve(mut stream: TcpStream, bodies: Arc<Mutex<Vec<Value>>>) -> std::io::Resu
         chunk(json!({"role": "assistant", "content": answer}), None),
         chunk(json!({}), Some("stop")),
     ] {
-        payload.push_str(&format!("data: {data}\n\n"));
+        write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -246,7 +247,7 @@ impl Client {
                     last_line = Instant::now();
                 }
                 Err(_) => {
-                    if Instant::now() - last_line >= quiet_ms {
+                    if last_line.elapsed() >= quiet_ms {
                         return;
                     }
                 }
@@ -340,7 +341,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
 }
 
 impl Harness {
-    /// Run one prompt turn and return the prompt_and_wait response.
+    /// Run one prompt turn and return the `prompt_and_wait` response.
     fn prompt(&mut self, id: &str, message: &str) -> Value {
         self.client.send_command(
             id,
@@ -379,7 +380,7 @@ impl Harness {
             .to_string()
     }
 
-    /// The persisted model_change pair.
+    /// The persisted `model_change` pair.
     fn persisted_model_change(&self) -> (String, String) {
         let entries = self.session_entries();
         let change = entries

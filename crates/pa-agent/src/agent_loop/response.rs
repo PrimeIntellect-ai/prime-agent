@@ -137,6 +137,12 @@ async fn stream_assistant_response_inner(
         service_tier: config.service_tier,
         api_key: resolved_api_key,
         signal: signal.cloned().unwrap_or_default(),
+        // The TS loop config extends `SimpleStreamOptions`, so its own
+        // `onPayload`/`onResponse` ride every stream call; the Rust loop
+        // config carries no hooks yet, and the request-timing seam wrapper
+        // composes them per request at the `StreamFn` boundary instead.
+        on_payload: None,
+        on_response: None,
     };
 
     let mut response = race_with_abort(

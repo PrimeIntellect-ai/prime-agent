@@ -10,7 +10,7 @@ use crate::view::AgentView;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self};
-use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui::Terminal;
 use std::io::stdout;
 use std::time::Duration;
 
@@ -52,6 +52,13 @@ pub fn load_theme(name: &str) -> Theme {
 /// Every error return funnels through the one exit restore: an early `?`
 /// after the mount (a stream read, a draw failure) must not hand the shell
 /// a terminal still in TUI state.
+///
+/// # Errors
+///
+/// Returns `Err` when the surface fails to mount or the replay loop fails
+/// (raw-mode enable, the alternate-screen enter, a stream read, or a
+/// draw); the exit restore runs first, so the shell never keeps a
+/// TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
     options: AppOptions,
@@ -114,11 +121,12 @@ fn run_app_surface(
         let (_w, h) = crossterm::terminal::size()?;
         view.set_terminal_rows(h);
         draw(&mut terminal, &mut view)?;
-        if options.panic_after_frame {
-            // The verifier's panic driver: the unwind must cross the live
-            // surface's unwind guard, not the already-restored exit.
-            panic!("pa-tui-replay: --panic-exit reached");
-        }
+        // The verifier's panic driver: the unwind must cross the live
+        // surface's unwind guard, not the already-restored exit.
+        assert!(
+            !options.panic_after_frame,
+            "pa-tui-replay: --panic-exit reached"
+        );
 
         // Input.
         let timeout = Duration::from_millis(if stream_ended { 50 } else { 5 });
@@ -246,6 +254,21 @@ pub(crate) fn draw(
     terminal: &mut Terminal<crate::hyperlinks::LinkBackend>,
     view: &mut AgentView,
 ) -> Result<()> {
+    // The interactive surface's mount sequences (the alt-screen
+    // adopt/enter for a fresh process, the queued clear, the cursor
+    // hide) ride THIS draw's single flush: the first paint is the mount
+    // (a direct open holds the shell or the previous surface until its
+    // first frame is ready — TS attaches before the chat mounts), and a
+    // mid-gap flush can never carry the clear out early over it.
+    if crate::altscreen::take_first_draw_mount() {
+        let mut out = std::io::stdout();
+        crate::altscreen::enter_queued(&mut out)?;
+        crossterm::queue!(
+            out,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::Hide
+        )?;
+    }
     let area = terminal.size()?;
     let frame_area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
     let width = area.width as usize;
@@ -353,6 +376,3 @@ pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<S
         })
         .collect()
 }
-
-#[allow(dead_code)]
-fn unused(_: TerminalOptions, _: Viewport) {}

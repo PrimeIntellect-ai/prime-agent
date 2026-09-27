@@ -105,6 +105,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use serde_json::Map;
 
     /// A fake worker: `acks[i]` decides whether the shutdown request
     /// succeeds; `exits[i]` whether the process exits in budget. The
@@ -178,14 +179,14 @@ mod tests {
             create_command: pa_types::daemon::DurableDaemonCreateCommand {
                 session_path: None,
                 no_session: None,
-                rest: Default::default(),
+                rest: Map::default(),
             },
             consecutive_failures: 0,
             stop_requested_at: None,
             archive_on_stop: None,
             last_failure_at: None,
             last_error: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         crate::registry::ResidentWorker::new(
             name.to_string(),

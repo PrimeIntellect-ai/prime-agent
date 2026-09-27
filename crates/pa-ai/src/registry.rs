@@ -41,6 +41,11 @@ fn registry() -> &'static RwLock<HashMap<String, RegisteredProvider>> {
 }
 
 /// Register (or replace) the provider for `provider.api()`.
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str>) {
     let mut registry = registry().write().unwrap();
     registry.insert(
@@ -53,6 +58,11 @@ pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str
 }
 
 /// Look up the provider for an api identifier.
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn get_api_provider(api: &str) -> Option<Arc<dyn Provider>> {
     registry()
         .read()
@@ -62,6 +72,11 @@ pub fn get_api_provider(api: &str) -> Option<Arc<dyn Provider>> {
 }
 
 /// All registered providers.
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn get_api_providers() -> Vec<Arc<dyn Provider>> {
     registry()
         .read()
@@ -72,18 +87,33 @@ pub fn get_api_providers() -> Vec<Arc<dyn Provider>> {
 }
 
 /// Unregister providers installed with the given source id (extension teardown).
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn unregister_api_providers(source_id: &str) {
     let mut registry = registry().write().unwrap();
     registry.retain(|_, entry| entry.source_id.as_deref() != Some(source_id));
 }
 
 /// Remove all registered providers.
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn clear_api_providers() {
     registry().write().unwrap().clear();
 }
 
 /// Register the built-in providers (explicit Rust equivalent of the TS
 /// side-effect import in `stream.ts` / `register-builtins.ts`).
+///
+/// # Panics
+///
+/// Panics if the registry `RwLock` is poisoned (a thread panicked while
+/// holding it).
 pub fn register_builtin_api_providers() {
     let mut registry = registry().write().unwrap();
     // Providers are registered here as they are ported; each entry mirrors the

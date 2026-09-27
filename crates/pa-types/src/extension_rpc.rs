@@ -142,7 +142,7 @@ pub enum SidecarMessage {
         #[serde(default)]
         params: Value,
     },
-    /// Fire-and-forget from the sidecar (extension_error, registration).
+    /// Fire-and-forget from the sidecar (`extension_error`, registration).
     Notification {
         method: String,
         #[serde(default)]
@@ -203,7 +203,7 @@ pub struct ExtensionRegistration {
     pub providers: Vec<ProviderRegistration>,
 }
 
-/// Extension tool definition (ToolDefinition minus functions; `parameters` is
+/// Extension tool definition (`ToolDefinition` minus functions; `parameters` is
 /// the TypeBox/JSON Schema, passed through as the wire tool schema).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

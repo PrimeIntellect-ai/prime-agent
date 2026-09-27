@@ -3,6 +3,7 @@
 //! `releases/<version>-<platform>-<sha256>/`, and write the installer
 //! metadata (`install.rs` validates it on every later read).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,12 @@ pub struct DownloadBudget {
 /// Stream `url` to `destination` verifying the archive digest while bytes
 /// arrive (a digest mismatch is caught without a second pass). Retries the
 /// whole download while the budget remains.
+///
+/// # Errors
+///
+/// Returns the last attempt's error when every download attempt fails;
+/// when the wall-clock budget expires before an attempt runs, the
+/// budget-expiry error replaces it.
 pub async fn download_archive(
     url: &str,
     expected_sha256: &str,
@@ -89,7 +96,10 @@ async fn download_once(
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 /// The staging scratch prefix under `releases/`: a staging directory is
@@ -121,6 +131,13 @@ fn sweep_staging(releases: &Path) {
 /// kill once the read bound is hit), and stdout is read to a bounded
 /// length, so a payload binary that hangs or streams cannot exhaust the
 /// updater.
+///
+/// # Errors
+///
+/// Returns an error when the probe child cannot be spawned, exposes no
+/// stdout pipe, times out or overruns its bounds, or exits without
+/// success. A successful probe returns the trimmed stdout verbatim:
+/// empty output and non-version text are `Ok`, not errors.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const MAX_VERSION_OUTPUT: usize = 512;
@@ -185,6 +202,13 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
 /// silently reactivated. Returns the release directory (spec §7: the
 /// candidate is created at `Downloading`/`Staged` and never removed by the
 /// update flow).
+///
+/// # Errors
+///
+/// Returns an error when the existing release fails re-validation, the
+/// staging scratch cannot be created, the archive's digest no longer
+/// matches after extraction, the unpack fails, or the staged tree cannot
+/// be renamed or fsynced into place.
 pub fn stage_archive(
     archive: &Path,
     archive_sha256: &str,
@@ -245,6 +269,13 @@ fn file_digest(path: &Path) -> Result<String> {
 /// place: a manual install can never write over a running binary (the
 /// in-place `cp` class of corrupted installs) and a crash can never leave
 /// a partial release under its final name.
+///
+/// # Errors
+///
+/// Returns an error when the payload path cannot be resolved or is not a
+/// directory or regular file, when the staging scratch cannot be created,
+/// when the payload's `--version` probe fails, when the copy fails its
+/// digest check, or when the staged tree cannot be renamed into place.
 pub async fn stage_local_payload(
     payload: &Path,
     root: &Path,
@@ -820,5 +851,102 @@ mod tests {
             release_tree_digest(&first).unwrap(),
             release_tree_digest(&second).unwrap()
         );
+    }
+
+    /// Serve one archive download from a fake local release endpoint and
+    /// return the endpoint's base URL plus a channel carrying the request
+    /// head. No fixed ports: the listener binds `127.0.0.1:0`.
+    async fn fake_release_endpoint(
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 4096];
+            let mut read = 0usize;
+            let head = loop {
+                let Ok(n) = socket.read(&mut buffer[read..]).await else {
+                    return;
+                };
+                read += n;
+                let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                if head.contains("\r\n\r\n") {
+                    break head;
+                }
+            };
+            let head_bytes = [
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+                &body,
+            ]
+            .concat();
+            let _ = socket.write_all(&head_bytes).await;
+            let _ = head_tx.send(head);
+        });
+        (format!("http://127.0.0.1:{port}"), head_rx)
+    }
+
+    #[tokio::test]
+    async fn downloads_verify_the_archive_digest_and_refuse_a_mismatch() {
+        let payload: Vec<u8> = b"release archive bytes".to_vec();
+        let sha = sha256_hex(&payload);
+        let budget = DownloadBudget {
+            total_ms: 10_000,
+            attempts: 1,
+        };
+        let destination_name = "update.tar.gz";
+        // The verified download lands the exact payload bytes at the
+        // destination and identifies the release updater.
+        {
+            let (base_url, head_rx) = fake_release_endpoint(payload.clone()).await;
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join(destination_name);
+            download_archive(
+                &format!("{base_url}/prime-agent-1.2.3.tar.gz"),
+                &sha,
+                &destination,
+                budget,
+                "prime-agent/1.2.2 (test)",
+            )
+            .await
+            .expect("the digest matches, the download completes");
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                payload,
+                "the staged archive is exactly the endpoint's payload"
+            );
+            let head = head_rx.await.expect("the head was captured").to_lowercase();
+            assert!(
+                head.contains("user-agent: prime-agent/1.2.2 (test)"),
+                "the request identifies the release updater: {head}"
+            );
+        }
+        // A digest mismatch refuses the payload: nothing lands, and no
+        // partial artifact stays behind.
+        {
+            let (base_url, _) = fake_release_endpoint(payload).await;
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join(destination_name);
+            let error = download_archive(
+                &format!("{base_url}/prime-agent-1.2.3.tar.gz"),
+                &format!("{sha}ff"),
+                &destination,
+                budget,
+                "prime-agent/1.2.2 (test)",
+            )
+            .await;
+            assert!(error.is_err(), "a wrong digest is never installed");
+            assert!(!destination.exists(), "a refused download lands nothing");
+        }
     }
 }

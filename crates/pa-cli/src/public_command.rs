@@ -84,7 +84,7 @@ fn handled_with_exit(exit_code: i32) -> PublicCommandResult {
     }
 }
 
-/// A handled invocation whose fail() branch already printed an error: the
+/// A handled invocation whose `fail()` branch already printed an error: the
 /// exit code is 1, matching `process.exitCode = 1` in the TS `fail` helper.
 fn handled_failed() -> PublicCommandResult {
     PublicCommandResult {
@@ -153,6 +153,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
             exit_code: None,
         },
         "list" => run_internal_agent_command("list", &rest),
+        "sessions" => run_internal_agent_command("sessions", &rest),
         "attach" => run_attach(&rest),
         "stop" => {
             if !require_operand_count(&rest, 1, Some(1), "stop") {
@@ -170,6 +171,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "schedule" => run_nested_agent_command("schedule", "cron", &rest),
         "status" => run_status(&rest),
         "doctor" => run_doctor(&rest),
+        "incident" => run_incident_command(&rest),
         "shutdown" => run_shutdown(&rest),
         "package" => run_package(&rest),
         "mcp" => run_mcp(&rest),
@@ -208,7 +210,7 @@ fn print_requested_help(path: &[String]) -> PublicCommandResult {
     let suggestion = find_command_suggestion(&path[path.len() - 1], &candidates);
     let mut message = format!("Unknown command: {}", path.join(" "));
     let hint = suggestion.map(|suggestion| {
-        let mut full = parent.to_vec();
+        let mut full = parent.clone();
         full.push(suggestion);
         format!("Did you mean \"{APP_NAME} help {}\"?", full.join(" "))
     });
@@ -329,21 +331,12 @@ fn validate_schedule_args(args: &[String]) -> bool {
     true
 }
 
-/// The parsed `prime-agent update` invocation.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct UpdateInvocation {
-    force: bool,
-    rollback: bool,
-    channel: Option<pa_core::update::version::UpdateChannel>,
-    archive: Option<std::path::PathBuf>,
-    source: Option<String>,
-}
-
-/// Parse `update`'s options: the TS booleans plus the direct-install pair
-/// (`--archive <path>` with the required `--source <https-url>`). Returns
-/// `None` on a usage failure (already reported).
-fn parse_update_options(args: &[String]) -> Option<UpdateInvocation> {
-    let mut invocation = UpdateInvocation::default();
+/// Parse `update`'s options into the shared [`crate::self_update::SelfUpdateOptions`]:
+/// the TS booleans plus the direct-install pair (`--archive <path>` with the
+/// required `--source <https-url>`). Returns `None` on a usage failure
+/// (already reported).
+fn parse_update_options(args: &[String]) -> Option<crate::self_update::SelfUpdateOptions> {
+    let mut invocation = crate::self_update::SelfUpdateOptions::default();
     let mut index = 0;
     let mut channel: Option<&str> = None;
     while index < args.len() {
@@ -483,6 +476,39 @@ fn run_doctor(args: &[String]) -> PublicCommandResult {
         daemon_discovery::run_ps(
             options.contains("--json"),
             &daemon_discovery::current_state_root(),
+        );
+    }
+    handled()
+}
+
+/// `prime-agent incident` (TS `runIncidentCommand`): parse the options,
+/// resolve the window once, and print the timeline.
+fn run_incident_command(args: &[String]) -> PublicCommandResult {
+    let options = match crate::incident::parse_incident_options(args) {
+        Ok(options) => options,
+        Err(error) => {
+            return fail(
+                error.to_string(),
+                Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
+            )
+        }
+    };
+    // Resolve once: re-resolving later can cross UTC midnight and render a
+    // different window than the one that was validated.
+    let now_ms = crate::util_time::now_ms() as i64;
+    let window = match crate::incident::resolve_incident_window(&options, now_ms) {
+        Ok(window) => window,
+        Err(error) => {
+            return fail(
+                error.to_string(),
+                Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
+            )
+        }
+    };
+    if let Err(error) = crate::incident::run_incident(&options, Some(window)) {
+        return fail(
+            error.to_string(),
+            Some(format!("Run \"{APP_NAME} help incident\" for usage.")),
         );
     }
     handled()
@@ -638,115 +664,25 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     // setting (`/nightly off`) is the default the update follows
     // (`options.channel ?? persistedChannel`), an explicit nightly switch
     // warns and confirms, and a completed run persists the explicit
-    // switch (`commitChannel`).
-    let agent_dir = crate::config::get_agent_dir();
+    // switch (`commitChannel`) — one shared body with the `package update`
+    // self target (`crate::self_update`).
     let persisted_wire = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
-            pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_update_channel()
+            pa_core::settings::SettingsManager::create(&cwd, crate::config::get_agent_dir())
+                .get_update_channel()
         })
-        .map(|channel| {
-            match channel {
-                pa_core::settings::UpdateChannel::Stable => "stable",
-                pa_core::settings::UpdateChannel::Nightly => "nightly",
-            }
-            .to_string()
-        });
-    if options.channel == Some(pa_core::update::version::UpdateChannel::Nightly)
-        && persisted_wire.as_deref() != Some("nightly")
-    {
-        println!(
-            "Nightly releases are unreleased Prime Agent builds. They can be broken, and a broken update can leave Prime Agent unusable until you roll back or reinstall."
-        );
-        // TS `setSelfUpdateAbortedExitCode`: the interactive child's
-        // marker changes the abort code (75 vs 1) so the TUI's update
-        // run can tell an aborted switch from a real failure.
-        let abort_code = if std::env::var(SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref() == Ok("1") {
-            75
-        } else {
-            1
-        };
-        if !options.force {
-            if !std::io::stdin().is_terminal() {
-                eprintln!(
-                    "Switching to the nightly channel needs confirmation. Re-run with --force to proceed."
-                );
-                return handled_with_exit(abort_code);
-            }
-            if !crate::daemon_discovery::stop::prompt_yes_no(
-                "Switching to the nightly channel and continue with the update?",
-            ) {
-                println!("Update cancelled. Nothing was changed.");
-                return handled_with_exit(abort_code);
-            }
-        }
+        .map(crate::self_update::settings_channel_wire_name)
+        .map(str::to_string);
+    if let Some(abort_code) = crate::self_update::confirm_nightly_switch(
+        options.force,
+        options.channel,
+        persisted_wire.as_deref(),
+        std::io::stdin().is_terminal(),
+    ) {
+        return handled_with_exit(abort_code);
     }
-    // The effective channel: an explicit flag wins, else the persisted
-    // one, else the running version infers it.
-    let channel = options.channel.or_else(|| {
-        persisted_wire
-            .as_deref()
-            .and_then(pa_core::update::version::UpdateChannel::from_wire)
-    });
-
-    let command_options = crate::update_flow::update_command::UpdateCommandOptions {
-        force: options.force,
-        rollback: options.rollback,
-        channel,
-        archive: options.archive,
-        source: options.source,
-    };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return fail(
-                format!("Could not start the update runtime: {error}."),
-                None,
-            );
-        }
-    };
-    match runtime.block_on(crate::update_flow::update_command::run_update_command(
-        &command_options,
-    )) {
-        Ok(code) => {
-            // TS `commitChannel`: a completed run persists an explicit
-            // switch (Complete and Skipped alike — a channel pin applies
-            // even when no newer release was needed) and reports it. The
-            // not-attempted exit (75) reaches here only as the child-mode
-            // no-change skip: a declined confirmation returns earlier and
-            // never runs the update flow.
-            let flag_wire = options
-                .channel
-                .map(pa_core::update::version::UpdateChannel::wire_name);
-            if (code == 0 || code == 75)
-                && flag_wire.is_some()
-                && flag_wire != persisted_wire.as_deref()
-            {
-                let wire = flag_wire.unwrap_or_default();
-                if let Ok(cwd) = std::env::current_dir() {
-                    let settings_channel = match wire {
-                        "nightly" => pa_core::settings::UpdateChannel::Nightly,
-                        _ => pa_core::settings::UpdateChannel::Stable,
-                    };
-                    let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                    if settings.set_update_channel(settings_channel).is_ok() {
-                        println!("Updates now follow the {wire} channel.");
-                    }
-                }
-            }
-            PublicCommandResult {
-                handled: true,
-                args: vec![],
-                explicit_agents_view: false,
-                attach_agent: None,
-                exit_code: Some(code),
-            }
-        }
-        Err(error) => fail(format!("{error:#}"), None),
-    }
+    handled_with_exit(crate::self_update::run(&options, persisted_wire))
 }
 
 fn run_attach(rest: &[String]) -> PublicCommandResult {
@@ -898,11 +834,95 @@ fn require_operand_count(
     false
 }
 
+/// The incident command's dispatch contract (the TS public-command.test.ts
+/// incident suite): parsed options and a once-resolved window reach
+/// `run_incident`; usage errors fail with exit code 1 and the help hint.
+#[cfg(test)]
+mod incident_dispatch_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn routes_the_incident_command_with_parsed_window_options() {
+        // The routed dispatch parses the options, resolves the window
+        // once, and runs the command (over whatever logs exist under the
+        // agent dir — the fixture-backed coverage lives in the incident
+        // module's own tests); a routed run never fails with a usage
+        // error.
+        let result = handle_public_command(&args(&[
+            "incident",
+            "--since",
+            "20:02",
+            "--until=21:00",
+            "--session",
+            "abc",
+        ]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, None);
+        assert!(result.args.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_incident_options_with_usage_guidance() {
+        let result = handle_public_command(&args(&["incident", "--json"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn rejects_an_unordered_incident_window_with_usage_guidance() {
+        let result = handle_public_command(&args(&[
+            "incident",
+            "--since",
+            "2026-09-10T20:30",
+            "--until",
+            "2026-09-10T20:00",
+        ]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn rejects_a_bad_incident_time_with_usage_guidance() {
+        let result = handle_public_command(&args(&["incident", "--since", "yesterday"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn shows_incident_in_the_top_level_command_list() {
+        assert!(format_top_level_help().contains("incident"));
+    }
+
+    #[test]
+    fn the_incident_help_matches_the_ts_spec() {
+        let help = format_command_help(&["incident"]).expect("the incident spec");
+        assert!(
+            help.contains("Reconstruct a daemon incident from its logs"),
+            "{help}"
+        );
+        assert!(
+            help.contains("--since <time>  Window start (ISO date/time, date, or HH:MM today; default: 24h ago)"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Times without a timezone are read as UTC"),
+            "{help}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod update_options_tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Option<UpdateInvocation> {
+    fn parse(args: &[&str]) -> Option<crate::self_update::SelfUpdateOptions> {
         let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         parse_update_options(&args)
     }

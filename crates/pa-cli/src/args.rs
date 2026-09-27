@@ -549,9 +549,7 @@ fn take_required_value(
     flag: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<String> {
-    let next = if let Some(next) = args.get(index + 1) {
-        next
-    } else {
+    let Some(next) = args.get(index + 1) else {
         diagnostics.push(Diagnostic::error(format!("{flag} requires a value")));
         return None;
     };

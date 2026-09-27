@@ -3,11 +3,12 @@
 //! the headless agents-view plan typing queries and asserting the redesigned
 //! picker contract (Kevin's 2026-09-23 directive): queries match the
 //! session NAME, the durable session ID, and the CWD — never first
-//! messages, transcript text, recap summaries, or file paths — and hits
+//! messages, transcript text, or file paths — and hits
 //! render as one flat, relevance-ranked list. `PA_SEARCH_FRAMES_DIR`
 //! dumps every frame for before/after evidence captures.
 #![cfg(unix)]
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -115,18 +116,18 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     let mut content = format!(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}}\n"
     );
-    content.push_str(&format!(
-        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}\n"
-    ));
+    let _ = writeln!(content,
+        "{{\"type\":\"session_info\",\"id\":\"{id}-info\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"name\":\"{name}\"}}"
+    );
     for (index, (user, assistant)) in turns.iter().enumerate() {
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}\n",
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}u\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{user}\",\"timestamp\":{}}}}}",
             index * 1000
-        ));
-        content.push_str(&format!(
-            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}\n",
+        );
+        let _ = writeln!(content,
+            "{{\"type\":\"message\",\"id\":\"{id}-m{index}a\",\"timestamp\":\"2024-01-01T00:00:0{index}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant}\"}}],\"timestamp\":{}}}}}",
             index * 1000 + 1
-        ));
+        );
     }
     std::fs::write(&path, content).expect("write fixture");
     path
@@ -225,9 +226,19 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
+            // The full-roster gate: all four fixtures sit in the row
+            // model before any query filters them, so every later
+            // settle rides the render cadence alone, never the scan's
+            // data arrival (the registered render/data-arrival race
+            // closes by construction).
+            AgentsStep::WaitRender {
+                needle: "4 inactive".to_string(),
+                timeout_ms: 10_000,
+            },
             // A noisy word: transcripts mention it, names mostly do not.
             AgentsStep::Type("fast".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
@@ -367,11 +378,20 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
+        incident_notice_state: None,
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::Type("run".to_string()),
-            AgentsStep::WaitSettle { timeout_ms: 300 },
+            // The full-catalog count gate: the plan cannot reach Done
+            // before the scan's rows rendered under the query (a
+            // wall-clock settle only wins on an idle machine — the
+            // registered render/data-arrival race this barrier closes
+            // by construction, red-agentsview-search-ranked-hits-20260926-1).
+            AgentsStep::WaitRender {
+                needle: "3 inactive".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 120,
         height: 36,

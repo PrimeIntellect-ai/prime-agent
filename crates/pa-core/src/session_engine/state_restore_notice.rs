@@ -79,7 +79,7 @@ pub fn notice_message(result: &RestoreResult) -> CustomMessage {
             "restored": !result.restored.is_empty(),
         })),
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 

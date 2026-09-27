@@ -128,13 +128,35 @@ pub struct LlmContext {
     pub tools: Vec<ToolDefinition>,
 }
 
-/// Stream request options (subset of the TS `SimpleStreamOptions` the loop
-/// uses). Every option is either serialized into the proxy request
-/// (temperature, max_tokens, reasoning, session_id, service_tier — see
-/// [`crate::proxy`]) or client-local (api_key, signal); TS
-/// `PROXY_SERIALIZED_OPTIONS` marks the same classification so a new
-/// shared option cannot be silently dropped by the proxy transport.
+/// Provider response as the response hook sees it (the TS `ProviderResponse`
+/// `{ status, headers }` shape; the pa-ai mirror lives in `pa-types`).
 #[derive(Debug, Clone)]
+pub struct ProviderResponse {
+    pub status: u16,
+    /// Ordered (`BTreeMap`): response metadata can serialize into failure
+    /// diagnostics on the wire; unordered iteration would leak random key
+    /// order into the bytes.
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Hook invoked with the outbound provider payload before sending; return
+/// `Some` to replace the payload (TS `onPayload`). The payload crosses in
+/// its wire shape (JSON), not as a provider-crate type.
+pub type OnPayloadHook =
+    std::sync::Arc<dyn Fn(serde_json::Value, &Model) -> Option<serde_json::Value> + Send + Sync>;
+
+/// Hook invoked after the HTTP response is received and before the body is
+/// read (TS `onResponse`).
+pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send + Sync>;
+
+/// Stream request options (subset of the TS `SimpleStreamOptions` the loop
+/// uses, plus the request hooks the TS options carry). Every option is
+/// either serialized into the proxy request (temperature, max_tokens,
+/// reasoning, session_id, service_tier — see [`crate::proxy`]) or
+/// client-local (api_key, signal); TS `PROXY_SERIALIZED_OPTIONS` marks the
+/// same classification so a new shared option cannot be silently dropped
+/// by the proxy transport.
+#[derive(Clone)]
 pub struct StreamRequestOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
@@ -146,6 +168,28 @@ pub struct StreamRequestOptions {
     pub service_tier: Option<crate::types::ServiceTier>,
     pub api_key: Option<String>,
     pub signal: crate::abort::AbortSignal,
+    /// Outbound-payload hook (TS `SimpleStreamOptions.onPayload`). `None`
+    /// leaves the payload untouched; the provider client invokes it once
+    /// per request before the body is sent.
+    pub on_payload: Option<OnPayloadHook>,
+    /// Response-headers hook (TS `SimpleStreamOptions.onResponse`). Invoked
+    /// once per request after the response headers arrive.
+    pub on_response: Option<OnResponseHook>,
+}
+
+impl std::fmt::Debug for StreamRequestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamRequestOptions")
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("reasoning", &self.reasoning)
+            .field("session_id", &self.session_id)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .field("signal", &self.signal)
+            .field("on_payload", &self.on_payload.is_some())
+            .field("on_response", &self.on_response.is_some())
+            .finish()
+    }
 }
 
 impl Default for StreamRequestOptions {
@@ -158,6 +202,8 @@ impl Default for StreamRequestOptions {
             service_tier: None,
             api_key: None,
             signal: crate::abort::AbortSignal::never(),
+            on_payload: None,
+            on_response: None,
         }
     }
 }
@@ -241,6 +287,12 @@ pub fn event_stream() -> (
 impl AssistantMessageEventStreamHandle {
     /// Push an event. Ignored after the stream was ended or closed, and after a
     /// terminal event resolved the result (TS `EventStream.push` after `done`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
+    /// is poisoned while storing a terminal event's message (another
+    /// thread panicked while holding one of them).
     pub fn push(&self, event: AssistantMessageEvent) {
         if *self.shared.closed.lock().unwrap() {
             return;
@@ -259,6 +311,12 @@ impl AssistantMessageEventStreamHandle {
     ///
     /// Like the TS `EventStream.end`, already-queued events are still yielded
     /// by the consumer before iteration finishes; further pushes are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
+    /// is poisoned while storing a supplied result (another thread
+    /// panicked while holding one of them).
     pub fn end(&self, result: Option<AssistantMessage>) {
         *self.shared.closed.lock().unwrap() = true;
         if let Some(message) = result {
@@ -296,7 +354,7 @@ impl ModelStream for AssistantMessageEventStream {
                 let notified = self.shared.notify.notified();
                 tokio::select! {
                     event = self.rx.recv() => return event,
-                    _ = notified => {
+                    () = notified => {
                         if *self.shared.closed.lock().unwrap() {
                             self.closed = true;
                             return self.try_next();

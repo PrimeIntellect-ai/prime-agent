@@ -226,6 +226,10 @@ pub fn provider_retry_delay(
 ///
 /// The wait future is injectable so deterministic callers (scripts, tests)
 /// can avoid real timers; poll it with any executor (`futures` works).
+///
+/// # Errors
+///
+/// Returns the `attempt` future's error when the completion attempt fails.
 pub async fn complete_with_provider_retry<A, AF, W, WF>(
     policy: &ProviderRetryPolicy,
     signal: Option<&AbortSignal>,

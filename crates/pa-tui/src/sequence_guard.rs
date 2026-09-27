@@ -776,7 +776,7 @@ mod tests {
             sgr(64, 20, 5, true),  // wheel up
             sgr(65, 20, 5, true),  // wheel down
             sgr(0, 100, 30, true), // three-digit coordinates
-            sgr(35, 7, 9, true),   // hover motion (consumed)
+            sgr(35, 7, 9, true),   // hover motion (the hover affordance's report)
             sgr(1, 3, 4, true),    // middle press (consumed)
         ]
     }
@@ -801,7 +801,7 @@ mod tests {
             .filter_map(|out| match out {
                 GuardOutput::Mouse(report) => Some(*report),
                 GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
-                _ => None,
+                GuardOutput::Event(_) => None,
             })
             .collect()
     }
@@ -1151,13 +1151,15 @@ mod tests {
 
     /// The report a run must produce: the SGR decode filtered through the
     /// dispatch filter both paths share (`mouse::from_crossterm` consumes
-    /// hover motion and the non-left buttons).
+    /// the non-left buttons; the buttonless hover motion now maps
+    /// through — the hover affordance's report, operator directive
+    /// 2026-09-26).
     fn expected_report(report: &str) -> Vec<Report> {
         crate::mouse::parse_sgr_mouse_event(report)
             .filter(|r| {
                 matches!(
                     r.button,
-                    mouse::BUTTON_LEFT | mouse::WHEEL_UP | mouse::WHEEL_DOWN
+                    mouse::BUTTON_LEFT | mouse::WHEEL_UP | mouse::WHEEL_DOWN | mouse::BUTTON_NONE
                 )
             })
             .into_iter()
@@ -1277,7 +1279,7 @@ mod tests {
         let now = Instant::now();
         assert!(guard.feed(esc_press(), now).is_empty());
         assert!(guard
-            .flush_expired(now + HOLD - Duration::from_millis(1))
+            .flush_expired((now + HOLD).checked_sub(Duration::from_millis(1)).unwrap())
             .is_empty());
         assert_eq!(
             guard.flush_expired(now + HOLD),
