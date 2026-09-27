@@ -461,3 +461,14 @@ pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessi
         thinking,
     })
 }
+
+/// Register the faux provider from a script and return its model. Scripts
+/// carry plain-text responses (strings or `{"text"}` objects) or content-block
+/// arrays (thinking, text, tool calls) so harnesses can script full turns.
+/// Verification harness only; never set by the product.
+fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
+    let script: serde_json::Value = serde_json::from_str(script)?;
+    let parsed = pa_ai::faux::script::parse_faux_script(&script).map_err(anyhow::Error::msg)?;
+    let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+    Ok(registration.get_model())
+}
