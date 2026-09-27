@@ -1154,7 +1154,7 @@ mod tests {
         None
     }
 
-    fn test_model() -> Model {
+    fn proxy_tier_model() -> Model {
         serde_json::from_value(serde_json::json!({
             "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
             "provider": "prime-inference", "baseUrl": "http://127.0.0.1:9/v1",
@@ -1176,7 +1176,7 @@ mod tests {
     async fn serializes_service_tier_into_the_proxy_request() {
         let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
         let (handle, mut stream) = stream_proxy(
-            test_model(),
+            proxy_tier_model(),
             context(),
             StreamRequestOptions {
                 service_tier: Some(ServiceTier::Priority),
@@ -1204,7 +1204,7 @@ mod tests {
     async fn without_a_tier_the_proxy_request_omits_it() {
         let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
         let (handle, mut stream) = stream_proxy(
-            test_model(),
+            proxy_tier_model(),
             context(),
             StreamRequestOptions::default(),
             ProxyStreamOptions {

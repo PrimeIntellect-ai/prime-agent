@@ -1088,8 +1088,8 @@ pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> O
 
 /// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`):
 /// the fast-mode (priority) tier exists on the eligible ids served over
-/// the OpenAI Responses APIs. Shared by the surfaces that gate the `/fast`
-/// command on model eligibility.
+/// the `OpenAI` Responses APIs. Shared by the surfaces that gate the
+/// `/fast` command on model eligibility.
 pub fn supports_fast_mode(model: &Model) -> bool {
     supports_service_tier(model, ServiceTier::Priority)
 }
@@ -1097,6 +1097,33 @@ pub fn supports_fast_mode(model: &Model) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    /// A minimal model for the tier-eligibility predicate (TS #2144's
+    /// gating tests run the same provider/api/id combinations).
+    fn tier_model(provider: &str, api: &str, id: &str) -> Model {
+        let zero_cost = || ModelCost {
+            input: JsNumber(0.0),
+            output: JsNumber(0.0),
+            cache_read: JsNumber(0.0),
+            cache_write: JsNumber(0.0),
+        };
+        Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: api.to_string(),
+            provider: provider.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: Vec::new(),
+            cost: zero_cost(),
+            context_window: 0,
+            max_tokens: 0,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
     fn service_tier_eligibility_matches_ts() {
         use ServiceTier::*;
         // `default` is always accepted (it means no tier request at all).
