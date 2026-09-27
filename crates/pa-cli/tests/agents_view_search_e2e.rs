@@ -230,6 +230,15 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
+            // The full-roster gate: all four fixtures sit in the row
+            // model before any query filters them, so every later
+            // settle rides the render cadence alone, never the scan's
+            // data arrival (the registered render/data-arrival race
+            // closes by construction).
+            AgentsStep::WaitRender {
+                needle: "4 inactive".to_string(),
+                timeout_ms: 10_000,
+            },
             // A noisy word: transcripts mention it, names mostly do not.
             AgentsStep::Type("fast".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
@@ -374,7 +383,15 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::Type("run".to_string()),
-            AgentsStep::WaitSettle { timeout_ms: 300 },
+            // The full-catalog count gate: the plan cannot reach Done
+            // before the scan's rows rendered under the query (a
+            // wall-clock settle only wins on an idle machine — the
+            // registered render/data-arrival race this barrier closes
+            // by construction, red-agentsview-search-ranked-hits-20260926-1).
+            AgentsStep::WaitRender {
+                needle: "3 inactive".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 120,
         height: 36,

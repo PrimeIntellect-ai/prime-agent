@@ -9,7 +9,9 @@
 //! 2026-09-26: the card click toggles the card, not the thinking blocks
 //! around it), a plain click in the prompt bar places the caret at the
 //! clicked cell (then typing inserts there), and a plain click on a
-//! `/model` picker row moves the selection onto it.
+//! `/model` picker row moves the selection onto it. The `?1003` hover
+//! motions (the hover affordance's buttonless reports) ride the same
+//! path without disturbing the click grammar.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -563,6 +565,65 @@ fn a_second_click_on_a_card_collapses_back() {
     assert!(
         !last.contains("\u{2570}\u{2500} print(4)"),
         "the expanded output folded away again: {last}"
+    );
+}
+
+/// Buttonless motion reports (the `?1003` hover surface) flow through the
+/// same decode-and-dispatch path without disturbing the click grammar:
+/// hover motions across the frame, then a plain click on the condensed
+/// block still expands the run (the hover branch never consumes or
+/// corrupts the press state).
+#[test]
+fn hover_motion_reports_do_not_disturb_the_click_grammar() {
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let (_, row, col) =
+        locate(&frames, "8 tool calls").expect("the condensed run renders before the motions");
+    let motion = |col: usize, row: usize| HeadlessStep::Mouse(format!("\x1b[<35;{col};{row}M"));
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::Key(ctrl_o()),
+            HeadlessStep::WaitRender {
+                needle: "8 tool calls".to_string(),
+                timeout_ms: 5_000,
+            },
+            // Hover motions across the block row and the plain rows
+            // around it (the `?1003` any-event reports the real
+            // terminal sends with the hover affordance active).
+            motion(col + 1, row),
+            motion(col + 1, row + 1),
+            motion(3, 1),
+            motion(col + 1, row),
+            // The click still fires after the hover interleaving.
+            HeadlessStep::Mouse(press(col + 1, row + 1)),
+            HeadlessStep::Mouse(release(col + 1, row + 1)),
+            HeadlessStep::WaitRender {
+                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let last = frames.last().expect("a frame after the click");
+    assert!(
+        last.contains("\u{2570}\u{2500} print(4)"),
+        "the click expanded the card's own output after the hover motions: {last}"
+    );
+    assert!(
+        !last.contains("8 tool calls"),
+        "the condensed block is gone: {last}"
     );
 }
 
