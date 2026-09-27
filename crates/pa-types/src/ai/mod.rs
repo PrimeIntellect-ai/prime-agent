@@ -1187,8 +1187,6 @@ mod tests {
         assert_eq!(clamp_service_tier(None, None), None);
     }
 
-    use super::*;
-
     fn rt<T: serde::Serialize + for<'de> Deserialize<'de>>(json: &str) -> String {
         let parsed: T = serde_json::from_str(json).expect("deserialize");
         serde_json::to_string(&parsed).expect("serialize")
