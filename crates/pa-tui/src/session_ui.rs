@@ -3,6 +3,17 @@
 //! event application, and session switching. Rendering itself lives in the
 //! view crate modules; this module only decides what the view shows.
 
+mod heartbeats;
+mod stream;
+
+use heartbeats::paused_heartbeat_count;
+pub(crate) use heartbeats::HeartbeatsUpdate;
+use stream::already_running_warning;
+pub(crate) use stream::resume_hint_from_stats;
+use stream::streaming_tray_hint;
+use stream::LoaderTokenTracker;
+use stream::SpeedStats;
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
@@ -190,18 +201,6 @@ pub(crate) struct CompactionAbortNote {
     /// was sent — a newer run's loader is never cleared by a stale one.
     pub(crate) compaction_generation: u64,
     pub(crate) outcome: Result<(), String>,
-}
-
-/// A landed heartbeat-catalog refresh for the `/heartbeats` view (TS
-/// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
-/// the fetch error that keeps the last catalog (stale-while-revalidate).
-pub(crate) struct HeartbeatsUpdate {
-    /// The refresh epoch this snapshot belongs to: a response older than
-    /// the session's current epoch is stale and never overwrites a newer
-    /// catalog.
-    pub epoch: u64,
-    pub heartbeats: Vec<HeartbeatEntry>,
-    pub fetch_error: Option<String>,
 }
 
 pub(crate) struct ActivityUpdates {
@@ -450,6 +449,10 @@ pub(crate) struct SessionUi {
     /// when the flow spawns (so a later key cannot spawn a second flow
     /// over the same panel), consumed by the settle.
     traces_login_run: Option<TracesLoginIntent>,
+    /// The generation of the in-flight traces login: incremented on
+    /// each spawn; a late settle from a superseded run never clears
+    /// the newer login's panel (#2845 review).
+    traces_login_gen: u64,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -917,6 +920,7 @@ impl SessionUi {
             traces_upload_notes,
             pending_traces_login: None,
             traces_login_run: None,
+            traces_login_gen: 0,
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -3072,129 +3076,6 @@ impl SessionUi {
             .expect("prompt stash store poisoned");
         store.for_session(stash_session_id).stash_draft_head(stash);
     }
-
-    /// The working loader starts with a `Waiting` activity and a zero
-    /// token count (TS `agent_start` resets the tracker).
-    fn start_loader(&mut self, view: &mut AgentView) {
-        view.working = Some(WorkingState {
-            activity: "Waiting",
-            message: None,
-            download: false,
-            tokens: 0,
-            elapsed_secs: 0,
-        });
-        view.working_since = Some(std::time::Instant::now());
-        self.working_tokens.reset();
-    }
-
-    /// Update the loader's activity label from one provider stream event
-    /// (TS `AgentActivityTracker`: thinking/text/toolcall events switch the
-    /// label and direction). Token counting lives in
-    /// [`Self::track_stream_tokens`]: the event's own delta is only the
-    /// last of possibly many coalesced provider deltas, so the message —
-    /// not the delta — carries the token truth.
-    fn track_stream_activity(&mut self, event: &Value, view: &mut AgentView) {
-        let (activity, download) = match event.get("type").and_then(Value::as_str) {
-            Some("thinking_start" | "thinking_delta") => ("Thinking", true),
-            Some("text_start" | "text_delta") => ("Writing", true),
-            Some("toolcall_start" | "toolcall_delta") => ("Writing code", true),
-            _ => return,
-        };
-        if let Some(working) = &mut view.working {
-            working.activity = activity;
-            working.download = download;
-        }
-    }
-}
-
-/// The loader's token accounting (TS `AgentActivityTracker`): the live
-/// count is completed-message output tokens plus max(reported usage, the
-/// content estimate at 4 chars per token), reported monotonically within a
-/// run. The live count derives from the streamed message itself — never
-/// from per-delta sums — because the worker coalesces provider deltas into
-/// latest-snapshot frames and a delta sum would undercount.
-#[derive(Debug, Default)]
-struct LoaderTokenTracker {
-    /// Settled-message output tokens, banked at `message_end` (TS
-    /// `completedTokens`).
-    completed_tokens: u64,
-    /// The streaming message's reported `usage.output` (TS
-    /// `streamingUsageTokens`).
-    streaming_usage: u64,
-    /// The streaming message's content size in chars (TS accumulates the
-    /// same value as a delta sum; the snapshot message carries it directly).
-    streaming_chars: u64,
-}
-
-impl LoaderTokenTracker {
-    /// TS `agent_start`/`reset`: a fresh run counts from zero.
-    fn reset(&mut self) {
-        self.completed_tokens = 0;
-        self.start_message();
-    }
-
-    /// TS `message_start` (assistant): the new message's live state starts
-    /// empty — its reported usage only counts from the first update.
-    fn start_message(&mut self) {
-        self.streaming_usage = 0;
-        self.streaming_chars = 0;
-    }
-
-    /// TS `message_update`: adopt the message's reported usage and size,
-    /// returning the live count.
-    fn apply_streaming(&mut self, usage_output: u64, content_chars: u64) -> u64 {
-        self.streaming_usage = usage_output;
-        self.streaming_chars = content_chars;
-        self.current()
-    }
-
-    /// TS `message_end`: bank the message's tokens into the completed
-    /// count (authoritative usage when reported, else the live estimate)
-    /// and clear the live state.
-    fn settle(&mut self, usage_output: u64) {
-        let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
-        self.completed_tokens += if usage_output > 0 {
-            usage_output
-        } else {
-            estimate
-        };
-        self.start_message();
-    }
-
-    /// TS `currentTokens`: completed tokens plus max(reported usage, the
-    /// chars/4 estimate).
-    fn current(&self) -> u64 {
-        let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
-        self.completed_tokens + self.streaming_usage.max(estimate)
-    }
-}
-
-/// Per-session output tok/sec accumulation for `/speed` (TS `speedStats`):
-/// output tokens and wall-clock spans summed over the session's completed
-/// responses.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct SpeedStats {
-    tokens: u64,
-    duration_ms: i64,
-    samples: u32,
-}
-
-impl SpeedStats {
-    /// The session-average rate in tok/s over the accumulated span (TS
-    /// `speedStats.tokens / (speedStats.durationMs / 1000)`).
-    fn average_rate(&self) -> f64 {
-        self.tokens as f64 / (self.duration_ms as f64 / 1000.0)
-    }
-}
-
-/// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
-/// below.
-fn format_rate(tokens_per_second: f64) -> String {
-    if tokens_per_second >= 100.0 {
-        format!("{tokens_per_second:.0}")
-    } else {
-        format!("{tokens_per_second:.1}")
-    }
 }
 
 impl SessionUi {
@@ -4310,11 +4191,11 @@ impl SessionUi {
         auth: crate::provider_auth::ProviderAuthCommandsHandle,
         view: &mut AgentView,
     ) {
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
-            "Login to {}",
-            provider.name
-        )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut session_dialog =
+            crate::auth_panel::AuthPanel::new(format!("Login to {}", provider.name));
+        session_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(session_dialog);
         // A still-running previous flow ends before its replacement arms:
         // its flag marks the blocking body out of the way, and its late
         // settle is skipped below so it can never close the newer panel.
@@ -4359,16 +4240,29 @@ impl SessionUi {
         if let Some(panel) = view.auth_panel.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
         }
-        // A cancel key on an armed panel flow ends it cooperatively
-        // (#2770): the flag marks the blocking body (no credential write
-        // after the exit), the panel unmounts, and the settled outcome
-        // is the silent cancel.
-        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
-        if cancel_key {
+        // A cancel key on the mounted panel ends it (TS `cancel()` closes
+        // the dialog): the armed flag marks the blocking body (#2770 — no
+        // credential write after the exit), every flow reads its own
+        // dropped oneshot or cooperative flag as the silent cancel, and
+        // the panel unmounts immediately so a cancelled login never
+        // strands the frame. The team picker's Esc answers the picker and
+        // keeps the dialog mounted (TS the selector is its own component
+        // whose cancel keeps the login going).
+        // Only the binding match unmounts (the same check
+        // `AuthPanel::handle_key` marks cancellation by): a raw
+        // ctrl+c with the binding remapped away is an unhandled
+        // key, not a cancel — unmounting without marking leaves a
+        // live flow that can persist credentials (#2845 review).
+        let cancel_key = kb.matches(&id, "tui.select.cancel");
+        let team_picker = view
+            .auth_panel
+            .as_ref()
+            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
+        if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                view.auth_panel = None;
             }
+            view.auth_panel = None;
         }
         self.dirty = true;
         Ok(())
@@ -4440,9 +4334,14 @@ impl SessionUi {
     ) {
         use crate::auth_panel::AuthPanelRequest;
         match request {
-            AuthPanelRequest::Progress { message } => {
+            AuthPanelRequest::Progress { message, .. } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
                     panel.push_progress(message);
+                }
+            }
+            AuthPanelRequest::Waiting { message } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.push_waiting(message);
                 }
             }
             AuthPanelRequest::AuthUrl { url, instructions } => {
@@ -4452,12 +4351,13 @@ impl SessionUi {
             }
             AuthPanelRequest::PastePrompt {
                 prompt,
+                tone,
                 style,
                 allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, allow_empty, reply);
+                    panel.mount_paste(prompt, tone, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -4479,9 +4379,13 @@ impl SessionUi {
                 view.auth_panel = None;
                 self.note(&note, view);
             }
-            AuthPanelRequest::TracesSettled { outcome } => {
-                view.auth_panel = None;
-                self.finish_traces_login(outcome, view).await;
+            AuthPanelRequest::TracesSettled { outcome, gen } => {
+                // A superseded run's late settle cannot clear a newer
+                // login: the generation guard (#2845 review).
+                if gen == self.traces_login_gen {
+                    view.auth_panel = None;
+                    self.finish_traces_login(outcome, view).await;
+                }
             }
         }
         self.dirty = true;
@@ -4783,13 +4687,15 @@ impl SessionUi {
             return;
         };
         self.traces_login_run = Some(intent);
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
-            "Login to Prime Agent Traces",
-        ));
+        self.traces_login_gen += 1;
+        let gen = self.traces_login_gen;
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
+        traces_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(traces_dialog);
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
+            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome, gen });
         });
     }
 
@@ -5551,71 +5457,6 @@ impl SessionUi {
         }
     }
 
-    /// `/speed on/off`: toggles the footer tok/sec readout for this
-    /// session (TS `setSpeedDisplay`): the flag lives on the client;
-    /// disabling clears the stats and the row (TS `resetSpeedStats`), and
-    /// the status row reports the TS wording either way.
-    fn set_speed_display(&mut self, enabled: bool, view: &mut AgentView) {
-        self.speed_display_enabled = enabled;
-        if !enabled {
-            self.speed_stats = None;
-            view.chrome.speed_text = None;
-        }
-        let status = if enabled {
-            "Speed display on — footer shows output tok/s per model response and a session average"
-        } else {
-            "Speed display off"
-        };
-        self.note(status, view);
-    }
-
-    /// Updates the footer tok/sec readout from a completed assistant
-    /// message (TS `recordSpeedSample`): output tokens over the
-    /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this `message_end` arrival. Timestamps keep the span true
-    /// even when buffered session events replay back-to-back on attach.
-    /// Aborted/failed responses and samples without a finite positive
-    /// span or token count are skipped: some providers only fill usage at
-    /// stream end, so they never produce a bogus rate.
-    fn record_speed_sample(&mut self, message: &Value, view: &mut AgentView) {
-        if !self.speed_display_enabled {
-            return;
-        }
-        let stop_reason = message
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if stop_reason == "aborted" || stop_reason == "error" {
-            return;
-        }
-        // TS reads `Number(message.timestamp)`: a frame without one is NaN
-        // in TS and fails its `> 0` guard, so it is skipped here too — a
-        // zero-default would span the epoch and poison the average.
-        let Some(timestamp) = message.get("timestamp").and_then(Value::as_i64) else {
-            return;
-        };
-        let duration_ms = crate::agents_view_state::now_ms() as i64 - timestamp;
-        let output_tokens = message
-            .get("usage")
-            .and_then(|usage| usage.get("output"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if duration_ms <= 0 || output_tokens == 0 {
-            return;
-        }
-        let stats = self.speed_stats.get_or_insert_with(SpeedStats::default);
-        stats.tokens += output_tokens;
-        stats.duration_ms += duration_ms;
-        stats.samples += 1;
-        let last = format_rate(output_tokens as f64 / (duration_ms as f64 / 1000.0));
-        let average = format_rate(stats.average_rate());
-        view.chrome.speed_text = Some(if stats.samples > 1 {
-            format!("{last} tok/s · avg {average}")
-        } else {
-            format!("{last} tok/s")
-        });
-    }
-
     /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
@@ -6232,8 +6073,10 @@ impl SessionUi {
             self.note("/mcp is not available in this client yet", view);
             return;
         };
-        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let mut mcp_dialog = crate::auth_panel::AuthPanel::new(intent.title);
+        mcp_dialog.set_cancel_signal(panel.cancel_signal());
+        view.auth_panel = Some(mcp_dialog);
         let args = intent.args;
         tokio::spawn(async move {
             let note =
@@ -6740,6 +6583,17 @@ impl SessionUi {
         if let Some(delta) = crate::mouse::wheel_scroll_delta(&event) {
             if !overlay_focused {
                 view.scroll_by(delta);
+                self.dirty = true;
+            }
+            return;
+        }
+        // A buttonless motion report is the hover (operator directive
+        // 2026-09-26: `?1003` any-event tracking delivers it): the
+        // hovered clickable card row records its hover state, and the
+        // frame re-renders only when that state changed — a motion burst
+        // across one row never schedules a render per report.
+        if event.button == crate::mouse::BUTTON_NONE && event.motion {
+            if view.note_hover(row, col) {
                 self.dirty = true;
             }
             return;
@@ -7400,220 +7254,6 @@ impl SessionUi {
         Ok(())
     }
 
-    /// One key press while the `/heartbeats` view is open: Esc/Ctrl+C/close
-    /// binding close it; Enter on the list opens the selected heartbeat's
-    /// action pane; Enter on an action runs the management request.
-    async fn handle_heartbeats_picker_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        // The view consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
-        let action = view
-            .heartbeats_picker
-            .as_mut()
-            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
-        match action {
-            Some(HeartbeatsPickerAction::None) => {
-                self.dirty = true;
-            }
-            Some(HeartbeatsPickerAction::Close) => {
-                view.heartbeats_picker = None;
-                self.dirty = true;
-            }
-            Some(HeartbeatsPickerAction::Manage {
-                active_session_id,
-                job_id,
-                action,
-            }) => {
-                self.run_heartbeat_manage(active_session_id, job_id, action, view)
-                    .await;
-            }
-            None => {}
-        }
-        Ok(())
-    }
-
-    /// Run one heartbeat management request (TS `manageHeartbeat` →
-    /// `agentConnection.manageHeartbeat`): the daemon owns the job; the
-    /// updated job (or the stop's removal) patches the open view locally,
-    /// a background refresh reconciles the catalog, and a failure
-    /// surfaces as the view's error row.
-    async fn run_heartbeat_manage(
-        &mut self,
-        active_session_id: String,
-        job_id: String,
-        action: HeartbeatAction,
-        view: &mut AgentView,
-    ) {
-        let request = DaemonCommand::HeartbeatManage {
-            id: None,
-            active_session_id,
-            job_id,
-            action: Value::String(action.as_wire().to_string()),
-            rest: Map::default(),
-        };
-        match self
-            .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
-            .await
-        {
-            Ok(data) => {
-                // The daemon returns the updated job (a stop keeps the
-                // cancelled row's identity); a patch that cannot parse still
-                // leaves the actions pane, and the refresh reconciles.
-                match data
-                    .get("heartbeat")
-                    .and_then(crate::heartbeats_picker::parse_heartbeat_job)
-                {
-                    Some(job) => {
-                        let stopped = action == HeartbeatAction::Stop;
-                        let job_id = job.id.clone();
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
-                            picker.apply_managed_job(job.clone(), stopped);
-                        }
-                        // The activity dock follows the same patch the
-                        // manager view applied (TS `manageHeartbeat`
-                        // rewrites the catalog entry, not just the open
-                        // manager).
-                        if stopped {
-                            self.heartbeat_catalog
-                                .retain(|entry| entry.job.id != job_id);
-                        } else if let Some(entry) = self
-                            .heartbeat_catalog
-                            .iter_mut()
-                            .find(|entry| entry.job.id == job_id)
-                        {
-                            entry.job = job;
-                        }
-                    }
-                    None => {
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
-                            picker.back_to_list();
-                        }
-                    }
-                }
-                self.sync_activity_dock(view);
-                self.spawn_heartbeat_refresh();
-                self.dirty = true;
-            }
-            Err(error) => {
-                if let Some(picker) = view.heartbeats_picker.as_mut() {
-                    picker.set_action_error(format!("{error:#}"));
-                }
-                self.dirty = true;
-            }
-        }
-    }
-
-    /// Scope a fetched catalog to THIS session only (operator scoping:
-    /// nested sessions' heartbeats do not surface in the dock, the
-    /// panel, or the `/heartbeats` view — a sanctioned divergence from
-    /// TS `scopeHeartbeatsToSession`, which also kept the RLM children's
-    /// jobs; the child ids stay empty here).
-    fn scope_heartbeats(&self, heartbeats: Vec<HeartbeatEntry>) -> Vec<HeartbeatEntry> {
-        scope_heartbeats(
-            heartbeats,
-            (!self.active_session_id.is_empty()).then_some(self.active_session_id.as_str()),
-            (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
-            &[],
-        )
-    }
-
-    /// The open-time heartbeat-catalog fold: the first `heartbeats_list`
-    /// response scopes and sorts into the catalog synchronously with the
-    /// attach (bounded like every UI request), so the dock's heartbeat
-    /// rows ride the first content frame instead of popping in late. A
-    /// failed or timed-out fetch leaves the just-cleared catalog — the
-    /// same empty-open state the background refresh's failure arm
-    /// produces, and the next `heartbeats_changed` event refills.
-    async fn fetch_heartbeat_catalog(&mut self) {
-        // Advance the epoch so a refresh still in flight from before the
-        // attach (a `heartbeats_changed` burst's spawned fetch) never
-        // overwrites this fold with its older catalog: the epoch's
-        // staleness check drops it at fold time.
-        self.heartbeat_refresh_epoch += 1;
-        let Ok(data) = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::HeartbeatsList {
-                    id: None,
-                    active_session_id: None,
-                    rest: Map::default(),
-                },
-            )
-            .await
-        else {
-            return;
-        };
-        let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
-        sort_heartbeats(&mut heartbeats);
-        self.heartbeat_catalog = heartbeats;
-    }
-
-    /// Fire a background heartbeat-catalog refresh (TS
-    /// `refreshHeartbeatCatalog`): the fetch lands through the run loop's
-    /// channel into the open view; failures clear nothing — the next
-    /// `heartbeats_changed` event retries. At most one refresh runs in
-    /// flight with one queued trailing refresh (daemon-wide broadcasts can
-    /// burst; stacked concurrent requests would load the supervisor), and
-    /// every response carries the epoch it was issued under so a stale
-    /// one never overwrites a newer catalog.
-    pub(crate) fn spawn_heartbeat_refresh(&mut self) {
-        if self.heartbeat_refresh_in_flight {
-            self.heartbeat_refresh_queued = true;
-            return;
-        }
-        self.heartbeat_refresh_in_flight = true;
-        let updates = self.heartbeat_updates.clone();
-        let client = self.client.clone();
-        let epoch = self.heartbeat_refresh_epoch;
-        tokio::spawn(async move {
-            let request = DaemonCommand::HeartbeatsList {
-                id: None,
-                active_session_id: None,
-                rest: Map::default(),
-            };
-            let fetched = tokio::time::timeout(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                client.request_ok(request),
-            )
-            .await;
-            match fetched {
-                Ok(Ok(data)) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: parse_heartbeats(&data),
-                        fetch_error: None,
-                    });
-                }
-                Ok(Err(error)) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: Vec::new(),
-                        fetch_error: Some(format!("{error:#}")),
-                    });
-                }
-                Err(_) => {
-                    let _ = updates.send(HeartbeatsUpdate {
-                        epoch,
-                        heartbeats: Vec::new(),
-                        fetch_error: Some(
-                            "timed out waiting for the Prime Agent daemon response".to_string(),
-                        ),
-                    });
-                }
-            }
-        });
-    }
-
     /// Fetch the session's slash-command catalog in the background (TS
     /// `refreshConnectionCatalog`'s `getCommands` arm, best-effort with a
     /// bounded wait like the heartbeat refresh): the response carries the
@@ -7690,70 +7330,6 @@ impl SessionUi {
             Vec::new()
         };
         view.editor.set_autocomplete_skill_commands(skills);
-        self.dirty = true;
-    }
-
-    /// Fold a landed heartbeat-catalog refresh into the session: re-scope
-    /// and re-sort, keep the open view's selection, surface the fetch
-    /// error, and re-sync the activity dock (TS `applyHeartbeatCatalog` over
-    /// both the manager and the tray's `getTrayHeartbeatLabel`).
-    pub(crate) fn apply_heartbeat_update(
-        &mut self,
-        update: HeartbeatsUpdate,
-        view: &mut AgentView,
-    ) {
-        // The refresh slot frees whether the response landed, failed, or
-        // timed out; a burst's queued refresh runs next.
-        self.heartbeat_refresh_in_flight = false;
-        let queued = std::mem::take(&mut self.heartbeat_refresh_queued);
-        // A response from an older refresh never overwrites the newer
-        // catalog (an in-flight refresh raced a fresher epoch).
-        if update.epoch < self.heartbeat_refresh_epoch {
-            if queued {
-                self.spawn_heartbeat_refresh();
-            }
-            return;
-        }
-        // TS stale-while-revalidate: a failed refresh keeps the last catalog
-        // (the dock keeps counting the heartbeats it knows; the daemon's
-        // scheduler keeps firing while its catalog read times out), and the
-        // failure surfaces only inside an open manager view.
-        if let Some(error) = update.fetch_error {
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
-                picker.set_fetch_error(Some(error));
-            }
-            self.dirty = true;
-        } else {
-            let mut heartbeats = self.scope_heartbeats(update.heartbeats);
-            sort_heartbeats(&mut heartbeats);
-            self.heartbeat_catalog.clone_from(&heartbeats);
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
-                picker.apply_catalog(heartbeats, None);
-            }
-            self.sync_activity_dock(view);
-            self.dirty = true;
-        }
-        if queued {
-            self.spawn_heartbeat_refresh();
-        }
-    }
-
-    /// Open the `/heartbeats` view over the CACHED catalog at once (TS
-    /// `showHeartbeatManager`'s mount): the keypress never waits on the
-    /// daemon — a non-blocking refresh lands through the update channel,
-    /// and stale-while-revalidate keeps the mounted catalog on failure
-    /// (the error surfaces inside the open view only). The picker owns
-    /// the frame: the dock's focus hands off, so closing the picker
-    /// returns to the editor, not the dock.
-    fn open_heartbeats_view(&mut self, view: &mut AgentView) {
-        self.subagents_focused = false;
-        view.heartbeats_picker = Some(HeartbeatsPicker::new(
-            self.heartbeat_catalog.clone(),
-            None,
-            None,
-            picker_viewport_rows(view.terminal_rows()),
-        ));
-        self.spawn_heartbeat_refresh();
         self.dirty = true;
     }
 
@@ -10313,74 +9889,12 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     sessions
 }
 
-/// The streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
-/// arm): `<followUp> to queue message` — the tray override while the agent
-/// streams and a draft sits in the editor (an empty draft or an idle
-/// session shows nothing; the Ctrl+C exit hint outranks it at the call
-/// site, TS `isCtrlCExitHintVisible()`'s early return).
-fn streaming_tray_hint(
-    keybindings: &crate::keybindings::KeybindingsManager,
-    turn_active: bool,
-    draft: &str,
-) -> Option<String> {
-    if !turn_active || draft.trim().is_empty() {
-        return None;
-    }
-    let follow_up = keybindings
-        .first_key("app.message.followUp")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_default();
-    Some(format!("{follow_up} to queue message"))
-}
-
-/// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
-/// the running user command, spelled through the effective keybindings.
-fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
-    let key = keybindings.first_key("app.clear").map_or_else(
-        || "Ctrl+C".to_string(),
-        |key| crate::keybindings::format_key_text(&key),
-    );
-    // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
-    // row text (the StatusKind tier is color only).
-    format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")
-}
-
-/// TS `formatResumeHint` (resume-hint.ts): the post-exit hint names how to
-/// resume the session just left. Ephemeral (no session file) and unflushed
-/// empty sessions are omitted — neither can be resumed. Persistence is
-/// lazy: a file that does not exist on disk cannot be resumed either.
-pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
-    let session_id = stats.get("sessionId").and_then(Value::as_str)?;
-    let session_file = stats.get("sessionFile").and_then(Value::as_str)?;
-    let user_messages = stats
-        .get("userMessages")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if session_file.is_empty() || user_messages == 0 || !std::path::Path::new(session_file).exists()
-    {
-        return None;
-    }
-    Some(format!(
-        "Resume this session with: prime-agent --resume {session_id}"
-    ))
-}
-
 /// Send a `create` command and return the new session's active id. A
 /// non-empty selection picks the reopen form: `continueRecent` or an
 /// explicit saved-session path.
 /// The picker's viewport row budget (TS `showConfigurationMenu` passes
 /// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
 /// row for its hint).
-/// The dock's paused-heartbeat count over the scoped catalog: the count
-/// is label-independent (the dogfood repro: unlabeled agent heartbeats
-/// fire on schedule but a label-keyed count showed none of them).
-fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
-    heartbeats
-        .iter()
-        .filter(|entry| entry.job.status == "paused")
-        .count()
-}
-
 pub(crate) fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
@@ -10524,51 +10038,6 @@ pub(crate) fn pop_superseded_attempt_row(view: &mut AgentView) -> bool {
 }
 
 #[cfg(test)]
-mod streaming_tray_hint_tests {
-    use super::streaming_tray_hint;
-    use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
-
-    /// TS `getTrayOverrideLabel`'s streaming arm: the follow-up hint names
-    /// the effective `app.message.followUp` key (the default is
-    /// alt+enter).
-    #[test]
-    fn the_hint_names_the_follow_up_key_over_a_draft() {
-        let kb = KeybindingsManager::new();
-        assert_eq!(
-            streaming_tray_hint(&kb, true, "a draft in the editor"),
-            Some("Alt+Enter to queue message".to_string()),
-            "the default binding renders the TS sentence"
-        );
-    }
-
-    /// TS `!this.isAgentStreaming() || !text.trim()` — an idle session or
-    /// an empty (whitespace-only) draft shows no hint.
-    #[test]
-    fn idle_or_empty_draft_shows_no_hint() {
-        let kb = KeybindingsManager::new();
-        assert_eq!(streaming_tray_hint(&kb, false, "draft"), None);
-        assert_eq!(streaming_tray_hint(&kb, true, ""), None);
-        assert_eq!(streaming_tray_hint(&kb, true, "   "), None);
-    }
-
-    /// A user-rebound follow-up key spells through the effective binding
-    /// (TS `keyText("app.message.followUp")`).
-    #[test]
-    fn the_hint_spells_a_rebound_follow_up_key() {
-        let mut config = KeybindingsConfig::new();
-        config.insert(
-            "app.message.followUp".to_string(),
-            vec!["ctrl+q".to_string()],
-        );
-        let kb = KeybindingsManager::with_user_bindings(config);
-        assert_eq!(
-            streaming_tray_hint(&kb, true, "draft"),
-            Some("Ctrl+Q to queue message".to_string()),
-            "the hint follows the effective binding"
-        );
-    }
-}
-#[cfg(test)]
 mod bash_bang_tests {
     use super::already_running_warning;
     use crate::keybindings::KeybindingsManager;
@@ -10669,83 +10138,6 @@ mod activity_dock_counts_tests {
             .count();
         assert_eq!(running, 2, "finished runs never inflate the indicator");
         assert_eq!(activities.len(), 3);
-    }
-}
-
-#[cfg(test)]
-mod loader_token_tests {
-    use super::{format_rate, LoaderTokenTracker, SpeedStats};
-
-    /// The live count derives from the streamed message, so coalesced
-    /// frames (one latest-snapshot wire frame per flush tick) count the
-    /// full streamed size — a per-delta sum would undercount them ~20x.
-    #[test]
-    fn coalesced_frames_count_from_the_message_not_deltas() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        // A message streams to 400 chars; the coalesced wire frame carries
-        // the full snapshot but only the final provider delta.
-        assert_eq!(tracker.apply_streaming(0, 400), 100);
-        // A provider that reports usage upfront wins over the estimate.
-        assert_eq!(tracker.apply_streaming(600, 400), 600);
-        // Settle banks the reported usage, then the live state is empty.
-        tracker.settle(600);
-        assert_eq!(tracker.current(), 600);
-    }
-
-    /// Settling without reported usage banks the live estimate (TS
-    /// `usage.output > 0 ? usage.output : estimatedStreamingTokens()`).
-    #[test]
-    fn settle_without_usage_banks_the_estimate() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        assert_eq!(tracker.apply_streaming(0, 404), 101);
-        tracker.settle(0);
-        assert_eq!(tracker.current(), 101);
-    }
-
-    /// A new message resets the live state but keeps the run's completed
-    /// count; `agent_start` resets the whole tracker (TS `reset`).
-    #[test]
-    fn message_start_resets_the_live_state_and_agent_start_the_run() {
-        let mut tracker = LoaderTokenTracker::default();
-        tracker.reset();
-        assert_eq!(tracker.apply_streaming(0, 800), 200);
-        tracker.settle(0);
-        tracker.start_message();
-        // The live count rides on the run's completed count: 200 banked
-        // plus the new message's reported 50.
-        assert_eq!(tracker.apply_streaming(50, 8), 250);
-        tracker.settle(50);
-        assert_eq!(tracker.current(), 250);
-        tracker.reset();
-        assert_eq!(tracker.current(), 0);
-    }
-
-    /// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
-    /// below.
-    #[test]
-    fn format_rate_matches_the_ts_boundaries() {
-        assert_eq!(format_rate(150.0), "150");
-        assert_eq!(format_rate(100.0), "100");
-        assert_eq!(format_rate(99.96), "100.0");
-        assert_eq!(format_rate(12.34), "12.3");
-        assert_eq!(format_rate(0.5), "0.5");
-    }
-
-    /// The session average sums tokens over the summed wall-clock span (TS
-    /// `speedStats`); it only reads once a positive-span sample exists.
-    #[test]
-    fn speed_stats_average_rate_sums_tokens_over_spans() {
-        let mut stats = SpeedStats {
-            tokens: 300,
-            duration_ms: 1500,
-            samples: 1,
-        };
-        assert_eq!(stats.average_rate(), 200.0);
-        stats.tokens += 100;
-        stats.duration_ms += 500;
-        assert_eq!(stats.average_rate(), 200.0);
     }
 }
 

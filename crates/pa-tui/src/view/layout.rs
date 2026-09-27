@@ -35,10 +35,10 @@ pub(super) struct EntryLayout {
 /// Exact transcript geometry plus the small splash/status surfaces. Entry
 /// rows are constructed only when `transcript_window` visits their range.
 pub(crate) struct TranscriptLayout {
-    splash: Vec<Line>,
+    pub(super) splash: Vec<Line>,
     /// Absolute row starts, including the end sentinel.
     offsets: Vec<usize>,
-    tail: Vec<Line>,
+    pub(super) tail: Vec<Line>,
     pub(super) total: usize,
 }
 

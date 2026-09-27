@@ -216,7 +216,7 @@ impl Supervisor {
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         command: &pa_types::daemon::DaemonCommand,
         client_id: &str,
-        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         command_id: String,
         type_name: String,
         active_session_id: &str,

@@ -215,6 +215,25 @@ pub struct AgentView {
     dock_cursor: Option<(usize, usize)>,
     /// Window height of the last composed frame (cursor positioning).
     pub(crate) window_rows: usize,
+    /// Whether the last composed frame's transcript window reached the
+    /// transcript tail (operator directive 2026-09-26: the follow hint
+    /// composites only when following would actually scroll — a window
+    /// that already shows the tail is at the bottom, not paused above
+    /// new content).
+    pub(crate) window_shows_tail: bool,
+    /// A detail change whose window `resolve_sparse_geometry` consumed
+    /// before its first composition: the next window build's dense arm
+    /// re-derives the follow state from the post-transition geometry
+    /// (operator directive 2026-09-26).
+    pub(crate) detail_transition: bool,
+    /// The screen cell the mouse currently hovers, set while its row is
+    /// a clickable card row (operator directive 2026-09-26: the hovered
+    /// card row brightens so clickability is discoverable). One cell of
+    /// state — a motion report never costs more than one re-style —
+    /// revalidated against every composed frame so a scroll, a resize,
+    /// or streaming never leaves the affordance on a row that stopped
+    /// being the hovered card.
+    pub(crate) hover_pos: Option<(usize, usize)>,
     /// Plain text of the last frame's rows: OSC zone-marker emission only
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
@@ -395,6 +414,9 @@ impl AgentView {
             terminal_rows: 24,
             dock_cursor: None,
             window_rows: 0,
+            window_shows_tail: false,
+            detail_transition: false,
+            hover_pos: None,
             osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
@@ -1738,9 +1760,33 @@ impl AgentView {
         for line in dock {
             frame.push(pad_row(line, width));
         }
+        // The hover affordance (operator directive 2026-09-26): the
+        // hovered clickable card row brightens — Muted text to the
+        // theme's foreground, Dim to Muted, the "opacity shift" that
+        // signals the row is clickable. One row, only while hovered —
+        // and revalidated against THIS frame's just-recorded click
+        // surface, so a scroll, a resize, or streaming that moves other
+        // content onto the hovered row clears the affordance instead of
+        // brightening whatever landed there (the review bots' finding:
+        // the state is a screen coordinate, the layout moves).
+        if let Some((row, col)) = self.hover_pos {
+            if matches!(
+                self.click_target_at(row, col),
+                Some(click::ClickAction::ToggleCardExpansion)
+            ) {
+                if let Some(line) = frame.get_mut(row) {
+                    apply_hover_affordance(line, &self.theme);
+                }
+            } else {
+                self.hover_pos = None;
+            }
+        }
         // A paused viewport carries the follow hint over the last transcript
-        // window row (TS composites it above the dock, below overlays).
-        if !self.following {
+        // window row (TS composites it above the dock, below overlays) —
+        // but only when following would actually scroll: a window that
+        // already shows the transcript tail is at the bottom, not paused
+        // above new content (operator directive 2026-09-26).
+        if !self.following && !self.window_shows_tail {
             if let Some(row) = frame.get_mut(window_height) {
                 let key = self
                     .editor
@@ -1893,57 +1939,165 @@ impl AgentView {
         rows
     }
 
-    /// Rows of the inline layout that changed since the last main-screen
-    /// flush, as a write plan for the flush primitive (TS
-    /// `exitFullscreen`'s inline repaint):
+    /// Stream the changed rows of the inline layout to `out` as the
+    /// main-screen flush (TS `exitFullscreen`'s inline repaint): the flush
+    /// is the one output path that writes into the user's native
+    /// scrollback, so its byte stream is parity-frozen — and on a long
+    /// transcript the materialized flush (`render_inline_frame` plus the
+    /// row texts plus the write buffer) held the whole transcript in
+    /// memory at once, a +O(rows) RSS spike right at exit. The streaming
+    /// flush renders the frame one section at a time (splash, chat
+    /// entries, tail, dock) and hands the encoded rows to `out` in
+    /// bounded chunks, so the peak extra memory is one section plus one
+    /// chunk.
     ///
-    /// - [`FlushPlan::Append`] when the flushed frame is a prefix of the
-    ///   new one (or nothing was flushed yet): the new tail appends below
-    ///   the cursor and flows into native scrollback — this is the exit
-    ///   path that keeps the exit frame and resume hint visible.
-    /// - [`FlushPlan::Repaint`] when rows above the flushed tail changed
-    ///   (a transcript that grew past a suspend-time flush, a snapshot
-    ///   rebuild): the visible screen is erased and the last screenful
-    ///   repainted, mirroring the TS full redraw. Scrollback above the
-    ///   screen is never rewritten — terminal scrollback is immutable,
-    ///   the same trade-off the TS renderer makes.
-    pub fn take_flush_plan(&mut self, width: usize, screen_height: usize) -> FlushPlan {
-        let rows = self.render_inline_frame(width);
-        let texts: Vec<String> = rows.iter().map(row_text_of).collect();
-        let first_changed = (0..self.flushed_frame.len().max(texts.len())).find(|&index| {
-            let old = self.flushed_frame.get(index).map(String::as_str);
-            let new = texts.get(index).map(String::as_str);
-            old != new
-        });
-        let plan = match first_changed {
-            // Identical frame: nothing to write.
-            None => FlushPlan::Append(Vec::new()),
-            // The flushed frame is a prefix: append the new tail.
-            Some(index) if index >= self.flushed_frame.len() => {
-                FlushPlan::Append(rows[index.min(rows.len())..].to_vec())
-            }
-            // Rows above the flushed tail changed: repaint the visible
-            // window (the frame tail), leaving scrollback untouched.
-            Some(_) => {
-                let start = rows.len().saturating_sub(screen_height);
-                FlushPlan::Repaint(rows[start..].to_vec())
-            }
+    /// The write plan keeps the materialized flush's decision tree:
+    ///
+    /// - rows extending the flushed frame append below the cursor and
+    ///   flow into native scrollback — the exit path that keeps the exit
+    ///   frame and resume hint visible;
+    /// - a change above the flushed tail (a transcript that grew past a
+    ///   suspend-time flush, a snapshot rebuild) erases the visible
+    ///   screen and repaints the last screenful, mirroring the TS full
+    ///   redraw — scrollback above the screen is never rewritten,
+    ///   because terminal scrollback is immutable;
+    /// - an identical frame writes nothing.
+    ///
+    /// `self.flushed_frame` (the row texts of the last flush) is the diff
+    /// base for the next flush, exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the write error when `out` rejects a chunk (a terminal
+    /// that went away mid-flush): the rows already written have scrolled,
+    /// so the flush is not retried — the exit tail restores the terminal.
+    pub fn stream_flush_to(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        width: usize,
+        screen_height: usize,
+    ) -> std::io::Result<()> {
+        let layout = self.layout_pass(width);
+        let mut sink = FlushSink {
+            flushed: std::mem::take(&mut self.flushed_frame),
+            texts: Vec::new(),
+            ring: std::collections::VecDeque::new(),
+            chunk: String::new(),
+            screen_height,
+            appending: false,
+            repaint: false,
         };
-        self.flushed_frame = texts;
-        plan
+        sink.feed(out, &layout.splash)?;
+        let mut preceded_by_tool_activity = false;
+        for (index, entry) in self.chat.iter().enumerate() {
+            let rows =
+                self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
+            sink.feed(out, &rows)?;
+            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+        }
+        sink.feed(out, &layout.tail)?;
+        let dock = self.render_dock(width);
+        sink.feed(out, &dock)?;
+        sink.finish(out)?;
+        self.flushed_frame = std::mem::take(&mut sink.texts);
+        Ok(())
     }
 }
 
-/// The main-screen write plan produced by [`AgentView::take_flush_plan`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum FlushPlan {
-    /// Write the rows below the cursor (joined with newlines), scrolling
-    /// excess rows into native scrollback.
-    Append(Vec<Line>),
-    /// Erase the visible screen (scrollback above it stays) and paint the
-    /// rows from the top — the TS full-redraw path for changes above the
-    /// flushed tail.
-    Repaint(Vec<Line>),
+/// The encoded flush rows leave the process in slices of at most this
+/// many bytes: big enough that each PTY write stays one syscall, small
+/// enough that the flush buffer never holds the transcript.
+const CHUNK_BYTES: usize = 256 * 1024;
+
+/// The streaming main-screen flush state: feeds the inline frame's rows
+/// section by section, routes them between the append stream and the
+/// repaint ring, and writes the encoded bytes in bounded chunks.
+struct FlushSink {
+    /// The last flush's row texts — the diff base (owned: the new frame's
+    /// texts replace it at the end of the flush).
+    flushed: Vec<String>,
+    /// The new frame's row texts, accumulated as the rows stream (the
+    /// diff base the NEXT flush compares against).
+    texts: Vec<String>,
+    /// The most recent `screen_height` rows seen, for the repaint write:
+    /// a change above the flushed tail repaints the frame tail only.
+    ring: std::collections::VecDeque<crate::Line>,
+    /// The encoded append rows not yet handed to `out`.
+    chunk: String,
+    screen_height: usize,
+    /// Set once a row extends the flushed frame: every later row appends.
+    appending: bool,
+    /// Set when a row inside the flushed frame changed: every row keeps
+    /// landing in the repaint ring instead.
+    repaint: bool,
+}
+
+impl FlushSink {
+    /// Feed one section of the inline frame.
+    fn feed(&mut self, out: &mut dyn std::io::Write, rows: &[crate::Line]) -> std::io::Result<()> {
+        for row in rows {
+            let index = self.texts.len();
+            let text = row_text_of(row);
+            if self.appending {
+                crate::interactive::write_flush_rows(&mut self.chunk, std::slice::from_ref(row));
+                self.texts.push(text);
+                if self.chunk.len() >= CHUNK_BYTES {
+                    out.write_all(self.chunk.as_bytes())?;
+                    self.chunk.clear();
+                }
+            } else if self.repaint || index >= self.flushed.len() {
+                // Rows inside the flushed frame landed in the ring while
+                // the mode was undecided; a changed row turns the write
+                // into a repaint, and a row past the flushed frame turns
+                // it into an append.
+                if self.repaint {
+                    self.ring_push(row);
+                } else {
+                    self.appending = true;
+                    crate::interactive::write_flush_rows(
+                        &mut self.chunk,
+                        std::slice::from_ref(row),
+                    );
+                }
+                self.texts.push(text);
+            } else {
+                if self.flushed[index].as_str() != text.as_str() {
+                    self.repaint = true;
+                }
+                self.ring_push(row);
+                self.texts.push(text);
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the repaint ring at one screenful.
+    fn ring_push(&mut self, row: &crate::Line) {
+        self.ring.push_back(row.clone());
+        while self.ring.len() > self.screen_height {
+            self.ring.pop_front();
+        }
+    }
+
+    /// Write what the decided mode owes: the append tail, the repaint
+    /// erase plus the ring, or nothing for an identical frame.
+    fn finish(&mut self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        if self.appending {
+            if !self.chunk.is_empty() {
+                out.write_all(self.chunk.as_bytes())?;
+                self.chunk.clear();
+            }
+        } else if self.repaint || self.texts.len() < self.flushed.len() {
+            // A frame that shrank never rewinds into a rewrite of
+            // scrollback: the changed region repaints the visible window.
+            let mut buffer = String::from("\x1b[2J\x1b[H");
+            let ring: Vec<crate::Line> = std::mem::take(&mut self.ring).into_iter().collect();
+            crate::interactive::write_flush_rows(&mut buffer, &ring);
+            out.write_all(buffer.as_bytes())?;
+            self.chunk.clear();
+        }
+        Ok(())
+    }
 }
 
 /// Concatenated span contents of a row (includes zero-width OSC zone
@@ -1970,8 +2124,31 @@ fn split_at_chars(text: &str, at: usize) -> (&str, &str) {
 }
 
 /// One scroll-indicator surface row (`↑ N more` on the editor background).
+/// The hover affordance's row restyle (operator directive 2026-09-26):
+/// Muted spans brighten to the theme's foreground and Dim spans to
+/// Muted — the "text opacity changes a little bit" the operator asked
+/// for. Accent paint (the status glyphs, errors, links) keeps its own
+/// color, so the row stays legible and only its dim text brightens.
+fn apply_hover_affordance(row: &mut Line, theme: &crate::theme::Theme) {
+    let muted = theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+    let dim = theme.fg_style(crate::theme::ThemeColor::Dim).fg;
+    let text = theme.fg_style(crate::theme::ThemeColor::Text);
+    let bright = theme.fg_style(crate::theme::ThemeColor::Muted);
+    for span in row.iter_mut() {
+        if span.style.fg == muted {
+            span.style = span.style.patch(text);
+        } else if span.style.fg == dim {
+            span.style = span.style.patch(bright);
+        }
+    }
+}
+
 fn indicator_row(indicator: &str, bg: Style, border: Style, width: usize) -> Line {
-    let mut row: Line = vec![Span::styled(indicator.to_string(), border)];
+    // The indicator text paints on the editor surface's background too
+    // (operator directive 2026-09-26): the bar's `↑/↓ N more` rows read
+    // as part of the prompt bar, not as text floating on the terminal's
+    // bare background.
+    let mut row: Line = vec![Span::styled(indicator.to_string(), border.patch(bg))];
     let used = str_width(indicator);
     row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
     row
@@ -2543,6 +2720,288 @@ mod tests {
         assert!(top_frame.iter().any(|l| row_text(l).contains("to follow")));
     }
 
+    /// A transcript with thinking blocks: long in `all`/`details` (the
+    /// thinking renders, far past a page above the tail), and short
+    /// enough in `overview` (thinking hidden) that the whole
+    /// conversation fits the window.
+    fn thinking_filled(v: AgentView, turns: usize) -> AgentView {
+        let mut v = filled(v, 0);
+        for index in 0..turns {
+            v.push(TranscriptItem::UserMessage {
+                text: format!("user line {index}"),
+            });
+            v.push(TranscriptItem::Assistant {
+                blocks: vec![crate::chat::MessageBlock::Thinking(format!(
+                    "thinking {index} {} the expanded mode dwarfs the collapsed one",
+                    "reasoning word ".repeat(56)
+                ))],
+                has_tool_calls: false,
+            });
+        }
+        v
+    }
+
+    /// The mode-exit follow recompute (operator directive 2026-09-26):
+    /// pausing in an expanded mode and collapsing back to `overview`
+    /// when the collapsed transcript fits the window resumes following —
+    /// the view already shows the transcript tail, so the follow hint
+    /// does not render and the tail keeps following new content.
+    #[test]
+    fn collapse_resumes_following_when_the_tail_is_in_view() {
+        let mut v = thinking_filled(view(), 2);
+        v.detail = Detail::All;
+        v.render_frame(80, 24);
+        assert!(v.is_following());
+        // Pause a page up in the expanded mode (thinking rows on end).
+        v.scroll_by(-(v.page_size() as isize));
+        assert!(!v.is_following());
+        // Collapse: the hidden thinking shrinks the transcript below the
+        // window — the re-walked window shows the tail.
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(v.is_following(), "the collapse re-derived the follow state");
+        assert!(
+            !collapsed.iter().any(|l| row_text(l).contains("to follow")),
+            "the tail-in-view window carries no follow hint: {collapsed:?}"
+        );
+        assert_eq!(v.scroll_info().lines_below, 0);
+    }
+
+    /// The height-exact boundary (the review bots' finding): a window
+    /// whose bottom lands exactly on the transcript's final chat row —
+    /// with the empty tail section below it — is at the bottom, not
+    /// paused above new content: the follow state re-derives and the
+    /// hint does not render.
+    #[test]
+    fn a_window_ending_exactly_at_the_tail_shows_no_hint() {
+        let mut v = thinking_filled(view(), 8);
+        v.render_frame(80, 24);
+        // The scroll distance to the exact bottom (a following window
+        // sits at `last_max_scroll`, which `lines_above` reports; the
+        // resolve happens before the top pin, so the walked window below
+        // stays sparse).
+        let bottom = v.scroll_info().lines_above;
+        v.scroll_to_top();
+        // The render establishes the walked top window; each row step
+        // keeps the walk (the sparse path), so the final window is a
+        // walked Top anchor sitting exactly on the bottom.
+        v.render_frame(80, 24);
+        for _ in 0..bottom {
+            v.scroll_by(1);
+        }
+        let frame = v.render_frame(80, 24);
+        assert_eq!(
+            v.scroll_info().lines_below,
+            0,
+            "the window sits exactly at the bottom"
+        );
+        assert!(
+            !frame.iter().any(|l| row_text(l).contains("to follow")),
+            "the at-the-bottom window carries no follow hint (following \
+             would scroll nothing)"
+        );
+    }
+
+    /// The recompute is not a blanket un-pause: a collapse that leaves
+    /// real rows below the window keeps following paused and the hint
+    /// rendered (following would actually scroll).
+    #[test]
+    fn collapse_keeps_the_hint_when_rows_remain_below() {
+        let mut v = filled(view(), 30);
+        v.render_frame(80, 24);
+        v.scroll_by(-2);
+        assert!(!v.is_following());
+        v.detail = Detail::Overview;
+        let collapsed = v.render_frame(80, 24);
+        assert!(!v.is_following());
+        assert!(
+            collapsed
+                .iter()
+                .any(|l| row_text(l).contains("ctrl+shift+down to follow")),
+            "the paused window with rows below keeps the hint"
+        );
+    }
+
+    /// The prompt bar's scroll indicators paint on the editor surface's
+    /// background (operator directive 2026-09-26): the `↑ N more` row
+    /// reads as part of the bar, not as text floating on the terminal's
+    /// bare background.
+    #[test]
+    fn the_more_indicator_carry_the_bar_background() {
+        let bg = ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(10, 11, 12));
+        let border = ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
+        for label in [" ↑ 14 more", " ↓ 3 more"] {
+            let row = indicator_row(label, bg, border, 20);
+            for span in &row {
+                assert_eq!(
+                    span.style.bg,
+                    Some(ratatui::style::Color::Rgb(10, 11, 12)),
+                    "every span of {label:?} carries the bar background"
+                );
+            }
+        }
+    }
+
+    /// The hover affordance (operator directive 2026-09-26): a
+    /// buttonless motion over a clickable card row brightens that row —
+    /// Muted spans to the theme's foreground, Dim to Muted — and only
+    /// the state change costs a render; a motion across the same row
+    /// re-styles nothing.
+    #[test]
+    fn the_hover_affordance_brightens_the_hovered_card_row() {
+        // The condensed run block paints its summary row Muted (the
+        // count text) and its breakdown Dim — the affordance's exact
+        // input.
+        let mut view = condensed_view(run_cards(3));
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        // The block's summary row (the "3 tool calls" count row), not the
+        // entry's leading spacer: the affordance's visible surface.
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(
+            plain[block_row].iter().any(|span| span.style.fg == muted),
+            "the block's summary row paints muted: {:?}",
+            plain[block_row]
+        );
+        // Hovering onto the block row changes the state and the paint.
+        assert!(view.note_hover(block_row, 2));
+        assert_eq!(view.hover_pos, Some((block_row, 2)));
+        let hovered = view.render_frame(80, 24);
+        let dim = view.theme.fg_style(crate::theme::ThemeColor::Dim).fg;
+        let bright = view.theme.fg_style(crate::theme::ThemeColor::Muted);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the hovered row's muted span brightened to the theme fg"
+                );
+            } else if plain_span.style.fg == dim {
+                assert_eq!(
+                    hovered_span.style.fg, bright.fg,
+                    "the hovered row's dim span stepped up to muted"
+                );
+            }
+        }
+        // A motion across the same row changes nothing (the cell rides
+        // along; the affordance is row-level).
+        assert!(!view.note_hover(block_row, 5));
+        assert_eq!(view.hover_pos, Some((block_row, 5)));
+        // Moving onto a non-clickable row clears the hover and restores
+        // the paint with the next frame.
+        assert!(view.note_hover(0, 2));
+        assert_eq!(view.hover_pos, None);
+        let restored = view.render_frame(80, 24);
+        assert!(
+            restored[block_row]
+                .iter()
+                .any(|span| span.style.fg == muted),
+            "the block's muted paint returns with the hover"
+        );
+        // The block's breakdown row (the dim branch gutter below the
+        // summary) pins the Dim -> Muted conversion on its own paint:
+        // the entry's whole span is the clickable target, and hovering
+        // it steps the dim spans up exactly one tier.
+        let breakdown_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 bash"))
+            })
+            .expect("the block's breakdown row renders");
+        assert!(
+            plain[breakdown_row].iter().any(|span| span.style.fg == dim),
+            "the breakdown row paints dim: {:?}",
+            plain[breakdown_row]
+        );
+        assert!(view.note_hover(breakdown_row, 2));
+        let hovered_breakdown = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered_breakdown[breakdown_row]
+            .iter()
+            .zip(&plain[breakdown_row])
+        {
+            if plain_span.style.fg == dim {
+                assert_eq!(
+                    hovered_span.style.fg, bright.fg,
+                    "the hovered breakdown's dim span stepped up to muted"
+                );
+            }
+        }
+    }
+
+    /// The render-side revalidation (the review bots' finding): the
+    /// hover is a screen coordinate, and the layout moves — a scroll
+    /// that brings other content onto the hovered row clears the
+    /// affordance with the next frame instead of brightening whatever
+    /// landed there.
+    #[test]
+    fn a_scrolled_layout_revalidates_the_hover() {
+        // A transcript TALLER than the window (the run's block at the
+        // top, user rows below): the window can actually scroll, so the
+        // revalidation is exercised by a real layout move, not a clamp.
+        let mut entries = run_cards(3);
+        for index in 0..10 {
+            entries.push(crate::chat::ChatEntry::User {
+                text: format!("later user line {index}"),
+            });
+        }
+        let mut view = condensed_view(entries);
+        view.render_frame(80, 24);
+        view.scroll_to_top();
+        let plain = view.render_frame(80, 24);
+        let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
+        let block_row = (0..plain.len())
+            .find(|&row| {
+                plain[row]
+                    .iter()
+                    .any(|span| span.content.contains("3 tool calls"))
+            })
+            .expect("the block's summary row renders");
+        assert!(view.note_hover(block_row, 2));
+        let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
+        let hovered = view.render_frame(80, 24);
+        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+            if plain_span.style.fg == muted {
+                assert_eq!(
+                    hovered_span.style.fg, text,
+                    "the muted spans brightened on the hovered row"
+                );
+            }
+        }
+        // Scroll down past the block's whole span: user rows land on the
+        // recorded screen row, and the revalidation clears the hover
+        // with the next frame (a stale coordinate never brightens the
+        // user content that moved onto it).
+        view.scroll_by(6);
+        let scrolled = view.render_frame(80, 24);
+        assert_eq!(
+            view.hover_pos, None,
+            "the scroll cleared the stale hover coordinate"
+        );
+        // The position the block vacated carries different content
+        // (the user block's rows moved onto it — border, text, border):
+        // no hover affordance survives the move onto non-card rows.
+        assert!(
+            !scrolled[block_row]
+                .iter()
+                .any(|span| span.content.contains("3 tool calls")),
+            "the block's summary vacated the recorded position: {:?}",
+            scrolled[block_row]
+        );
+        assert!(
+            (0..scrolled.len()).any(|row| scrolled[row]
+                .iter()
+                .any(|span| span.content.contains("user line"))),
+            "the user rows moved into the window with the scroll"
+        );
+    }
+
     #[test]
     fn follow_hint_keeps_zone_markers_on_the_composited_row() {
         // A marked row composited with the hint keeps its zone flags at
@@ -2564,8 +3023,17 @@ mod tests {
         assert_eq!(crate::osc133::row_markers(&out), RowMarkers::default());
     }
 
+    /// Flush the inline frame into a byte sink, returning the exact bytes
+    /// the terminal would receive.
+    fn flush_bytes(v: &mut AgentView, width: usize, screen_height: usize) -> Vec<u8> {
+        let mut sink: Vec<u8> = Vec::new();
+        v.stream_flush_to(&mut sink, width, screen_height)
+            .expect("the flush streams");
+        sink
+    }
+
     #[test]
-    fn flush_plan_appends_then_repaints_the_changed_tail() {
+    fn flush_streams_append_then_repaints_the_changed_tail() {
         let mut v = view();
         v.chrome.version = "0.0.0".to_string();
         v.chrome.cwd = "/w".to_string();
@@ -2577,17 +3045,20 @@ mod tests {
         // transcript, dock) and keeps the zero-width zone markers embedded
         // in the rows — they must survive into scrollback for
         // shell-integration jumps.
-        let first = v.take_flush_plan(80, 24);
-        let FlushPlan::Append(rows) = &first else {
-            panic!("first flush must append");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("prime agent v0.0.0"));
+        let first = flush_bytes(&mut v, 80, 24);
+        let joined = String::from_utf8_lossy(&first);
+        // The encoded bytes carry SGR styling between spans: assert on
+        // single-span fragments, not strings spanning a style boundary.
+        assert!(joined.contains("0.0.0"));
         assert!(joined.contains("first turn"));
-        assert!(rows.iter().any(|l| crate::osc133::row_markers(l).start));
+        assert!(first
+            .windows(crate::osc133::ZONE_START.len())
+            .any(|w| w == crate::osc133::ZONE_START.as_bytes()));
+        // Every appended row starts at column 0 and ends CRLF.
+        assert!(first.starts_with(b"\r") && first.ends_with(b"\r\n"));
 
         // An unchanged frame flushes nothing.
-        assert_eq!(v.take_flush_plan(80, 24), FlushPlan::Append(Vec::new()));
+        assert!(flush_bytes(&mut v, 80, 24).is_empty());
 
         // New transcript rows land ABOVE the flushed dock, so the flush
         // repaints the visible window: the changed region is rewritten, not
@@ -2595,36 +3066,39 @@ mod tests {
         v.push(TranscriptItem::UserMessage {
             text: "second turn".to_string(),
         });
-        let FlushPlan::Repaint(rows) = v.take_flush_plan(80, 24) else {
-            panic!("growth past the flushed dock must repaint");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut v, 80, 24);
+        assert!(
+            repaint.starts_with(b"\x1b[2J\x1b[H"),
+            "a repaint erases first"
+        );
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("second turn"));
         assert!(joined.contains("first turn"));
         // The repaint covers at most one screenful: a long transcript
         // repaints only the tail.
         let mut long = filled(view(), 30);
-        let FlushPlan::Append(_) = long.take_flush_plan(80, 10) else {
-            panic!("first flush of a long transcript must append");
-        };
+        let appended = flush_bytes(&mut long, 80, 10);
+        assert!(
+            !appended.is_empty() && !appended.starts_with(b"\x1b[2J"),
+            "first flush appends"
+        );
         long.push(TranscriptItem::UserMessage {
             text: "late turn".to_string(),
         });
-        let FlushPlan::Repaint(rows) = long.take_flush_plan(80, 10) else {
-            panic!("growth past the flushed dock must repaint");
-        };
-        assert!(rows.len() <= 10);
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut long, 80, 10);
+        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
+        // One screenful of rows: at most `screen_height` CRLFs.
+        assert!(repaint.iter().filter(|b| **b == b'\n').count() <= 10);
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("late turn"));
         assert!(!joined.contains("reply 0"));
 
         // A shrinking rebuild never rewinds into a rewrite of scrollback:
         // the changed region repaints the visible window only.
         v.clear_chat();
-        let FlushPlan::Repaint(rows) = v.take_flush_plan(80, 24) else {
-            panic!("a rebuild past the flushed frame must repaint");
-        };
-        let joined = rows.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        let repaint = flush_bytes(&mut v, 80, 24);
+        assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
+        let joined = String::from_utf8_lossy(&repaint);
         assert!(!joined.contains("second turn"));
     }
 
