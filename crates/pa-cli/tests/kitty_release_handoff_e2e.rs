@@ -464,6 +464,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
+        restore_dock_focus: false,
         session: SessionSelection::New,
         initial_message: None,
         show_images: true,
@@ -484,7 +485,6 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
-        restore_dock_focus: false,
         client_settings: None,
     }
 }
