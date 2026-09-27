@@ -4367,7 +4367,12 @@ impl SessionUi {
         // strands the frame. The team picker's Esc answers the picker and
         // keeps the dialog mounted (TS the selector is its own component
         // whose cancel keeps the login going).
-        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
+        // Only the binding match unmounts (the same check
+        // `AuthPanel::handle_key` marks cancellation by): a raw
+        // ctrl+c with the binding remapped away is an unhandled
+        // key, not a cancel — unmounting without marking leaves a
+        // live flow that can persist credentials (#2845 review).
+        let cancel_key = kb.matches(&id, "tui.select.cancel");
         let team_picker = view
             .auth_panel
             .as_ref()
