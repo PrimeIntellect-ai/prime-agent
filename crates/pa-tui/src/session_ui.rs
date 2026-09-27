@@ -1833,26 +1833,100 @@ impl SessionUi {
     }
 
     /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
-    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// slice (`onLoginCompleted`): a COMPLETED Anthropic subscription
     /// login draws the ban-risk warning once per session, gated by the
     /// settings toggle (`warnings.anthropicExtraUsage`, TS default
-    /// true — an absent settings seam keeps the default).
-    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
+    /// true — an absent settings seam keeps the warning ENABLED).
+    /// The warning STACKS — `note_as` would rewrite the just-shown
+    /// login-success row in place — and carries the same `⚠` prefix as
+    /// the credential-detection arm.
+    pub(crate) fn maybe_warn_anthropic_subscription_auth(
+        &mut self,
+        provider: &str,
+        view: &mut AgentView,
+    ) {
         if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
             || self.anthropic_subscription_warning_shown
-            || self
+            || !self
                 .client_settings
                 .as_ref()
-                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+                .is_none_or(|settings| settings.warnings_anthropic_extra_usage())
         {
             return;
         }
         self.anthropic_subscription_warning_shown = true;
-        self.note_as(
-            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
-            StatusKind::Warning,
-            view,
-        );
+        view.push_entry(ChatEntry::Status {
+            text: format!("\u{26a0} {ANTHROPIC_SUBSCRIPTION_AUTH_WARNING}"),
+            kind: StatusKind::Warning,
+        });
+        self.last_status_index = None;
+        self.dirty = true;
+    }
+
+    /// The credential-detection arm of TS
+    /// `maybeWarnAboutAnthropicSubscriptionAuth` (#2645): the startup,
+    /// model-selection, and api-key-save triggers need the ACTIVE
+    /// CREDENTIAL's shape — the composition root's
+    /// [`ProviderAuthCommands::anthropic_subscription_warning`] resolves
+    /// it (a stored `Oauth` credential or an `sk-ant-oat` key is the
+    /// subscription; a plain API key never warns). The login-completed
+    /// slice — where the just-settled subscription OAuth login itself
+    /// proves the shape — lives in
+    /// [`Self::maybe_warn_anthropic_subscription_auth`]. Both share the
+    /// once-per-run gate and the `warnings.anthropicExtraUsage` setting.
+    pub(crate) async fn maybe_warn_anthropic_subscription_auth_if_subscribed(
+        &mut self,
+        provider: Option<&str>,
+        view: &mut AgentView,
+    ) {
+        if self.anthropic_subscription_warning_shown {
+            return;
+        }
+        let warnings_enabled = self
+            .client_settings
+            .as_ref()
+            .is_none_or(|settings| settings.warnings_anthropic_extra_usage());
+        if !warnings_enabled || provider != Some("anthropic") {
+            return;
+        }
+        let Some(auth) = self.provider_auth.clone() else {
+            return;
+        };
+        if let Some(warning) = auth.0.anthropic_subscription_warning().await {
+            self.anthropic_subscription_warning_shown = true;
+            // The warning STACKS, never rewrites: `note_as` would replace
+            // the just-shown `Model: ...` or login-success confirmation
+            // row in place (TS `showStatus`'s back-to-back rewrite); a
+            // plain pushed row keeps both, and clearing the status index
+            // keeps the NEXT status from rewriting the warning either.
+            view.push_entry(ChatEntry::Status {
+                text: format!("\u{26a0} {warning}"),
+                kind: StatusKind::Warning,
+            });
+            self.last_status_index = None;
+            self.dirty = true;
+        }
+    }
+
+    /// The active model's provider from the daemon's state (TS
+    /// `getCurrentModel().provider`); best-effort, silent on failure.
+    pub(crate) async fn current_model_provider(&mut self) -> Option<String> {
+        let state = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::GetState {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+            .ok()?;
+        state
+            .get("model")?
+            .get("provider")?
+            .as_str()
+            .map(str::to_string)
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to

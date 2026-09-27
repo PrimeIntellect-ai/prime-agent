@@ -20,11 +20,32 @@ pub struct AuxiliaryModelContext {
     pub agent_dir: PathBuf,
 }
 
+/// The session fallback for a summarizer call, WITH its merged request
+/// headers: the registry (auth storage + models.json) is the single owner
+/// of the team header, so a fallback call ships the stored team exactly
+/// like the session's own requests (TS `_resolveAuxiliaryModel`'s fallback
+/// resolves through the same storage the session request path uses).
+pub(crate) fn session_fallback_with_headers(
+    context: &AuxiliaryModelContext,
+    session_model: &Model,
+    session_api_key: Option<String>,
+) -> ResolvedAuxiliaryModel {
+    let auth = crate::auth::AuthStorage::create(&context.agent_dir);
+    let mut registry =
+        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let resolved = registry.get_api_key_and_headers(session_model, session_model.headers.as_ref());
+    ResolvedAuxiliaryModel {
+        model: session_model.clone(),
+        api_key: session_api_key,
+        headers: resolved.headers,
+    }
+}
+
 /// One routed summarizer target: the model the pass runs on, the key it
 /// sends, and the merged request headers its provider needs (TS
 /// `_resolveAuxiliaryModel`'s `{ model, apiKey, headers }`). The session
-/// fallback carries no headers — today's session-model summarizer path
-/// never wired them.
+/// fallback resolves its headers through the same registry the session's
+/// own requests use.
 #[derive(Debug, Clone)]
 pub struct ResolvedAuxiliaryModel {
     pub model: Model,
@@ -57,11 +78,8 @@ pub fn resolve_auxiliary_model(
     session_api_key: Option<String>,
     required_context_tokens: Option<u64>,
 ) -> ResolvedAuxiliaryModel {
-    let fallback = || ResolvedAuxiliaryModel {
-        model: session_model.clone(),
-        api_key: session_api_key.clone(),
-        headers: None,
-    };
+    let fallback =
+        || session_fallback_with_headers(context, session_model, session_api_key.clone());
     let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
     // A malformed or whitespace value behaves as unset (TS
     // `getAuxiliaryModel`): the pass falls back to the session model.
@@ -164,6 +182,37 @@ mod tests {
             agent_dir: dir.path().to_path_buf(),
         };
         (dir, context)
+    }
+
+    /// The session fallback resolves its MERGED headers through the same
+    /// registry the session's own requests use (Cursor PR #2755: with the
+    /// provider-side team-header fallback deleted, the fallback summarizer
+    /// call is the only other path that must carry the stored team).
+    #[test]
+    fn the_session_fallback_keeps_the_merged_headers() {
+        let (dir, context) = context_with_settings(serde_json::json!({}));
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "test-key",
+                    "primeTeam": { "teamId": "team-1", "name": "Test Team" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let session = model("session-model", "prime-inference", 8_000);
+        let routed = session_fallback_with_headers(&context, &session, Some("override".into()));
+        assert_eq!(routed.model.id, "session-model");
+        assert_eq!(routed.api_key.as_deref(), Some("override"));
+        let headers = routed.headers.expect("the fallback keeps merged headers");
+        assert_eq!(
+            headers.get("X-Prime-Team-ID").map(String::as_str),
+            Some("team-1"),
+            "the stored team ships on the fallback summarizer call"
+        );
     }
 
     #[test]

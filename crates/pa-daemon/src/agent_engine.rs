@@ -1066,8 +1066,8 @@ impl AgentSessionEngine {
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
-            let mut target = self.provider_target.write().expect("provider target lock");
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
+            let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key,
@@ -1273,6 +1273,13 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> TurnResult {
+        #[derive(Clone)]
+        struct FailoverPrimary {
+            model: pa_types::ai::Model,
+            thinking_level: pa_agent::types::ThinkingLevel,
+            api_key: Option<String>,
+            headers: Option<std::collections::BTreeMap<String, String>>,
+        }
         // Model resolution and session construction are hard failures: they
         // never reach the provider, so the retry loop does not apply (the
         // TS loop only classifies provider stream failures).
@@ -1363,13 +1370,11 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
-        let primary_state: std::cell::RefCell<
-            Option<(
-                pa_types::ai::Model,
-                pa_agent::types::ThinkingLevel,
-                Option<String>,
-            )>,
-        > = std::cell::RefCell::new(None);
+        // The failover-captured primary target state (TS `_backupModel`):
+        // the model, its thinking level, and its resolved request auth,
+        // restored when the turn settles back onto the primary.
+        let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
+            std::cell::RefCell::new(None);
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -1461,11 +1466,14 @@ impl AgentSessionEngine {
                         // session was built with, restored when the turn
                         // settles.
                         if primary.is_none() {
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                self.resolve_request_api_key(&model),
-                            ));
+                            let (api_key, headers) =
+                                self.resolve_request_key_and_headers(&model);
+                            *primary = Some(FailoverPrimary {
+                                model: model.clone(),
+                                thinking_level: map_thinking_level(self.effective_thinking()),
+                                api_key,
+                                headers,
+                            });
                         }
                     }
                     let next = next.clone();
@@ -1483,13 +1491,15 @@ impl AgentSessionEngine {
                         // request hits the switched-to provider with its
                         // resolved key.
                         {
+                            let (api_key, headers) =
+                                self.resolve_request_key_and_headers(&next);
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
                                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: self.resolve_request_api_key(&next),
+                                api_key,
                                 model: next.clone(),
-                                headers: None,
+                                headers,
                             });
                         }
                         agent.set_model(agent_model).await;
@@ -1508,7 +1518,12 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((primary_model, thinking_level, primary_api_key)) = primary
+                        let Some(FailoverPrimary {
+                            model: primary_model,
+                            thinking_level,
+                            api_key: primary_api_key,
+                            headers: primary_headers,
+                        }) = primary
                         else {
                             return Ok(None);
                         };
@@ -1523,7 +1538,7 @@ impl AgentSessionEngine {
                                 service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
                                 model: primary_model.clone(),
-                                headers: None,
+                                headers: primary_headers,
                             });
                         }
                         agent.set_model(agent_model).await;
