@@ -174,10 +174,10 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
     let last_row_at = find_subsequence_last(&output, &last_user_row)
         .expect("the flush wrote the transcript's last user row");
-    let dock_at = find_subsequence_last(&output, EXIT_HINT_ROW)
-        .expect("the flush wrote the dock rows");
-    let leave_at = find_subsequence(&output, ALT_SCREEN_LEAVE)
-        .expect("the exit left the alternate screen");
+    let dock_at =
+        find_subsequence_last(&output, EXIT_HINT_ROW).expect("the flush wrote the dock rows");
+    let leave_at =
+        find_subsequence(&output, ALT_SCREEN_LEAVE).expect("the exit left the alternate screen");
     assert!(
         leave_at < first_row_at && first_row_at < last_row_at && last_row_at < dock_at,
         "the flushed rows follow the alt-screen leave (output {}B, leave_at {leave_at}, first_row_at {first_row_at}, last_row_at {last_row_at}, dock_at {dock_at})",

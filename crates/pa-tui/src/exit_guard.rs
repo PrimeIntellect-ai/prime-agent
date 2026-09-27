@@ -285,10 +285,7 @@ fn spawn_watchdog(state: Arc<GuardState>) {
                 // not stalled. Hold the fire while progress keeps landing
                 // (checked every poll slice); the silent case still fires
                 // at the deadline, exactly as before.
-                let last_progress = LAST_EXIT_PROGRESS
-                    .lock()
-                    .ok()
-                    .and_then(|last| *last);
+                let last_progress = LAST_EXIT_PROGRESS.lock().ok().and_then(|last| *last);
                 if force_quit_due(now, deadline, last_progress) {
                     force_quit();
                 }
