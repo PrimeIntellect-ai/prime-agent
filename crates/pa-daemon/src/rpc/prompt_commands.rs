@@ -92,16 +92,13 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
 /// emits the same pair through its engine-event surface — the RPC stream
 /// forwards the frames verbatim through the connection-output seam).
 async fn write_command_row(state: &RpcState, message: &CustomMessage) {
-    // The session row crosses the pa-core/pa-agent boundary by its
-    // shared camelCase wire shape (the messages module's round-trip
-    // conversion, the same JSON both sides serialize).
-    let custom = serde_json::from_value::<pa_agent::types::CustomAgentMessage>(
-        serde_json::to_value(message)
-            .ok()
-            .unwrap_or(serde_json::Value::Null),
-    );
-    let Ok(custom) = custom else {
-        return;
+    // The row's loop shape (TS messages.ts: the `custom` role carries
+    // the session-command rows — the role rides BESIDE the row's own
+    // fields, exactly this construction; a bare round-trip cannot
+    // recover it, the session row type carries no role).
+    let custom = pa_agent::types::CustomAgentMessage {
+        role: "custom".to_string(),
+        payload: serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
     };
     for event in [
         AgentEvent::MessageStart {
