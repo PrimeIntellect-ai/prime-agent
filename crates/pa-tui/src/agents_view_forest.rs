@@ -607,11 +607,6 @@ struct BaseRow {
     /// the running line's `"{direct}, {nested} running"` title (the
     /// nested number is the recursive running count minus this).
     direct_running: usize,
-    /// The descendant-tree model multiset (the summary row's model mix):
-    /// a real model string (never the `-` placeholder) -> its count. The
-    /// collapsed summary row otherwise hides every subagent's model — and
-    /// the mix is what tells the operator a tree runs a model blend.
-    descendant_models: std::collections::BTreeMap<String, usize>,
     record: usize,
     search_score: Option<f64>,
 }
@@ -705,7 +700,6 @@ pub fn build_rows(
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
             direct_running: 0,
-            descendant_models: std::collections::BTreeMap::new(),
             summary,
             record: position,
         });
@@ -756,8 +750,7 @@ pub fn build_rows(
     // walk is itself traversed — so a chain of any depth folds before its
     // parent (TS's `index < tallyOrder.length` loop; a fixed `0..len` range
     // would strand grandchildren and their descendants out of every fold:
-    // the busy tally, the descendant counts, the cost rollups, and the
-    // summary row's model mix).
+    // the busy tally, the descendant counts, and the cost rollups).
     let mut tally_order: Vec<usize> = (0..base.len())
         .filter(|index| !nested.contains(index))
         .collect();
@@ -777,12 +770,6 @@ pub fn build_rows(
         let mut direct_running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
-        // The descendant model multiset rolls up in the same walk (the
-        // summary row renders the whole descendant tree's model mix,
-        // matching its descendant count's deliberate divergence): each
-        // child contributes its own model plus its already-rolled map.
-        let mut models: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
         for child in children_by_parent.get(index).into_iter().flatten() {
             if base[*child].section == Section::Running {
                 direct_running += 1;
@@ -791,14 +778,7 @@ pub fn build_rows(
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
-            if base[*child].model != "-" {
-                *models.entry(base[*child].model.clone()).or_insert(0) += 1;
-            }
-            for (model, count) in &base[*child].descendant_models {
-                *models.entry(model.clone()).or_insert(0) += *count;
-            }
         }
-        base[*index].descendant_models = models;
         base[*index].running_subagent_count = running;
         base[*index].direct_running = direct_running;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
@@ -1241,48 +1221,19 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
     }
 }
 
-/// The collapsed summary row's model mix (the operator's cost question:
-/// which models the subagent tree runs): `model×count` per distinct
-/// model, highest count first, then alphabetical —
-/// `glm-5.3-fast×2, opus-4-6`. Empty when no descendant carries
-/// model identity.
-fn model_mix(models: &std::collections::BTreeMap<String, usize>) -> String {
-    let mut entries: Vec<(&String, usize)> = models
-        .iter()
-        .map(|(model, count)| (model, *count))
-        .collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    entries
-        .into_iter()
-        .map(|(model, count)| {
-            if count > 1 {
-                format!("{model}\u{d7}{count}")
-            } else {
-                model.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The running line under one agent (the operator's 2026-09-25
 /// directive, a deliberate TS divergence: TS `createSubagentSummaryRow`
 /// titles one `"{n} subagents running"` line that expands to every
 /// child). The title reads `"{direct}, {nested} running"` — `direct` =
 /// immediately running children, `nested` = further running descendants
 /// below them — and the expansion renders only running rows, flattened
-/// through non-running ancestors. The collapsed line is the one place the
-/// subagent tree's model mix surfaces while work runs — expanded children
-/// render their own Model column.
+/// through non-running ancestors. The title stays count-only (the
+/// operator's 2026-09-26 follow-up: the model mix left this line, the
+/// expanded children render their own Model column).
 fn running_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let direct = parent.direct_running;
     let nested = parent.running_subagent_count.saturating_sub(direct);
-    let mut title = format!("{direct}, {nested} running");
-    let mix = model_mix(&parent.descendant_models);
-    if !mix.is_empty() {
-        title.push_str(" \u{b7} ");
-        title.push_str(&mix);
-    }
+    let title = format!("{direct}, {nested} running");
     summary_row(
         parent,
         depth,
@@ -1298,14 +1249,17 @@ fn running_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agents
 /// directive): the explicit home for every not-running descendant — the
 /// historical agents stay discoverable here without contaminating the
 /// running line's expansion. The count aggregates the whole descendant
-/// tree's not-running rows (the summary count's deliberate divergence),
-/// the expansion lists the not-running children, and the model mix rides
-/// this line when no running line renders above it.
+/// tree's not-running rows (the summary count's deliberate divergence)
+/// and the expansion lists the not-running children. The title stays
+/// count-only (the operator's 2026-09-26 follow-up: the model mix left
+/// this line too), and the line bills the same descendant-tree aggregate
+/// the running line does — the aggregate must survive the state where
+/// every descendant is done and the running line no longer renders.
 fn inactive_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let inactive = parent
         .descendant_count
         .saturating_sub(parent.running_subagent_count);
-    let mut title = format!(
+    let title = format!(
         "{inactive} inactive {}",
         if inactive == 1 {
             "subagent"
@@ -1313,31 +1267,25 @@ fn inactive_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agent
             "subagents"
         }
     );
-    if parent.running_subagent_count == 0 {
-        let mix = model_mix(&parent.descendant_models);
-        if !mix.is_empty() {
-            title.push_str(" \u{b7} ");
-            title.push_str(&mix);
-        }
-    }
     summary_row(
         parent,
         depth,
         expanded,
         title,
         INACTIVE_SUMMARY_ROW_PREFIX,
-        0.0,
+        parent.descendant_cost,
         0,
     )
 }
 
 /// One summary line's row: both lines reuse their parent's summary so
 /// the open action and selection keys resolve the parent. The `cost`
-/// cell is the line's aggregate — the running line bills the whole
-/// descendant tree (the operator's 2026-09-26 ask; TS
-/// `createSubagentSummaryRow` pins `recursiveCost: 0` there, a
-/// deliberate divergence) while the inactive line stays unbilled, and
-/// neither line carries an age.
+/// cell is the line's aggregate — BOTH lines bill the whole descendant
+/// tree (the operator's 2026-09-26 ask; the running line first, then
+/// the follow-up: an all-done tree renders no running line, so the
+/// inactive line bills the same total — TS `createSubagentSummaryRow`
+/// pins `recursiveCost: 0` there, a deliberate divergence), and neither
+/// line carries an age.
 fn summary_row(
     parent: &BaseRow,
     depth: usize,
@@ -1846,16 +1794,17 @@ mod tests {
         assert_eq!(rows[3].title, "1 inactive subagent");
     }
 
-    /// The collapsed summary row carries the subagent tree's model mix
-    /// (the operator's cost question: which models the tree runs). The
-    /// count spans the whole descendant tree like the summary count
-    /// itself; `-` placeholders stay out; ties order alphabetically.
+    /// The summary rows' titles are count-only (the operator's
+    /// 2026-09-26 follow-up): the running line reads `"{direct}, {nested}
+    /// running"`, the inactive line `"{n} inactive subagent(s)"`, and
+    /// neither carries the descendant tree's model mix anymore — the
+    /// models surface on the child rows' own Model column. The tally
+    /// walk still folds every depth (the dynamic bound a fixed `0..len`
+    /// range would strand).
     #[test]
-    fn summary_row_carries_the_descendant_model_mix() {
+    fn summary_rows_stay_count_only() {
         let mut glm_one = child_summary("c1", "p", "worker one");
         glm_one["model"] = json!("internal/glm-5.3-fast");
-        let mut glm_two = child_summary("c2", "p", "worker two");
-        glm_two["model"] = json!("internal/glm-5.3-fast");
         let mut opus = child_summary("c3", "p", "worker three");
         opus["model"] = json!("anthropic/claude-opus-4-6");
         let mut grandchild = child_summary("gc", "c3", "grandkid");
@@ -1864,40 +1813,37 @@ mod tests {
         let roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
             roster_entry("c1", "idle", glm_one),
-            roster_entry("c2", "idle", glm_two),
+            roster_entry("c2", "idle", child_summary("c2", "p", "worker two")),
             roster_entry("c3", "idle", opus),
             roster_entry("gc", "idle", grandchild),
         ];
-        // Collapsed: the summary row is the only place the tree's model
-        // mix surfaces — two glm workers, two opus rows (a child plus
-        // its grandchild).
         let rows = rows_for(&roster, None, &[]);
         let summary = rows
             .iter()
             .find(|row| row.kind == RowKind::SubagentSummary)
             .expect("summary row");
-        assert_eq!(
-            summary.title,
-            "4 inactive subagents \u{b7} claude-opus-4-6\u{d7}2, glm-5.3-fast\u{d7}2"
-        );
-        // The child's own inactive line counts only its subtree.
+        assert_eq!(summary.title, "4 inactive subagents");
+        assert!(summary.model.is_empty(), "no model rides the summary row");
+        // The child rows keep their own Model column entry (the expanded
+        // inactive list renders them).
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
+        let child = rows
+            .iter()
+            .find(|row| row.title == "worker one")
+            .expect("child row");
+        assert_eq!(child.model, "glm-5.3-fast");
+        // The child's own inactive line counts only its subtree, also
+        // count-only.
         let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
         let nested = rows
             .iter()
             .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
             .expect("nested summary row");
-        assert_eq!(nested.title, "1 inactive subagent \u{b7} claude-opus-4-6");
-        // A child without model identity stays out of the mix.
-        let roster = vec![
-            roster_entry("p", "idle", parent_summary("p")),
-            roster_entry("c", "idle", child_summary("c", "p", "worker one")),
-        ];
-        let rows = rows_for(&roster, None, &[]);
-        assert_eq!(rows[1].title, "1 inactive subagent");
-        // A FOUR-level chain folds at every depth: the great-grandchild's
-        // model reaches the root's mix (the tally walk's dynamic bound —
-        // a fixed `0..len` range would strand the great-grandchild out of
-        // the rollup).
+        assert_eq!(nested.title, "1 inactive subagent");
+        // A FOUR-level chain folds at every depth: the great-grandchild
+        // still reaches the root's count (the tally walk's dynamic
+        // bound — a fixed `0..len` range would strand it out of the
+        // rollup).
         let mut gc = child_summary("gc", "c", "grandkid");
         gc["rlmChildId"] = json!("child-gc");
         gc["model"] = json!("anthropic/claude-opus-4-6");
@@ -1915,12 +1861,7 @@ mod tests {
             .iter()
             .find(|row| row.kind == RowKind::SubagentSummary)
             .expect("summary row");
-        // `worker one` carries no model identity, so the mix counts the
-        // grandchild (opus) and the great-grandchild (sol) only.
-        assert_eq!(
-            summary.title,
-            "3 inactive subagents \u{b7} claude-opus-4-6, gpt-5.6-sol"
-        );
+        assert_eq!(summary.title, "3 inactive subagents");
         assert_eq!(rows[0].descendant_count, 3);
     }
 
@@ -2588,11 +2529,13 @@ mod tests {
         assert_eq!(rows[1].title, "sweep alpha");
     }
 
-    /// The operator's 2026-09-26 ask: the collapsed running line's Cost
-    /// cell aggregates EVERY descendant subagent's spend — running, idle,
-    /// and inactive rows all bill — while the inactive line stays
-    /// unbilled and the parent row keeps the recursive total (own +
-    /// descendants).
+    /// The operator's 2026-09-26 ask: BOTH collapsed summary lines'
+    /// Cost cells aggregate EVERY descendant subagent's spend — running,
+    /// idle, and inactive rows all bill — and the parent row keeps the
+    /// recursive total (own + descendants). The inactive line bills the
+    /// same total as the running line (the follow-up: an all-done tree
+    /// renders no running line, so the aggregate must ride the line that
+    /// does).
     #[test]
     fn running_line_bills_every_descendant_status() {
         let mut parent = parent_summary("p");
@@ -2631,7 +2574,10 @@ mod tests {
             .iter()
             .find(|row| row.identity == "subagents-inactive:file:/x/p.jsonl")
             .expect("inactive line");
-        assert_eq!(inactive.cost, 0.0, "the inactive line stays unbilled");
+        assert_eq!(
+            inactive.cost, 4.75,
+            "the inactive line bills the same descendant aggregate as the running line"
+        );
     }
 
     /// The deleted-descendant bucket (TS #2506's
