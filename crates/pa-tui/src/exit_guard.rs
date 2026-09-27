@@ -28,7 +28,7 @@
 //! consumed always disarms.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -42,12 +42,64 @@ pub(crate) const CTRL_C_WINDOW_MS: u64 = 2_000;
 /// `process::exit`) is *observed* within the 2s window once process
 /// teardown and terminal latency are included.
 pub(crate) const FORCE_QUIT_AFTER_MS: u64 = 1_500;
+/// How long the exit path may stay silent after a real observation of
+/// progress before the watchdog treats it as stalled. The exit flush
+/// hands the whole transcript to the terminal in bounded chunks
+/// (view.rs `FlushSink`), and a slow terminal consumes those chunks at
+/// its own pace: the writer blocks inside `write` while the terminal
+/// drains, which looks exactly like a wedged shutdown to a pure wall
+/// clock. A completed chunk write is proof the exit is moving, so the
+/// watchdog holds fire while progress was observed within this window
+/// and force-quits only once it goes stale (a dead terminal, a wedged
+/// writer). TS has no watchdog at all — its exit simply waits for the
+/// writes — so holding on observed progress is the TS-healthy behavior;
+/// the hard 1500ms ceiling stays for the silent case (the wedged loop
+/// the guard was built for). With 32KiB chunks this holds for any drain
+/// faster than ~65KB/s; slower drains read as stalled and force-quit
+/// (deliberate: the 1500ms contract outranks an unbounded wait).
+const EXIT_PROGRESS_GRACE_MS: u64 = 500;
 /// Watchdog poll slice: the sleep-until-deadline loop wakes this often to
 /// re-read the deadline (so a disarm or cancel lands) and never
 /// overshoots the deadline by more than a few milliseconds.
 const WATCHDOG_POLL_MS: u64 = 25;
 /// The name of the watchdog thread (visible in thread dumps).
 const WATCHDOG_THREAD_NAME: &str = "tui-exit-watchdog";
+
+/// When the exit path last proved it is making progress (`None` until the
+/// first proof). Process-global on purpose: the writers that owe the proof
+/// (the exit flush's chunked writes in view.rs, the release tail in
+/// `exit_restore.rs`, the resume hint in `pa-cli`) do not own the guard — the
+/// guard is shared across surfaces and the writers live in other layers —
+/// and a stamp beside the watchdog reads at every poll slice exactly the
+/// same state any guard's watchdog would. One TUI process, one exit.
+static LAST_EXIT_PROGRESS: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Report exit-path progress: the writer completed a real step toward the
+/// process exit (a flush chunk, a release-tail write, the resume hint).
+/// The watchdog holds its force-quit while progress lands within
+/// [`EXIT_PROGRESS_GRACE_MS`]; a shutdown that keeps moving is draining a
+/// slow terminal, not stalled, and TS semantics for it are to let the
+/// writes finish (TS has no forced exit at all). Feeding is one mutex
+/// store per bounded chunk: never on a frame path, only on the exit path.
+pub fn note_exit_progress() {
+    if let Ok(mut last) = LAST_EXIT_PROGRESS.lock() {
+        *last = Some(Instant::now());
+    }
+}
+
+/// Whether the watchdog may force-quit at `now`: the deadline has passed
+/// AND the exit path has been silent for the whole grace window. A fresh
+/// progress stamp means the exit is draining a slow terminal (a healthy
+/// flush), so the forced exit would kill a live writer mid-stream —
+/// truncating the scrollback contract the flush is frozen to, and
+/// queueing the restore's own bytes mid-flush. Silence for the grace
+/// window means nothing is moving: the original wedged-shutdown case.
+fn force_quit_due(now: Instant, deadline: Instant, last_progress: Option<Instant>) -> bool {
+    now >= deadline
+        && !last_progress.is_some_and(|last| {
+            now.duration_since(last) <= Duration::from_millis(EXIT_PROGRESS_GRACE_MS)
+        })
+}
 
 /// What one Ctrl+C observation means, given the previous press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +280,19 @@ fn spawn_watchdog(state: Arc<GuardState>) {
             let deadline = thread_state.base + Duration::from_millis(deadline_ms);
             let now = Instant::now();
             if now >= deadline {
-                force_quit();
+                // Drain-aware: the deadline passed, but a writer that
+                // completed a step recently is draining a slow terminal,
+                // not stalled. Hold the fire while progress keeps landing
+                // (checked every poll slice); the silent case still fires
+                // at the deadline, exactly as before.
+                let last_progress = LAST_EXIT_PROGRESS.lock().ok().and_then(|last| *last);
+                if force_quit_due(now, deadline, last_progress) {
+                    force_quit();
+                }
+                // Held: re-check on the next poll slice (progress may go
+                // stale while the drain stalls).
+                std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
+                continue;
             }
             std::thread::sleep((deadline - now).min(Duration::from_millis(WATCHDOG_POLL_MS)));
         });
@@ -252,8 +316,57 @@ fn force_quit() -> ! {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that touch the process-global progress stamp:
+    /// the stamp is shared by every test thread, so a reader must hold
+    /// this lock across its whole observation window.
+    static PROGRESS_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn ctrl_c() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn force_quit_holds_only_while_progress_is_fresh() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        // Before the deadline the watchdog never fires, progress or not.
+        assert!(!force_quit_due(now, deadline, None));
+        assert!(!force_quit_due(now, deadline, Some(now)));
+        // Past the deadline with no progress ever observed: the wedged
+        // shutdown — fires at the deadline, unchanged.
+        assert!(force_quit_due(deadline, deadline, None));
+        // Past the deadline with progress inside the grace window: the
+        // exit is draining a slow terminal — hold.
+        let fresh = deadline
+            .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS))
+            .expect("the grace window precedes the deadline");
+        assert!(!force_quit_due(deadline, deadline, Some(fresh)));
+        // Progress one millisecond older than the grace window: nothing
+        // has moved for the whole window — stalled, fire.
+        let stale = deadline
+            .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS + 1))
+            .expect("the stale timestamp precedes the deadline");
+        assert!(force_quit_due(deadline, deadline, Some(stale)));
+    }
+
+    #[test]
+    fn note_exit_progress_stamps_the_last_observation() {
+        let _state = PROGRESS_STATE_LOCK.lock();
+        {
+            let mut last = LAST_EXIT_PROGRESS.lock().expect("progress lock");
+            *last = None;
+        }
+        note_exit_progress();
+        let first = LAST_EXIT_PROGRESS
+            .lock()
+            .expect("progress lock")
+            .expect("the note stamped an observation");
+        note_exit_progress();
+        let second = LAST_EXIT_PROGRESS
+            .lock()
+            .expect("progress lock")
+            .expect("the note stamped again");
+        assert!(second >= first, "the stamp keeps the LAST observation");
     }
 
     #[test]

@@ -88,6 +88,7 @@ use crate::protocol::{
 use crate::registry::{
     ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,
 };
+use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
 use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
@@ -143,9 +144,11 @@ pub struct Supervisor {
     /// never overtake the snapshot answer (a client that applies the
     /// push first and then the snapshot would lose the rows).
     pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// In-flight saved-session renames (TS `pendingSessionNames`): one
-    /// reservation per `[depth, parent, name]` scope, so a concurrent
-    /// rename of the same name fails the second caller.
+    /// In-flight name reservations (TS `pendingSessionNames`): one
+    /// reservation per `[depth, parent, name]` scope, shared by the
+    /// saved-session rename ladder and the subagent spawn admission (TS
+    /// #2396 `createRlmSubagentRuntime`), so a concurrent rename or spawn
+    /// of the same name in the same scope fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     shutting_down: AtomicBool,
     /// Whether some path has taken ownership of the one terminal stop pass.

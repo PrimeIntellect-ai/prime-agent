@@ -925,8 +925,10 @@ pub struct RequestRejected {
     pub command: String,
     /// The daemon's raw error string.
     pub message: String,
-    /// The typed structured failure info of the refusal, when the daemon
-    /// tagged one (`errorInfo`); `None` on plain message refusals.
+    /// The typed refusal info (`errorInfo`), when the daemon typed it:
+    /// `update_restarting` (the update-prepare fence, TS #2391),
+    /// `session_already_active`, `model_provider_unauthenticated`, ...
+    /// `None` for untyped refusals and older daemons.
     pub error_info: Option<DaemonErrorInfo>,
 }
 
@@ -950,6 +952,23 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<RequestRejected>().is_some())
 }
 
+/// True when an open failure is the update-restart transient state (TS
+/// `isDaemonUpdateRestartingError`): a typed `update_restarting`
+/// rejection from a current daemon, or the exact-message fallback that
+/// also recognizes older daemons rejecting with the same plain string.
+pub fn is_update_restarting_rejection(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<RequestRejected>()
+            .is_some_and(|rejected| {
+                matches!(
+                    &rejected.error_info,
+                    Some(pa_types::daemon::DaemonErrorInfo::UpdateRestarting)
+                ) || rejected.message == pa_types::daemon::UPDATE_RESTART_PREPARING_MESSAGE
+            })
+    })
+}
+
 /// Whether an error is a response/handshake timeout ("Timed out after
 /// Nms waiting for the Prime Agent daemon (response|handshake)"): a
 /// transient under-load failure, not a protocol error — the caller
@@ -957,10 +976,18 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
 pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
     // Case-insensitive: the TUI's own bounded requests say
     // "timed out after Nms ...", the daemon client's hello/connect paths
-    // "Timed out after Nms ...".
-    error
-        .chain()
-        .any(|cause| cause.to_string().to_lowercase().contains("timed out after"))
+    // "Timed out after Nms ...". ANCHORED at the chain link's start, the
+    // shape of TS's own transport-timeout checks: every genuine emitter
+    // begins its message with the phrase, so an error that merely
+    // QUOTES a timeout (the update-restart wait's deadline error inlines
+    // the last attempt's text) never matches and keeps its dedicated
+    // guidance handoff.
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .to_lowercase()
+            .starts_with("timed out after")
+    })
 }
 
 /// Whether an error means the daemon connection could not carry the
@@ -1295,6 +1322,42 @@ mod tests {
     fn plain_errors_are_not_rejections() {
         let error = anyhow!("the daemon connection is closed");
         assert!(!is_daemon_rejection(&error));
+    }
+
+    /// TS #2391 `update_restarting` wire round-trip (the
+    /// daemon-errors.test.ts mirror): the typed info survives the wire
+    /// to a `RequestRejected`, and the exact-message fallback recognizes
+    /// the older daemon's plain-string rejection. An unrelated refusal
+    /// never classifies as the update-restart transient state.
+    #[test]
+    fn update_restarting_rejection_round_trips_the_wire() {
+        let line = serde_json::from_str::<DaemonResponse>(
+            r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart","errorInfo":{"code":"update_restarting"}}"#,
+        )
+        .expect("typed refusal parses");
+        let error = response_data_or_error("create", line).unwrap_err();
+        assert!(is_update_restarting_rejection(&error));
+        let rejection = error
+            .downcast_ref::<RequestRejected>()
+            .expect("typed rejection");
+        assert_eq!(
+            rejection.error_info,
+            Some(pa_types::daemon::DaemonErrorInfo::UpdateRestarting)
+        );
+        // The legacy daemon: the same plain string with no errorInfo.
+        let legacy = serde_json::from_str::<DaemonResponse>(
+            r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart"}"#,
+        )
+        .expect("legacy refusal parses");
+        let error = response_data_or_error("create", legacy).unwrap_err();
+        assert!(is_update_restarting_rejection(&error));
+        // An unrelated refusal is not the update-restart state.
+        let other = serde_json::from_str::<DaemonResponse>(
+            r#"{"type":"response","command":"create","success":false,"error":"Unknown active session: active-gap"}"#,
+        )
+        .expect("unrelated refusal parses");
+        let error = response_data_or_error("create", other).unwrap_err();
+        assert!(!is_update_restarting_rejection(&error));
     }
 
     #[test]

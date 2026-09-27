@@ -3,6 +3,27 @@
 //! builders.
 use super::*;
 
+/// One spawn-name reservation held across a fresh-launch create (TS
+/// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the
+/// reservation is the only cross-create serializer for a same-name
+/// admission (the per-file single-flight below cannot see a different
+/// session file), and the guard releases the key when the create ends,
+/// whatever its outcome.
+struct CreateNameReservation {
+    supervisor: Arc<Supervisor>,
+    key: String,
+}
+
+impl Drop for CreateNameReservation {
+    fn drop(&mut self) {
+        self.supervisor
+            .pending_session_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
 impl Supervisor {
     /// Record one session binding (the stale-id rebind table). A supersede
     /// (a new worker taking over a session file another id was bound to)
@@ -574,6 +595,18 @@ impl Supervisor {
         {
             return Ok(summary);
         }
+        // TS `createRlmSubagentRuntime` (#2396): the sibling name is held
+        // under a daemon-wide reservation for the whole fresh-launch
+        // admission and re-asserted at this boundary, so a same-name
+        // sibling that lands mid-admission fails closed before the durable
+        // ledger edge is appended. TS reserves names only on the subagent
+        // admission path (a named open of a live session reuses it above,
+        // and a root create keeps the plain live check), so only a
+        // `kind: "subagent"` create reserves.
+        // The binding owns the reservation guard: it releases the key
+        // only when `handle_create` returns (the RAII drop), holding the
+        // name across the whole launch and durable admission.
+        let _name_reservation = self.reserve_subagent_create_name(command)?;
         if let DaemonCommand::Create {
             name: Some(name), ..
         } = command
@@ -706,6 +739,67 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+
+    /// Reserve a subagent spawn's name for the whole fresh-launch admission
+    /// (TS #2396 `createRlmSubagentRuntime`): the reservation spans the
+    /// availability re-assert, the worker launch, and the durable ledger
+    /// admission, and the guard releases the key when the create ends,
+    /// whatever its outcome. Creates that do not reserve - a root create,
+    /// or an open that reuses a live worker above - answer `None` and keep
+    /// the plain live check (TS reserves names only on the subagent
+    /// admission path); a racing same-name admission of the same parent
+    /// scope fails the create with the TS unavailability error.
+    fn reserve_subagent_create_name(
+        self: &Arc<Self>,
+        command: &DaemonCommand,
+    ) -> Result<Option<CreateNameReservation>> {
+        let DaemonCommand::Create {
+            name,
+            runtime_metadata,
+            ..
+        } = command
+        else {
+            return Ok(None);
+        };
+        let (Some(name), Some(metadata)) = (name, runtime_metadata) else {
+            return Ok(None);
+        };
+        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
+            return Ok(None);
+        }
+        // The child's scope keys the reservation exactly like a rename's
+        // (TS `sessionNameReservationKey`): `[depth, parent, name]`, the
+        // parent keyed by its session file when it has one.
+        let scope = NameScope {
+            id: String::new(),
+            name: name.clone(),
+            depth: metadata
+                .get("rlmDepth")
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as u32,
+            parent_session_id: metadata
+                .get("parentSessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            parent_session_path: metadata
+                .get("parentSessionFile")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        let key = reservation_key(&scope);
+        let reserved = self
+            .pending_session_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        if !reserved {
+            bail!(name_unavailable_error(name, scope.depth));
+        }
+        Ok(Some(CreateNameReservation {
+            supervisor: Arc::clone(self),
+            key,
+        }))
     }
 }
 

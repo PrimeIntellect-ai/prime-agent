@@ -32,7 +32,7 @@ use pa_tui::interactive::{
 use pa_tui::provider_auth::{
     AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthCommandsHandle, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
-    PRIME_INFERENCE_PROVIDER_ID,
+    ProviderWarningFuture, PRIME_INFERENCE_PROVIDER_ID,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -170,6 +170,11 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
         _provider: &ProviderRow,
     ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
         Box::pin(async move { ProviderAuthOutcome::Cancelled })
+    }
+
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
+        // The panel PTY e2e drives no Anthropic subscription auth.
+        Box::pin(async move { None })
     }
 }
 
@@ -333,6 +338,11 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
         _provider: &ProviderRow,
     ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
         Box::pin(async move { ProviderAuthOutcome::Cancelled })
+    }
+
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
+        // The scripted picker drives no Anthropic subscription auth.
+        Box::pin(async move { None })
     }
 }
 
