@@ -53,6 +53,15 @@ pub(crate) use render::auth_actions_row;
 #[cfg(test)]
 use render::verification_code;
 
+// The team picker (TS `PrimeTeamSelectorComponent`: the search field
+// over the personal-first rows, the fuzzy filter, the row parts,
+// and the pick) moved to the child module at the same tree position
+// (auth_panel::picker); the facade bindings keep the mount and key
+// arms' bare paths in scope.
+mod picker;
+
+use picker::{PickerSegment, PrimeTeamPicker};
+
 /// One Prime team option (TS `PrimeTeam` as the selector renders it).
 /// `created_at` is carry-through metadata the flow stores with the
 /// selection (the picker never renders it).
@@ -529,28 +538,6 @@ enum PanelInput {
     },
 }
 
-/// The mounted team picker (TS `PrimeTeamSelectorComponent`): the search
-/// field over the personal-first rows.
-#[derive(Debug)]
-struct PrimeTeamPicker {
-    /// The team rows; the personal account rides first as its own row.
-    teams: Vec<PrimeTeamOption>,
-    /// TS `currentTeamId`: the stored selection's team id; `None` marks
-    /// the personal account current.
-    current: Option<String>,
-    search: SearchInput,
-    /// Indices over the full row list (0 = personal, i + 1 = teams[i]).
-    filtered: Vec<usize>,
-    selected: usize,
-}
-
-/// One trailing cell of a team row: a muted detail or the "current"
-/// marker (TS `MenuRow`'s meta with `theme.fg("success", ...)`).
-enum PickerSegment {
-    Muted(String),
-    Current,
-}
-
 impl AuthPanel {
     /// Mount the panel for one session-surface login run (TS the
     /// non-onboarding `loginDialogOptions`: the rule and the title open
@@ -857,87 +844,6 @@ impl AuthPanel {
         if let Some(cancel) = &self.flow_cancel {
             cancel.mark();
         }
-    }
-}
-
-impl PrimeTeamPicker {
-    /// TS `filterOptions`: the fuzzy filter over the full row list; a
-    /// fresh query resets the cursor to the first row.
-    fn refilter(&mut self) {
-        let query = self.search.value().to_string();
-        let rows = self.teams.len() + 1;
-        self.filtered = if query.is_empty() {
-            (0..rows).collect()
-        } else {
-            fuzzy_filter(&(0..rows).collect::<Vec<_>>(), &query, |row| {
-                self.search_text(*row)
-            })
-        };
-        self.selected = 0;
-    }
-
-    /// TS `getSearchText`: the personal account or the team's name,
-    /// slug, role, and id.
-    fn search_text(&self, row: usize) -> String {
-        if row == 0 {
-            return "personal account".to_string();
-        }
-        match self.teams.get(row - 1) {
-            Some(team) => format!(
-                "{} {} {} {}",
-                team.name,
-                team.slug.clone().unwrap_or_default(),
-                team.role.clone().unwrap_or_default(),
-                team.team_id
-            ),
-            None => String::new(),
-        }
-    }
-
-    /// The row's primary and trailing cells (TS `getPrimary`/
-    /// `getSecondary`/`getMeta`): the name with the slug/role detail,
-    /// "personal account" for the personal row, and the "current"
-    /// marker on the stored selection.
-    fn row_parts(&self, row: usize) -> (Line, Vec<PickerSegment>) {
-        if row == 0 {
-            let mut trailing = vec![PickerSegment::Muted("personal account".to_string())];
-            if self.current.is_none() {
-                trailing.push(PickerSegment::Current);
-            }
-            return (vec![Span::raw("Personal")], trailing);
-        }
-        let Some(team) = self.teams.get(row - 1) else {
-            return (Vec::new(), Vec::new());
-        };
-        // The team fields are provider-supplied: the same control
-        // character hygiene every daemon-supplied row carries.
-        let name = scrub_controls(&team.name);
-        let role = team.role.as_deref().map_or_else(
-            || "member".to_string(),
-            |role| scrub_controls(role).to_lowercase(),
-        );
-        let detail = match &team.slug {
-            Some(slug) => format!("slug: {}, role: {role}", scrub_controls(slug)),
-            None => format!("role: {role}"),
-        };
-        let mut trailing = vec![PickerSegment::Muted(detail)];
-        if self.current.as_deref() == Some(team.team_id.as_str()) {
-            trailing.push(PickerSegment::Current);
-        }
-        (vec![Span::raw(name)], trailing)
-    }
-
-    /// TS confirm on the selected row: the personal row answers the
-    /// personal account, a team row answers the team; an empty filter
-    /// selects nothing.
-    fn pick(&self) -> Option<PrimeTeamPick> {
-        let row = *self.filtered.get(self.selected)?;
-        Some(if row == 0 {
-            PrimeTeamPick::PersonalAccount
-        } else {
-            let team = self.teams.get(row - 1)?;
-            PrimeTeamPick::Team(team.clone())
-        })
     }
 }
 
