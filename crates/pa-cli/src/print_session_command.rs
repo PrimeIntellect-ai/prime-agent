@@ -124,7 +124,7 @@ pub(crate) async fn execute_prompt_session_command(
         if let Some(instructions) = &custom_instructions {
             event["customInstructions"] = json!(instructions);
         }
-        goal.emit_stream_event(event);
+        goal.emit_stream_event(&event);
     }
     // The refinement rows the executor's refine run appends (streamed in
     // TS emission order ahead of the `refine_complete` event).
@@ -165,7 +165,7 @@ pub(crate) async fn execute_prompt_session_command(
                 custom_instructions.as_deref(),
             )
         };
-        goal.emit_stream_event(end);
+        goal.emit_stream_event(&end);
     }
     // `/refine`: the durable refinement rows stream as message pairs, then
     // `refine_complete` (or `refine_failed`), before the result row.
@@ -176,9 +176,9 @@ pub(crate) async fn execute_prompt_session_command(
             goal.emit_row_pair(&row);
         }
         if let Some(error) = &execution.refinement_failed {
-            goal.emit_stream_event(json!({ "type": "refine_failed", "error": error }));
+            goal.emit_stream_event(&json!({ "type": "refine_failed", "error": error }));
         } else if let Some(result) = &execution.refinement {
-            goal.emit_stream_event(json!({
+            goal.emit_stream_event(&json!({
                 "type": "refine_complete",
                 "result": serde_json::to_value(result).unwrap_or(Value::Null),
             }));

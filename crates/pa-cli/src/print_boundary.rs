@@ -966,7 +966,7 @@ impl TurnBoundary {
     /// Stream one session event in json mode (text mode stays quiet here).
     fn emit_json(&self, event: &Value) {
         if self.json_mode {
-            (self.sink)(&event);
+            (self.sink)(event);
         }
     }
 }

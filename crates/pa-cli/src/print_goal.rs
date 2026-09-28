@@ -177,7 +177,7 @@ impl PrintGoalSurface {
 
     fn emit(&self, event: &Value) {
         if self.json_mode {
-            (self.sink)(&event);
+            (self.sink)(event);
         }
     }
 
@@ -226,7 +226,7 @@ impl PrintGoalSurface {
 
     /// The snapshot of a queue holding one minted goal turn (the queued
     /// preview is the full row text, TS `queuedAgentMessagePreview`).
-    fn queued_snapshot(&self, turn: &QueuedGoalTurn) -> Value {
+    fn queued_snapshot(turn: &QueuedGoalTurn) -> Value {
         let preview = turn.preview_text();
         match turn.lane {
             QueueLane::Steering => json!({
@@ -245,7 +245,7 @@ impl PrintGoalSurface {
     /// Queue one minted goal turn (TS `_queuePreparedPrompt` at the mint
     /// site): the queue snapshot publishes at the moment of the mint.
     async fn queue_turn(&self, turn: QueuedGoalTurn) {
-        let snapshot = self.queued_snapshot(&turn);
+        let snapshot = Self::queued_snapshot(&turn);
         *self.queued.lock().await = Some(turn);
         self.emit_action_snapshot(snapshot).await;
     }
@@ -409,7 +409,7 @@ impl PrintGoalSurface {
     /// One raw stream event (the session-command events:
     /// `compaction_start`, `compaction_end`, `refine_complete`,
     /// `refine_failed`).
-    pub(crate) fn emit_stream_event(&self, event: Value) {
+    pub(crate) fn emit_stream_event(&self, event: &Value) {
         self.emit(&event);
     }
 

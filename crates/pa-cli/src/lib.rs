@@ -61,7 +61,7 @@ pub use interactive_mode::{
 
 /// Entry point shared by the binary and the integration tests. Returns the
 /// process exit code.
-pub fn main_with_runtime(args: Vec<String>, runtime: &dyn mode::Runtime) -> i32 {
+pub fn main_with_runtime(args: &[String], runtime: &dyn mode::Runtime) -> i32 {
     match main_impl(&args, runtime) {
         Ok(code) => code,
         Err(error) => {
@@ -91,7 +91,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
 
     // Public command routing: help requests, removed commands, management
     // commands, and the model/session rewrites.
-    let public_command = public_command::handle_public_command(&args);
+    let public_command = public_command::handle_public_command(args);
     if public_command.handled {
         return Ok(public_command.exit_code.unwrap_or(0));
     }

@@ -43,7 +43,7 @@ fn interactive_fork_child_mode() {
         "--daemon-socket".to_string(),
         config["socket"].as_str().expect("socket").to_string(),
     ];
-    let code = pa_cli::main_with_runtime(args, &pa_cli::PrintRuntime);
+    let code = pa_cli::main_with_runtime(&args, &pa_cli::PrintRuntime);
     std::fs::write(
         config["outcome"].as_str().expect("outcome path"),
         code.to_string(),
