@@ -735,6 +735,18 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
+        // TS `app.prompt.stash` (default ctrl+s, `handlePromptStash`):
+        // with a draft in the editor the key stashes it — the whole draft
+        // (text, collapsed pastes, pasted images) moves to the session's
+        // stash and the editor clears; with an empty editor the key
+        // restores the stashed draft. The manual stash is not a
+        // restore-on-open head: it returns only on this key, never on a
+        // chat open or a switch landing (TS `restoreOnOpen`), so the
+        // agents-view and `/switch` auto paths keep their own semantics.
+        if view.editor.keybindings().matches(&id, "app.prompt.stash") {
+            self.handle_prompt_stash(view);
+            return Ok(());
+        }
         // TS `app.session.resume` (no default key; user-bindable): open the
         // agents view. Unlike agents-back it fires with a draft in the
         // editor — the draft is stashed for the session on the exit path

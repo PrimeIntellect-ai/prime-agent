@@ -456,8 +456,10 @@ impl SessionUi {
                 // The switched-to session's own restore head (if one was
                 // stashed earlier) lands after the switch note, so the
                 // restore status is the row the back-to-back rewrite keeps
-                // (TS `showStatus` last-wins).
-                self.restore_prompt_stash_if_editor_empty(view);
+                // (TS `showStatus` last-wins). Like a chat's opening
+                // restore, only an auto restore-on-open head lands here —
+                // a manually stashed draft waits for its own key.
+                self.restore_prompt_stash_if_editor_empty(view, true);
             }
             Err(error) => {
                 self.note(&format!("switch to {id} failed: {error:#}"), view);

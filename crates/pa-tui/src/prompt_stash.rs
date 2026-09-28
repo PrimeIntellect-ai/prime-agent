@@ -63,9 +63,25 @@ impl PromptStashState {
         self.queued_stashes = ordered;
     }
 
-    /// Take the head draft when it is a restore-on-open auto-stash,
-    /// promoting the next queued draft to the head (TS
-    /// `restorePromptStashIfEditorEmpty`'s queue shift). The caller owns
+    /// Take the head draft whatever its restore semantics, promoting the
+    /// next queued draft to the head (TS `restorePromptStashIfEditorEmpty`
+    /// with the default `stash` argument — the manual `app.prompt.stash`
+    /// arm: the key restores whatever draft the session holds, manual or
+    /// auto). The caller owns the editor-empty condition.
+    pub fn take_head(&mut self) -> Option<PromptStash> {
+        let head = self.stash.take();
+        self.stash = if self.queued_stashes.is_empty() {
+            None
+        } else {
+            Some(self.queued_stashes.remove(0))
+        };
+        head
+    }
+
+    /// Take the head draft when it is a restore-on-open auto-stash (TS
+    /// `restorePromptStashOnOpen`'s `restoreOnOpen` gate: a manual stash
+    /// never lands on an open or a switch — only its own key restores
+    /// it), promoting the next queued draft to the head. The caller owns
     /// the editor-empty condition.
     pub fn take_head_restore_on_open(&mut self) -> Option<PromptStash> {
         if !self
@@ -75,13 +91,7 @@ impl PromptStashState {
         {
             return None;
         }
-        let head = self.stash.take();
-        self.stash = if self.queued_stashes.is_empty() {
-            None
-        } else {
-            Some(self.queued_stashes.remove(0))
-        };
-        head
+        self.take_head()
     }
 }
 
@@ -193,6 +203,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["manual draft", "older queued"]
         );
+    }
+
+    #[test]
+    fn take_head_restores_a_manual_stash_and_promotes_the_queue() {
+        // TS `restorePromptStashIfEditorEmpty`'s manual arm (the
+        // `app.prompt.stash` key): the head returns whatever its restore
+        // semantics — a manual stash (restore_on_open unset) restores
+        // here, while `take_head_restore_on_open` leaves it waiting.
+        let mut store = PromptStashStore::default();
+        let state = store.for_session("a");
+        state.stash = Some(draft("manual draft", false));
+        state.queued_stashes.push(draft("queued auto", true));
+
+        assert!(
+            state.take_head_restore_on_open().is_none(),
+            "the manual head never lands on an open"
+        );
+        let restored = state.take_head().expect("the key takes any head");
+        assert_eq!(restored.text, "manual draft");
+        assert!(!restored.restore_on_open);
+        assert_eq!(
+            state.stash.as_ref().map(|stash| stash.text.as_str()),
+            Some("queued auto")
+        );
+    }
+
+    #[test]
+    fn an_auto_head_queues_a_manual_stash_behind_it() {
+        // TS `stashDraftForAgentsView`'s ordering with a manual stash
+        // held: the agents-view exit's auto head queues in front, the
+        // manual draft keeps its key-only semantics behind it.
+        let mut store = PromptStashStore::default();
+        let state = store.for_session("a");
+        state.stash = Some(draft("manual draft", false));
+        state.stash_draft_head(draft("agents-view draft", true));
+
+        let auto = state.take_head_restore_on_open().expect("the auto head");
+        assert_eq!(auto.text, "agents-view draft");
+        let manual = state.take_head().expect("the manual draft follows");
+        assert_eq!(manual.text, "manual draft");
+        assert!(state.is_empty());
     }
 
     #[test]
