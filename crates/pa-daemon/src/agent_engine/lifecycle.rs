@@ -174,6 +174,7 @@ impl AgentSessionEngine {
             session_build: tokio::sync::Mutex::new(()),
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            image_route: std::sync::Mutex::new(None),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
                 pa_core::autonomous::create_autonomous_runtime_state(None, None),
@@ -226,7 +227,7 @@ impl AgentSessionEngine {
     }
 
     /// The session's live working directory (the engine's cwd slot).
-    pub(super) fn cwd(&self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 
@@ -780,8 +781,9 @@ impl AgentSessionEngine {
     }
 
     /// The current explicit selection (create-config flags merged over the
-    /// process fallback).
-    pub(super) fn current_selection(&self) -> EngineModelSelection {
+    /// process fallback). `pub(crate)`: the image-route acceptance probe
+    /// reads the create-config key pin alongside the registry resolution.
+    pub(crate) fn current_selection(&self) -> EngineModelSelection {
         self.selection.read().expect("model selection lock").clone()
     }
 
@@ -956,6 +958,10 @@ impl AgentSessionEngine {
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             telemetry,
             cwd,
+            // TS settings.imageModel routing: the daemon owns the routing
+            // (the armed route overrides the serving target + the run's
+            // model); the headless surfaces pass `None` to keep their own.
+            image_model_router: None,
             agent_dir: self.config.agent_dir.clone(),
             mcp_manager: Some(std::sync::Arc::clone(&self.mcp)),
             model: Some(agent_model),

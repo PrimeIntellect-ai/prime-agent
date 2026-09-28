@@ -37,6 +37,7 @@ use crate::engine::{
     SessionEngine, SideQuestionOutcome, SideQuestionRequest,
 };
 use crate::goal_continuation::GoalBoundary;
+use crate::image_route::ImageRoute;
 use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_MAX_DEPTH};
 
 // The test mass (the faux harness and the in-file unit battery) moved to
@@ -195,7 +196,7 @@ pub struct AgentSessionEngine {
     /// turn holds the core session's mutex across its admission, so an
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
-    turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     /// The live quota park (TS `AgentSession._quotaPark`): shared with the
     /// park callback the retry chain consults (an owned, `'static` future
     /// over `&self` state), so it lives in an `Arc` the callback clones.
@@ -277,7 +278,7 @@ pub struct AgentSessionEngine {
     /// Resolved at create time (before any turn) so summary/state polls
     /// during a live turn stay side-effect-free.
     effective_thinking: std::sync::RwLock<Option<pa_types::ai::ModelThinkingLevel>>,
-    service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
+    pub(crate) service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
     /// Built once on the first prompt, reused across prompts, shared
     /// behind an Arc: a running model turn (the admission in
     /// `run_turn_once`), a compaction summarizer, and a refinement run
@@ -309,7 +310,7 @@ pub struct AgentSessionEngine {
     /// (api key + model), set when the session builds: `set_model` swaps
     /// the slot so the live session follows the new model without a
     /// rebuild.
-    provider_target: std::sync::Arc<
+    pub(crate) provider_target: std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
     /// One shared supervisor-link client for the worker: agent messaging
@@ -412,6 +413,14 @@ pub struct AgentSessionEngine {
     /// One compact-and-retry attempt per context overflow (TS
     /// `_overflowRecovery`): the state machine the overflow arm walks.
     pub(crate) overflow_recovery: std::sync::Mutex<OverflowRecovery>,
+    /// The image-model route armed for the dispatched episode (TS
+    /// `agent.modelOverride`, set at dispatch when the batch attaches
+    /// images the session model cannot serve): the stream's provider
+    /// target for the episode plus the agent's per-run override. Re-applied
+    /// at every model-turn attempt so retries and post-compaction
+    /// continuations keep serving it; cleared (and the session target
+    /// restored) when the episode settles.
+    pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
     /// The live automatic-compaction abort slot (TS
     /// `_autoCompactionAbortController`): the threshold and requested
     /// turn-boundary runs each register their controller here for the

@@ -31,11 +31,15 @@
 #      schema-id check does: the daemon's hello line carries a schemaId,
 #      and only a daemon whose hello answers the TypeScript schema id
 #      (protocol-7-schema-29-...) is treated as the TS daemon. Such a
-#      daemon gets the product's own stop-when-idle semantics — a session
-#      count over `list`, a `shutdown` request ONLY when it is idle, then
-#      a 5s confirm poll. A busy daemon is LEFT RUNNING (never signaled;
-#      it stops itself when idle), an unknown schema is skipped, and no
-#      signal is ever sent to any pid from this script.
+#      daemon is shut down REGARDLESS of busy-ness (the field ruling: an
+#      install that leaves the old daemon up is the takeover bug) — a
+#      session count over `list`, a `shutdown` request (force:false when
+#      idle, force:true when busy), then a 5s confirm poll that verifies
+#      it went down; the summary reports what was stopped. An unknown
+#      schema is skipped, and no signal is ever sent to any pid from this
+#      script (even the forced request is the daemon's own shutdown over
+#      its socket; the TS sessions' state stays on disk for the Rust
+#      side).
 #   2. THE TS FILES ARE PRESERVED, NOT DELETED (the pi_agent_rust
 #      `legacy-pi` precedent: rollback stays possible). What the TS
 #      installer actually created, researched from its install.sh: a
@@ -473,17 +477,26 @@ fi
 commit="$("$UVPY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
 say "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 
-# --- the TypeScript takeover, step 1: stop the TS daemon CLEANLY ---------------
+# --- the TypeScript takeover, step 1: stop the TS daemon ALWAYS ---------------
 # Probe the TS daemon's own socket and this product's pinned socket with the
 # same schema-id check the CLI uses: the daemon hello line carries a
 # schemaId; only the TypeScript schema id identifies the TS daemon. A TS
-# daemon is asked to stop ONLY when idle (the stop-when-idle semantics — a
-# `shutdown` request the daemon handles cleanly, closing its sessions with
-# resume entries kept); a busy one is left running to drain on its own.
-# NOTHING IS EVER KILLED from here: no signal is sent to any pid; an
-# unknown schema, a dead socket file, or an unreadable session count all
-# skip the stop (the launcher's socket pin already makes conflicts
-# impossible, so a skip is safe).
+# daemon is asked to shut down REGARDLESS of busy-ness (the field ruling on
+# the fresh-install bug: the friend's TS daemon survived the install — the
+# Rust daemon owns the store now, and the TS sessions' state stays on disk
+# for the Rust side to resume what the user resumes). Idle keeps the clean
+# `shutdown` request (force:false, the graceful path); a busy daemon gets
+# the forced request (force:true). Both are the daemon's OWN shutdown
+# request over its socket — NOTHING IS EVER KILLED from here, no signal is
+# sent to any pid — and both are confirmed down the same way (a 5s poll
+# until the socket stops answering; the summary reports the stop).
+# An unknown schema or a dead socket file skips the stop (the launcher's
+# socket pin already makes conflicts impossible, so a skip is safe); the
+# env-override candidate probing and the loud leftover warning ride the
+# follow-up hardening.
+# ts_stop_summary accumulates the summary line(s) a stop earns; the
+# success block prints them with the other takeover facts.
+ts_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 # The daemon probe rides a FILE, not a heredoc inside a command
@@ -548,10 +561,11 @@ if schema != TS_SCHEMA_ID:
     print("foreign:" + schema)
     sys.exit(0)
 
-# TS daemon identified: confirm it is idle before asking it to stop. The
-# request rides the protocol-7 COMMAND ENVELOPE exactly like the products'
-# own clients (the TS supervisor refuses bare commands: "Daemon commands
-# require protocol ... or newer" — a bare `list` would kill the probe).
+# TS daemon identified: read its session count (the request rides the
+# protocol-7 COMMAND ENVELOPE exactly like the products' own clients —
+# the TS supervisor refuses bare commands: "Daemon commands require
+# protocol ... or newer" — a bare `list` would kill the probe), then ask
+# it to shut down: force:false when idle, force:true when busy.
 def envelope(request_id, body):
     return json.dumps({
         "type": "command",
@@ -579,13 +593,21 @@ while time.monotonic() < deadline:
 if count is None:
     print("ts:probe-failed")
     sys.exit(0)
-if count != 0:
-    print("ts:busy:%d" % count)
-    sys.exit(0)
 
-# Idle: ask for a clean stop (force:false — the graceful path, never a kill),
-# let the daemon ack, then confirm it stopped listening.
-sock.sendall(envelope("installer-stop", {"type": "shutdown", "force": False}).encode())
+# THE ALWAYS-STOP RULING (the field fix: the friend's install left his TS
+# daemon up): the TS daemon is shut down regardless of busy-ness — the
+# Rust daemon owns the store after this install, and the TS sessions'
+# state is on disk (the Rust side resumes what the user resumes), so
+# nothing needs to keep running under the old daemon. Idle keeps the
+# clean request (force:false — the graceful path); a busy daemon gets
+# the forced request (force:true). Both are the daemon's OWN shutdown
+# request over its socket — no signal is ever sent to any pid — and both
+# are confirmed down the same way (the socket stops answering within the
+# 5s poll).
+forced = count != 0
+sock.sendall(
+    envelope("installer-stop", {"type": "shutdown", "force": forced}).encode()
+)
 ack_deadline = time.monotonic() + PROBE_TIMEOUT_S
 while time.monotonic() < ack_deadline:
     line = read_line(sock, ack_deadline)
@@ -606,7 +628,10 @@ while time.monotonic() < end:
         probe.connect(path)
         probe.close()
     except OSError:
-        print("ts:stopped")
+        if forced:
+            print("ts:stopped-busy:%d" % count)
+        else:
+            print("ts:stopped")
         sys.exit(0)
     time.sleep(0.05)
 print("ts:stop-failed")
@@ -619,19 +644,22 @@ stop_ts_daemon() {
   case "$verdict" in
     ts:stopped)
       say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}ts daemon: stopped cleanly on ${socket_path} (idle; no signal sent; verified down)
+"
       ;;
-    ts:busy:*)
-      sessions="${verdict#ts:busy:}"
-      note "note: the TypeScript daemon on ${socket_path} is serving ${sessions} session(s);"
-      note "  it was left running (never killed) and stops itself when idle. The Rust"
-      note "  launcher pins its own socket, so the two daemons cannot conflict."
+    ts:stopped-busy:*)
+      sessions="${verdict#ts:stopped-busy:}"
+      say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
+      say "  the forced shutdown request; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (${sessions} session(s) were live; the forced shutdown request; verified down)
+"
       ;;
     ts:probe-failed)
       note "note: the TypeScript daemon on ${socket_path} did not answer the idle probe;"
       note "  it was left running (never killed)."
       ;;
     ts:stop-failed)
-      note "note: the TypeScript daemon on ${socket_path} was asked to stop cleanly but is"
+      note "note: the TypeScript daemon on ${socket_path} was asked to shut down but is"
       note "  still listening after 5s; it was NOT killed — it will drain on its own,"
       note "  or run 'prime-agent shutdown --force' (the shared-state-root sweep) to stop it."
       ;;
@@ -1073,6 +1101,9 @@ elif [ -d "$old" ]; then
   echo "            once you no longer need the rollback)"
 fi
 echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
+if [ -n "$ts_stop_summary" ]; then
+  printf '%s' "$ts_stop_summary"
+fi
 
 echo "next steps: the README's Install section ships inside the payload"
 echo "  ${share_dir}/README.md"

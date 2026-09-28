@@ -1843,13 +1843,12 @@ impl SessionUi {
     /// TS streaming behavior: Enter parks mid-turn input on the steering
     /// lane, the follow-up key on the follow-up lane; an idle session runs
     /// either immediately. The images whose markers are present in
-    /// `text`, or `None` when there are none (TS `collectImagesFor`).
-    /// Resolved against the current model: when it has no image input the
-    /// attachments are dropped here, matching the paste-time hint.
-    fn collect_images_for(&self, text: &str, view: &AgentView) -> Option<serde_json::Value> {
-        if !self.model_supports_images(view) {
-            return None;
-        }
+    /// `text`, or `None` when there are none (TS `collectImagesFor`):
+    /// attachments always reach the session - a text-only session model is
+    /// either routed to `settings.imageModel` at dispatch or the turn
+    /// fails there with the actionable setup error, so nothing is
+    /// silently downgraded downstream.
+    fn collect_images_for(&self, text: &str, _view: &AgentView) -> Option<serde_json::Value> {
         let images: Vec<&LoadedImage> = collect_marked_images(&self.pasted_images, text)
             .into_iter()
             .map(|(_, image)| image)

@@ -111,10 +111,28 @@ impl SessionUi {
             });
         }
         if !self.model_supports_images(view) {
-            self.note(
-                "Current model does not support images; the attachment will be omitted.",
-                view,
-            );
+            // The turn routes to `settings.imageModel` when one is
+            // configured (the images are sent to the routed model);
+            // without one the turn fails with the actionable refusal
+            // naming the setting - either way the attachment itself is
+            // never silently omitted. Images the host blocks surface the
+            // block instead of a routing note.
+            let settings = self.client_settings.as_ref();
+            let blocked = settings.is_some_and(|settings| settings.block_images());
+            let routed = settings.is_some_and(|settings| settings.image_model().is_some());
+            if blocked {
+                self.note("Images are blocked (settings: block images).", view);
+            } else if routed {
+                self.note(
+                    "Current model does not support images; the attachment routes to the configured image model.",
+                    view,
+                );
+            } else {
+                self.note(
+                    "Current model does not support images. Set settings.imageModel to route image turns.",
+                    view,
+                );
+            }
         }
         self.dirty = true;
     }
