@@ -1286,7 +1286,7 @@ fn hidden_thinking_after_a_bash_card_renders_zero_height() {
             id: "b1".to_string(),
             command: "echo hi".to_string(),
             excluded: false,
-            output_lines: vec!["hi".to_string()],
+            output: "hi".to_string(),
             running: false,
             exit_code: Some(0),
             cancelled: false,
