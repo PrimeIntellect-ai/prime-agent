@@ -87,7 +87,11 @@ impl SessionFile {
         )
     }
 
-    /// Write the full file atomically (header + every entry), like `_rewriteFile`.
+    /// Write the full file atomically (header + every entry), like `_rewriteFile`
+    /// plus the port's session durability strengthening: the temp is fsynced
+    /// before the rename (the TS `_rewriteFile` passes no `fsync` option),
+    /// so rows the durable append path already landed are never regressed by
+    /// a rewrite that a hard crash could zero out.
     ///
     /// # Errors
     ///

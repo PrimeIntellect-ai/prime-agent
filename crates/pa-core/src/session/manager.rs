@@ -1939,8 +1939,19 @@ fn resolve_session_rlm_depth(header: &SessionHeader, _session_path: &Path) -> u6
 }
 
 /// Atomic session-file write: private temp + fsync + rename onto the
-/// destination (TS `writeFileAtomicSync`; the win32 destination-busy retry
-/// rides along in `rename_onto`).
+/// destination (the `writeFileAtomicSync` shape; the win32 destination-busy
+/// retry rides along in `rename_onto`).
+///
+/// The fsync is the port's deliberate session durability strengthening, not
+/// TS parity: the TS session rewrites and repairs pass no `fsync` option
+/// (session-manager.ts `_rewriteFile`/`_repairTornTail`), and the port
+/// instead promises that a row the append path made durable
+/// (`window::append_cached`'s per-row sync) is never regressed by the
+/// rewrite that replaces it — a non-synced rename onto the destination can
+/// zero the file on a hard crash, the window TS tolerates through
+/// repair-on-open. Disclosed in the atomic-write durability audit: the
+/// session family keeps its fsync; every other `atomic_write` family site
+/// is TS-default (no fsync).
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {

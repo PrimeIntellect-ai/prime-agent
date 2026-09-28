@@ -272,7 +272,10 @@ fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAu
 }
 
 /// Persist the authorization cache (best-effort atomic temp+rename write,
-/// 0o600 like the TS `writeFileAtomicSync` call).
+/// 0o600 like the TS `writeFileAtomicSync` call, which the TS reference
+/// makes with no `fsync` — a failed or lost cache write only requires a
+/// later refetch (model-registry.ts: "A failed cache write only requires a
+/// later refetch")).
 pub fn write_private_prime_authorization_cache(
     models_json_path: &Path,
     cache: &PrivatePrimeAuthorizationCache,
@@ -331,6 +334,28 @@ mod tests {
             models: get_private_prime_inference_models(),
             refreshed_at: 1,
         }
+    }
+
+    /// Per-call-site served-path oracle (model-registry.ts:1185 passes only
+    /// `{ mode: 0o600 }`): the authorization-cache write takes NO fsync
+    /// branch — the refetchable cache has the weakest durability need in
+    /// the shared helper's family.
+    #[test]
+    fn authorization_cache_write_takes_the_ts_default_no_sync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let models_json = dir.path().join("models.json");
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        write_private_prime_authorization_cache(&models_json, &cache("fingerprint-a"));
+        assert_eq!(
+            crate::settings::storage::opt_in_fsync_calls(),
+            before,
+            "the TS-default cache write must not sync"
+        );
+        let written =
+            std::fs::read_to_string(private_prime_authorization_cache_path(&models_json)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed["fingerprint"], "fingerprint-a");
+        assert!(written.ends_with('}') && !written.contains('\n'));
     }
 
     /// The injected private models keep their zero pricing end to end: a

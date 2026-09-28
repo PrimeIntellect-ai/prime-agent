@@ -347,6 +347,29 @@ mod tests {
         assert!(data.credential("prime-inference").is_some());
     }
 
+    /// Per-call-site served-path oracle (auth-storage.ts:206/:250 pass only
+    /// `{ mode: 0o600 }`): the auth save goes through the real `with_lock`
+    /// writer and takes NO fsync branch, landing the exact document bytes.
+    #[test]
+    fn auth_write_takes_the_ts_default_no_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        let document = r#"{ "prime-inference": { "type": "api_key", "key": "sk" } }"#;
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        backend
+            .with_lock(&mut |_| Ok(((), Some(document.to_string()))))
+            .unwrap();
+        assert_eq!(
+            crate::settings::storage::opt_in_fsync_calls(),
+            before,
+            "the TS-default auth write must not sync"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("auth.json")).unwrap(),
+            document
+        );
+    }
+
     #[test]
     fn parse_rejects_non_object() {
         assert!(parse_storage_data(Some("[1,2]")).is_err());

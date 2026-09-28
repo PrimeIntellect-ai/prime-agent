@@ -561,6 +561,38 @@ mod tests {
         );
     }
 
+    /// Per-call-site served-path oracle (refinement.ts:404 passes only
+    /// `{ mode }` — THE MEASURED SIGNAL of record 20260928-172400): the
+    /// harness save takes NO fsync branch, landing exactly
+    /// `to_string_pretty(state) + "\n"` bytes.
+    #[test]
+    fn harness_save_takes_the_ts_default_no_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        let mut state = empty_harness_state();
+        state
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "m1".to_string(),
+                entry("m1", RefinementKind::Memory, HarnessScope::Global, "a fact"),
+            );
+        let expected = format!("{}\n", serde_json::to_string_pretty(&state).unwrap());
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        let written = save_harness_state(&dir, &state).unwrap();
+        assert_eq!(
+            crate::settings::storage::opt_in_fsync_calls(),
+            before,
+            "the TS-default harness save must not sync"
+        );
+        assert_eq!(written, get_harness_state_path(&dir));
+        assert_eq!(
+            std::fs::read_to_string(get_harness_state_path(&dir)).unwrap(),
+            expected
+        );
+    }
+
     #[test]
     fn merge_prefixed_local_conflicts() {
         let mut global = empty_harness_state();

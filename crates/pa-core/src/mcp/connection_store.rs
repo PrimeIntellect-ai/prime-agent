@@ -271,3 +271,46 @@ pub fn new_pending_record(
         attempt_id: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per-call-site served-path oracle (mcp/connection-store.ts:890
+    /// passes only `{ mode: 0o600 }`): the registry write goes through the
+    /// real `write_records` writer and takes NO fsync branch, landing the
+    /// exact serialized document bytes.
+    #[test]
+    fn registry_write_takes_the_ts_default_no_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let record = McpConnectionRecord {
+            connection_id: "c1".to_string(),
+            service_id: "acme".to_string(),
+            endpoint: "https://acme.example/mcp".to_string(),
+            label: "Acme".to_string(),
+            status: McpConnectionStatus::Connected,
+            created_at: 1,
+            updated_at: 1,
+            verified_at: Some(2),
+            tool_count: Some(3),
+            last_error: None,
+            attempt_id: None,
+        };
+        let mut records = HashMap::new();
+        records.insert(record.connection_id.clone(), record);
+        let doc = serde_json::json!({
+            "version": FILE_VERSION,
+            "connections": records.iter().collect::<std::collections::BTreeMap<&String, &McpConnectionRecord>>(),
+        });
+        let expected = serde_json::to_string_pretty(&doc).unwrap();
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        write_records(&path, &records).unwrap();
+        assert_eq!(
+            crate::settings::storage::opt_in_fsync_calls(),
+            before,
+            "the TS-default registry write must not sync"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+}
