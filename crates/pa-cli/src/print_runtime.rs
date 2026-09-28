@@ -621,6 +621,9 @@ fn headless_image_model_router(
     // snapshot. Cleared on every settle so the next arm re-captures
     // whatever the session serves by then.
     let armed_from = std::sync::Arc::new(std::sync::Mutex::new(None));
+    // The routed target the arm wrote, so the settle can tell a slot that
+    // still holds the route from one a mid-run `/model` switch rewrote.
+    let armed_to = std::sync::Arc::new(std::sync::Mutex::new(None));
     let decide_agent_dir = agent_dir.clone();
     let decide_provider_target = std::sync::Arc::clone(&provider_target);
     let decide_armed_from = std::sync::Arc::clone(&armed_from);
