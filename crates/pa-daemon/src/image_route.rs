@@ -319,7 +319,7 @@ mod tests {
     ) -> AgentSessionEngine {
         let agent_dir = dir.join("agent");
         write_image_pair_models_json(&agent_dir);
-        write_image_settings(dir, &settings);
+        write_image_settings(dir, settings);
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.to_path_buf(),
             agent_dir,
