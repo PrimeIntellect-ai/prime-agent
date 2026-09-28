@@ -297,7 +297,14 @@ impl AgentSession {
             return Ok(());
         };
         let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
-        let route = (router.decide)(carries_images).map_err(anyhow::Error::msg)?;
+        // The live thinking level (the agent state's, matching
+        // `request_output_budget`'s read) rides the decision: a mid-run
+        // `/effort` or model switch must not route with the build-time
+        // level.
+        let live_level = provider_adapter::model_thinking_level(
+            self.agent.state().await.thinking_level,
+        );
+        let route = (router.decide)(carries_images, live_level).map_err(anyhow::Error::msg)?;
         let Some(resolved) = route.as_ref() else {
             (router.swap_target)(None);
             self.agent.set_model_override(None);

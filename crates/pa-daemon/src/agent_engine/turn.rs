@@ -174,12 +174,19 @@ impl AgentSessionEngine {
                     outcome
                 })
             });
+        // A routed image-model episode serves (and overflows within) the
+        // ROUTED model: the overflow classification window derives from
+        // the serving model, never from the text-only session model.
+        let overflow_window = match self.armed_image_route() {
+            Some(route) => route.target.model.context_window,
+            None => model.context_window,
+        };
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
                 &failover_policy,
                 &candidates,
-                model.context_window,
+                overflow_window,
                 None,
                 || {
                     let mut emit = emit_cell.borrow_mut();

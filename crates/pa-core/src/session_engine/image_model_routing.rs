@@ -20,8 +20,11 @@ use crate::models::ResolvedImageModel;
 /// actionable refusal that fails the turn. The host owns the
 /// session-model and per-request-field reads (the agent-state model
 /// descriptor is lossy - it carries no input modalities).
-pub type ImageRouteDecisionFn =
-    Arc<dyn Fn(bool) -> Result<Option<ResolvedImageModel>, String> + Send + Sync>;
+pub type ImageRouteDecisionFn = Arc<
+    dyn Fn(bool, pa_types::ai::ModelThinkingLevel) -> Result<Option<ResolvedImageModel>, String>
+        + Send
+        + Sync,
+>;
 
 /// Swap the host's serving target to the routed image model, or restore
 /// the session target (`None`). Called with the fresh decision of every

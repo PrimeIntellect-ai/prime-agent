@@ -486,16 +486,15 @@ async fn build_headless_engine_with(
     // image-attaching batches on a session model without image input
     // route to the configured image model or fail the turn with the
     // actionable refusal naming the setting.
-    // The routing decision reads the resolved session model and the
-    // requested thinking level (both fixed at build for a headless run).
+    // The routing decision reads the resolved session model live (a
+    // mid-run switch rewrites the serving slot) and receives the LIVE
+    // thinking level per batch (the engine passes its agent state's level,
+    // so a mid-run `/effort` or model switch never routes at a stale level).
     let image_model_router = headless_image_model_router(
         std::sync::Arc::clone(&provider_target),
         config.cwd.clone(),
         config.agent_dir.clone(),
         model.clone(),
-        pa_core::session_engine::provider_adapter::model_thinking_level(resolve_thinking_level(
-            config, &model,
-        )),
     );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
@@ -614,7 +613,6 @@ fn headless_image_model_router(
     cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
     session_model: pa_types::ai::Model,
-    thinking_level: pa_types::ai::ModelThinkingLevel,
 ) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
     // The pre-route session target, captured at the FIRST arm (not at
     // build): a mid-run model switch rewrites the live slot, and the
@@ -627,7 +625,9 @@ fn headless_image_model_router(
     let decide_provider_target = std::sync::Arc::clone(&provider_target);
     let decide_armed_from = std::sync::Arc::clone(&armed_from);
     let decide = std::sync::Arc::new(
-        move |carries_images: bool| -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
+        move |carries_images: bool,
+              thinking_level: pa_types::ai::ModelThinkingLevel|
+              -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
             if !carries_images {
                 return Ok(None);
             }

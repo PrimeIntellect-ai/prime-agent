@@ -115,12 +115,14 @@ impl SessionUi {
             // configured (the images are sent to the routed model);
             // without one the turn fails with the actionable refusal
             // naming the setting - either way the attachment itself is
-            // never silently omitted.
-            let routed = self
-                .client_settings
-                .as_ref()
-                .is_some_and(|settings| settings.image_model().is_some());
-            if routed {
+            // never silently omitted. Images the host blocks surface the
+            // block instead of a routing note.
+            let settings = self.client_settings.as_ref();
+            let blocked = settings.is_some_and(|settings| settings.block_images());
+            let routed = settings.is_some_and(|settings| settings.image_model().is_some());
+            if blocked {
+                self.note("Images are blocked (settings: block images).", view);
+            } else if routed {
                 self.note(
                     "Current model does not support images; the attachment routes to the configured image model.",
                     view,
