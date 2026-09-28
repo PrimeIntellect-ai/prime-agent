@@ -680,6 +680,7 @@ fn headless_image_model_router(
     );
     let swap_target = {
         let provider_target = std::sync::Arc::clone(&provider_target);
+        let armed_to = std::sync::Arc::clone(&armed_to);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
             if let Some(resolved) = route {
                 // The first swap of the episode captures the session
@@ -717,7 +718,10 @@ fn headless_image_model_router(
                     .expect("provider target lock")
                     .clone();
                 let still_routed = match (&current, &routed) {
-                    (Some(current), Some(routed)) => current == routed,
+                    (Some(current), Some(routed)) => {
+                        current.model.id == routed.model.id
+                            && current.service_tier == routed.service_tier
+                    }
                     _ => true,
                 };
                 if still_routed {
