@@ -95,13 +95,21 @@
 # the payload, keeps one .old rollback generation, and re-runs the
 # takeover steps as no-ops when there is nothing left to take over).
 #
+# PREREQUISITES: curl + sh (+ the network for the download). The installer
+# needs a Python for its own scripting steps (the store guard's realpath,
+# the artifact's JSON parsing and zip extraction, the daemon probe) — but
+# it does NOT need one installed: it bootstraps uv first (a static binary
+# whose installer needs only curl + sh) and resolves its Python THROUGH
+# uv (an existing interpreter when there is one, else uv's own managed
+# 3.11 — no system python3 anywhere). Offline without uv, a system
+# python3 is the fallback; with neither, the installer names the one
+# missing prerequisite and exits.
+#
 # Authentication is mandatory even though the repo is public: GitHub's
 # workflow-artifact DOWNLOAD API requires an authenticated principal (an
 # anonymous request answers 401). `gh` is used when on PATH; otherwise
-# GITHUB_TOKEN must be set and the REST API is called with curl (python3
-# unzips the artifact — POSIX sh has no unzip, and the product itself
-# needs a Python runtime for its kernel sidecar, so the dependency adds
-# nothing the product does not already require).
+# GITHUB_TOKEN must be set and the REST API is called with curl (the
+# uv-resolved Python unzips the artifact — POSIX sh has no unzip).
 set -eu
 
 REPO="${PRIME_AGENT_RUST_REPO:-PrimeIntellect-ai/prime-agent}"
@@ -124,14 +132,27 @@ install is preserved under share/prime-agent-legacy, and its npm package is unin
 touched. Both the default and --update install the newest successful `continuous`
 workflow run on the `rust` branch.
 
-The installer pre-warms the Python kernel (uv + `prime-agent
---prime-agent-bootstrap`); offline, that step degrades to a warning and the
-first session bootstraps the kernel itself — it needs the network once.
+Needs curl + sh (+ the network): the installer bootstraps its own Python via
+uv — no system python3 required. It also pre-warms the Python kernel (uv +
+`prime-agent --prime-agent-bootstrap`); offline, that step degrades to a
+warning and the first session bootstraps the kernel itself — it needs the
+network once.
+
+Options:
+  --update    the documented alias the update entry points exec (identical run)
+  --verbose   the progress detail also goes to stdout, not just fd 3
+Output:
+  stdout      the essentials (the success block, the actionable takeover
+              facts, the PATH warning when it applies, the next-step line)
+  fd 3        the progress detail — a wrapper captures it by opening fd 3;
+              a bare run leaves it closed and stays quiet
+  stderr      warnings and diagnostics (a curl | sh run keeps them)
 
 Environment:
   PRIME_AGENT_RUST_REPO     <org>/<repo> to install from
   PRIME_AGENT_RUST_RUN      continuous workflow run id ("latest" by default)
   PRIME_AGENT_RUST_PREFIX   install prefix (~/.local by default)
+  PRIME_AGENT_RUST_VERBOSE  1 = the --verbose output mode
   GITHUB_TOKEN              artifact authentication when gh is not on PATH
 USAGE
 }
@@ -139,13 +160,90 @@ USAGE
 # --- arguments ---------------------------------------------------------------
 # No positional arguments. --update is the documented alias the update entry
 # points (`prime-agent update`, the TUI /update) exec — identical to the default
-# run because the flow is idempotent by construction.
+# run because the flow is idempotent by construction. --verbose folds the fd-3
+# progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
+VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
 case "${1:-}" in
   "") ;;
   --update) ;;
+  --verbose|-v) VERBOSE=1 ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; die "unknown argument: ${1}" ;;
 esac
+
+# --- the output contract ------------------------------------------------------
+# Minimal by default (the curl|sh reference class): stdout carries the
+# essentials only — the success block, the actionable takeover facts, the
+# conditional PATH warning, the next-step line — which is exactly what a
+# wrapper like `prime-agent update` reports onward. Progress detail rides
+# fd 3: a wrapper opens it to capture the trace, a bare run leaves it
+# closed (the detail drops silently), and --verbose folds it onto stdout.
+# Warnings and diagnostics go to stderr, which a `curl | sh` run keeps.
+if [ "$VERBOSE" = 1 ]; then
+  exec 3>&1
+elif [ -e /dev/fd/3 ]; then
+  :   # already open — a wrapper's capture channel; keep it
+else
+  exec 3>/dev/null
+fi
+say() { printf '%s\n' "$*" >&3; }
+note() { printf '%s\n' "$*" >&2; }
+
+# --- the Python bootstrap: the installer must not depend on system python3 ----
+# Every scripting step below (the store guard's realpath, the artifact's
+# JSON parsing and zip extraction, the daemon probe) needs a Python — and a
+# fresh machine may have none. The fix is uv first: a single static binary
+# whose installer needs only curl + sh, and uv can then provide the Python
+# itself (its own standalone builds — no system python anywhere).
+#
+# NOTE ON THE GUARD ORDER BELOW: the astral installer writes only its own
+# fixed install path (~/.local/bin/uv), never under the shared session
+# store and never under this installer's prefix — so the store guard still
+# runs before the FIRST PREFIX-DERIVED write, which is the invariant that
+# matters. (uv's install also lands on PATH at ~/.local/bin, the same
+# default prefix this script uses; a custom prefix simply keeps uv at
+# ~/.local, where the product's own ensure_uv also looks for it.)
+uv_bin=""
+if command -v uv >/dev/null 2>&1; then
+  uv_bin="$(command -v uv)"
+elif [ -x "${HOME}/.local/bin/uv" ]; then
+  uv_bin="${HOME}/.local/bin/uv"
+else
+  # The fetch and the script run are checked SEPARATELY: a plain
+  # `curl | sh` pipeline reports the script's status, so a dead network
+  # would masquerade as success.
+  if uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
+     && printf '%s\n' "$uv_install_out" | sh >/dev/null 2>&1 \
+     && [ -x "${HOME}/.local/bin/uv" ]; then
+    uv_bin="${HOME}/.local/bin/uv"
+  fi
+fi
+
+# Resolve the installer's Python, once. DETERMINISTIC CHOICE (recorded in
+# the log line below): prefer an interpreter uv already sees
+# (`uv python find 3.11` — the system python3 counts when it exists), and
+# only otherwise install uv's own managed 3.11. Offline with no usable uv,
+# fall back to a system python3; with neither, the machine is missing the
+# one prerequisite the installer cannot provide for itself.
+UVPY=""
+if [ -n "$uv_bin" ]; then
+  UVPY="$("$uv_bin" python find 3.11 2>/dev/null || true)"
+  if [ -z "$UVPY" ]; then
+    if "$uv_bin" python install 3.11 >/dev/null 2>&1; then
+      UVPY="$("$uv_bin" python find 3.11 2>/dev/null || true)"
+    fi
+  fi
+fi
+if [ -z "$UVPY" ] && command -v python3 >/dev/null 2>&1; then
+  UVPY="python3"
+fi
+[ -n "$UVPY" ] \
+  || die "the installer could not obtain a Python runtime, which it needs
+for its scripting steps (the store guard, the artifact handling). Install
+uv with:
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+(the installer then provisions its own Python through uv — no system
+python3 required), or install python3 yourself and re-run"
 
 # --- the preserve invariant: guard the shared store ---------------------------
 # ~/.prime/agent is shared by both products BY DESIGN (sessions, leases,
@@ -155,7 +253,7 @@ esac
 # Resolved like PREFIX below: when $HOME is a symlink, a PREFIX spelled in the
 # physical form must still compare equal to the store, or the guard would
 # pass two different spellings of the same directory.
-PRESERVED_STORE="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
+PRESERVED_STORE="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
 guard_preserved() {
   for guarded_path in "$@"; do
     case "$guarded_path" in
@@ -189,7 +287,7 @@ esac
 # Resolve PREFIX FULLY (symlinks included) BEFORE creating anything under
 # it: a prefix whose spelling hides a symlink into the shared store must
 # abort before mkdir -p ever writes there, not after.
-PREFIX="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
+PREFIX="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
 guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
 mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # The guard must also see THROUGH symlinked child roots: a ${PREFIX}/share or
@@ -198,7 +296,7 @@ mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # children (not refusing them) keeps legitimate out-of-store symlinked roots
 # installable while the resolved paths go through the same guard.
 for install_root in "${PREFIX}/share" "${PREFIX}/bin"; do
-  guard_preserved "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+  guard_preserved "$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
 done
 
 share_dir="${PREFIX}/share/prime-agent"
@@ -253,7 +351,7 @@ the Linux builds require glibc >= 2.35 (Ubuntu 22.04 or newer)" ;;
     die "glibc ${glibc} is below the supported floor: the Linux builds are
 compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
   fi
-  echo "glibc ${glibc} >= 2.35: supported"
+  say "glibc ${glibc} >= 2.35: supported"
 fi
 
 # --- auth (workflow-artifact downloads require a principal) ----------------
@@ -288,11 +386,11 @@ else
   }
   if [ "$RUN" = "latest" ]; then
     RUN="$(api "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
-      | python3 -c 'import json, sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')" \
+      | "$UVPY" -c 'import json, sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')" \
       || die "could not list ${WORKFLOW} runs in ${REPO} (check GITHUB_TOKEN)"
   fi
 fi
-echo "installing the ${WORKFLOW} run ${RUN} ${TARGET} artifact from ${REPO}"
+say "installing the ${WORKFLOW} run ${RUN} ${TARGET} artifact from ${REPO}"
 
 # --- download the platform artifact -----------------------------------------
 # The artifact zip is flat (the build job uploads the assembled dist tree),
@@ -305,7 +403,7 @@ if [ "$HAVE_GH" = 1 ]; then
     || die "artifact artifacts-${TARGET} not found in run ${RUN} (is the build matrix up?)"
 else
   artifact_id="$(api "https://api.github.com/repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100" \
-    | python3 -c '
+    | "$UVPY" -c '
 import json, sys
 name = "artifacts-" + sys.argv[1]
 for artifact in json.load(sys.stdin).get("artifacts", []):
@@ -318,7 +416,7 @@ for artifact in json.load(sys.stdin).get("artifacts", []):
     -o "${dl}/artifact.zip" \
     "https://api.github.com/repos/${REPO}/actions/artifacts/${artifact_id}/zip" \
     || die "could not download artifact ${artifact_id} from run ${RUN}"
-  python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+  "$UVPY" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
     "${dl}/artifact.zip" "$dl"
   rm -f "${dl}/artifact.zip"
 fi
@@ -347,8 +445,8 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   die "no sha256 tool found (sha256sum or shasum is required to verify the download)"
 fi
-commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
-echo "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
+commit="$("$UVPY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
+say "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 
 # --- the TypeScript takeover, step 1: stop the TS daemon CLEANLY ---------------
 # Probe the TS daemon's own socket and this product's pinned socket with the
@@ -363,10 +461,15 @@ echo "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 # impossible, so a skip is safe).
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
-stop_ts_daemon() {
-  socket_path="$1"
-  [ -e "$socket_path" ] || return 0
-  verdict="$(python3 - "$socket_path" <<'PY'
+# The daemon probe rides a FILE, not a heredoc inside a command
+# substitution: macOS ships bash 3.2 as /bin/sh, and its POSIX-mode parser
+# cannot close a $( ) that spans a heredoc body ("unexpected EOF while
+# looking for matching ')'" — the operator hit it live on darwin-arm64 at
+# exactly this construct. A top-level heredoc writes the probe once (the
+# download dir is this run's temp, swept with it); the substitution then
+# holds a plain call.
+probe_py="${dl}/daemon-stop.py"
+cat > "$probe_py" <<'PROBE_PY'
 import json, select, socket, sys, time
 
 path = sys.argv[1]
@@ -482,40 +585,44 @@ while time.monotonic() < end:
         sys.exit(0)
     time.sleep(0.05)
 print("ts:stop-failed")
-PY
-)" || verdict="probe-error"
+PROBE_PY
+
+stop_ts_daemon() {
+  socket_path="$1"
+  [ -e "$socket_path" ] || return 0
+  verdict="$("$UVPY" "$probe_py" "$socket_path" 2>/dev/null)" || verdict="probe-error"
   case "$verdict" in
     ts:stopped)
-      echo "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
+      say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
       ;;
     ts:busy:*)
       sessions="${verdict#ts:busy:}"
-      echo "note: the TypeScript daemon on ${socket_path} is serving ${sessions} session(s);"
-      echo "  it was left running (never killed) and stops itself when idle. The Rust"
-      echo "  launcher pins its own socket, so the two daemons cannot conflict."
+      note "note: the TypeScript daemon on ${socket_path} is serving ${sessions} session(s);"
+      note "  it was left running (never killed) and stops itself when idle. The Rust"
+      note "  launcher pins its own socket, so the two daemons cannot conflict."
       ;;
     ts:probe-failed)
-      echo "note: the TypeScript daemon on ${socket_path} did not answer the idle probe;"
-      echo "  it was left running (never killed)."
+      note "note: the TypeScript daemon on ${socket_path} did not answer the idle probe;"
+      note "  it was left running (never killed)."
       ;;
     ts:stop-failed)
-      echo "note: the TypeScript daemon on ${socket_path} was asked to stop cleanly but is"
-      echo "  still listening after 5s; it was NOT killed — it will drain on its own,"
-      echo "  or run 'prime-agent shutdown --force' (the shared-state-root sweep) to stop it."
+      note "note: the TypeScript daemon on ${socket_path} was asked to stop cleanly but is"
+      note "  still listening after 5s; it was NOT killed — it will drain on its own,"
+      note "  or run 'prime-agent shutdown --force' (the shared-state-root sweep) to stop it."
       ;;
     foreign:*)
-      echo "note: a daemon is listening on ${socket_path} but its hello schema"
-      echo "  (${verdict#foreign:}) is not the TypeScript daemon's; nothing was done."
+      note "note: a daemon is listening on ${socket_path} but its hello schema"
+      note "  (${verdict#foreign:}) is not the TypeScript daemon's; nothing was done."
       ;;
     stale)
-      echo "note: no daemon answers on ${socket_path} (a stale socket file was left alone)"
+      note "note: no daemon answers on ${socket_path} (a stale socket file was left alone)"
       ;;
     no-hello|no-schema)
-      echo "note: whatever listens on ${socket_path} did not greet with a schema id;"
-      echo "  nothing was done (the installer only stops what identifies itself)."
+      note "note: whatever listens on ${socket_path} did not greet with a schema id;"
+      note "  nothing was done (the installer only stops what identifies itself)."
       ;;
     probe-error|"")
-      echo "note: could not probe ${socket_path}; nothing was done (never killed blind)."
+      note "note: could not probe ${socket_path}; nothing was done (never killed blind)."
       ;;
   esac
 }
@@ -543,8 +650,8 @@ ts_owned_old_layout() {
 # A TS managed root elsewhere (XDG_DATA_HOME) does not block this install and
 # is left in place — only the keyword is taken over.
 if [ "$ts_managed_root" != "$share_dir" ] && [ -d "$ts_managed_root" ] && ts_managed "$ts_managed_root"; then
-  echo "note: a TypeScript native install also lives at ${ts_managed_root}"
-  echo "  (XDG_DATA_HOME); it does not occupy ${share_dir} and was left in place."
+  say "note: a TypeScript native install also lives at ${ts_managed_root}"
+  say "  (XDG_DATA_HOME); it does not occupy ${share_dir} and was left in place."
 fi
 
 # --- install ---------------------------------------------------------------------
@@ -648,8 +755,8 @@ for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-age
   # Best-effort: an un-sweepable generation (a mounted dir, a permission
   # wall) must not abort the install — the leftover is harmless.
   if ! rm -rf "$sweep_dir" 2>/dev/null; then
-    echo "warning: could not sweep the previous rollback generation ${sweep_dir};"
-    echo "  it stays (harmless — remove it by hand if you recognize it)"
+    note "warning: could not sweep the previous rollback generation ${sweep_dir};"
+    note "  it stays (harmless — remove it by hand if you recognize it)"
   fi
 done
 
@@ -725,14 +832,14 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
     # continue — an unrecognized or partial directory at the old name must
     # not block installing into ${share_dir} (the same rule the leftover
     # path applies after the publish).
-    echo "note: ${old_layout_dir} is not this installer's payload tree; it was"
-    echo "  left in place (no migration, no rollback from it)"
+    note "note: ${old_layout_dir} is not this installer's payload tree; it was"
+    note "  left in place (no migration, no rollback from it)"
   else
     mv "$old_layout_dir" "$old"
     migrated_old_layout="$old"
-    echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
-    echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
-    echo "   the slot by hand once you no longer need the rollback)"
+    say "the old prime-agent-rust install migrated to the rollback slot ${old}"
+    say "  (it is kept — the sweep only removes marker-stamped generations; remove"
+    say "   the slot by hand once you no longer need the rollback)"
   fi
 fi
 if [ -d "$share_dir" ]; then
@@ -759,12 +866,12 @@ fi
 # the payload is already live, so an un-removable leftover warns, not dies.
 if [ -d "$old_layout_dir" ] && ts_owned_old_layout "$old_layout_dir"; then
   if ! rm -rf "$old_layout_dir" 2>/dev/null; then
-    echo "warning: could not remove the superseded ${old_layout_dir} tree; remove it by hand"
+    note "warning: could not remove the superseded ${old_layout_dir} tree; remove it by hand"
   else
-    echo "removed the superseded ${old_layout_dir} tree (its payload now lives under ${share_dir})"
+    say "removed the superseded ${old_layout_dir} tree (its payload now lives under ${share_dir})"
   fi
 elif [ -d "$old_layout_dir" ]; then
-  echo "note: ${old_layout_dir} is not this installer's payload tree; it was left in place"
+  note "note: ${old_layout_dir} is not this installer's payload tree; it was left in place"
 fi
 
 # --- the launcher (the takeover lives here) -----------------------------------
@@ -781,8 +888,8 @@ fi
 # aside first, so nothing this script did not write is ever lost.
 if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   if [ -L "$launcher" ]; then
-    echo "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
-    echo "  the keyword is the Rust port's now"
+    say "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
+    say "  the keyword is the Rust port's now"
   elif [ -f "$launcher" ] && grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
     :   # this installer's own previous launcher (a REGULAR file — the
     :   # marker grep never opens a special file): plain replace below
@@ -791,8 +898,8 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
     mv "$launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${launcher}; resolve it and re-run"
     preserved_launcher="$preserved_cmd_path"
-    echo "note: an unrelated prime-agent command existed at ${launcher};"
-    echo "  it was preserved at ${preserved_cmd_path}"
+    note "note: an unrelated prime-agent command existed at ${launcher};"
+    note "  it was preserved at ${preserved_cmd_path}"
   fi
 fi
 launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
@@ -829,7 +936,7 @@ migrated_old_layout=""
 old_launcher="${bin_dir}/prime-agent-rust"
 if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old_launcher" 2>/dev/null; then
   rm -f "$old_launcher"
-  echo "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
+  say "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
 fi
 
 # --- the TypeScript takeover completes AFTER the publish ----------------------
@@ -849,7 +956,7 @@ stop_ts_daemon "$rust_socket"
 if command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
-    ts_version="$(python3 -c 'import json, sys
+    ts_version="$("$UVPY" -c 'import json, sys
 try:
     package = json.load(open(sys.argv[1]))
     if package.get("name") == "prime-agent":
@@ -861,8 +968,8 @@ except Exception:
         echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
         echo "  restore with: npm install -g prime-agent@${ts_version}"
       else
-        echo "warning: npm uninstall -g prime-agent failed; run it by hand — the"
-        echo "  npm-installed TS command can shadow ${launcher} on PATH"
+        note "warning: npm uninstall -g prime-agent failed; run it by hand — the"
+        note "  npm-installed TS command can shadow ${launcher} on PATH"
       fi
     fi
   fi
@@ -878,35 +985,35 @@ fi
 # machine still gets a successful install, and the first session retries
 # the bootstrap online per the product's own guidance.
 if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
-  echo "uv found (the kernel venv's package manager)"
+  say "uv found (the kernel venv's package manager)"
 else
-  echo "installing uv (the kernel venv's package manager — the command the"
-  echo "product's own error message names):"
+  say "installing uv (the kernel venv's package manager — the command the"
+  say "product's own error message names):"
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the SCRIPT's status, so a dead network
   # (curl fails, sh reads nothing and exits 0) would masquerade as success.
   if curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" | sh; then
     [ -x "${HOME}/.local/bin/uv" ] \
-      || echo "warning: the uv installer reported success but ${HOME}/.local/bin/uv is missing; the first session may need to install uv itself"
+      || note "warning: the uv installer reported success but ${HOME}/.local/bin/uv is missing; the first session may need to install uv itself"
   else
-    echo "warning: could not install uv (offline?); the kernel pre-warm was"
-    echo "  skipped. The first session needs uv — install it with:"
-    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    note "warning: could not install uv (offline?); the kernel pre-warm was"
+    note "  skipped. The first session needs uv — install it with:"
+    note "  curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
 if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
-    echo "kernel pre-warmed: the first session's Python kernel is ready"
-    printf '  %s\n' "$bootstrap_out"
+    say "kernel pre-warmed: the first session's Python kernel is ready"
+    say "$bootstrap_out"
   else
-    echo "warning: the kernel pre-warm failed (the install stands; the first"
-    echo "  session will retry it online):"
-    printf '%s\n' "$bootstrap_out"
+    note "warning: the kernel pre-warm failed (the install stands; the first"
+    note "  session will retry it online):"
+    note "$bootstrap_out"
   fi
 else
-  echo "note: kernel pre-warm skipped (no uv); the first session bootstraps"
-  echo "  the kernel itself and needs the network once"
+  note "note: kernel pre-warm skipped (no uv); the first session bootstraps"
+  note "  the kernel itself and needs the network once"
 fi
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
