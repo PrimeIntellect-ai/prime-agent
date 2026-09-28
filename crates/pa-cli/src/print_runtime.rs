@@ -666,50 +666,45 @@ fn headless_image_model_router(
     let swap_target = {
         let provider_target = std::sync::Arc::clone(&provider_target);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
-            match route {
-                Some(resolved) => {
-                    // The first swap of the episode captures the session
-                    // target it replaces (the later arms re-write the slot,
-                    // so only the arm preceding them holds it).
-                    let mut armed_from = armed_from.lock().expect("armed-from lock");
-                    if armed_from.is_none() {
-                        armed_from
-                            .clone_from(&provider_target.read().expect("provider target lock"));
-                    }
-                    // The routed model's request auth resolves like the
-                    // session model's did at startup (registry + headers).
-                    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
-                    let mut registry =
-                        pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-                    registry.load_private_authorization_from_cache();
-                    let resolved_auth = registry
-                        .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
-                    let target = pa_core::session_engine::provider_adapter::ProviderTarget {
-                        api_key: resolved_auth.api_key,
-                        headers: resolved_auth.headers,
-                        model: resolved.model.clone(),
-                        service_tier: resolved.service_tier,
-                    };
-                    *provider_target.write().expect("provider target lock") = Some(target);
+            if let Some(resolved) = route {
+                // The first swap of the episode captures the session
+                // target it replaces (the later arms re-write the slot,
+                // so only the arm preceding them holds it).
+                let mut armed_from = armed_from.lock().expect("armed-from lock");
+                if armed_from.is_none() {
+                    armed_from.clone_from(&provider_target.read().expect("provider target lock"));
                 }
-                None => {
-                    // Restore the captured session target and release the
-                    // capture: a mid-run model switch rewrote the slot, and
-                    // the next arm captures the switched-to target.
-                    let captured =
-                        armed_from
-                            .lock()
-                            .expect("armed-from lock")
-                            .take()
-                            .or_else(|| {
-                                provider_target
-                                    .read()
-                                    .expect("provider target lock")
-                                    .clone()
-                            });
-                    if let Some(target) = captured {
-                        *provider_target.write().expect("provider target lock") = Some(target);
-                    }
+                // The routed model's request auth resolves like the
+                // session model's did at startup (registry + headers).
+                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                let mut registry =
+                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                registry.load_private_authorization_from_cache();
+                let resolved_auth = registry
+                    .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
+                let target = pa_core::session_engine::provider_adapter::ProviderTarget {
+                    api_key: resolved_auth.api_key,
+                    headers: resolved_auth.headers,
+                    model: resolved.model.clone(),
+                    service_tier: resolved.service_tier,
+                };
+                *provider_target.write().expect("provider target lock") = Some(target);
+            } else {
+                // Restore the captured session target and release the
+                // capture: a mid-run model switch rewrote the slot, and
+                // the next arm captures the switched-to target.
+                let captured = armed_from
+                    .lock()
+                    .expect("armed-from lock")
+                    .take()
+                    .or_else(|| {
+                        provider_target
+                            .read()
+                            .expect("provider target lock")
+                            .clone()
+                    });
+                if let Some(target) = captured {
+                    *provider_target.write().expect("provider target lock") = Some(target);
                 }
             }
         })
