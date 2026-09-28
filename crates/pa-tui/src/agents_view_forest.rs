@@ -25,9 +25,8 @@ mod rows;
 mod selection;
 mod summary;
 
-pub use lineage::{
-    compute_rollups, has_session_children, scope_ancestors, scope_depth, scope_to_subtree,
-};
+pub use lineage::{compute_rollups, has_session_children, scope_ancestors, scope_to_subtree};
+pub(crate) use lineage::{scope_root, ScopeRoot};
 pub(crate) use rows::build_rows;
 pub use selection::{ancestor_session_ids, resolve_selection};
 pub(crate) use summary::{is_subagent_summary, session_model};

@@ -69,19 +69,23 @@ fn parent_reference_keys(record: &UnifiedRecord) -> Vec<String> {
 }
 
 /// The `parent` record's session file, live summary first, saved catalog
-/// row second (both serve absolute paths).
+/// row second (both serve absolute paths; an empty string is absent — a
+/// `--no-session` worker's in-memory store publishes one, and every other
+/// TUI accessor of the fact reads it the same way).
 fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
     parent
         .daemon
         .as_ref()
         .and_then(|daemon| daemon.get("sessionFile"))
         .and_then(Value::as_str)
+        .filter(|file| !file.is_empty())
         .or_else(|| {
             parent
                 .saved
                 .as_ref()
                 .and_then(|saved| saved.get("path"))
                 .and_then(Value::as_str)
+                .filter(|file| !file.is_empty())
         })
 }
 
@@ -345,15 +349,37 @@ pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bo
     })
 }
 
-/// The scope root's depth label (TS `getAgentsViewDepth`:
-/// `rlmDepth + 1`); `None` when the root is not in the record set.
-#[must_use]
-pub fn scope_depth(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<u32> {
+/// The scope root's facts the scoped view renders and creates with:
+/// `child_depth` is the root's `rlmDepth + 1` (TS `getAgentsViewDepth`) —
+/// the view's depth label and the depth a session created in this scope
+/// runs at; `session_file` is the root's file exactly as the forest links
+/// children to it ([`parent_record_file`]); `cwd` is the root's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopeRoot {
+    pub(crate) child_depth: u32,
+    pub(crate) session_file: Option<String>,
+    pub(crate) cwd: Option<String>,
+}
+
+/// The scope root's facts, `None` when the root is not in the record set.
+pub(crate) fn scope_root(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<ScopeRoot> {
     scope_root_index(records, scope).map(|root| {
-        summary_for_record(&records[root])
+        let summary = summary_for_record(&records[root]);
+        // `rlmDepth` rides the wire as a u32 (the create check enforces
+        // it); an out-of-range value falls back to the root's 0.
+        let root_depth = summary
             .get("rlmDepth")
             .and_then(Value::as_u64)
-            .unwrap_or(0) as u32
-            + 1
+            .and_then(|depth| u32::try_from(depth).ok())
+            .unwrap_or(0);
+        ScopeRoot {
+            child_depth: root_depth + 1,
+            session_file: parent_record_file(&records[root]).map(str::to_string),
+            cwd: summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
+        }
     })
 }

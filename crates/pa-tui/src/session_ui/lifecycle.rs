@@ -31,6 +31,19 @@ impl SessionUi {
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
+            SessionSelection::NewChild { rlm_depth, .. } => {
+                let id = create_session(&client, options, None).await?;
+                // `tui agents new scoped`, fire-and-forget (the
+                // `subagents_view_opened` pattern): the open never waits on
+                // the telemetry flush.
+                if let Some(telemetry) = options.telemetry.clone() {
+                    let depth = *rlm_depth;
+                    tokio::spawn(async move {
+                        telemetry.scoped_agent_created(depth).await;
+                    });
+                }
+                id
+            }
             SessionSelection::Attach(id) => id.clone(),
             SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?

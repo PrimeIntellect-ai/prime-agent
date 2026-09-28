@@ -61,12 +61,51 @@ fn expand_and_new_key_overrides_fire_and_defaults_are_inert() {
     // default ctrl+n no longer does.
     mode.handle_key("alt+n");
     assert!(!mode.running);
-    assert!(mode.new_session);
+    assert_eq!(
+        mode.opened.as_ref().map(|opened| &opened.selection),
+        Some(&SessionSelection::New)
+    );
     let mut mode =
         mode_with_user_bindings(&[("app.agents.expand", "alt+x"), ("app.agents.new", "alt+n")]);
     mode.handle_key("ctrl+n");
     assert!(mode.running, "the default new key is inert");
-    assert!(!mode.new_session);
+    assert!(mode.opened.is_none());
+}
+
+/// The scoped view's ctrl+n creates the new session under the scope
+/// root (the operator's 2026-09-28 directive): one level below it and
+/// in its directory, so it lists in this view and the agents-back
+/// return lands here.
+#[test]
+fn new_key_in_a_scoped_view_creates_under_the_scope_root() {
+    let mut parent = parent_summary("p");
+    parent["cwd"] = serde_json::json!("/work/p");
+    let mut mode = scoped_mode(
+        None,
+        vec![
+            roster_entry("p", "idle", &parent),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+    );
+    assert!(mode.scope_active);
+    mode.handle_key("ctrl+n");
+    assert!(!mode.running);
+    assert_eq!(
+        mode.opened,
+        Some(OpenedRow {
+            selection: SessionSelection::NewChild {
+                parent_session_file: "/x/p.jsonl".into(),
+                rlm_depth: 1,
+            },
+            expanded_ancestors: vec![],
+            selected_row_identity: String::new(),
+            selected_key: SelectionKey::default(),
+            rlm_depth: Some(1),
+            has_children: false,
+            status_message: None,
+            cwd: Some("/work/p".into()),
+        })
+    );
 }
 
 /// TS `cycleProgramForSelected` (the `app.agents.program` key, default
