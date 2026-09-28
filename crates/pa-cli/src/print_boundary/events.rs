@@ -105,7 +105,7 @@ impl TurnBoundary {
                 }
             }
             Err(error) => {
-                self.emit_json(json!({ "type": "error", "message": error.to_string() }));
+                self.emit_json(&json!({ "type": "error", "message": error.to_string() }));
             }
         }
         let mut event = json!({
@@ -121,13 +121,13 @@ impl TurnBoundary {
         if let Some(instructions) = custom_instructions {
             event["customInstructions"] = json!(instructions);
         }
-        self.emit_json(event);
+        self.emit_json(&event);
     }
 
     /// Stream one session event in json mode (text mode stays quiet here).
-    pub(super) fn emit_json(&self, event: Value) {
+    pub(super) fn emit_json(&self, event: &Value) {
         if self.json_mode {
-            (self.sink)(&event);
+            (self.sink)(event);
         }
     }
 }
