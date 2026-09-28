@@ -823,7 +823,8 @@ fn reconstructs_the_queue_from_session_actions() {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         },
         "an attach re-syncs the queue strip from the snapshot"
     );
@@ -850,11 +851,39 @@ fn reconstructs_the_child_status_provenance_from_session_actions() {
     let view = reconstruct(&data);
     assert_eq!(
         view.queued.rlm_child_status,
-        crate::queued::RlmChildStatusIndices {
+        crate::queued::QueueLaneIndices {
             steering: Vec::new(),
             follow_up: vec![0, 2],
         },
         "the attach re-sync carries the typed provenance"
+    );
+}
+
+/// The injected-continuation provenance rides the attach snapshot too
+/// (replay parity with the live frames): a re-attach keeps the
+/// engine-minted continuations folded and inspectable read-only, while
+/// a projection without the rider (older daemons) still decodes.
+#[test]
+fn reconstructs_the_injected_provenance_from_session_actions() {
+    let mut attach = slim_attach();
+    attach["snapshot"]["state"]["sessionActions"] = json!({
+        "queuedCount": 2,
+        "steering": [],
+        "followUps": [
+            "[goal: continuation]\n\nKeep driving the goal.",
+            "then summarize",
+        ],
+        "injectedPrompts": { "steering": [], "followUp": [0] },
+    });
+    let data = attach_data_from_response(attach).unwrap();
+    let view = reconstruct(&data);
+    assert_eq!(
+        view.queued.injected_prompts,
+        crate::queued::QueueLaneIndices {
+            steering: Vec::new(),
+            follow_up: vec![0],
+        },
+        "the attach re-sync carries the injected provenance"
     );
 }
 
@@ -962,7 +991,8 @@ fn decodes_session_action_update_as_the_queue_projection() {
             steering: vec![],
             follow_ups: vec!["queued follow-up".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         }
     );
 }
@@ -989,9 +1019,47 @@ fn decodes_the_child_status_provenance_from_the_live_queue_update() {
             steering: vec!["[child-exited: no-reply child:lane]".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices {
+            rlm_child_status: crate::queued::QueueLaneIndices {
                 steering: vec![0],
                 follow_up: Vec::new(),
+            },
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
+        }
+    );
+}
+
+/// The live queue update carries the injected-continuation provenance
+/// (the second Rust-native rider): the parked continuations fold into
+/// the strip on the live path exactly like the attach path, and a
+/// projection without the rider decodes with empty provenance.
+#[test]
+fn decodes_the_injected_provenance_from_the_live_queue_update() {
+    let update = event_to_update(&json!({
+        "type": "session_action_update",
+        "actions": {
+            "queuedCount": 2,
+            "steering": [],
+            "followUps": [
+                "[goal: continuation]\n\nKeep driving the goal.",
+                "then summarize",
+            ],
+            "injectedPrompts": { "steering": [], "followUp": [0] },
+        },
+    }))
+    .expect("a queue update");
+    assert_eq!(
+        update,
+        TurnUpdate::QueueUpdated {
+            steering: Vec::new(),
+            follow_ups: vec![
+                "[goal: continuation]\n\nKeep driving the goal.".to_string(),
+                "then summarize".to_string(),
+            ],
+            starting: None,
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices {
+                steering: Vec::new(),
+                follow_up: vec![0],
             },
         }
     );
@@ -1022,7 +1090,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: Some("queued before compaction".to_string()),
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
     let committed = json!({
@@ -1044,7 +1113,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
     // An active action that is not a turn never projects a starting
@@ -1068,7 +1138,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
 }
