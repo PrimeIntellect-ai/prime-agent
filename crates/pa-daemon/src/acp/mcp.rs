@@ -383,10 +383,10 @@ pub async fn release_session_servers(mode: &super::AcpModeState) {
 
 fn jsonrpc_invalid_params(reason: &str) -> Value {
     super::jsonrpc::error_response(
-        Value::Null,
+        &Value::Null,
         super::jsonrpc::INVALID_PARAMS,
         "Invalid params",
-        Some(serde_json::json!({ "reason": reason })),
+        Some(&serde_json::json!({ "reason": reason })),
     )
 }
 

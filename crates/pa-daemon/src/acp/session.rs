@@ -530,10 +530,10 @@ pub async fn publish_response_boundary(
 /// actually reads.
 pub fn prompt_block_error(id: &Value, error: PromptBlockError) -> Value {
     jsonrpc::error_response(
-        id.clone(),
+        id,
         jsonrpc::INVALID_PARAMS,
         "Invalid params",
-        Some(json!({ "reason": error.to_string() })),
+        Some(&json!({ "reason": error.to_string() })),
     )
 }
 

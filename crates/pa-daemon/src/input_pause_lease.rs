@@ -336,7 +336,7 @@ impl Supervisor {
     /// detach arm): mark the detaching sessions, bump the connection epoch,
     /// then (after the routed detach answered) release the client's leases
     /// for those sessions.
-    pub(crate) async fn begin_detach_pause_bookkeeping(
+    pub(crate) fn begin_detach_pause_bookkeeping(
         &self,
         connection: &Arc<ClientConnectionState>,
         active_session_id: Option<&str>,

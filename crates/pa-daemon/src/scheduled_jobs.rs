@@ -557,7 +557,7 @@ impl Worker {
 
     /// `cron_list` (TS daemon-mode case): the store's jobs filtered by the
     /// selector and the inactive cut.
-    pub(crate) async fn handle_cron_list(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) fn handle_cron_list(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("cron_list") {
             return response;
         }

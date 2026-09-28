@@ -141,7 +141,7 @@ impl SessionBindingTable {
 impl SessionBindingTable {
     /// Poisoning-tolerant lock (the supervisor's std-Mutex pattern): the
     /// tables' invariants survive a panic between lock and unlock.
-    fn locked<'a, T>(mutex: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
+    fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

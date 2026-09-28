@@ -70,8 +70,8 @@ pub(super) async fn handle_session_prompt(
         // of a request error.
         session.producer().finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            id,
-            stop_reason_response(AcpStopReason::Cancelled),
+            &id,
+            &stop_reason_response(AcpStopReason::Cancelled),
         ));
         return;
     }
@@ -241,7 +241,7 @@ async fn run_prompt_turn(
         // `_checkCompaction`'s abort arm): drop the pending compaction
         // and refine requests, reset the overflow machine, and settle.
         if final_message.stop_reason == pa_types::ai::StopReason::Aborted {
-            session.reset_overflow_recovery().await;
+            session.reset_overflow_recovery();
             session.clear_turn_boundary_requests(&mode.engine).await;
             break;
         }
@@ -251,7 +251,7 @@ async fn run_prompt_turn(
         // review prompt's turn line (TS `_assistantTurnsSinceAutoRefine`'s
         // message_end increment), then the boundary check runs.
         if final_message.stop_reason != pa_types::ai::StopReason::Error {
-            session.reset_overflow_recovery().await;
+            session.reset_overflow_recovery();
             mode.engine
                 .session
                 .note_settled_turn_since_auto_refine_review();
@@ -591,8 +591,8 @@ async fn settle_turn(
         // with the protocol stop reason and no boundary frames.
         session.producer().finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            id.clone(),
-            stop_reason_response(AcpStopReason::Cancelled),
+            &id,
+            &stop_reason_response(AcpStopReason::Cancelled),
         ));
         clear_prompt_slot(state, session_id).await;
         return;
@@ -669,7 +669,7 @@ async fn settle_turn(
     };
     let response = match turn_failure {
         Some(failure) => internal_error(id, &format!("prime-agent turn failed: {failure}")),
-        None => jsonrpc::response(id.clone(), stop_reason_response(stop_reason)),
+        None => jsonrpc::response(&id, &stop_reason_response(stop_reason)),
     };
     let _ = tx.send(response);
     clear_prompt_slot(state, session_id).await;

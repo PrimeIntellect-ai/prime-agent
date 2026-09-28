@@ -483,7 +483,7 @@ impl Supervisor {
         // transaction whose marker expired returns the supervisor to Serving
         // before the command is served.
         if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-            self.finish_update_abort(abort).await;
+            self.finish_update_abort(abort);
         }
         // Admission gate: mutating commands are refused while a prepare
         // transaction is active (TS "Daemon is preparing an update restart"),
@@ -844,13 +844,8 @@ impl Supervisor {
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let attached_ids = attached.session_ids();
-                let marked = self
-                    .begin_detach_pause_bookkeeping(
-                        connection,
-                        active_session_id.as_deref(),
-                        &attached_ids,
-                    )
-                    .await;
+                let marked =
+                    self.begin_detach_pause_bookkeeping(connection, active_session_id.as_deref(), &attached_ids);
                 let outcome = self
                     .route_client_command(
                         command,

@@ -61,10 +61,10 @@ pub(super) async fn handle_set_config_option(
     };
     let Some((daemon_session_id, config, producer)) = resolved else {
         let _ = tx.send(jsonrpc::error_response(
-            id,
+            &id,
             jsonrpc::INVALID_PARAMS,
             "Invalid params",
-            Some(json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+            Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
         ));
         return;
     };
@@ -109,7 +109,7 @@ pub(super) async fn handle_set_config_option(
             return;
         }
     };
-    let _ = tx.send(jsonrpc::response(id, config_options_value(&options)));
+    let _ = tx.send(jsonrpc::response(&id, &config_options_value(&options)));
 }
 
 /// One failed wire config operation: the TS handler's `RequestError`
@@ -132,16 +132,16 @@ impl WireConfigError {
     fn response(self, id: Value) -> Value {
         match self {
             WireConfigError::InvalidParams(reason) => jsonrpc::error_response(
-                id,
+                &id,
                 jsonrpc::INVALID_PARAMS,
                 "Invalid params",
-                Some(json!({ "reason": reason })),
+                Some(&json!({ "reason": reason })),
             ),
             WireConfigError::Internal(details) => jsonrpc::error_response(
-                id,
+                &id,
                 jsonrpc::INTERNAL_ERROR,
                 "Internal error",
-                Some(json!({ "details": details })),
+                Some(&json!({ "details": details })),
             ),
         }
     }

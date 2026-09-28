@@ -238,7 +238,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 
 /// Children registry bound to the running supervisor, with a parent identity
 /// rooted at `agent_dir`.
-async fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSessions {
+fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
         agent_dir.to_path_buf(),
@@ -323,7 +323,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let script = write_script(dir.path(), "replacement kid answer");
-    let children = children(&socket, &agent_dir, &script).await;
+    let children = children(&socket, &agent_dir, &script);
 
     // Four concurrent spawns, each with a unique prompt marker.
     let (a, b, c, d) = tokio::join!(

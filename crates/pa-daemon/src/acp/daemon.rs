@@ -460,7 +460,7 @@ async fn handle_request(
         "initialize" => {
             let result = serde_json::to_value(types::initialize_result(&options.product_version))
                 .expect("serializes");
-            let _ = tx.send(jsonrpc::response(id, result));
+            let _ = tx.send(jsonrpc::response(&id, &result));
         }
         "session/new" => {
             handle_session_new(id, params, link, state, options, tx).await;
@@ -470,7 +470,7 @@ async fn handle_request(
         }
         "session/cancel" => {
             let _ = session_cancel(params, link, state).await;
-            let _ = tx.send(jsonrpc::response(id, json!({})));
+            let _ = tx.send(jsonrpc::response(&id, &json!({})));
         }
         "session/set_config_option" => {
             handle_set_config_option(id, params, link, state, tx).await;
@@ -480,10 +480,10 @@ async fn handle_request(
         }
         other => {
             let _ = tx.send(jsonrpc::error_response(
-                id,
+                &id,
                 jsonrpc::METHOD_NOT_FOUND,
                 &format!("\"Method not found\": {other}"),
-                Some(json!({ "method": other })),
+                Some(&json!({ "method": other })),
             ));
         }
     }
@@ -521,10 +521,10 @@ async fn handle_session_new(
             Err(reason) => {
                 *state.lock().await = DaemonAcpState::default();
                 let _ = tx.send(jsonrpc::error_response(
-                    id,
+                    &id,
                     jsonrpc::INVALID_PARAMS,
                     "Invalid params",
-                    Some(json!({ "reason": reason })),
+                    Some(&json!({ "reason": reason })),
                 ));
                 return;
             }
@@ -710,7 +710,7 @@ async fn handle_session_new(
         guard.session_new_in_flight = false;
         guard.session = Some(hosted);
     }
-    let _ = tx.send(jsonrpc::response(id, result));
+    let _ = tx.send(jsonrpc::response(&id, &result));
     producer.commit_session_new_response().await;
 }
 
@@ -771,8 +771,8 @@ async fn handle_session_prompt(
                 // prompt frame's admission and this task starting.
                 if std::mem::take(&mut hosted.cancel_requested) {
                     let _ = tx.send(jsonrpc::response(
-                        id,
-                        serde_json::to_value(types::AcpStopReasonResponse {
+                        &id,
+                        &serde_json::to_value(types::AcpStopReasonResponse {
                             stop_reason: types::AcpStopReason::Cancelled,
                         })
                         .expect("serializes"),
@@ -864,8 +864,8 @@ async fn handle_session_prompt(
     if cancelled {
         producer.finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            id,
-            serde_json::to_value(types::AcpStopReasonResponse {
+            &id,
+            &serde_json::to_value(types::AcpStopReasonResponse {
                 stop_reason: types::AcpStopReason::Cancelled,
             })
             .expect("serializes"),
@@ -974,8 +974,8 @@ async fn handle_session_prompt(
     // reached on the enabled run is the only non-end_turn outcome.
     let stop_reason = meta::acp_stop_reason_for_status(false, autonomous_status.as_ref());
     let _ = tx.send(jsonrpc::response(
-        id,
-        serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
+        &id,
+        &serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
     ));
 }
 
@@ -1095,7 +1095,7 @@ async fn handle_session_close(
         .await;
     let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
-    let _ = tx.send(jsonrpc::response(id, json!({})));
+    let _ = tx.send(jsonrpc::response(&id, &json!({})));
     let mut guard = state.lock().await;
     guard.session_close_in_flight = false;
 }

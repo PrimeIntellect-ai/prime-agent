@@ -116,7 +116,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -294,7 +294,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     );
 
     // Empty list: no live sessions.
-    client.send_command("l1", serde_json::json!({ "type": "list" }));
+    client.send_command("l1", &serde_json::json!({ "type": "list" }));
     let list = client.read_response("l1");
     assert_eq!(list["success"], true, "list failed: {list}");
     assert_eq!(list["data"]["sessions"], serde_json::json!([]));
@@ -312,7 +312,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -332,7 +332,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     // Attach and stream the first turn.
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -394,7 +394,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
 
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let (prompt_ack, mut turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed: {prompt_ack}");
@@ -429,20 +429,20 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     // The final answer is queryable.
     client.send_command(
         "g1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "get_last_assistant_text",
             "activeSessionId": session_id,
         }),
     );
-    let last = client.read_response("g1");
+    let final_answer = client.read_response("g1");
     assert_eq!(
-        last["success"], true,
-        "get_last_assistant_text failed: {last}"
+        final_answer["success"], true,
+        "get_last_assistant_text failed: {final_answer}"
     );
-    assert_eq!(last["data"]["text"], "hello from scripted");
+    assert_eq!(final_answer["data"]["text"], "hello from scripted");
 
     // The session appears in list.
-    client.send_command("l2", serde_json::json!({ "type": "list" }));
+    client.send_command("l2", &serde_json::json!({ "type": "list" }));
     let list = client.read_response("l2");
     let sessions = list["data"]["sessions"].as_array().expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -465,7 +465,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
 
     // Saved-session listing: item + progress events, then the final response
     // (differential shape from the TS supervisor's `handleSavedSessionList`).
-    client.send_command("e1", serde_json::json!({ "type": "list_saved_sessions" }));
+    client.send_command("e1", &serde_json::json!({ "type": "list_saved_sessions" }));
     let rejected = client.read_response("e1");
     assert_eq!(rejected["success"], false);
     assert_eq!(
@@ -474,7 +474,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     );
     client.send_command(
         "sl1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "list_saved_sessions",
             "cwd": dir.path().to_string_lossy(),
             "sessionDir": agent_dir.join("sessions").to_string_lossy(),
@@ -527,7 +527,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     // unit-tested in `worker::agent_message_tests`.
     client.send_command(
         "m1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "send_message",
             "targetActiveSessionId": "no-such-session",
             "message": "anybody there?",
@@ -547,7 +547,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     // Second turn of the script replays the next response.
     client.send_command(
         "p2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt_and_wait",
             "activeSessionId": session_id,
             "message": "again",
@@ -557,13 +557,13 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     assert_eq!(done["success"], true, "prompt_and_wait failed: {done}");
     client.send_command(
         "g2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "get_last_assistant_text",
             "activeSessionId": session_id,
         }),
     );
-    let last = client.read_response("g2");
-    assert_eq!(last["data"]["text"], "second turn");
+    let final_answer = client.read_response("g2");
+    assert_eq!(final_answer["data"]["text"], "second turn");
 }
 // Session-read commands over the persisted branch: differential goldens
 // captured from the live TS daemon (protocol 7, schema 28, read-only
@@ -585,7 +585,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -612,14 +612,14 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // attached clients only.
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let ack = client.read_response("p1");
     assert_eq!(ack["success"], true, "prompt failed: {ack}");
@@ -635,7 +635,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // {"header": { type, version, id, timestamp, cwd, parentSession?, rlmDepth?, git? }}.
     client.send_command(
         "h1",
-        serde_json::json!({ "type": "get_session_header", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_header", "activeSessionId": session_id }),
     );
     let header = client.read_response("h1");
     assert_eq!(
@@ -668,7 +668,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // a TS session without a model context window.
     client.send_command(
         "st1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("st1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
@@ -732,7 +732,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // Unknown active session selector fails with the TS error string.
     client.send_command(
         "h2",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": "nope" }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": "nope" }),
     );
     let missing = client.read_response("h2");
     assert_eq!(missing["success"], false);
@@ -766,7 +766,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     });
     client.send_command(
         "tc1",
-        serde_json::json!({ "type": "create", "config": session_config }),
+        &serde_json::json!({ "type": "create", "config": session_config }),
     );
     let created = client.read_response("tc1");
     assert_eq!(created["success"], true, "create failed: {created}");
@@ -779,7 +779,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // Disabled attach to an enabled worker: the exact TS error.
     client.send_command(
         "ta1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "telemetryDisabled": true,
@@ -798,7 +798,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // Enabled attach to the same worker stays fine (guard does not over-block).
     client.send_command(
         "ta2",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("ta2");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -807,7 +807,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // allowed against its worker.
     client.send_command(
         "tc2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": session_config,
             "telemetryDisabled": true,
@@ -822,7 +822,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
         .to_string();
     client.send_command(
         "ta3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id2,
             "telemetryDisabled": true,
@@ -915,7 +915,7 @@ fn shutdown_command_exits_the_supervisor_process() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -938,7 +938,7 @@ fn shutdown_command_exits_the_supervisor_process() {
     };
     assert_eq!(worker_pids.len(), 1, "one worker per session");
 
-    client.send_command("sd", serde_json::json!({ "type": "shutdown" }));
+    client.send_command("sd", &serde_json::json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
 
@@ -997,7 +997,7 @@ fn side_questions_start_abort_and_events_scripted() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -1018,7 +1018,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // `side_question_event`) out to clients attached to the session.
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -1026,7 +1026,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Unknown session fails with the TS routing error.
     client.send_command(
         "sq-missing",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": "no-such-session",
             "sideQuestionId": "q0",
@@ -1040,7 +1040,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Start a side question; the response acknowledges immediately.
     client.send_command(
         "sq1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -1072,7 +1072,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // hold: duplicate ids are rejected, and one run per client per session.
     client.send_command(
         "sq-dup",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -1087,7 +1087,7 @@ fn side_questions_start_abort_and_events_scripted() {
     );
     client.send_command(
         "sq-busy",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q2",
@@ -1104,7 +1104,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Aborting an unknown id reports { aborted: false }.
     client.send_command(
         "ab-unknown",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "never-started",
@@ -1118,7 +1118,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // the partial answer streamed so far.
     client.send_command(
         "ab1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -1141,7 +1141,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // completes (the script replays from the top, fresh conversation).
     client.send_command(
         "sq2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -1193,7 +1193,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -1214,7 +1214,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     // stream; its result is also the no-capability echo golden.
     client.send_command(
         "a0",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let plain_attach = client.read_response("a0");
     assert_eq!(plain_attach["success"], true, "plain attach failed");
@@ -1225,7 +1225,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
 
     client.send_command(
         "p1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": session_id,
             "message": "give me a big answer"
@@ -1245,7 +1245,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     ]);
     client.send_command(
         "a1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "capabilities": caps,
@@ -1409,7 +1409,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let (mut legacy, _hello) = Client::connect(&socket);
     legacy.send_command(
         "a2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "capabilities": ["attach_snapshot", "event_sequence", "slim_attach"],
@@ -1492,7 +1492,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -1511,7 +1511,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
         .to_string();
     client.send_command(
         "s1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("s1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
@@ -1570,7 +1570,7 @@ fn compaction_commands_scripted_session() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -1589,7 +1589,7 @@ fn compaction_commands_scripted_session() {
 
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -1603,7 +1603,7 @@ fn compaction_commands_scripted_session() {
     // One scripted turn so the session has content.
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let (prompt_ack, mut turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed");
@@ -1613,7 +1613,7 @@ fn compaction_commands_scripted_session() {
     // Unknown session selector fails with the TS routing error.
     client.send_command(
         "cp-missing",
-        serde_json::json!({ "type": "compact", "activeSessionId": "no-such-session" }),
+        &serde_json::json!({ "type": "compact", "activeSessionId": "no-such-session" }),
     );
     let missing = client.read_response("cp-missing");
     assert_eq!(missing["success"], false);
@@ -1623,7 +1623,7 @@ fn compaction_commands_scripted_session() {
     // observes `isCompacting` mid-run, then aborts it.
     client.send_command(
         "cp1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "compact",
             "activeSessionId": session_id,
             "customInstructions": "focus on the goal",
@@ -1649,7 +1649,7 @@ fn compaction_commands_scripted_session() {
     let (mut second, _hello) = Client::connect(&socket);
     second.send_command(
         "a2",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let second_attach = second.read_response("a2");
     assert_eq!(
@@ -1658,7 +1658,7 @@ fn compaction_commands_scripted_session() {
     );
     second.send_command(
         "st1",
-        serde_json::json!({ "type": "get_state", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_state", "activeSessionId": session_id }),
     );
     let state = second.read_response("st1");
     assert_eq!(state["success"], true, "get_state failed: {state}");
@@ -1671,7 +1671,7 @@ fn compaction_commands_scripted_session() {
     // cancelled compact response and aborted `compaction_end` event.
     second.send_command(
         "ab1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_compaction",
             "activeSessionId": session_id,
         }),
@@ -1702,7 +1702,7 @@ fn compaction_commands_scripted_session() {
     // `CompactionResult` response shape.
     client.send_command(
         "cp2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "compact",
             "activeSessionId": session_id,
             "customInstructions": "focus on the goal",
@@ -1761,7 +1761,7 @@ fn compaction_commands_scripted_session() {
     // messages after it (the scripted empty cut keeps the whole transcript).
     client.send_command(
         "gm1",
-        serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
     );
     let messages = client.read_response("gm1");
     assert_eq!(messages["success"], true, "get_messages failed: {messages}");
@@ -1781,7 +1781,7 @@ fn compaction_commands_scripted_session() {
     let (mut third, _hello) = Client::connect(&socket);
     third.send_command(
         "a3",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let reattached = third.read_response("a3");
     assert_eq!(reattached["success"], true, "reattach failed: {reattached}");
@@ -1801,7 +1801,7 @@ fn compaction_commands_scripted_session() {
     // nothing-to-compact skip.
     client.send_command(
         "cp3",
-        serde_json::json!({ "type": "compact", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "compact", "activeSessionId": session_id }),
     );
     let (skipped, mut cp3_lines) = client.read_response_and_lines("cp3");
     assert_eq!(skipped["success"], false, "skip must fail: {skipped}");
@@ -1826,7 +1826,7 @@ fn compaction_commands_scripted_session() {
     // connection state.
     client.send_command(
         "sac1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "set_auto_compaction",
             "activeSessionId": session_id,
             "enabled": false,
@@ -1844,7 +1844,7 @@ fn compaction_commands_scripted_session() {
     );
     client.send_command(
         "a4",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let reattached = client.read_response("a4");
     assert_eq!(
@@ -1854,7 +1854,7 @@ fn compaction_commands_scripted_session() {
     );
     client.send_command(
         "sac2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "set_auto_compaction",
             "activeSessionId": session_id,
             "enabled": true,
@@ -1866,7 +1866,7 @@ fn compaction_commands_scripted_session() {
     // abort_compaction with nothing running still succeeds (TS parity).
     client.send_command(
         "ab2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_compaction",
             "activeSessionId": session_id,
         }),
@@ -1908,7 +1908,7 @@ fn tool_result_entries_persisted_and_streamed() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -1926,13 +1926,13 @@ fn tool_result_entries_persisted_and_streamed() {
         .to_string();
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(client.read_response("a1")["success"], true, "attach failed");
 
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let (prompt_ack, mut lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed: {prompt_ack}");
@@ -1980,7 +1980,7 @@ fn tool_result_entries_persisted_and_streamed() {
     // The stats command counts the persisted entry.
     client.send_command(
         "s1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("s1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
@@ -2039,7 +2039,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // First create reserves the name (worker reports it via get_state).
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "dup",
             "config": {
@@ -2059,7 +2059,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // phrasing broke both parity and that fallback.
     client.send_command(
         "c2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "dup",
             "config": {
@@ -2083,7 +2083,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // An empty name keeps its own error (worker-side parity string).
     client.send_command(
         "c3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "  ",
             "config": {
@@ -2138,7 +2138,7 @@ fn create_with_continue_recent_is_refused() {
 
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "continueRecent": true,
             "config": {
@@ -2162,7 +2162,7 @@ fn create_with_continue_recent_is_refused() {
     // refusal never widened into a general create gate.
     client.send_command(
         "c2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": cwd,

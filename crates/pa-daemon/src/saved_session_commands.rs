@@ -825,7 +825,7 @@ impl Worker {
     /// `rename_saved_session` (TS daemon-mode case): a live target renames
     /// through the session's own rename path (answering with no data, the
     /// TS shape); an offline file gets the catalog append.
-    pub(crate) async fn handle_rename_saved_session(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) fn handle_rename_saved_session(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("rename_saved_session") {
             return response;
         }

@@ -207,7 +207,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 
 /// Children registry bound to the running supervisor, with a parent identity
 /// rooted at `agent_dir`.
-async fn children(
+fn children(
     socket: &Path,
     agent_dir: &Path,
     script: &Path,
@@ -270,7 +270,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let script = write_script(dir.path(), "child answer");
-    let children = children(&socket, &agent_dir, &script, 0).await;
+    let children = children(&socket, &agent_dir, &script, 0);
 
     // Spawn: one child worker session created through the supervisor.
     let handle = children
@@ -500,7 +500,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
     let script = write_script(dir.path(), "root session answer");
-    let children = children(&socket, &agent_dir, &script, 0).await;
+    let children = children(&socket, &agent_dir, &script, 0);
 
     let handle = children
         .create_session(RlmCreateSessionRequest {
@@ -539,8 +539,8 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
             "g1",
             json!({ "type": "get_last_assistant_text", "activeSessionId": active_id }),
         );
-        let last = client.read_response("g1");
-        last["data"]["text"]
+        let final_answer = client.read_response("g1");
+        final_answer["data"]["text"]
             .as_str()
             .filter(|text| !text.is_empty())
             .map(str::to_string)
@@ -575,7 +575,7 @@ async fn rlm_recursion_bound_is_enforced() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let script = write_script(dir.path(), "unreachable");
     // A depth-2 parent (the default bound): spawns are refused.
-    let children = children(&socket, &agent_dir, &script, 2).await;
+    let children = children(&socket, &agent_dir, &script, 2);
     let error = children
         .spawn(spawn_request("too-deep", "nope"))
         .await

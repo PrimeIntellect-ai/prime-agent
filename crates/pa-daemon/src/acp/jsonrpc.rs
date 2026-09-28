@@ -75,12 +75,12 @@ pub fn parse_line(line: &str) -> Result<Incoming, Value> {
 }
 
 /// A successful response frame.
-pub fn response(id: Value, result: Value) -> Value {
+pub fn response(id: &Value, result: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
 /// An error response frame. `data` rides under the error object.
-pub fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
+pub fn error_response(id: &Value, code: i64, message: &str, data: Option<&Value>) -> Value {
     let error = match data {
         Some(data) => json!({ "code": code, "message": message, "data": data }),
         None => json!({ "code": code, "message": message }),
@@ -89,7 +89,7 @@ pub fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) 
 }
 
 /// A notification frame (no id, no response expected).
-pub fn notification(method: &str, params: Value) -> Value {
+pub fn notification(method: &str, params: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
 }
 

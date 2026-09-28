@@ -307,7 +307,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     let restart_before = pa_daemon::util::now_iso();
     let daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
-    let supervisor2_pid = daemon2.child.id();
+    let restart_supervisor_pid = daemon2.child.id();
 
     // The control plane answers mid-recovery: hello within the latency
     // bound while the pass is visibly unfinished (strictly fewer than
@@ -322,9 +322,9 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         "hello starved behind the recovery: {hello_latency:?}"
     );
     assert!(
-        child_pids_of(supervisor2_pid).len() < SESSIONS,
+        child_pids_of(restart_supervisor_pid).len() < SESSIONS,
         "the recovery finished before the first hello; the responsiveness check is vacuous (children: {:?})",
-        child_pids_of(supervisor2_pid)
+        child_pids_of(restart_supervisor_pid)
     );
 
     // list answers mid-recovery too: it serves the registered rows instead

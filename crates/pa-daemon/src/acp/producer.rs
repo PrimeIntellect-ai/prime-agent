@@ -181,7 +181,7 @@ impl UpdateProducer {
         *namespace = serde_json::to_value(&payload).expect("meta payload serializes");
         jsonrpc::notification(
             "session/update",
-            json!({ "sessionId": self.session_id, "update": value }),
+            &json!({ "sessionId": self.session_id, "update": value }),
         )
     }
 

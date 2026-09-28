@@ -339,7 +339,7 @@ impl Worker {
     /// every model resolution, MCP user servers on every store resolve), so
     /// the reload's observable state is already fresh and the command is
     /// the TS success with no extra work to perform.
-    pub(crate) async fn handle_reload(&self) -> DaemonResponse {
+    pub(crate) fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
         }

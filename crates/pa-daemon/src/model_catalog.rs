@@ -50,7 +50,7 @@ impl Worker {
     /// network request on the response path — with the refresh running in
     /// the background (see the module docs for the divergence from TS's
     /// awaited `refreshModelCatalog`).
-    pub(crate) async fn handle_get_model_catalog(&self) -> DaemonResponse {
+    pub(crate) fn handle_get_model_catalog(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_model_catalog") {
             return response;
         }

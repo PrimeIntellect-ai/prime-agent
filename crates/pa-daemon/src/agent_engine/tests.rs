@@ -4085,7 +4085,7 @@ impl KernelEnvOverride {
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
             .collect();
-        for (key, value) in &pairs {
+        for (key, value) in pairs {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),

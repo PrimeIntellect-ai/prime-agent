@@ -97,7 +97,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -233,7 +233,7 @@ fn the_one_worker_of(daemon_pid: u32) -> u32 {
 /// The active id a create response answered (the summary's `id`, the same
 /// field a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
-    client.send_command(request_id, json!({ "type": "create", "config": config }));
+    client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
     assert_eq!(created["success"], true, "create failed: {created}");
     let id = created["data"]["id"]
@@ -248,7 +248,7 @@ fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (Str
 fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
     client.send_command(
         request_id,
-        json!({ "type": "get_session_stats", "activeSessionId": id }),
+        &json!({ "type": "get_session_stats", "activeSessionId": id }),
     );
     let stats = client.read_response(request_id);
     assert_eq!(stats["success"], true, "stats failed: {stats}");
@@ -264,7 +264,7 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
 fn run_one_turn(client: &mut Client, id: &str, request_id: &str) {
     client.send_command(
         request_id,
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": id,
             "message": "go",
@@ -393,7 +393,7 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     let (worker_id, _created) = create_session(&mut client, "c1", &create_config);
     run_one_turn(&mut client, &worker_id, "p1");
     let session_file = session_file_of(&mut client, &worker_id, "s1");
-    let worker_pid = the_one_worker_of(daemon_pid);
+    let worker_process_id = the_one_worker_of(daemon_pid);
 
     // The supervisor dies hard; the detached worker survives it, holding
     // its session lease. Its descriptor is then destroyed — the stranded
@@ -404,7 +404,7 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     let _ = daemon.child.wait();
     drop(daemon);
     assert!(
-        process_alive(worker_pid),
+        process_alive(worker_process_id),
         "the worker survived its supervisor's hard death"
     );
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
@@ -430,15 +430,15 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     // same); the lease releases and the session file resumes through a
     // fresh registered worker.
     let daemon2 = spawn_daemon(&socket, &agent_dir);
-    if !wait_gone(worker_pid, Instant::now() + Duration::from_secs(20)) {
-        force_kill(worker_pid);
+    if !wait_gone(worker_process_id, Instant::now() + Duration::from_secs(20)) {
+        force_kill(worker_process_id);
         panic!("the descriptorless leftover worker survived the next daemon cycle (the registration heal or the boot reap must clear it)");
     }
 
     let mut client = Client::connect(&socket);
     client.send_command(
         "r1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
@@ -491,7 +491,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     // that must escalate past a wedged worker.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "lifecycle": "client_owned",
             "config": create_config,
@@ -506,14 +506,14 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
         .to_string();
     run_one_turn(&mut client, &worker_id, "p1");
     let session_file = session_file_of(&mut client, &worker_id, "s1");
-    let worker_pid = the_one_worker_of(daemon_pid);
+    let worker_process_id = the_one_worker_of(daemon_pid);
 
     // The worker freezes mid-flight: it cannot process the routed
     // shutdown (the route times out), it survives SIGTERM (the signal
     // stays pending while it is stopped), and only SIGKILL ends it.
     let stop = Command::new("kill")
         .arg("-STOP")
-        .arg(worker_pid.to_string())
+        .arg(worker_process_id.to_string())
         .status()
         .expect("SIGSTOP the worker");
     assert!(stop.success(), "SIGSTOP the session worker");
@@ -523,7 +523,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     // descriptor. The response waits out the whole stop.
     client.send_command(
         "k1",
-        json!({ "type": "complete_owned_session", "activeSessionId": worker_id }),
+        &json!({ "type": "complete_owned_session", "activeSessionId": worker_id }),
     );
     // The stop's durable intent is observable on disk BEFORE the worker
     // is told: the routed shutdown waits out its route budget against the
@@ -554,8 +554,8 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     }
     let stopped = client.read_response("k1");
     assert_eq!(stopped["success"], true, "owned stop failed: {stopped}");
-    if !wait_gone(worker_pid, Instant::now() + Duration::from_secs(5)) {
-        force_kill(worker_pid);
+    if !wait_gone(worker_process_id, Instant::now() + Duration::from_secs(5)) {
+        force_kill(worker_process_id);
         panic!("the stopped worker outlived its stop — the per-session stop must escalate (SIGKILL) instead of stranding a live lease holder");
     }
 
@@ -563,7 +563,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     // opens again instead of answering the hold refusal.
     client.send_command(
         "r1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
