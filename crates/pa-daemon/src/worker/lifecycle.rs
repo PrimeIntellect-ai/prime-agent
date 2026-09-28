@@ -403,6 +403,18 @@ impl Worker {
             .compaction
             .run(custom_instructions, &self.idle_notify)
             .await;
+        // TS `compact()`'s `finally` re-schedules the input pump on
+        // every outcome (`_notifySessionInputCheckpointChange()` +
+        // `_scheduleSessionInputPump()`): a resume site that cleared
+        // the suspension MID-window (a steer's `wake: "immediate"`
+        // resume) left its item parked in the lane behind the
+        // compacting gate, and without this wake the runner never
+        // re-checks - the parked steer would strand forever (the lost
+        // steer is worse than the racing turn the gate defers). The
+        // suspension-cleared case delivers here; the still-suspended
+        // case parks again on the suspension gate, exactly like TS's
+        // rescheduled pump re-blocking on `_sessionInputPumpSuspended`.
+        self.work_notify.notify_one();
         // The TS `compact()` `didCompact` + active-goal branch
         // (agent-session.ts): with `this._goalState.status === "active"`
         // and the run not aborted,

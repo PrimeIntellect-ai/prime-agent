@@ -114,6 +114,11 @@ pub struct AgentLoopConfig {
     pub max_tokens: Option<u64>,
     pub reasoning: ThinkingLevel,
     pub session_id: Option<String>,
+    /// TS `AgentLoopConfig extends SimpleStreamOptions` — the requested
+    /// service tier rides the loop config into every stream request
+    /// (`None` until a host supplies one; the daemon's live sessions own
+    /// their tier in the provider target instead).
+    pub service_tier: Option<crate::types::ServiceTier>,
     pub convert_to_llm: ConvertToLlmFn,
     pub transform_context: Option<TransformContextFn>,
     pub get_system_prompt: Option<GetSystemPromptFn>,
@@ -141,6 +146,7 @@ impl AgentLoopConfig {
             max_tokens: None,
             reasoning: ThinkingLevel::Off,
             session_id: None,
+            service_tier: None,
             convert_to_llm,
             transform_context: None,
             get_system_prompt: None,

@@ -544,8 +544,10 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
-    // Refine rebuilds the session context (like compact): one
-    // context-rebuilding command at a time.
+    // Refine appends durable rows and pushes them into the live loop
+    // context (TS `_appendDurableRefineMessage`); it shares compact's
+    // one-command-at-a-time serialization (one session-context-mutating
+    // command at a time).
     let _ops = state.session_ops.lock().await;
     let result = engine
         .session
