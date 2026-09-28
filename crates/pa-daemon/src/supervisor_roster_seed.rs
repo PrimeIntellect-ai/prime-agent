@@ -392,7 +392,12 @@ impl Supervisor {
                 .filter(|entry| roster.get(&entry.agent_id) == Some(entry))
                 .collect::<Vec<_>>()
         };
-        self.push_roster_update(changed, Vec::new());
+        // The replay arm, not the guarded mutation push: re-shipping the
+        // row the roster still holds is this path's contract, so the
+        // content-diff guard (which would drop a byte-identical replay)
+        // does not apply here — the identity gate above is this path's
+        // own unchanged-row filter.
+        self.push_roster_update_unguarded(changed, Vec::new());
     }
 
     /// Whether the roster still holds exactly the given seeded row (the

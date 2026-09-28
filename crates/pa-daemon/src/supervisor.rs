@@ -149,6 +149,13 @@ pub struct Supervisor {
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
+    /// The last `roster_update` content published per agent id (the
+    /// content-diff guard, TS #2481): an entry whose content equals its
+    /// last published form is dropped from the push (an identical
+    /// rewrite broadcasts nothing), so subscribers never re-apply (and
+    /// the wire never re-ships) a row that did not change.
+    pub(crate) last_published_roster:
+        std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
     /// In-flight registration-seed tasks (each `worker_register`'s
     /// background family walk). A `roster_subscribe` drains and awaits
     /// them before building its snapshot: a seeded row's push must
@@ -258,6 +265,7 @@ impl Supervisor {
             events,
             session_subscribers: subscribers::SessionSubscribers::new(),
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
+            last_published_roster: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
