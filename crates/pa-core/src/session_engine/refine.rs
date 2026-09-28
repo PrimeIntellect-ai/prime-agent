@@ -878,9 +878,13 @@ Reviewer instructions: record it"
                 session
                     .set_append_ownership(crate::session::window::AppendOwnership::SessionLeaseHeld);
                 // The served-path proof: the shared-window extraction
-                // must not touch the file, so removing it cannot fail
-                // the transcript.
+                // must not touch the file, so removing it cannot fail the
+                // parts. The file returns before the refinement's rows
+                // append to it.
                 std::fs::remove_file(&path).unwrap();
+                let probe = session.refine_transcript_parts();
+                probe.await.unwrap();
+                std::fs::write(&path, &body).unwrap();
             }
             let global_harness_dir = dir.path().join("harness");
             let parts = session.refine_transcript_parts();
