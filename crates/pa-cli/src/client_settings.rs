@@ -63,13 +63,9 @@ impl ClientSettings for CliClientSettings {
     fn default_service_tier(&self) -> String {
         // The wire name of the persisted default tier (TS
         // `getDefaultServiceTier()`), "default" when unset or unreadable.
-        self.manager()
+        serde_json::to_value(self.manager().get_default_service_tier())
             .ok()
-            .and_then(|manager| {
-                serde_json::to_value(manager.get_default_service_tier())
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-            })
+            .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| "default".to_string())
     }
 
@@ -77,7 +73,7 @@ impl ClientSettings for CliClientSettings {
         let parsed: pa_types::ai::ServiceTier =
             serde_json::from_value(serde_json::Value::String(tier.to_string()))
                 .map_err(|error| anyhow::anyhow!("Invalid service tier \"{tier}\": {error}"))?;
-        self.manager()?.set_default_service_tier(parsed)
+        self.manager().set_default_service_tier(parsed)
     }
 
     setting!(
