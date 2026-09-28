@@ -1,1 +1,0 @@
-- Removed unused internal code: parameters that every caller set to the same value, a worker message nothing sends, a never-set ACP meta field, five never-set UI component options, a test-only MCP store option, and four test-only helpers.

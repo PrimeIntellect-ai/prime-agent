@@ -1,1 +1,0 @@
-- Fixed very large bracketed pastes slowing input handling: the paste end marker is now found without rescanning the whole paste on every chunk.

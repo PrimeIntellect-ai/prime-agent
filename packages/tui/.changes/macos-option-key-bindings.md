@@ -1,1 +1,0 @@
-- Fixed keybinding matching so a picker can opt in to accept the character macOS types for Option+letter (for example `ß` for Option+S) when the terminal does not send Option as Meta.

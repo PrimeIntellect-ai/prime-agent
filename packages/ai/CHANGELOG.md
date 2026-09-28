@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.7] - 2026-09-28
+
+- Fixed Azure OpenAI Responses requests to send `store: false`, so responses are no longer stored server-side, and to omit `prompt_cache_key` when `cacheRetention` is `"none"`, matching the OpenAI Responses provider.
+- Fixed Gemma 4 thinking on Google Vertex: disabled thinking now sends `thinkingLevel: MINIMAL` instead of an unsupported `thinkingBudget: 0`, and reasoning levels map to `MINIMAL` (minimal/low) or `HIGH` (medium/high) like the Google Generative AI provider.
+- Removed the unused `chalk`, `undici`, and `zod-to-json-schema` dependencies.
+
 ## [0.9.6] - 2026-09-23
 
 - Bumped the Claude Code client version claimed by Anthropic subscription (OAuth) requests from 2.1.261 to 2.1.281: the API gates newer models on the claimed client version and rejects claude-opus-5.5 (and other gated models) with a 400 for anything below 2.280.

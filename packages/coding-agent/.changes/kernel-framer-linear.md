@@ -1,1 +1,0 @@
-- Fixed host stalls while a kernel cell sends a multi-megabyte display output (such as a large image) or host request: the host now reads kernel output in linear time instead of rescanning the partial line on every pipe chunk.

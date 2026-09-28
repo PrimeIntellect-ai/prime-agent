@@ -1,1 +1,0 @@
-- Removed unused internal code: the orphaned `core/index.ts` barrel, six uncalled helpers, and eleven unused daemon protocol types.

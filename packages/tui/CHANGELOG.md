@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.7] - 2026-09-28
+
+- Fixed keybinding matching so a picker can opt in to accept the character macOS types for Option+letter (for example `ß` for Option+S) when the terminal does not send Option as Meta.
+- Fixed very large bracketed pastes slowing input handling: the paste end marker is now found without rescanning the whole paste on every chunk.
+- Moved `chalk` to devDependencies (only tests use it) and removed the unused `@xterm/xterm` devDependency.
+- Removed the unused `mime-types` and `@types/mime-types` dependencies.
+
 ## [0.9.6] - 2026-09-21
 
 - Added a masked option to the Input component (and MenuSearchInput): the rendered line shows one bullet per grapheme while edits and submit keep the real buffer, so secret paste fields never draw the pasted value. The TUI's first consumer is the MCP token paste panel.

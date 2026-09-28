@@ -1,1 +1,0 @@
-- Removed the unused `chalk`, `undici`, and `zod-to-json-schema` dependencies.

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.7] - 2026-09-28
+
+- Changed the continual-harness kernel surface back to the twelve per-kind CRUD methods on `rlm.harness` (`create_memory`/`update_memory`/`delete_memory` plus the `*_skill`, `*_subagent`, and `*_prompt_note` methods), the `path` spelling of the harness entry grouping, and callable `rlm.harness.record_refinement`/`plan_refinement`, reverting #2154 and #2155 at the user's request.
+- Fixed harness state persisted while the grouping was spelled `topic` losing that grouping after the revert: entries migrate to `path` when they load, and rolling back a refinement recorded in that window restores the entry's original grouping.
+- Fixed the conversation detail level resetting to Details every time you open, resume, or attach to a chat: the level you pick with Ctrl+O is now saved as the `chatDetail` setting and reused for every chat until you change it. Chats with no saved choice still start at Details.
+- Fixed Option+S not toggling the model selector scope on macOS terminals that type `ß` instead of sending Option as Meta; the character no longer lands in the search field.
+- Fixed old sessions showing as running in the agents view as soon as you open them, even though nothing is running: a session now counts as running only while it is doing work, not while its status summary is out of date.
+- Fixed host stalls while a kernel cell sends a multi-megabyte display output (such as a large image) or host request: the host now reads kernel output in linear time instead of rescanning the partial line on every pipe chunk.
+- Changed the daemon to take its supervisor and worker command lists from the protocol command table, and daemon-hosted subagents to take their session options from the same mapping as in-process subagents. No behavior change.
+- Removed unused internal code: parameters that every caller set to the same value, a worker message nothing sends, a never-set ACP meta field, five never-set UI component options, a test-only MCP store option, and four test-only helpers.
+- Removed unused internal code: the orphaned `core/index.ts` barrel, six uncalled helpers, and eleven unused daemon protocol types.
+
 ## [0.9.6] - 2026-09-23
 
 - Added daemon incident notices to the agents view: recent worker crashes, command-timeout bursts, and update restarts surface as a dismissible status line pointing at `prime-agent incident`.

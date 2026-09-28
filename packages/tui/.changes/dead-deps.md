@@ -1,1 +1,0 @@
-- Removed the unused `mime-types` and `@types/mime-types` dependencies.

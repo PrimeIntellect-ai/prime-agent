@@ -1,1 +1,0 @@
-- Fixed Option+S not toggling the model selector scope on macOS terminals that type `ß` instead of sending Option as Meta; the character no longer lands in the search field.
