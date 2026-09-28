@@ -360,7 +360,10 @@ impl MockSupervisor {
     /// the listener fails the pending accept instantly — the
     /// roster-failure route's refusal is deterministic), and a served
     /// connection (the chat's) stays alive while the loop moves on.
-    pub(crate) fn serve(listener: std::os::unix::net::UnixListener, stall: &'static [&'static str]) {
+    pub(crate) fn serve(
+        listener: std::os::unix::net::UnixListener,
+        stall: &'static [&'static str],
+    ) {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -371,7 +374,10 @@ impl MockSupervisor {
         }
     }
 
-    pub(crate) fn serve_connection(stream: std::os::unix::net::UnixStream, stall: &'static [&'static str]) {
+    pub(crate) fn serve_connection(
+        stream: std::os::unix::net::UnixStream,
+        stall: &'static [&'static str],
+    ) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);

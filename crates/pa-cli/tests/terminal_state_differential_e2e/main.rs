@@ -57,8 +57,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::{
-    child_options, find_subsequence, harness_lock, quiet_child_epilogue, spawn_child,
-    view_options, ChildSpec, DifferentialHarness, PtyReader, Termios,
+    child_options, find_subsequence, harness_lock, quiet_child_epilogue, spawn_child, view_options,
+    ChildSpec, DifferentialHarness, PtyReader, Termios,
 };
 use ledger::ModeLedger;
 
@@ -67,10 +67,10 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
+use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::config_selector::{
     run_config_selector, ConfigSelector, ConfigSelectorOptions, SelectorRow,
 };
-use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::interactive::{run_interactive, UiMode};
 
 /// The kitty flags push (`1|2|4`, the TS `ProcessTerminal` set): the arm
