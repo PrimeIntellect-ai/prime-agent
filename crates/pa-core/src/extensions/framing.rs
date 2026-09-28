@@ -70,23 +70,36 @@ impl LineDecoder {
     /// # Errors
     ///
     /// Returns an error when a completed line is not valid UTF-8, or when the
-    /// unterminated buffered bytes exceed `limits.max_line_bytes`.
+    /// unterminated buffered bytes exceed `limits.max_line_bytes`. An error
+    /// means the stream is corrupt: the decoder is not fed again.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        // The buffer keeps only the newline-free tail of earlier feeds, so only
+        // the new bytes can hold a newline: a long line arriving in small
+        // chunks is scanned once, not once per chunk.
+        let mut scan_from = self.buffer.len();
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();
-        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = self.buffer.drain(..=pos).collect();
-            line.pop(); // the newline
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
+        // Consume by offset and drain once per feed: a drain per line would
+        // shift the remaining bytes each time.
+        let mut consumed = 0;
+        while let Some(rel) = self.buffer[scan_from..].iter().position(|&b| b == b'\n') {
+            let end = scan_from + rel;
+            let line = &self.buffer[consumed..end];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            consumed = end + 1;
+            scan_from = consumed;
             if line.is_empty() {
                 continue;
             }
-            let line = String::from_utf8(line)
-                .map_err(|err| anyhow!("extension RPC line is not valid UTF-8: {err}"))?;
-            lines.push(line);
+            match std::str::from_utf8(line) {
+                Ok(line) => lines.push(line.to_owned()),
+                Err(err) => {
+                    self.buffer.drain(..consumed);
+                    return Err(anyhow!("extension RPC line is not valid UTF-8: {err}"));
+                }
+            }
         }
+        self.buffer.drain(..consumed);
         if self.buffer.len() > self.limits.max_line_bytes {
             return Err(anyhow!(
                 "extension RPC line exceeds the line limit: {} bytes without a newline",
