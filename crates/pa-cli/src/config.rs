@@ -16,9 +16,10 @@ pub const ENV_AGENT_DIR: &str = "PRIME_AGENT_CODING_AGENT_DIR";
 pub const ENV_SESSION_DIR: &str = "PRIME_AGENT_SESSION_DIR";
 
 /// `PRIME_AGENT_DAEMON_SOCKET`: overrides the daemon socket path when no
-/// explicit `--daemon-socket` flag is given. The `prime-agent-rust`
-/// launcher pins it, so the Rust product's daemon runs beside - never
-/// on, never replacing - the TypeScript product's daemon: the two
+/// explicit `--daemon-socket` flag is given. The `prime-agent` launcher
+/// (written by install-rust.sh) pins it, so the Rust product's daemon
+/// runs beside - never on, never replacing - the TypeScript product's
+/// daemon: the two
 /// products share the session store (`~/.prime/agent`) but not the
 /// daemon, and a Rust CLI that found the TS daemon on the default socket
 /// would treat the schema-id mismatch as a stale daemon and shut it down
@@ -162,7 +163,7 @@ mod tests {
 
     /// Precedence: an explicit `--daemon-socket` flag wins over the
     /// `PRIME_AGENT_DAEMON_SOCKET` environment, which wins over the
-    /// per-user default. The env is what the `prime-agent-rust` launcher
+    /// per-user default. The env is what the `prime-agent` launcher
     /// pins, so the flag/env/default order is the co-existence contract:
     /// an explicit flag still overrides what any launcher installed.
     #[test]

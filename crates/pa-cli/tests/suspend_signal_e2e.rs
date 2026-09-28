@@ -10,8 +10,8 @@
 //! and a real shell cannot produce that sequence anyway (Ctrl+C goes to
 //! the shell, the foreground process; the suspended app is background).
 //!
-//! Two harness details keep the child deterministic (found the hard way,
-//! see PORTING-NOTES "Suspend-to-background"): the child is in its own
+//! Two harness details keep the child deterministic (found the hard way):
+//! the child is in its own
 //! process group inside this runner's session (its terminal is the
 //! harness pty alone), and the SIGINT-while-stopped
 //! test is separate — a SIGINT sent to a *stopped* process queues until

@@ -394,6 +394,28 @@ fn nightly_status_and_usage_error_render_the_ts_wording() {
     );
 }
 
+/// `/nightly on` (or bare) explains the move: the update installs the
+/// latest continuous build, so there is no nightly channel to switch to
+/// (the 2026-09-27 operator directive — the channel no longer gates the
+/// update, and no update plan is parked).
+#[test]
+fn nightly_on_renders_the_migration_note() {
+    let steps = vec![
+        HeadlessStep::Submit("/nightly on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/nightly".to_string()),
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan(steps);
+    let all = frames.join("\n");
+    assert!(
+        all.contains(
+            "Nightly builds are now the continuous Rust build — run /update to install the latest."
+        ),
+        "the migration note rendered:\n{all}"
+    );
+}
+
 /// `/nightly off` pins the channel through the settings seam and renders
 /// the TS stable-pin note.
 #[test]
@@ -405,7 +427,9 @@ fn nightly_off_renders_the_stable_pin_note() {
     let frames = run_plan(steps);
     let all = frames.join("\n");
     assert!(
-        all.contains("Updates now follow the stable channel. Run /update to install the latest stable release."),
+        all.contains(
+            "Updates now follow the stable channel. Run /update to install the latest build."
+        ),
         "the stable-pin note rendered:\n{all}"
     );
 }

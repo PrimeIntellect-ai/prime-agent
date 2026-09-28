@@ -553,6 +553,29 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The settled-child kernel release's registered-jobs gate
+                // (TS #2483's `canPassivateSettledSession`
+                // `hasRegisteredCronJob`): the release defers while this
+                // session still owns an active or paused scheduled job
+                // (a cron or heartbeat run must not lose its kernel).
+                let jobs_core = Arc::clone(&core);
+                let jobs_store = std::sync::Arc::clone(scheduled.store());
+                concrete.set_registered_jobs_probe(std::sync::Arc::new(move || {
+                    let active_session_id = {
+                        jobs_core
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .active_session_id
+                            .clone()
+                    };
+                    jobs_store.list().into_iter().any(|job| {
+                        job.active_session_id == active_session_id
+                            && matches!(
+                                job.status,
+                                pa_core::cron::JobStatus::Active | pa_core::cron::JobStatus::Paused
+                            )
+                    })
+                }));
                 // The live compaction summary-delta sink (the
                 // `compaction_summary_delta` broadcast, the operator's
                 // "stream the compacted summary" feature): every

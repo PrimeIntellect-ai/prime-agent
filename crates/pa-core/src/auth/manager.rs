@@ -30,6 +30,34 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Wall-clock milliseconds since the epoch (auth expiry comparison).
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(i64::MAX, |d| d.as_millis() as i64)
+}
+
+/// One OAuth refresh in flight per provider: the token fetch in
+/// [`AuthStorage::refresh_oauth`] runs outside every lock, so the
+/// in-process single-flight that TS gets from its single-threaded runtime
+/// needs its own gate. The registry mirrors the storage backend's
+/// process-lock registry (created once, lives for the process, recovered
+/// on poisoning).
+fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
+    static FLIGHTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
+    > = std::sync::OnceLock::new();
+    let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let lock = {
+        let mut registry = registry.lock().expect("auth refresh-flight registry");
+        *registry
+            .entry(provider.to_string())
+            .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+    };
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// One candidate credential source.
 #[derive(Clone)]
 struct AuthSourceCandidate {
@@ -209,6 +237,13 @@ pub struct AuthStorage {
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
     errors: Vec<String>,
+    /// Memoized auth-source candidates (TS #2479's `authCandidateMemos`),
+    /// keyed by `source:provider`, superseded exactly when the candidate's
+    /// hashed material changes. Reuse skips only the SHA-256 work: the
+    /// material itself (env reads, stored-value resolution, the fallback
+    /// resolver) is recomputed on every call, and stale checks run against
+    /// the memoized candidate — candidates are immutable.
+    candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
 
 impl AuthStorage {
@@ -226,6 +261,7 @@ impl AuthStorage {
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
+            candidate_memos: std::sync::Mutex::new(HashMap::new()),
         };
         auth.reload();
         auth
@@ -285,7 +321,7 @@ impl AuthStorage {
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
         let backend: Arc<dyn AuthStorageBackend> =
-            Arc::new(super::storage::InMemoryAuthStorageBackend::default());
+            Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
         let content = serde_json::to_string_pretty(&data.0).unwrap_or_default();
         backend
             .with_lock(&mut |current| {
@@ -303,6 +339,7 @@ impl AuthStorage {
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
+            candidate_memos: std::sync::Mutex::new(HashMap::new()),
         };
         auth.reload();
         auth
@@ -385,34 +422,84 @@ impl AuthStorage {
         }
     }
 
+    /// Memo marker for candidates whose value material could not be
+    /// resolved into a key (TS #2479's `AUTH_SOURCE_LAZY_VALUE_KEY`): the
+    /// entry is keyed by everything else the candidate hashes.
+    fn auth_source_lazy_value_key() -> &'static str {
+        "value-lazy"
+    }
+
+    /// The memo reuse arm (TS #2479's `reuseAuthSourceCandidate`): the key
+    /// is the hashed material itself, so the memo is superseded exactly
+    /// when the material is.
+    fn reuse_auth_source_candidate(
+        &self,
+        source: AuthSource,
+        provider: &str,
+        key: String,
+        build: impl FnOnce() -> AuthSourceCandidate,
+    ) -> AuthSourceCandidate {
+        let memo_slot = format!("{source:?}:{provider}");
+        let mut memos = self
+            .candidate_memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((memo_key, candidate)) = memos.get(&memo_slot) {
+            if memo_key == &key {
+                return candidate.clone();
+            }
+        }
+        let candidate = build();
+        memos.insert(memo_slot, (key, candidate.clone()));
+        candidate
+    }
+
     fn runtime_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
-        let key = self.runtime_overrides.get(provider)?;
-        Some(AuthSourceCandidate {
-            source: AuthSource::Runtime,
-            configured: true,
-            label: None,
-            identity_fingerprint: fingerprint(AuthSource::Runtime, "identity:runtime-override"),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Runtime,
-                &format!("value:runtime-override {key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        let key = self.runtime_overrides.get(provider)?.clone();
+        Some(self.reuse_auth_source_candidate(
+            AuthSource::Runtime,
+            provider,
+            key.clone(),
+            move || AuthSourceCandidate {
+                source: AuthSource::Runtime,
+                configured: true,
+                label: None,
+                identity_fingerprint: fingerprint(AuthSource::Runtime, "identity:runtime-override"),
+                value_fingerprint: Some(fingerprint(
+                    AuthSource::Runtime,
+                    &format!("value:runtime-override {key}"),
+                )),
+                resolve_value_fingerprint: None,
+            },
+        ))
     }
 
     fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
         let value_material = self.stored_value_material(&credential);
-        Some(AuthSourceCandidate {
-            source: AuthSource::Stored,
-            configured: true,
-            label: None,
-            identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-            value_fingerprint: value_material.map(|material| {
-                fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
+        // The key is the hashed material itself (TS #2479: keyed by
+        // credential fields, never object identity, so the key
+        // changes exactly when the hashed material does).
+        let key = format!(
+            "identity:auth.json {}",
+            value_material
+                .as_deref()
+                .unwrap_or(Self::auth_source_lazy_value_key()),
+        );
+        Some(
+            self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
+                AuthSourceCandidate {
+                    source: AuthSource::Stored,
+                    configured: true,
+                    label: None,
+                    identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
+                    value_fingerprint: value_material.map(|material| {
+                        fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
+                    }),
+                    resolve_value_fingerprint: None,
+                }
             }),
-            resolve_value_fingerprint: None,
-        })
+        )
     }
 
     fn environment_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
@@ -425,39 +512,52 @@ impl AuthStorage {
         let identity_material = env_keys
             .and_then(|keys| keys.first().cloned())
             .unwrap_or_else(|| self.env_credentials.ambient_identity_material(provider));
-        Some(AuthSourceCandidate {
-            source: AuthSource::Environment,
-            configured: false,
-            label: Some(label),
-            identity_fingerprint: fingerprint(
-                AuthSource::Environment,
-                &format!("identity:{identity_material}"),
-            ),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Environment,
-                &format!("value:{identity_material} {api_key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        // Env values are deliberately re-read on every call (TS
+        // #2479); the memo only skips re-fingerprinting unchanged
+        // material.
+        let key = format!("{identity_material} {api_key}");
+        Some(
+            self.reuse_auth_source_candidate(AuthSource::Environment, provider, key, || {
+                AuthSourceCandidate {
+                    source: AuthSource::Environment,
+                    configured: false,
+                    label: Some(label),
+                    identity_fingerprint: fingerprint(
+                        AuthSource::Environment,
+                        &format!("identity:{identity_material}"),
+                    ),
+                    value_fingerprint: Some(fingerprint(
+                        AuthSource::Environment,
+                        &format!("value:{identity_material} {api_key}"),
+                    )),
+                    resolve_value_fingerprint: None,
+                }
+            }),
+        )
     }
 
     fn fallback_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let resolver = self.fallback_resolver.as_ref()?;
         let api_key = resolver(provider)?;
-        Some(AuthSourceCandidate {
-            source: AuthSource::Fallback,
-            configured: false,
-            label: Some("custom provider config".to_string()),
-            identity_fingerprint: fingerprint(
-                AuthSource::Fallback,
-                &format!("identity:{provider}"),
-            ),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Fallback,
-                &format!("value:{provider} {api_key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        Some(self.reuse_auth_source_candidate(
+            AuthSource::Fallback,
+            provider,
+            api_key.clone(),
+            || AuthSourceCandidate {
+                source: AuthSource::Fallback,
+                configured: false,
+                label: Some("custom provider config".to_string()),
+                identity_fingerprint: fingerprint(
+                    AuthSource::Fallback,
+                    &format!("identity:{provider}"),
+                ),
+                value_fingerprint: Some(fingerprint(
+                    AuthSource::Fallback,
+                    &format!("value:{provider} {api_key}"),
+                )),
+                resolve_value_fingerprint: None,
+            },
+        ))
     }
 
     /// Candidate priority: runtime first; prime-inference prefers environment
@@ -833,30 +933,107 @@ impl AuthStorage {
             .api_key
     }
 
-    /// Refresh an expired OAuth credential under the backend lock, returning
-    /// the new credential on success.
+    /// Refresh an expired OAuth credential, returning the new credential on
+    /// success.
+    ///
+    /// Load-then-lock shape: the token fetch is a network round trip and
+    /// never runs under the document lock. The TS product runs the same
+    /// refresh inside its `withLockAsync` (its single-threaded runtime
+    /// pays nothing for holding the lock across the `await`); this engine
+    /// is threaded, and the port's [`FileAuthStorageBackend::with_lock`]
+    /// spans the whole critical section, so a fetch under the lock stalls
+    /// every other same-process auth read and write for the round trip.
+    /// The phases:
+    ///
+    /// 1. LOAD: the current document through the consolidated read arm
+    ///    (no document lock; a cache miss pays the read arm's one short
+    ///    locked read).
+    /// 2. FETCH: the OAuth integration's token call outside every lock,
+    ///    behind [`refresh_flight`]'s per-provider single-flight gate. The
+    ///    expiry is re-checked under the gate: the first flight may have
+    ///    just written a fresh credential, and a second fetch would waste
+    ///    a single-use refresh token. In-process callers therefore join
+    ///    one flight per provider — the same serialization TS's
+    ///    single-threaded runtime gives its locked refresh.
+    /// 3. WRITE: the same locked read-modify-write the TS product runs,
+    ///    now holding the lock only for the re-read, the insert, and the
+    ///    atomic write. A peer that refreshed while this fetch ran keeps
+    ///    its fresher credential: this attempt writes nothing and serves
+    ///    the peer's.
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
-        let mut refreshed: Option<AuthCredential> = None;
+        // LOAD: no document lock.
+        let Ok(content) = self.storage.read() else {
+            // The locked run failed the way the old single-lock shape
+            // failed: reload, then serve the stored credential.
+            self.reload();
+            return self
+                .data
+                .credential(provider_id)
+                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+        };
+        let Ok(data) = parse_storage_data(content.as_deref()) else {
+            self.reload();
+            return self
+                .data
+                .credential(provider_id)
+                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+        };
+        let Some(credential) = data.credential(provider_id) else {
+            self.reload();
+            return None;
+        };
+        let AuthCredential::Oauth { expires, .. } = &credential else {
+            self.reload();
+            return None;
+        };
+        if now_epoch_ms() < *expires {
+            self.reload();
+            return Some(credential);
+        }
+        // FETCH: outside every lock, one flight per provider.
+        let fetched = {
+            let _flight = refresh_flight(provider_id);
+            // The gate may have just released a flight that wrote a fresh
+            // credential; re-check before spending a refresh token.
+            let content = self.storage.read().unwrap_or_default();
+            if let Some(credential) = parse_storage_data(content.as_deref())
+                .ok()
+                .and_then(|data| data.credential(provider_id))
+                .filter(|credential| {
+                    matches!(
+                        credential,
+                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                    )
+                })
+            {
+                self.reload();
+                return Some(credential);
+            }
+            self.oauth.refresh(provider_id, &data)
+        };
+        let Some(new_credential) = fetched else {
+            // Refresh failed: keep credentials for a later retry; a peer
+            // may have refreshed meanwhile, so reload before failing.
+            self.reload();
+            return None;
+        };
+        // WRITE: the locked read-modify-write, holding the document lock
+        // only for the re-read, insert, and atomic write.
+        let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
-            let Some(credential) = data.credential(provider_id) else {
-                return Ok(((), None));
-            };
-            let AuthCredential::Oauth { expires, .. } = &credential else {
-                return Ok(((), None));
-            };
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(i64::MAX, |d| d.as_millis() as i64);
-            if now_ms < *expires {
+            if let Some(credential) = data.credential(provider_id).filter(|credential| {
+                matches!(
+                    credential,
+                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                )
+            }) {
+                // A peer refreshed while this fetch ran: its fresher
+                // credential stands and this attempt writes nothing.
                 refreshed = Some(credential);
                 return Ok(((), None));
             }
-            let Some(new_credential) = self.oauth.refresh(provider_id, &data) else {
-                return Ok(((), None));
-            };
             data.insert(provider_id, &new_credential);
-            refreshed = Some(new_credential);
             let content = serde_json::to_string_pretty(&data.0)?;
             Ok(((), Some(content)))
         });
@@ -868,12 +1045,10 @@ impl AuthStorage {
                 .credential(provider_id)
                 .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
         }
-        if result.is_ok() {
-            // Reload from what we wrote: the in-memory snapshot must not
-            // serve the pre-refresh credential to a later read (a rotated
-            // refresh token is single-use).
-            self.reload();
-        }
+        // Reload from what we wrote: the in-memory snapshot must not
+        // serve the pre-refresh credential to a later read (a rotated
+        // refresh token is single-use).
+        self.reload();
         refreshed
     }
 
@@ -1082,6 +1257,67 @@ mod tests {
         assert_eq!(
             auth.get_api_key("prime-inference").as_deref(),
             Some("sk-stale")
+        );
+    }
+
+    #[test]
+    fn candidate_memos_supersede_exactly_when_material_changes() {
+        // The memo is keyed by the hashed material itself (TS #2479's
+        // `authCandidateMemos`): a changed env value must re-resolve to the
+        // new fingerprint, so a stale marking from the old value never gates
+        // the new one, and the same value keeps serving the same
+        // resolution.
+        let mut auth = storage_with_env(
+            serde_json::json!({}),
+            ScriptedEnv(HashMap::from([(
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-one".to_string(),
+            )])),
+        );
+        assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("sk-one"));
+        assert!(auth.mark_auth_stale("anthropic"));
+        assert_eq!(
+            auth.get_api_key("anthropic"),
+            None,
+            "the marked value is gated"
+        );
+        // A changed value changes the memo key: the rebuilt candidate's
+        // value fingerprint differs from the stale token's, so the new
+        // value resolves.
+        auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-two".to_string(),
+        )])));
+        assert_eq!(
+            auth.get_api_key("anthropic").as_deref(),
+            Some("sk-two"),
+            "the memo must not serve the superseded candidate"
+        );
+        // The marked material's candidate re-serves when its value returns.
+        auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-one".to_string(),
+        )])));
+        assert_eq!(auth.get_api_key("anthropic"), None);
+        auth.clear_auth_stale("anthropic");
+        assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("sk-one"));
+        // The stored arm: replacing the credential changes the hashed
+        // material, so a stale marking of the old key never gates the new
+        // one.
+        let mut auth = storage_with(serde_json::json!({
+            "anthropic": { "type": "api_key", "key": "sk-old" }
+        }));
+        assert!(auth.mark_auth_stale("anthropic"));
+        auth.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "sk-new".into(),
+                prime_team: None,
+            },
+        );
+        assert!(
+            auth.has_auth("anthropic"),
+            "the replaced credential is not the stale-marked material"
         );
     }
 
@@ -1476,6 +1712,205 @@ mod tests {
         assert_eq!(
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::Team(team("team-1", "Team 1"))
+        );
+    }
+
+    /// A scripted OAuth integration for the refresh-flow tests: counts
+    /// refresh calls, optionally delays inside the fetch, and serves a
+    /// fixed fresh credential.
+    struct CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize,
+        delay_ms: u64,
+    }
+
+    impl CountingOAuth {
+        fn fetched_credential() -> AuthCredential {
+            AuthCredential::Oauth {
+                access: "fetched-access".into(),
+                refresh: Some("fetched-refresh".into()),
+                expires: now_epoch_ms() + 3_600_000,
+                account_id: None,
+                enterprise_url: None,
+                endpoint: None,
+                token_endpoint: None,
+                client_id: None,
+                resource: None,
+                issuer: None,
+            }
+        }
+    }
+
+    impl OAuthIntegration for CountingOAuth {
+        fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+            match credential {
+                AuthCredential::Oauth { access, .. } => Some(access.clone()),
+                _ => None,
+            }
+        }
+
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &AuthStorageData,
+        ) -> Option<AuthCredential> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            }
+            Some(Self::fetched_credential())
+        }
+    }
+
+    fn oauth_credential(access: &str, expires: i64) -> AuthCredential {
+        AuthCredential::Oauth {
+            access: access.into(),
+            refresh: Some("test-refresh".into()),
+            expires,
+            account_id: None,
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+        }
+    }
+
+    fn expired_oauth(access: &str) -> AuthCredential {
+        oauth_credential(access, 1000)
+    }
+
+    fn storage_over_backend_with(
+        oauth: Arc<CountingOAuth>,
+        provider: &str,
+        credential: AuthCredential,
+    ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
+        let backend: Arc<dyn AuthStorageBackend> =
+            Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
+        let mut data = AuthStorageData::default();
+        data.insert(provider, &credential);
+        let seed = serde_json::to_string_pretty(&data.0).unwrap_or_default();
+        backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(seed.clone())))
+            })
+            .ok();
+        (
+            AuthStorage::from_storage(Arc::clone(&backend), oauth),
+            backend,
+        )
+    }
+
+    #[test]
+    fn an_unexpired_oauth_credential_serves_without_a_fetch() {
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 0,
+        });
+        let (mut auth, _backend) = storage_over_backend_with(
+            oauth.clone(),
+            "x-fast",
+            oauth_credential("live-access", now_epoch_ms() + 3_600_000),
+        );
+        assert_eq!(auth.get_api_key("x-fast").as_deref(), Some("live-access"));
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the unexpired credential serves without a token fetch"
+        );
+    }
+
+    #[test]
+    fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_credential() {
+        // The fetch runs outside every lock: a locked writer lands
+        // mid-fetch, and the write phase keeps the peer's fresher
+        // credential instead of overwriting it with this attempt's own
+        // fetched token.
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 120,
+        });
+        let (mut auth, backend) =
+            storage_over_backend_with(oauth.clone(), "x-peer", expired_oauth("old-access"));
+        let writer_backend = Arc::clone(&backend);
+        let (wrote_tx, wrote_rx) = std::sync::mpsc::channel::<std::time::Duration>();
+        std::thread::spawn(move || {
+            // Mid-fetch: the resolving thread is inside the token fetch.
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let mut peer = AuthStorageData::default();
+            peer.insert(
+                "x-peer",
+                &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+            );
+            let content = serde_json::to_string_pretty(&peer.0).unwrap_or_default();
+            let t0 = std::time::Instant::now();
+            writer_backend
+                .with_lock(&mut |current| {
+                    let _ = current;
+                    Ok(((), Some(content.clone())))
+                })
+                .ok();
+            wrote_tx
+                .send(t0.elapsed())
+                .expect("the test main thread still waits for the write");
+        });
+        let api_key = auth.get_api_key("x-peer");
+        let write_wall = wrote_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect(
+                "the peer's locked write completed; a token fetch must not hold the document lock",
+            );
+        assert!(
+            write_wall < std::time::Duration::from_millis(60),
+            "the concurrent locked write waited {write_wall:?}: the fetch holds no lock"
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("peer-access"),
+            "the peer's fresher credential wins over this attempt's own fetch"
+        );
+        let stored = auth.get_all().credential("x-peer").unwrap();
+        let AuthCredential::Oauth { access, .. } = stored else {
+            panic!("the stored credential stays OAuth");
+        };
+        assert_eq!(access, "peer-access");
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one fetch ran"
+        );
+    }
+
+    #[test]
+    fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
+        // Two resolutions of the same expired provider race: the flight
+        // gate serializes them, and the second serves the first's fresh
+        // credential without spending its own token fetch.
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 80,
+        });
+        let (_, backend) =
+            storage_over_backend_with(oauth.clone(), "x-flight", expired_oauth("old-access"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let oauth = Arc::clone(&oauth);
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut auth = AuthStorage::from_storage(backend, oauth);
+                barrier.wait();
+                auth.get_api_key("x-flight")
+            }));
+        }
+        let keys: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(keys.iter().all(|k| k.as_deref() == Some("fetched-access")));
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one flight per provider: the second caller served the first's fresh credential"
         );
     }
 }

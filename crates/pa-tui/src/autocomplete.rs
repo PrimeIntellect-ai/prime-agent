@@ -1073,6 +1073,29 @@ mod tests {
         );
     }
 
+    /// `/update` is VISIBLE in autocomplete: the fast filter is the only
+    /// hidden-command policy (model eligibility), and the update command
+    /// never enters it — the migration path stays discoverable.
+    #[test]
+    fn update_lists_in_the_menu_under_every_hidden_set() {
+        let mut provider = provider("/tmp");
+        let visible = provider.get_suggestions(&["/up".to_string()], 0, 3, false);
+        let items = visible.expect("suggestions").items;
+        assert!(
+            items.iter().any(|item| item.value == "update"),
+            "update lists by default: {items:?}"
+        );
+        // The live surface's only hidden set (the /fast model filter)
+        // never contains the update command.
+        provider.set_hidden_commands(std::collections::HashSet::from(["fast".to_string()]));
+        let visible = provider.get_suggestions(&["/up".to_string()], 0, 3, false);
+        let items = visible.expect("suggestions").items;
+        assert!(
+            items.iter().any(|item| item.value == "update"),
+            "update stays listed under the fast filter: {items:?}"
+        );
+    }
+
     /// TS #2144 `getServiceTierCompletions`: the `/tier` argument position
     /// offers the injected items, filtered by the typed term, with the
     /// current tier marked in the description; other commands fall

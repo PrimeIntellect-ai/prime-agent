@@ -198,17 +198,30 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(
         &["update"],
-        "update [--force] [--rollback] [--nightly|--stable] [--archive <path> --source <url>]",
-        "Update Prime Agent",
+        "update [--check]",
+        "Update to the latest Rust build (uninstalls the TypeScript version)",
     )
     .options(&[
-        "--force     Reinstall even if the current version is the latest on the channel",
-        "--rollback  Restore the previous compiled release",
-        "--nightly   Switch updates to the nightly channel (unreleased builds, may be broken)",
-        "--stable    Return updates to the stable channel",
-        "--archive <path>  Install a local release payload (a release archive or a payload directory) instead of resolving the channel",
+        "--check  Print the latest available build vs the running version, without installing",
+        "--force     Reinstall even if the current version is the latest on the channel (the managed-install flow)",
+        "--rollback  Restore the previous compiled release (the managed-install flow)",
+        "--nightly   Switch updates to the nightly channel (the managed-install flow)",
+        "--stable    Return updates to the stable channel (the managed-install flow)",
+        "--archive <path>  Install a local release payload (the managed-install flow)",
         "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
-    ]),
+    ])
+    .description(
+        "Move from the TypeScript version to the Rust port in one step: `prime-agent update` \
+         downloads the latest install-rust.sh and runs it, which uninstalls the TypeScript \
+         version and installs the latest Rust build; your sessions and configuration \
+         (~/.prime/agent) are never touched. Restart prime-agent after the update to run the \
+         new build. This command exists only in the Rust binary — the TypeScript version does \
+         not have it; the move happens when you run the curl|sh URL from \
+         docs/RUST_QUICKSTART.md or `prime-agent update` (after the Rust install exists). The \
+         fetch source flips to the official domain install endpoint \
+         (https://app.primeintellect.ai/prime-agent/install.sh) at the rust-to-main merge; \
+         `PRIME_AGENT_RUST_INSTALLER_URL` overrides the source for testing.",
+    ),
     CommandSpec::new(&["model"], "model list [search]", "Inspect available models"),
     CommandSpec::new(&["model", "list"], "model list [search]", "List available models"),
     CommandSpec::new(

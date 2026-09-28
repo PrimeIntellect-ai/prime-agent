@@ -1381,8 +1381,8 @@ class Battery:
                 message = event.get("message") or {}
                 etype = event.get("type")
                 # Row scope: the event-set parity locked here excludes the
-                # two documented model-surface diffs (see PORTING-NOTES and
-                # the f6 commit): the harness-digest custom message pair
+                # two documented model-surface diffs
+                # (the f6 commit): the harness-digest custom message pair
                 # (TS delivers the per-turn digest as a custom message;
                 # Rust composes it into the request only) and the
                 # turn_end/agent_end payloads (TS carries the final message).
@@ -1413,7 +1413,7 @@ class Battery:
                     "protocol",
                     f"attach event sequences match ({len(ts_events)} projected events, in order; "
                     "harness-digest custom pairs and turn_end/agent_end payloads are out of scope here — "
-                    "documented model-surface diffs, see PORTING-NOTES)",
+                    "documented model-surface diffs)",
                     gap=False,
                 )
             else:
@@ -6133,9 +6133,9 @@ class Battery:
         path = self.run_dir / "report.md"
         lines = [f"# Parity battery run {self.stamp}", ""]
         # Battery greenness is scoped: it proves only the scripted flows
-        # below, never overall product parity (docs/completion-matrix.md).
+        # below, never overall product parity.
         lines.append(
-            "Note: 0 gaps below covers only these scripted flows; it is not a product-parity verdict (docs/completion-matrix.md)."
+            "Note: 0 gaps below covers only these scripted flows; it is not a product-parity verdict."
         )
         lines.append(f"- ts binary: {self.ts_bin}")
         lines.append(f"- rust binary: {self.rust_bin}")

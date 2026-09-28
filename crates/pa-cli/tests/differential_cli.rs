@@ -147,7 +147,7 @@ const CORPUS: &[&[&str]] = &[
     &["manage", "update"],
     // Daemon discovery against an empty sandbox state root: fully
     // deterministic output for both binaries (the sandbox TMPDIR keeps the
-    // OS census out of either root; see docs/PORTING-NOTES.md containment).
+    // OS census out of either root).
     &["status"],
     &["status", "--json"],
     &["doctor"],

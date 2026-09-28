@@ -20,6 +20,51 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    /// TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
+    /// worker-side: the turn runner's park arm proved the parent-owned,
+    /// unattached, unqueued idle state; the remaining
+    /// `canPassivateSettledSession` gates run here. A settled child
+    /// releases its kernel with a final snapshot flush (the revivable
+    /// stop: the next kernel use boots fresh from the flushed snapshot)
+    /// while staying listable, inspectable, collectable, and deletable
+    /// — the roster and collect surfaces are untouched by design.
+    fn release_settled_child_kernel(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            // `hasNonPassiveDescendants`: a busy descendant keeps the
+            // child's kernel resident (the TS policy).
+            if self.has_unsettled_rlm_work().await {
+                return;
+            }
+            // `hasRegisteredCronJob`: an active or paused scheduled job
+            // keeps the kernel resident (its next run needs it); an
+            // unwired probe stays open (a store-less embedding).
+            let probe = self
+                .registered_jobs_probe
+                .lock()
+                .expect("registered jobs probe lock")
+                .clone();
+            if let Some(probe) = probe {
+                if probe() {
+                    return;
+                }
+            }
+            // The release itself: best-effort (a failed stop leaves
+            // the kernel resident); a retired or never-built runtime
+            // releases nothing (the TS `?.` arm). The probe lock
+            // drops before the await so the future stays `Send`.
+            let release = self
+                .kernel_release_probe
+                .lock()
+                .expect("kernel release probe lock")
+                .clone();
+            if let Some(release) = release {
+                release().await;
+            }
+        })
+    }
+
     fn goal_state_value(&self) -> Value {
         if let Some(goal) = self.current_goal_state() {
             return serde_json::to_value(&goal).unwrap_or(Value::Null);
@@ -1214,7 +1259,7 @@ impl SessionEngine for AgentSessionEngine {
     fn set_rlm_max_depth(&self, max_depth: u64, global: bool) -> anyhow::Result<Value> {
         // The live bound every spawn checks (TS updates `_rlmMaxDepth`
         // and rebuilds the system prompt; the bound itself lives in the
-        // registry here - see PORTING-NOTES for the prompt-text note).
+        // registry here).
         if let Some(children) = &self.children {
             children.set_rlm_max_depth(max_depth.min(u64::from(u32::MAX)) as u32);
         }

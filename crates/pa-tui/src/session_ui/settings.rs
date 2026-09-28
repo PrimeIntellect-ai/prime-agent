@@ -17,6 +17,10 @@ pub(super) enum PendingConfirm {
     /// The import's stored session cwd is gone: `Yes` retries with the
     /// fallback cwd (TS `promptForMissingSessionCwd`).
     ImportCwdFallback { path: String, fallback_cwd: String },
+    /// `/update`: `Yes` spawns the out-of-band installer run (the
+    /// download+install never touches the session — the confirm guards
+    /// the binary replacement, not the session).
+    Update,
 }
 
 impl SessionUi {
@@ -88,6 +92,9 @@ impl SessionUi {
                         }
                         Some(PendingConfirm::ImportCwdFallback { path, fallback_cwd }) => {
                             self.run_import(&path, Some(&fallback_cwd), view).await?;
+                        }
+                        Some(PendingConfirm::Update) => {
+                            self.spawn_update(view);
                         }
                         None => {}
                     }

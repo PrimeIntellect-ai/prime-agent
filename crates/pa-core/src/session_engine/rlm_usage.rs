@@ -10,7 +10,7 @@
 //! row per origin batch through `SessionManager.appendChildUsageAttribution`,
 //! with the failure swallowed as recoverable bookkeeping).
 //!
-//! Observation split (PORTING-NOTES): TS children run in-process, so the
+//! Observation split: TS children run in-process, so the
 //! parent subscribes to child events and folds live at every child
 //! `message_end`. Rust children are separate worker processes; the
 //! daemon's children registry (`pa-daemon/rlm_children.rs`) observes

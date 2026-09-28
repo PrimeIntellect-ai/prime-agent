@@ -3,7 +3,7 @@
 The GitHub Actions workflows for this repo live here, byte-identical to their
 final form, because the dev box's GitHub token has no `workflow` scope and
 cannot push anything under `.github/workflows/` (see
-docs/installer-ci-design.md §3 and PR #76 for the same constraint).
+PR #76 for the same constraint).
 
 Promotion state (2026-09-23):
 

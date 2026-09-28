@@ -401,7 +401,7 @@ fn fresh_staging(root: &Path) -> Result<PathBuf> {
 
 /// Unpack a release archive at the staging root (the tar crate rejects
 /// absolute paths and `..` components by default; entries unpack at the
-/// archive root, installer-ci-design.md §5).
+/// archive root).
 fn unpack_archive_into(archive: &Path, staging: &Path) -> Result<()> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
@@ -600,8 +600,7 @@ mod tests {
     use super::*;
     use crate::update::release::sha256_hex;
 
-    /// A fixture archive with the exact release payload (installer-ci-design
-    /// §5), deterministically packed.
+    /// A fixture archive with the exact release payload, deterministically packed.
     fn fixture_archive(dir: &Path, name: &str) -> (PathBuf, String) {
         let staging = dir.join("staging");
         std::fs::create_dir_all(staging.join("prime-agent-runtime")).unwrap();

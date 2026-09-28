@@ -123,6 +123,14 @@ impl Supervisor {
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
+                // The residency change lands in the scheduled-jobs
+                // invalidation (TS `broadcastHeartbeatsChanged`: "every
+                // daemon-owned scheduled-job mutation and worker residency
+                // change"): the dead worker's durable jobs are passive from
+                // here on, so a snapshot that excluded them while the
+                // worker was live must not be served for the rest of the
+                // refresh window.
+                self.broadcast_heartbeats_changed();
                 // The give-up settles the dead worker's rows exactly like
                 // a stop (every owned non-ephemeral, non-queued row
                 // passivates and keeps its model/thinking/cwd). No ledger
@@ -705,7 +713,9 @@ impl Supervisor {
                         // and can never publish itself as fresh over this
                         // invalidation), and every client re-reads the
                         // catalog (TS `broadcastHeartbeatsChanged`
-                        // re-broadcast).
+                        // re-broadcast: the TS site writes the frame to
+                        // each client in its set, so a session-scoped
+                        // catalog view refreshes on the same push).
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);

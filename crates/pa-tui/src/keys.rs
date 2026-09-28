@@ -9,7 +9,7 @@
 //! layer sees crossterm's parsed events, where some encodings fold to the
 //! same event; the mode-aware mappings follow TS where the kitty protocol
 //! flag disambiguates, and the irreducible folds are documented divergences
-//! (see `ctrl_char_id` and `docs/FEATURE_PARITY.md`, the term-enhanced-keys
+//! (see `ctrl_char_id`, the term-enhanced-keys
 //! rows).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

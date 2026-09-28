@@ -3,7 +3,7 @@
 The `prime-agent` binary.
 
 ## Scope
-Argument parsing matching the TS CLI exactly, mode selection (interactive/headless/json/daemon subcommands), binary wiring of crates into processes, exit codes and user-facing errors. The daemon-forensics CLI (`incident.rs`, TS `src/cli/incident.ts`): the `prime-agent incident` timeline command — log-source discovery (agent.jsonl plus its `.old` rotation, falling back to the newest per-daemon log), `--since`/`--until` window and `--session` filter parsing, and the report rendering; the shared classifier lives in pa-types (`pa_types::incident`) and the agents-view notice in pa-tui. Client-side MCP auth flows (`mcp_login.rs`): the `/mcp login`/`/mcp logout` hook the TUI calls — the TS interactive client's placement — resolving a server (settings `mcpServers` + the builtin catalog), running the pa-core OAuth login on the suspended terminal, and persisting through the shared auth store. The same placement serves the TUI's client-command hooks: provider auth (`provider_login.rs` — the `/login`/`/logout` catalog, the API-key store, the MCP device flow, the Prime Inference terminal login (`prime_inference_login.rs` — the API-key flow: prime-cli credential reuse, the paste prompt with the whoami access check, the numbered team selector); the subscription OAuth and the Prime browser challenge stay unported and report it), trace-sharing state (`client_traces.rs` — the settings flag writes and the credential resolution `/traces` shows; the upload subsystem stays unported), and the update child runner + post-update relaunch (`client_update.rs` — the split-CLI child invocations and the exec of the updated launcher from the managed install root).
+Argument parsing matching the TS CLI exactly, mode selection (interactive/headless/json/daemon subcommands), binary wiring of crates into processes, exit codes and user-facing errors. The daemon-forensics CLI (`incident.rs`, TS `src/cli/incident.ts`): the `prime-agent incident` timeline command — log-source discovery (agent.jsonl plus its `.old` rotation, falling back to the newest per-daemon log), `--since`/`--until` window and `--session` filter parsing, and the report rendering; the shared classifier lives in pa-types (`pa_types::incident`) and the agents-view notice in pa-tui. Client-side MCP auth flows (`mcp_login.rs`): the `/mcp login`/`/mcp logout` hook the TUI calls — the TS interactive client's placement — resolving a server (settings `mcpServers` + the builtin catalog), running the pa-core OAuth login on the suspended terminal, and persisting through the shared auth store. The same placement serves the TUI's client-command hooks: provider auth (`provider_login.rs` — the `/login`/`/logout` catalog, the API-key store, the MCP device flow, the Prime Inference terminal login (`prime_inference_login.rs` — the API-key flow: prime-cli credential reuse, the paste prompt with the whoami access check, the numbered team selector); the subscription OAuth and the Prime browser challenge stay unported and report it), trace-sharing state (`client_traces.rs` — the settings flag writes and the credential resolution `/traces` shows; the upload subsystem stays unported), and the `/update` runner (`client_update.rs` — the out-of-band installer funnel with the output captured, the same body `prime-agent update` runs; `installer_update.rs` is that CLI command's own driver, `--check` included), plus the TS-parity staged update flow (`update_flow/`, `self_update.rs` — the `package update` self target's body, kept for the TS-parity package corpus).
 
 ## Non-goals
 No business logic; it composes pa-daemon, pa-core, pa-tui, pa-ai via their public APIs only.
@@ -86,13 +86,12 @@ listening unix sockets owned by product processes, a socket-dir sweep, probing/c
 each discovered daemon, and the reap/shutdown planners and executors. Containment is part of
 the contract: every scan, probe, and stop is scoped to an explicit `DaemonStateRoot`
 (the env-resolved current root for the CLI), with a hard never-touch exclusion list for this
-sandbox's ambient mission daemons - see docs/PORTING-NOTES.md. All e2e daemons live in
+sandbox's ambient mission daemons. All e2e daemons live in
 test-created fixture directories only.
 
 ## Update flow (staged activation)
 
-`prime-agent update` (the `update_flow` module, spec
-`docs/update-flow-state-machine.md`): the invoking CLI plans, downloads, and
+`prime-agent update` (the `update_flow` module): the invoking CLI plans, downloads, and
 stages the candidate (`Acquire`..`Staged`), then spawns the detached
 coordinator - the new binary running from its release dir - which adopts the
 status file and owns the FSM to a terminal state (`Preparing..Complete`,

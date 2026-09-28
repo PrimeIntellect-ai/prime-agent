@@ -4,7 +4,6 @@ use crate::daemon_discovery;
 use std::collections::HashSet;
 
 use crate::args::{parse_args, INTERNAL_RUNTIME_COMMAND_MARKER};
-use std::io::IsTerminal as _;
 
 use crate::command_registry::{
     find_command_suggestion, format_command_help, format_top_level_help, get_child_command_specs,
@@ -51,6 +50,7 @@ fn continue_with(args: Vec<String>) -> PublicCommandResult {
         exit_code: None,
     }
 }
+use std::io::IsTerminal as _;
 
 /// The error message used when a routed command needs a runtime subsystem that
 /// is not linked into this build yet.
@@ -574,7 +574,7 @@ fn run_package(args: &[String]) -> PublicCommandResult {
             arg == "--self" || arg == "--extensions" || arg == "--extension" || arg == "--force"
         }) {
             return fail(
-                "Package updates accept only an optional source. Use \"prime-agent update --force\" to update Prime Agent.",
+                "Package updates accept only an optional source. Use \"prime-agent update\" to update Prime Agent.",
                 None,
             );
         }
@@ -618,44 +618,26 @@ fn is_self_update_source(source: &str) -> bool {
 }
 
 fn run_update(args: &[String]) -> PublicCommandResult {
-    // The direct-install values must never be mistaken for legacy update
-    // targets: the legacy scan runs over the args with the pair consumed,
-    // the parse below runs over the original argv.
-    let mut stripped: Vec<String> = Vec::with_capacity(args.len());
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--archive" || args[index] == "--source" {
-            index += 2;
-            continue;
-        }
-        stripped.push(args[index].clone());
-        index += 1;
+    // The migration path's own surface: the bare command is the
+    // installer takeover (the funnel), and `--check` reports the latest
+    // available build vs the running one without installing. The
+    // TS-parity staged-flow flags below keep their surface exactly as
+    // before (the managed releases/ layout world the battery's wire
+    // suites pin); an installer-based install reports it is not owned by
+    // the installer there, while the bare command works everywhere the
+    // installer does.
+    if args.is_empty() {
+        let options = crate::installer_update::UpdateOptions { check: false };
+        return handled_with_exit(crate::installer_update::run(&options));
     }
-    let has_legacy_self_target = stripped
+    // `--check` alone (alias `--version`) reports without installing;
+    // mixed with anything else the staged parse below rejects it.
+    if args
         .iter()
-        .any(|arg| arg == "--self" || is_self_update_source(arg));
-    let has_legacy_package_target = stripped.iter().any(|arg| {
-        arg == "--extensions"
-            || arg == "--extension"
-            || (!arg.starts_with('-') && !is_self_update_source(arg))
-    });
-    if has_legacy_self_target && has_legacy_package_target {
-        return fail(
-            "Prime Agent and package updates are now separate.",
-            Some("Run \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.".to_string()),
-        );
-    }
-    if has_legacy_self_target {
-        return fail(
-            "An update target is no longer needed.",
-            Some("Use \"prime-agent update [--force]\".".to_string()),
-        );
-    }
-    if has_legacy_package_target {
-        return fail(
-            "Package updates moved to the package command.",
-            Some("Use \"prime-agent package update [source]\".".to_string()),
-        );
+        .all(|arg| matches!(arg.as_str(), "--check" | "--version"))
+    {
+        let options = crate::installer_update::UpdateOptions { check: true };
+        return handled_with_exit(crate::installer_update::run(&options));
     }
     let Some(options) = parse_update_options(args) else {
         return handled_failed();
@@ -925,6 +907,24 @@ mod update_options_tests {
     fn parse(args: &[&str]) -> Option<crate::self_update::SelfUpdateOptions> {
         let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         parse_update_options(&args)
+    }
+
+    /// The migration dispatch: the bare command and the report-only flag
+    /// never reach the staged-flow parse (`run_update` short-circuits
+    /// both before it), so the staged parse keeps its TS shape exactly.
+    #[test]
+    fn the_bare_and_check_invocations_short_circuit_the_staged_parse() {
+        let check = ["--check"];
+        let version = ["--version"];
+        for args in [&check, &version] {
+            let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
+            // The staged parse rejects the new flag: only the dispatch
+            // accepts it.
+            assert!(parse_update_options(&args).is_none(), "{args:?}");
+        }
+        // The staged flags still parse (the managed-install flow keeps
+        // its surface).
+        assert!(parse(&["--force"]).is_some());
     }
 
     #[test]
