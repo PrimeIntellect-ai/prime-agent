@@ -3,8 +3,8 @@
 use super::{
     connection, create, default_server_capabilities, json, paths, queue, response_failure,
     response_success, restore_queue_snapshot, session_file_name, summary, Arc,
-    EngineModelSelection, PromptRequest, Result, RlmSessionIdentity, ScriptedEngine, SessionEngine,
-    SessionFile, VecDeque, Worker, WorkerConfig,
+    EngineModelSelection, Result, RlmSessionIdentity, ScriptedEngine, SessionEngine, SessionFile,
+    VecDeque, Worker, WorkerConfig,
 };
 
 use serde_json::Value;

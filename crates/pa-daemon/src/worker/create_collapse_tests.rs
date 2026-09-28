@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use super::*;
 use crate::engine::{
     BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome, CompactionRequest, EngineEvent,
+    PromptRequest,
 };
 
 /// The scripted harness engine: the create-path seams keep their trait

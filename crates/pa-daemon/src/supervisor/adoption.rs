@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use super::{
     anyhow, json, load_descriptors, persist_worker, response_failure, response_success, socket,
-    subscribers, util, worker_connect_deadline, Context, DaemonCommand, DaemonResponse,
-    DaemonWorkerLifecycle, Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor,
-    Value, WorkerRegistration,
+    util, worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
+    Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
+    WorkerRegistration,
 };
 
 /// The boot the descriptor-adoption pass runs under. An update boot

@@ -2,8 +2,8 @@
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
 use super::{
-    broadcast, checkpoint_queue_recovery, config, create_daemon_event_meta, effective_service_tier,
-    env, is_rlm_child_status_item, json, lifecycle, queue, summary, supports_fast_mode, turn,
+    checkpoint_queue_recovery, config, create_daemon_event_meta, effective_service_tier, env,
+    is_rlm_child_status_item, json, lifecycle, queue, summary, supports_fast_mode, turn,
     AgentConnectionState, Arc, DaemonOutbound, DaemonSessionClosedReason, EventPump, Map, Mutex,
     OutboundFrame, QueueCheckpoint, QueueLanes, QueuedItem, Result, SessionActionSnapshot,
     SessionCore, SessionEngine, Value, Worker,

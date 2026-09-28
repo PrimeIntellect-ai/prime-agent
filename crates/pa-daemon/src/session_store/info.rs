@@ -4,7 +4,7 @@
 //! most-recent-session lookup.
 
 use super::{
-    fs, list_sessions, normalize_state_status, read, view, write, Cow, Deserialize, HashMap, Path,
+    fs, list_sessions, normalize_state_status, view, write, Cow, Deserialize, HashMap, Path,
     PathBuf, SessionHeader, Usage, Value,
 };
 
