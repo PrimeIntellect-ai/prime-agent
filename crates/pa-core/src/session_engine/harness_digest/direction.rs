@@ -123,7 +123,12 @@ async fn direction_rig(
         Vec::new(),
         Some(HarnessDigestContext {
             global_dir: tmp.path().join("harness"),
-            local_dir: Some(tmp.path().join("session-artifacts").join("s1").join("harness")),
+            local_dir: Some(
+                tmp.path()
+                    .join("session-artifacts")
+                    .join("s1")
+                    .join("harness"),
+            ),
             include_ipython: false,
             include_shell_examples: false,
             include_refine: false,
@@ -165,9 +170,15 @@ async fn digest_terms_rank_the_newest_four_texts() {
         .harness_digest_inputs()
         .await
         .expect("the rig wires a harness digest context");
-    for (term, weight) in [("foxtrot", 2.0), ("echo", 1.5), ("delta", 1.0), ("charlie", 1.0)] {
+    for (term, weight) in [
+        ("foxtrot", 2.0),
+        ("echo", 1.5),
+        ("delta", 1.0),
+        ("charlie", 1.0),
+    ] {
         assert_eq!(
-            inputs.terms.get(term), Some(&weight),
+            inputs.terms.get(term),
+            Some(&weight),
             "TS slice(-4): the newest texts carry the recency ladder"
         );
     }
@@ -212,7 +223,11 @@ async fn digest_direction_differential_across_window_shapes() {
         let tmp = tempfile::tempdir().unwrap();
         seed_global_memories(
             &tmp.path().join("harness"),
-            &[("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist")],
+            &[(
+                "aaa_alpha",
+                "alpha anchor notes",
+                "the alpha anchor checklist",
+            )],
         );
         let engine = direction_rig(&tmp, texts).await;
         let inputs = engine
@@ -242,8 +257,16 @@ async fn digest_direction_differential_across_window_shapes() {
     seed_global_memories(
         &tmp.path().join("harness"),
         &[
-            ("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist"),
-            ("zzz_foxtrot", "foxtrot frontier notes", "the foxtrot frontier checklist"),
+            (
+                "aaa_alpha",
+                "alpha anchor notes",
+                "the alpha anchor checklist",
+            ),
+            (
+                "zzz_foxtrot",
+                "foxtrot frontier notes",
+                "the foxtrot frontier checklist",
+            ),
         ],
     );
     let engine = direction_rig(&tmp, &DISTINCT6).await;
@@ -262,7 +285,11 @@ async fn digest_direction_differential_across_window_shapes() {
         base_render.state_fingerprint,
         fixed_render.state_fingerprint
     );
-    let newest_four: Vec<String> = DISTINCT6[2..].iter().rev().map(ToString::to_string).collect();
+    let newest_four: Vec<String> = DISTINCT6[2..]
+        .iter()
+        .rev()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(inputs.terms, digest_query_terms(None, &newest_four));
 }
 
@@ -275,7 +302,11 @@ async fn digest_ranks_the_newest_texts_memory_first() {
     seed_global_memories(
         &tmp.path().join("harness"),
         &[
-            ("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist lives here"),
+            (
+                "aaa_alpha",
+                "alpha anchor notes",
+                "the alpha anchor checklist lives here",
+            ),
             (
                 "zzz_foxtrot",
                 "foxtrot frontier notes",
