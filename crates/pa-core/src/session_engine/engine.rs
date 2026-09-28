@@ -121,6 +121,11 @@ pub struct SessionEngineConfig {
     /// scheduler fires (TS daemon-mode wires
     /// `AgentCronJobStore.forSessionArtifacts()` into both).
     pub cron_store: Option<super::runtime_wiring::KernelCronWiring>,
+    /// The image-model routing host seam (TS agent-session's settings +
+    /// registry reads at dispatch): the headless surfaces install theirs;
+    /// the daemon worker stays `None` because its turn dispatch owns
+    /// routing (its queued lanes re-dispatch every batch).
+    pub image_model_router: Option<super::image_model_routing::ImageModelRouter>,
 }
 
 /// An assembled, running session.
@@ -769,6 +774,42 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // reads the resource loader at expansion time; the session snapshots
     // the engine's loaded list).
     session.set_skills(resources.skills.clone());
+    // The embedding's image-model routing seam (the headless surfaces
+    // install theirs; the daemon worker's turn dispatch owns routing).
+    session.set_image_model_router(config.image_model_router.clone());
+    // The armed image route never outlives the run that armed it (TS
+    // `_clearModelOverrideWhenIdle`: the override drops once the turn is
+    // idle, so a picker switch between turns is live immediately — the
+    // settle's still-routed guard leaves the switched slot). The settle
+    // here is idempotent: an un-armed episode's swap restores the slot
+    // it already holds, and the next admission's own settle re-reads
+    // fresh state either way.
+    if let Some(router) = config.image_model_router.clone() {
+        // A weak agent reference: the listener lives ON the agent, so a
+        // strong edge would cycle and pin a dropped session's agent.
+        let agent_at_end = std::sync::Arc::downgrade(&agent);
+        agent
+            .subscribe(move |event, _signal| {
+                let router = router.clone();
+                let agent_at_end = agent_at_end.clone();
+                Box::pin(async move {
+                    if matches!(event, pa_agent::types::AgentEvent::AgentEnd { .. }) {
+                        (router.swap_target)(None);
+                        // The agent's per-run override clears with the
+                        // route (TS `_clearModelOverrideWhenIdle` drops
+                        // it once the turn is idle): a leftover override
+                        // would leak into a later `continue_run`'s loop
+                        // config — the retry would snapshot the image
+                        // model while the stream serves the session one.
+                        if let Some(agent) = agent_at_end.upgrade() {
+                            agent.set_model_override(None);
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+    }
     // The boot-notice mailbox becomes the session's next-turn queue:
     // rows parked by a boot that settled mid-build merge in, and later
     // boots (a lazy first-call start) push straight into the live
@@ -1002,6 +1043,7 @@ mod tests {
         let engine = create_session(SessionEngineConfig {
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
             steering_mode: None,
             follow_up_mode: None,
             cwd: cwd.clone(),
@@ -1106,6 +1148,7 @@ mod tests {
         let engine = create_session(SessionEngineConfig {
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
             steering_mode: None,
             follow_up_mode: None,
             cwd: cwd.clone(),
@@ -1173,6 +1216,7 @@ mod tests {
             SessionEngineConfig {
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
                 steering_mode: None,
                 follow_up_mode: None,
                 cwd: cwd.to_path_buf(),
