@@ -56,10 +56,16 @@ pub fn agent_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join(CONFIG_DIR_NAME))
 }
 
-/// Expand a leading `~`/`~/` against [`home_dir`]; other values pass
-/// through (TS `expandTildePath`: `~foo` is not an expansion).
+/// Expand a leading `~`/`~/` - and on Windows `~\` - against
+/// [`home_dir`]; other values pass through (TS `expandTildePath`: `~foo`
+/// is not an expansion, and the backslash form is the win32 arm of the
+/// TS helper; the pa-cli `config.rs` twin carries the same arm).
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir().map_or_else(|| PathBuf::from(path), |home| home.join(rest));
+    }
+    #[cfg(windows)]
+    if let Some(rest) = path.strip_prefix("~\") {
         return home_dir().map_or_else(|| PathBuf::from(path), |home| home.join(rest));
     }
     if path == "~" {
@@ -180,6 +186,29 @@ mod tests {
         with_env(&[("HOME", Some(""))], || {
             assert_eq!(home_dir(), None);
         });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn agent_dir_env_override_expands_the_win32_backslash_tilde() {
+        // The TS `expandTildePath` win32 arm: a `~\`-prefixed
+        // `PRIME_AGENT_CODING_AGENT_DIR` expands against the home dir
+        // exactly like the `~/` form (the daemon, pa-core, and pa-tui all
+        // resolve through this path - a CLI-only expansion would split
+        // the state dir between the two processes).
+        with_env(
+            &[
+                ("HOME", None),
+                ("USERPROFILE", Some(r"C:\Users\tester")),
+                ("PRIME_AGENT_CODING_AGENT_DIR", Some(r"~\state")),
+            ],
+            || {
+                assert_eq!(
+                    agent_dir(),
+                    Some(PathBuf::from(r"C:\Users\tester\state"))
+                );
+            },
+        );
     }
 
     #[test]
