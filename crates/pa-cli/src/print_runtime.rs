@@ -625,21 +625,33 @@ fn headless_image_model_router(
     let armed_from = std::sync::Arc::new(std::sync::Mutex::new(None));
     let decide_agent_dir = agent_dir.clone();
     let decide_provider_target = std::sync::Arc::clone(&provider_target);
+    let decide_armed_from = std::sync::Arc::clone(&armed_from);
     let decide = std::sync::Arc::new(
         move |carries_images: bool| -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
             if !carries_images {
                 return Ok(None);
             }
-            // The routing decision runs at commit, when the live slot
-            // holds the CURRENT session target (the previous episode
-            // settles before the next batch commits): decide against the
-            // switched-to model, falling back to the build-time pair only
-            // when the slot is somehow empty.
-            let session_model = decide_provider_target
-                .read()
-                .expect("provider target lock")
+            // The routing decision runs at commit and needs the SESSION
+            // model. During an armed episode the live slot holds the
+            // ROUTED target (a consecutive image batch re-decides before
+            // the previous episode settles), so the capture is the
+            // session model; un-armed, the live slot is the session
+            // target (a mid-run model switch rewrote it). The build-time
+            // pair is the fallback only when both are somehow empty.
+            let armed_capture = decide_armed_from
+                .lock()
+                .expect("armed-from lock")
                 .as_ref()
-                .map_or_else(|| session_model.clone(), |target| target.model.clone());
+                .map(|target| target.model.clone());
+            let session_model = armed_capture
+                .or_else(|| {
+                    decide_provider_target
+                        .read()
+                        .expect("provider target lock")
+                        .as_ref()
+                        .map(|target| target.model.clone())
+                })
+                .unwrap_or_else(|| session_model.clone());
             let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
             let image_model_reference = settings.get_image_model();
             let block_images = settings.get_block_images();
