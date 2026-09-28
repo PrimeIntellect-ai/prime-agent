@@ -735,9 +735,12 @@ mod tests {
             }
         }
 
-        fn runner(&self) -> impl Fn(&SelfUpdateOptions, Option<String>) -> i32 + '_ {
+        fn runner(&self) -> impl Fn(&SelfUpdateOptions, Option<&str>) -> i32 + '_ {
             move |options, persisted| {
-                self.seen.lock().unwrap().push((options.clone(), persisted));
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((options.clone(), persisted.map(str::to_string)));
                 self.code
             }
         }
