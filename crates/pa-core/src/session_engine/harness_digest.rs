@@ -977,8 +977,8 @@ mod tests {
         pa_ai::faux::FauxProviderRegistration,
         Option<String>,
     ) {
-        let registration = pa_ai::faux::register_faux_provider(
-            pa_ai::faux::RegisterFauxProviderOptions {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
                 models: Some(vec![pa_ai::faux::FauxModelDefinition {
                     id: "digest-placement-m".to_string(),
                     name: Some("Digest Placement Model".to_string()),
@@ -989,8 +989,7 @@ mod tests {
                     max_tokens: Some(256),
                 }]),
                 ..Default::default()
-            },
-        );
+            });
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Delayed {
             message: pa_ai::faux::faux_assistant_text_message(
                 "## Goal\nsummarized goal",
@@ -1103,16 +1102,15 @@ mod tests {
                     .expect("the rig's wire rows convert to loop rows")
             })
             .collect();
-        let agent = std::sync::Arc::new(pa_agent::agent::Agent::new(
-            pa_agent::agent::AgentOptions {
+        let agent =
+            std::sync::Arc::new(pa_agent::agent::Agent::new(pa_agent::agent::AgentOptions {
                 initial_state: pa_agent::agent::AgentInitialState {
                     messages: Some(live),
                     ..Default::default()
                 },
                 ..Default::default()
-            },
-        ));
-        let mut engine = crate::session_engine::AgentSession::from_session_arc(
+            }));
+        let engine = crate::session_engine::AgentSession::from_session_arc(
             agent,
             std::sync::Arc::new(tokio::sync::Mutex::new(session)),
             Vec::new(),
@@ -1151,9 +1149,7 @@ mod tests {
         anyhow::Result<crate::session_engine::compact_session::CompactOutcome>,
     > {
         let model = model.clone();
-        let handle = tokio::spawn(async move {
-            engine.compact(None, &model, None, None).await
-        });
+        let handle = tokio::spawn(async move { engine.compact(None, &model, None, None).await });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while registration.call_count() == 0 {
             assert!(
@@ -1238,7 +1234,12 @@ mod tests {
         );
         assert_eq!(
             run.entry.harness_state_fingerprint.as_deref(),
-            Some(commit_inputs.render_with_fingerprint().state_fingerprint.as_str()),
+            Some(
+                commit_inputs
+                    .render_with_fingerprint()
+                    .state_fingerprint
+                    .as_str()
+            ),
             "the state fingerprint is placement-independent (one state read per render)"
         );
         // The goal term is frozen across the window (the structural proof
