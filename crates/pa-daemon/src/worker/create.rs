@@ -2,13 +2,18 @@
 //! construction of the live session.
 use super::{
     Arc,
+    EngineEvent,
     EngineModelSelection,
+    PathBuf,
+    PromptRequest,
     Result,
     RlmSessionIdentity,
+    ScriptedEngine,
     SessionEngine,
     SessionFile,
     VecDeque,
     Worker,
+    WorkerConfig,
     config,
     connection,
     create,
