@@ -1274,7 +1274,7 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     write_corpus_fixture(&fixture, 10);
     let mut client = TimedRpcChild::spawn(
         &fixture,
-        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ] }),
+        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ], "repeatLastResponse": true }),
     );
     let (ready, _) = client.command(&json!({ "type": "get_state" }));
     let (_, _) = client.wait_response(&ready, TIMEOUT);
@@ -1333,7 +1333,7 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     write_corpus_fixture(&fixture, 10);
     let mut client = TimedRpcChild::spawn(
         &fixture,
-        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ] }),
+        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ], "repeatLastResponse": true }),
     );
     // No reader thread touches stdout until the stall window closes:
     // the get_state response (the session's whole serialized context,
