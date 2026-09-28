@@ -34,7 +34,7 @@ pub fn trim_freed_heap() {
 /// Trim only when a phase actually allocated: `bytes` is the transient's
 /// size (a serialized frame, a loaded file); small responses skip the
 /// arena walk entirely.
-pub fn trim_freed_heap_if_large(bytes: usize) {
+pub fn trim_freed_heap_if_large(#[allow(unused_variables)] bytes: usize) {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if bytes >= (1 << 20) {
         trim_freed_heap();

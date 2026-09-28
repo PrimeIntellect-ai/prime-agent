@@ -224,7 +224,7 @@ jobs:
   # operator-authorized workflow-scope push):
   #
   #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
-  #   `make windows-cross` (docs/windows-readiness.md). The Sep-23..25
+  #   `make windows-cross`. The Sep-23..25
   #   unix-only test regressions that broke it were fixed by #2833, so it
   #   type-checks every crate (including the cfg(windows) implementations
   #   and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs

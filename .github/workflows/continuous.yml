@@ -30,7 +30,7 @@ jobs:
   # same advisories + licenses check as `make deny` (deny.toml), on every
   # tree the branch channel builds binaries from. Advisories that are
   # triaged-unmaintained carry an `ignore` entry with the reason and a
-  # review date (docs/installer-ci-design.md §7); the gate fails on
+  # review date; the gate fails on
   # anything new. SEAM: pin the advisory-DB snapshot (or vendor it) when
   # the channel goes public.
   deny:
