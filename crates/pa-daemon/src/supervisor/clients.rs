@@ -3,7 +3,7 @@
 use super::{
     broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
     default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
-    response_failure, response_line, response_success, salvage_command_type, salvage_id, socket,
+    response_failure, response_line, response_success, salvage_command_type, salvage_id,
     subscribers, supervision, update_gate_refuses, util, Arc, AsyncWriteExt, BufReader,
     ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
     Ordering, Outbound, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
