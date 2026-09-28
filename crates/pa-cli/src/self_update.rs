@@ -84,7 +84,7 @@ pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
     // one, else the running version infers it.
     let channel = options
         .channel
-        .or_else(|| persisted_wire.as_deref().and_then(UpdateChannel::from_wire));
+        .or_else(|| persisted_wire.and_then(UpdateChannel::from_wire));
     let command_options = crate::update_flow::update_command::UpdateCommandOptions {
         force: options.force,
         rollback: options.rollback,

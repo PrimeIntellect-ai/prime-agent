@@ -277,7 +277,7 @@ impl ProviderAuthCommands for ProviderAuth {
         Box::pin(async move {
             // The auth-store writes and the MCP manager locks stay off
             // the async workers.
-            tokio::task::spawn_blocking(move || login_blocking(&provider_row, agent_dir, api_key))
+            tokio::task::spawn_blocking(move || login_blocking(&provider_row, &agent_dir, api_key))
                 .await
                 .expect("the login task ran")
         })
@@ -495,7 +495,7 @@ impl ProviderAuth {
 /// session routes the panel rows to the panel body).
 fn login_blocking(
     provider_row: &ProviderRow,
-    agent_dir: PathBuf,
+    agent_dir: &Path,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
     if provider_row.auth_type == AuthType::Oauth {
@@ -512,7 +512,7 @@ fn login_blocking(
             provider_row.name
         ));
     };
-    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     auth.set(
         &provider_row.id,
         AuthCredential::ApiKey {
