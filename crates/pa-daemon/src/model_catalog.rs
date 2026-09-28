@@ -616,7 +616,7 @@ mod tests {
                 Ok(Ok(frame)) if frame.outbound_type == "model_catalog_changed" => return,
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => panic!("event stream error: {error}"),
-                Err(_) => panic!("model_catalog_changed never landed"),
+                Err(_elapsed) => panic!("model_catalog_changed never landed"),
             }
         }
     }

@@ -222,7 +222,7 @@ impl Supervisor {
         if !available {
             return Err(anyhow!(
                 "Session worker is {}",
-                effective_worker_state(connected, &lifecycle, self.is_stopping(resident))
+                effective_worker_state(connected, lifecycle, self.is_stopping(resident))
             ));
         }
         Ok(())
@@ -233,14 +233,14 @@ impl Supervisor {
 /// `worker is {state}` answers).
 pub(crate) fn effective_worker_state(
     connected: bool,
-    lifecycle: &DaemonWorkerLifecycle,
+    lifecycle: DaemonWorkerLifecycle,
     stopping: bool,
 ) -> &'static str {
     if stopping {
         "stopping"
-    } else if lifecycle == &DaemonWorkerLifecycle::Failed {
+    } else if lifecycle == DaemonWorkerLifecycle::Failed {
         "failed"
-    } else if lifecycle == &DaemonWorkerLifecycle::Ready && !connected {
+    } else if lifecycle == DaemonWorkerLifecycle::Ready && !connected {
         "recovering"
     } else {
         match lifecycle {
@@ -410,19 +410,19 @@ mod tests {
     #[test]
     fn worker_states_match_ts_names() {
         use DaemonWorkerLifecycle as L;
-        assert_eq!(effective_worker_state(true, &L::Ready, true), "stopping");
-        assert_eq!(effective_worker_state(true, &L::Failed, false), "failed");
+        assert_eq!(effective_worker_state(true, L::Ready, true), "stopping");
+        assert_eq!(effective_worker_state(true, L::Failed, false), "failed");
         assert_eq!(
-            effective_worker_state(false, &L::Ready, false),
+            effective_worker_state(false, L::Ready, false),
             "recovering"
         );
-        assert_eq!(effective_worker_state(true, &L::Ready, false), "ready");
+        assert_eq!(effective_worker_state(true, L::Ready, false), "ready");
         assert_eq!(
-            effective_worker_state(true, &L::Starting, false),
+            effective_worker_state(true, L::Starting, false),
             "starting"
         );
         assert_eq!(
-            effective_worker_state(false, &L::Recovering, false),
+            effective_worker_state(false, L::Recovering, false),
             "recovering"
         );
     }

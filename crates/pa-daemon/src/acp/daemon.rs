@@ -637,7 +637,7 @@ async fn handle_session_new(
             .await
             .unwrap_or_default(),
     );
-    let published = picker_options_from_state(&state_value, &models);
+    let published = picker_options_from_state(state_value.as_ref(), &models);
     let config = Arc::new(HostedConfig {
         queue: tokio::sync::Mutex::new(()),
         published: tokio::sync::Mutex::new(published),

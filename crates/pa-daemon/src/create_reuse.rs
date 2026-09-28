@@ -406,7 +406,7 @@ impl Supervisor {
         let lifecycle = resident.descriptor.lock().await.lifecycle;
         crate::peer_tickets::effective_worker_state(
             connected,
-            &lifecycle,
+            lifecycle,
             self.is_stopping(resident),
         )
     }

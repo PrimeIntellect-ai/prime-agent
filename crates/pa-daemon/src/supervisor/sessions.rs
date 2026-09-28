@@ -232,7 +232,7 @@ impl Supervisor {
         // store never head-of-lines a runtime worker (the #2723 class).
         let stream_rows = stream.clone();
         let scan_command_id = command_id.to_string();
-        let scan_active_session_id = active_session_id.as_ref().cloned();
+        let scan_active_session_id = active_session_id.clone();
         let scan_cwd = cwd.clone();
         let scan = tokio::task::spawn_blocking(move || {
             let mut file_total = 0usize;

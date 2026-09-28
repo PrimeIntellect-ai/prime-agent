@@ -329,7 +329,7 @@ pub(super) async fn fetch_available_models(
 /// Build the pickers from one connection state (the shared computation's
 /// wire-side input adapter).
 pub(super) fn picker_options_from_state(
-    state: &Option<Value>,
+    state: Option<&Value>,
     models: &[pa_types::ai::Model],
 ) -> Vec<SessionConfigOption> {
     let Some(state) = state else {
@@ -366,7 +366,7 @@ pub(super) async fn refresh_wire_config(
             "the post-apply refresh failed: the worker's live state could not be read",
         ));
     };
-    let options = picker_options_from_state(&Some(state), &config.models.lock().await);
+    let options = picker_options_from_state(Some(&state), &config.models.lock().await);
     publish_config_options(producer, &config.published, options.clone()).await;
     Ok(options)
 }
