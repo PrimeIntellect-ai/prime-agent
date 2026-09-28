@@ -199,7 +199,7 @@ impl ExportCommands {
 /// seam): resolves a tool by name against the session's live registry at
 /// render time. The Rust tool surface carries no render functions —
 /// extension tools' the TS TUI components cannot cross the sidecar boundary
-/// (extensions-runner-design §2.3/R3) and the built-in `ipython` has none
+/// and the built-in `ipython` has none
 /// in either product — so a resolved tool reports no renderable
 /// representation and the export falls back to the template's generic
 /// tool rendering, exactly like the TS renderer for a tool without

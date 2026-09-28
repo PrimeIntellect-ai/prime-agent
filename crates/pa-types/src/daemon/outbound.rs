@@ -64,7 +64,7 @@ pub enum DaemonErrorInfo {
     },
     /// `prepare_update_restart` with a different `updateId` while a prepare
     /// transaction is active: a typed refusal the coordinator maps to
-    /// `Join` (spec `docs/update-flow-state-machine.md` §4).
+    /// `Join`.
     UpdatePrepareRefused {
         active_update_id: String,
     },

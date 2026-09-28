@@ -152,6 +152,11 @@ pub(crate) struct ResidentWorker {
     /// while its scheduler keeps firing. Fresh only while the generation
     /// is still current (see `heartbeat_snapshot_generation`).
     pub(crate) heartbeat_snapshot: Mutex<Option<WorkerHeartbeatSnapshot>>,
+    /// The worker's last selector-less `cron_list` answer (its own slice
+    /// of the supervisor snapshot, TS #2487): served by the supervisor
+    /// without forwarding while its generation is current, so a
+    /// `cron_list` consults this worker at most once per generation.
+    pub(crate) cron_snapshot: Mutex<Option<WorkerCronSnapshot>>,
     /// The worker's heartbeat-catalog generation (TS
     /// `worker.heartbeatSnapshotStale` + the queued re-read): bumped by
     /// every `heartbeats_changed` invalidation. A snapshot is fresh only
@@ -184,6 +189,19 @@ pub(crate) struct WorkerHeartbeatSnapshot {
     pub(crate) generation: u64,
 }
 
+/// The last cron jobs a worker answered a selector-less `cron_list` with
+/// (TS #2487: the supervisor serves each worker's own catalog slice from
+/// the supervisor-side snapshot instead of forwarding every request to
+/// every worker), tagged with the catalog generation it was read at: the
+/// slice is only trustworthy while its generation is still current, so a
+/// `heartbeats_changed` invalidation forces the next `cron_list` to consult
+/// that worker again (at most one forward per generation).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WorkerCronSnapshot {
+    pub(crate) jobs: Vec<pa_core::cron::AgentCronJob>,
+    pub(crate) generation: u64,
+}
+
 impl ResidentWorker {
     pub(crate) fn new(
         worker_id: String,
@@ -205,6 +223,7 @@ impl ResidentWorker {
             spawned_at_ms: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
+            cron_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
             route_state_tx,
             connection_epoch: AtomicU64::new(0),
@@ -324,6 +343,26 @@ impl ResidentWorker {
             .is_none_or(|stored| generation >= stored.generation)
         {
             *snapshot = Some(WorkerHeartbeatSnapshot { rows, generation });
+        }
+    }
+
+    /// Store the worker's last selector-less `cron_list` answer under the
+    /// same generation-monotonic discipline as
+    /// [`Self::store_heartbeat_snapshot`]: a late in-flight read can never
+    /// retag a newer snapshot as stale, and a read in the stored
+    /// generation still refreshes the rows (the catalog is constant
+    /// within a generation).
+    pub(crate) async fn store_cron_snapshot(
+        &self,
+        jobs: Vec<pa_core::cron::AgentCronJob>,
+        generation: u64,
+    ) {
+        let mut snapshot = self.cron_snapshot.lock().await;
+        if snapshot
+            .as_ref()
+            .is_none_or(|stored| generation >= stored.generation)
+        {
+            *snapshot = Some(WorkerCronSnapshot { jobs, generation });
         }
     }
 }

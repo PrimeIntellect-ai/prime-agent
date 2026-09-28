@@ -1,4 +1,4 @@
-//! The update-flow state-machine vocabulary (`docs/update-flow-state-machine.md`).
+//! The update-flow state-machine vocabulary.
 //!
 //! Slice 1 of the update flow: pure serde types and path layout shared by the
 //! coordinator (pa-cli detached process mode), the old and new supervisor

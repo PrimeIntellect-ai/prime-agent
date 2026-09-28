@@ -106,7 +106,7 @@ Every contributor (human or agent) must read this before working on this repo.
 Every user-visible feature ships its adoption telemetry event in the same PR as the feature:
 the event name + properties are added to `docs/telemetry-events.md` (schema versioned), and a
 seam emits it from day one. Telemetry properties never carry prompt, session, or file content
-(primitives only; see `pa-telemetry` and the privacy contract in `docs/telemetry-design.md`).
+(primitives only; see `pa-telemetry`).
 
 ## Branding
 
@@ -162,6 +162,5 @@ Layering rules:
 
 ## References
 
-- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the completion matrix, the keybindings).
-- `docs/FEATURE_PARITY.md` is the exhaustive interactive-mode audit: every TS component walked and verified against the Rust implementation.
+- `docs/` contains the product docs (the Rust quickstart, the keybindings reference, the telemetry event catalog, the model-facing surface contract, request timing, and the keyboard startup probe).
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.

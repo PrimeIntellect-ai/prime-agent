@@ -9,7 +9,7 @@
 //! (pa-core `session_engine::rlm_usage`) owns the target row, the
 //! aggregate math, and the durable append.
 //!
-//! Origin labels (PORTING-NOTES): TS reads the child's live message list
+//! Origin labels: TS reads the child's live message list
 //! and walks back to the nearest preceding user or agent-session custom
 //! message — the spawn prompt is a custom row with `details.id
 //! "spawn:<id>"`, so its completions label `spawn_task`. The Rust daemon

@@ -13,7 +13,7 @@ Prime Agent: A Self-Improving RLM Harness
 </h3>
 
 <p align="center">
-  <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
+  <a href="docs/RUST_QUICKSTART.md">Documentation</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
 </p>
@@ -21,9 +21,6 @@ Prime Agent: A Self-Improving RLM Harness
 <p align="center">
   <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
     <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
   </a>
   <a href="https://arxiv.org/abs/2608.23552">
     <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
@@ -43,15 +40,13 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 ## Install
 
-Download the latest build for your platform from the [continuous release](https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/continuous):
+Install the latest build with the repo's one-command installer (every push to the `rust` branch publishes a fresh `continuous` build):
 
 ```bash
-# macOS Apple Silicon
-curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-darwin-arm64.tar.gz | tar xz && ./prime-agent
-
-# Linux x64
-curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-linux-x64.tar.gz | tar xz && ./prime-agent
+curl -fsSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/rust/install-rust.sh | sh
 ```
+
+The script verifies the artifact against its `SHA256SUMS`, installs the payload under `~/.local/share/prime-agent/` (`PRIME_AGENT_RUST_PREFIX` moves both paths), and writes the `~/.local/bin/prime-agent` launcher — the same keyword the TypeScript product used, so an existing TypeScript install is taken over: its daemon is stopped cleanly, its files are preserved, and the shared session store is never touched. Workflow-artifact downloads need GitHub authentication, so sign in with `gh` or set `GITHUB_TOKEN`. The inspect-first path, the manual steps, and the platform matrix are in [docs/RUST_QUICKSTART.md](docs/RUST_QUICKSTART.md).
 
 ## Why Prime Agent
 
@@ -103,25 +98,13 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 
 ## Documentation
 
-- [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
-- [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
-- [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
-- [RLM programming model](packages/coding-agent/docs/rlm.md) — the persistent Python REPL, subagents, skills, and the trust model
-- [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
-- [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
-- [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers
-- [Architecture overview](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
-- [Development](packages/coding-agent/docs/development.md) — build and run from source
+- [Quickstart](docs/RUST_QUICKSTART.md) — install, authenticate, and run a first session; the side-by-side rules when the TypeScript build is installed on the same machine
+- [Keybindings](docs/keybindings.md) — every keyboard shortcut and how to customize them
+- [Telemetry events](docs/telemetry-events.md) — the versioned catalog of every telemetry event and its properties
 
 ## Contributing
 
 Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
-
-Read the [contribution guidelines](CONTRIBUTING.md) for the full process. Report security vulnerabilities privately by following the [security policy](SECURITY.md).
-
-## Acknowledgements
-
-Our agent and TUI is built on top of [`pi`](https://github.com/earendil-works/pi). We thank the authors of `pi` for their valuable work.
 
 ## License
 

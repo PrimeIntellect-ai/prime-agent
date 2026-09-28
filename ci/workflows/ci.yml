@@ -7,7 +7,7 @@
 # deliberately NOT promoted yet:
 #
 #   windows-cross — the cfg-hygiene cross-target gate, the local mirror of
-#   `make windows-cross` (docs/windows-readiness.md). Promote into the live
+#   `make windows-cross`. Promote into the live
 #   ci.yml once it is validated green at the rust tip.
 #
 #   windows — the real windows-latest runner (portable + Windows-only
@@ -44,7 +44,7 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Windows-readiness gates (docs/windows-readiness.md): the cfg-hygiene
+  # Windows-readiness gates: the cfg-hygiene
   # verifier the win-audit lane established, now at the stronger -D warnings
   # level, plus the real Windows runner the platform units target. The cross
   # job type-checks every crate (including the cfg(windows) implementations

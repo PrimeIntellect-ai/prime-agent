@@ -480,10 +480,12 @@ pub(crate) struct SavedSessionContext {
 }
 
 pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessionContext> {
-    let store = crate::session_store::SessionFile::open(path).ok()?;
-    let entries = store.branch_file_entries();
-    let leaf = store.leaf_id().map(str::to_string);
-    let context = pa_core::session::build_session_context(&entries, leaf.as_deref());
+    // Reads the saved (provider, model) + thinking level from the
+    // retained window (plus post-window live rows); unsupported files and
+    // malformed retained rows fall back to the full open inside
+    // `open_windowed`.
+    let store = crate::session_store::SessionFile::open_windowed(path).ok()?;
+    let context = store.restored_settings();
     let thinking = store
         .has_thinking_level()
         .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))

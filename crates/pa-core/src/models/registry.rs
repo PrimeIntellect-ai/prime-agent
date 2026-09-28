@@ -215,27 +215,43 @@ impl ModelRegistry {
     }
 
     /// Models whose provider has configured auth, with unauthorized private
-    /// Prime Inference models gated out (TS `getAvailable`).
+    /// Prime Inference models gated out (TS `getAvailable`). The per-model
+    /// auth probe is answered once per provider (the port of TS #2479's
+    /// `getAvailable` memo): the catalog walks hundreds of models over a
+    /// few dozen providers and each probe rebuilds the provider's
+    /// auth-source candidates, while a same-registry probe is stable by
+    /// construction (`&self`, no mutation between models).
     pub fn get_available(&self) -> Vec<&Model> {
+        let mut auth_by_provider: HashMap<&str, bool> = HashMap::new();
         self.models
             .iter()
             .filter(|model| {
                 (!is_private_prime_inference_model(model)
                     || self.is_authorized_private_model(model))
-                    && self.has_configured_auth(model)
+                    && *auth_by_provider
+                        .entry(model.provider.as_str())
+                        .or_insert_with(|| self.has_configured_auth(model))
             })
             .collect()
     }
 
     /// Models `rlm.find_models` may search: auth-configured, and not on a
-    /// stale or expired provider credential.
+    /// stale or expired provider credential. The per-model status probe
+    /// is answered once per provider (the port of TS #2479's
+    /// `_authenticatedRlmModels` memo — same stability argument as
+    /// [`Self::get_available`]).
     pub fn get_rlm_searchable_models(&self) -> Vec<&Model> {
+        let mut status_by_provider: HashMap<&str, bool> = HashMap::new();
         self.get_available()
             .into_iter()
             .filter(|model| {
-                let status = self.auth.get_auth_status(&model.provider);
-                status.source != Some(crate::auth::types::AuthSource::Stale)
-                    && status.label.as_deref() != Some("expired")
+                *status_by_provider
+                    .entry(model.provider.as_str())
+                    .or_insert_with(|| {
+                        let status = self.auth.get_auth_status(&model.provider);
+                        status.source != Some(crate::auth::types::AuthSource::Stale)
+                            && status.label.as_deref() != Some("expired")
+                    })
             })
             .collect()
     }
@@ -963,6 +979,32 @@ mod tests {
                 model.id == available_model.id && model.provider == available_model.provider
             })
         }));
+    }
+
+    #[test]
+    fn rlm_searchable_models_gate_one_stale_provider_across_its_models() {
+        // The per-provider status memo must answer every model of a
+        // provider with the same probe result: a stale provider's whole
+        // model list stays gated while a second authed provider keeps its
+        // models searchable.
+        let mut auth = auth_without_env(serde_json::json!({
+            "anthropic": { "type": "api_key", "key": "sk-ant" },
+            "openai": { "type": "api_key", "key": "sk-oai" }
+        }));
+        assert!(auth.mark_auth_stale("anthropic"));
+        let registry = ModelRegistry::in_memory(auth);
+        let searchable = registry.get_rlm_searchable_models();
+        assert!(searchable.iter().all(|model| model.provider != "anthropic"));
+        assert!(searchable.iter().any(|model| model.provider == "openai"));
+        // `has_auth` is stale-aware (a marked credential is not
+        // "configured"), so the available set gates the stale provider's
+        // models too - the same semantics at the tip and with the memo.
+        let available = registry.get_available();
+        assert!(!available.iter().any(|model| model.provider == "anthropic"));
+        assert!(available.iter().any(|model| model.provider == "openai"));
+        assert!(available
+            .iter()
+            .all(|model| model.provider != "zz-no-provider"));
     }
 
     #[test]

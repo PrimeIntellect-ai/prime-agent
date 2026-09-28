@@ -637,6 +637,13 @@ impl Supervisor {
         }
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
+        // The residency change lands in the scheduled-jobs invalidation (TS
+        // `broadcastHeartbeatsChanged`: "every daemon-owned scheduled-job
+        // mutation and worker residency change"): the stopped session's
+        // durable jobs are passive from here on, so a snapshot that
+        // excluded them while the worker was live must not be served for
+        // the rest of the refresh window.
+        self.broadcast_heartbeats_changed();
         // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
         // settle in place (every owned non-ephemeral, non-queued row
         // passivates and keeps its model/thinking/cwd, the top-level row

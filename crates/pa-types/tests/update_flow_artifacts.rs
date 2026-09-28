@@ -1,7 +1,6 @@
-//! Round-trip and cross-check tests for the update-flow artifact schemas
-//! (`docs/update-flow-state-machine.md` §7, §8): the golden roster example in
-//! the spec's own shape, the intent/status/marker artifacts, and the
-//! watchdog/transition tables as cross-referenced from the spec.
+//! Round-trip and cross-check tests for the update-flow artifact schemas:
+//! the golden roster example, the intent/status/marker artifacts, and the
+//! watchdog/transition tables.
 
 use std::path::Path;
 

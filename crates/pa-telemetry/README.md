@@ -63,5 +63,4 @@ pseudonymous installation identity for Prime Agent product analytics
 ## Placement
 
 Depends on no workspace crate (sits beside pa-types at the bottom of the
-dependency graph). Consumers: pa-core, pa-daemon, pa-cli. See
-`docs/telemetry-design.md` for the full design and `ARCHITECTURE.md`.
+dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
