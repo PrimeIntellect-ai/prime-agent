@@ -780,8 +780,9 @@ impl AgentSessionEngine {
     }
 
     /// The current explicit selection (create-config flags merged over the
-    /// process fallback).
-    pub(super) fn current_selection(&self) -> EngineModelSelection {
+    /// process fallback). `pub(crate)`: the image-route acceptance probe
+    /// reads the create-config key pin alongside the registry resolution.
+    pub(crate) fn current_selection(&self) -> EngineModelSelection {
         self.selection.read().expect("model selection lock").clone()
     }
 

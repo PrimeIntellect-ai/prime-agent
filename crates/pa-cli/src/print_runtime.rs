@@ -670,6 +670,24 @@ fn headless_image_model_router(
             registry.load_private_authorization_from_cache();
             let available: Vec<pa_types::ai::Model> =
                 registry.get_available().into_iter().cloned().collect();
+            // Route acceptance uses the same resolved-auth result the arm
+            // path installs: a provider can be signed in (the status
+            // probe) while its key resolution still fails, and a route
+            // accepted on the status probe alone would arm an
+            // unauthenticated target — the image turn's content would
+            // reach the provider without credentials instead of the
+            // actionable unresolvable-reference refusal (TS resolves the
+            // auth at request time and fails the turn before any request
+            // leaves; the port refuses the reference up front).
+            let resolvable_auth: std::collections::HashSet<String> = available
+                .iter()
+                .filter(|model| {
+                    registry
+                        .get_api_key_and_headers(model, model.headers.as_ref())
+                        .ok
+                })
+                .map(|model| model.id.clone())
+                .collect();
             pa_core::models::resolve_image_model_override(
                 &pa_core::models::ImageModelRoutingInputs {
                     session_model: &session_model,
@@ -677,7 +695,7 @@ fn headless_image_model_router(
                     service_tier: None,
                     image_model_reference: image_model_reference.as_deref(),
                     available_models: &available,
-                    has_configured_auth: &|model| registry.has_configured_auth(model),
+                    has_configured_auth: &|model| resolvable_auth.contains(&model.id),
                     block_images,
                 },
             )
@@ -727,10 +745,16 @@ fn headless_image_model_router(
                     .read()
                     .expect("provider target lock")
                     .clone();
+                // The full serving target, credentials included: an ACP
+                // model switch may keep the same model id while rotating
+                // its api key or headers, and the guard must treat that
+                // slot as switched, not as the route's own.
                 let still_routed = match (&current, &routed) {
                     (Some(current), Some(routed)) => {
                         current.model.id == routed.model.id
                             && current.service_tier == routed.service_tier
+                            && current.api_key == routed.api_key
+                            && current.headers == routed.headers
                     }
                     _ => true,
                 };

@@ -296,6 +296,19 @@ impl AgentSession {
         let Some(router) = self.image_model_router.as_ref() else {
             return Ok(());
         };
+        // The prior episode never outlives this admission (TS
+        // `_clearModelOverrideWhenIdle`: an explicit selection wins over
+        // routing lingering from the last dispatched turn, and the next
+        // dispatch re-evaluates against the new selection). The settle
+        // runs only while no run streams — the winner of an admission
+        // race keeps its own live serving target — and its still-routed
+        // guard leaves a mid-idle model switch alone, so the capture this
+        // batch's decision reads is always the live session model, never
+        // one from before a switch.
+        if !self.agent.state().await.is_streaming {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+        }
         let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
         // The live thinking level (the agent state's, matching
         // `request_output_budget`'s read) rides the decision: a mid-run
@@ -310,8 +323,17 @@ impl AgentSession {
             return Ok(());
         };
         (router.swap_target)(Some(resolved));
-        let agent_model = crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
-            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+        // The conversion failure happens AFTER the swap armed the routed
+        // target: unwind the route so the failed turn does not leave it
+        // serving the next batch (the same unwind the admission race and
+        // the refusal paths perform).
+        let Some(agent_model) =
+            crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+        else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Err(anyhow::anyhow!("model conversion failed"));
+        };
         self.agent
             .set_model_override(Some(pa_agent::agent::AgentModelOverride {
                 model: agent_model,
@@ -973,12 +995,25 @@ impl AgentSession {
             }
             if options.return_after_accepted {
                 // TS `returnAfterAccepted: true` — the connection's prompt
-                // returns once the admitted turn delivers.
-                self.agent
+                // returns once the admitted turn delivers. The failure
+                // path unwinds the route exactly like the plain prompt
+                // branch below: this prompt never started, so its route
+                // must not survive (while no winner streams).
+                if let Err(error) = self
+                    .agent
                     .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
                         prompt_messages,
                     ))
-                    .await?;
+                    .await
+                {
+                    if !self.agent.state().await.is_streaming {
+                        if let Some(router) = self.image_model_router.as_ref() {
+                            (router.swap_target)(None);
+                            self.agent.set_model_override(None);
+                        }
+                    }
+                    return Err(error);
+                }
             } else if let Err(error) = self
                 .agent
                 .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))

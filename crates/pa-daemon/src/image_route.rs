@@ -64,6 +64,25 @@ impl AgentSessionEngine {
         registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
+        // Route acceptance uses the same resolved-auth result the arm
+        // installs (the create-config key pin aside): a provider can be
+        // signed in while its key resolution still fails, and a route
+        // accepted on the status probe alone would arm an
+        // unauthenticated target — the image turn's content would reach
+        // the provider without credentials instead of the actionable
+        // unresolvable-reference refusal (TS resolves the auth at request
+        // time and fails the turn before any request leaves; the port
+        // refuses the reference up front).
+        let pinned_api_key = self.current_selection().api_key.is_some();
+        let resolvable_auth: std::collections::HashSet<String> = available
+            .iter()
+            .filter(|model| {
+                registry
+                    .get_api_key_and_headers(model, model.headers.as_ref())
+                    .ok
+            })
+            .map(|model| model.id.clone())
+            .collect();
         let route = pa_core::models::resolve_image_model_override(
             &pa_core::models::ImageModelRoutingInputs {
                 session_model: &session_model,
@@ -71,7 +90,7 @@ impl AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 image_model_reference: image_model_reference.as_deref(),
                 available_models: &available,
-                has_configured_auth: &|model| registry.has_configured_auth(model),
+                has_configured_auth: &|model| pinned_api_key || resolvable_auth.contains(&model.id),
                 block_images,
             },
         )
