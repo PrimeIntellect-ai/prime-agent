@@ -15,11 +15,11 @@ use super::{
     create,
     default_server_capabilities,
     json,
-    new,
     paths,
     queue,
     response_failure,
     response_success,
+    restore_queue_snapshot,
     session_file_name,
     summary,
 };

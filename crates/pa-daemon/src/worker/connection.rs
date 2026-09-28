@@ -32,7 +32,6 @@ use super::{
     current_protocol_info,
     default_client_capabilities,
     env,
-    exit_after_close,
     input,
     json,
     normalize_client_capabilities,
@@ -44,6 +43,8 @@ use super::{
     turn,
     worker_peer_command_allowed,
     worker_server_capabilities,
+    write_frame,
+    write_frame_segments,
 };
 
 /// Result of one connection's authentication command.

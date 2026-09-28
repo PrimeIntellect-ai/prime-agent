@@ -15,10 +15,6 @@ use super::{
     WATCH_POLL_INTERVAL_MS,
     WATCH_SETTLE_GRACE_MS,
     WATCH_WAIT_SLICE_MS,
-    clone,
-    drop,
-    matches,
-    status,
     usage,
 };
 

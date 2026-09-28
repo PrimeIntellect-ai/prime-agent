@@ -18,6 +18,7 @@ use super::{
     fs,
     index,
     json,
+    new_entry_id,
     write,
 };
 

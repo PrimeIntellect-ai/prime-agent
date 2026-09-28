@@ -22,6 +22,7 @@ use super::{
     SupervisorChildSessions,
     Value,
     config,
+    execute_session_command,
     json,
     json_round_trip,
     lifecycle,

@@ -21,7 +21,6 @@ use super::{
     clients,
     json,
     load_descriptors,
-    new,
     options,
     persist_worker,
     response_failure,

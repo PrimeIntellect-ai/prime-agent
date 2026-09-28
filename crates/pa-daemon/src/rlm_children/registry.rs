@@ -16,12 +16,7 @@ use super::{
     SupervisorChildSessionsInner,
     anyhow,
     bail,
-    clone,
-    command,
-    fire_settle_hook,
     json,
-    matches,
-    new,
     registry,
     usage,
 };

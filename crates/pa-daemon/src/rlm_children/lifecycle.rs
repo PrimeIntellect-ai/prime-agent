@@ -29,21 +29,13 @@ use super::{
     WATCH_SETTLE_GRACE_MS,
     WATCH_WAIT_SLICE_MS,
     anyhow,
-    clone,
-    command,
     compact_rlm_text,
     create_rlm_child_terminal_notice,
-    entry,
-    fire_settle_hook,
     json,
     lifecycle,
-    matches,
-    new,
     now_ms,
     registry,
-    rlm_max_depth,
     usage,
-    wire_marker,
 };
 
 /// Parsed ids of one created child session.

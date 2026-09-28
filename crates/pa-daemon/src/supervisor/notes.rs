@@ -7,7 +7,6 @@ use super::{
     Value,
     adoption,
     clients,
-    new,
     notes,
     options,
     paths,
