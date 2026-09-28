@@ -500,6 +500,10 @@ impl Supervisor {
                 );
             }
             self.rewrite_roster_session_name(session_path, &scope.name);
+            // The renamed session file can carry passive scheduled rows: the
+            // catalog snapshot's rows key off the session file (TS #2487
+            // invalidates the shared snapshot on the saved-session rename).
+            self.invalidate_passive_catalog();
             return (
                 vec![response_line(&response_success(
                     Some(command_id),
@@ -658,6 +662,10 @@ impl Supervisor {
         let result = delete_session_file(Path::new(session_path));
         let removed = result.get("ok").and_then(Value::as_bool) == Some(true);
         if removed {
+            // The deleted session file can carry passive scheduled rows: the
+            // catalog snapshot must rescan instead of serving them (TS #2487
+            // invalidates the shared snapshot on the saved-session delete).
+            self.invalidate_passive_catalog();
             let captured = tombstone_saved_session_delete_captured(
                 &self.options.agent_dir,
                 sessions_dir.as_deref().unwrap_or(&self.options.agent_dir),
