@@ -5997,21 +5997,20 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         }
         std::fs::write(&path, content).unwrap();
         let opened = pa_core::session::window::WindowedSessionStore::open(&path);
+        let window_served = opened.as_ref().is_ok_and(|window| window.is_some());
         assert_eq!(
-            opened.is_ok_and(|window| window.is_some()),
-            window_serves,
-            "goal class {name}: the window-served outcome must match the class              (the windowed classes must exercise the WINDOW path, the fallback              classes the full reader)"
+            window_served, window_serves,
+            "goal class {name}: the window-served outcome must match the class (the windowed classes must exercise the WINDOW path, the fallback classes the full reader)"
         );
         // The shared open's extraction (adopt_built_session's block):
         // the window's snapshot goal when the window serves, else the
         // loaded store's active-branch scan.
-        let shared = if let Ok(Some(window)) = opened {
-            window.goal_state().cloned()
-        } else {
-            crate::session_store::SessionFile::open(&path)
+        let shared = match opened {
+            Ok(Some(window)) => window.goal_state().cloned(),
+            _ => crate::session_store::SessionFile::open(&path)
                 .ok()
                 .as_ref()
-                .and_then(crate::goal_state_persist::goal_state_in_session_file)
+                .and_then(crate::goal_state_persist::goal_state_in_session_file),
         };
         assert_eq!(
             shared,
