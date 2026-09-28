@@ -55,6 +55,7 @@ impl LabelState {
 
 /// The full entry list as typed pa-types entries (wire-identical JSON
 /// round-trip; unknown kinds degrade to `FileEntry::Unknown`).
+#[must_use]
 pub fn file_entries(store: &SessionFile) -> Vec<FileEntry> {
     store
         .entries()
@@ -66,6 +67,7 @@ pub fn file_entries(store: &SessionFile) -> Vec<FileEntry> {
 
 /// `get_session_tree` (TS `getFlatTree`): every entry in file order with its
 /// active label, the wire `flatNodes` shape.
+#[must_use]
 pub fn flat_tree(store: &SessionFile) -> Vec<Value> {
     let labels = LabelState::from_entries(store.entries());
     store
@@ -91,6 +93,7 @@ pub fn flat_tree(store: &SessionFile) -> Vec<Value> {
 
 /// `get_user_messages_for_forking`: user messages with their text, in file
 /// order (TS `getUserMessagesForForking`).
+#[must_use]
 pub fn user_messages_for_forking(store: &SessionFile) -> Vec<Value> {
     store
         .entries()
@@ -218,6 +221,7 @@ impl SessionFile {
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.
+    #[must_use]
     pub fn branch_file_entries(&self) -> Vec<FileEntry> {
         self.branch()
             .iter()
@@ -390,6 +394,7 @@ fn parent_session_of(store: &SessionFile) -> Option<&str> {
 
 /// Extract the plain text of a user-message entry (TS
 /// `_extractUserMessageText` over string or text-block content).
+#[must_use]
 pub fn user_entry_text(entry: &SessionEntry) -> Option<String> {
     if entry.type_ != "message" {
         return None;
@@ -403,6 +408,7 @@ pub fn user_entry_text(entry: &SessionEntry) -> Option<String> {
 
 /// The typed-entry form of one store entry (None when it does not
 /// round-trip; unknown kinds still parse as `FileEntry::Unknown`).
+#[must_use]
 pub fn entry_as_file_entry(entry: &SessionEntry) -> Option<FileEntry> {
     serde_json::to_value(entry)
         .ok()
@@ -411,6 +417,7 @@ pub fn entry_as_file_entry(entry: &SessionEntry) -> Option<FileEntry> {
 
 /// The serialized wire form of one store entry (`set_session_entry_label`
 /// responses and the flat-tree node `entry` field).
+#[must_use]
 pub fn entry_json(entry: &SessionEntry) -> Value {
     serde_json::to_value(entry).unwrap_or(Value::Null)
 }

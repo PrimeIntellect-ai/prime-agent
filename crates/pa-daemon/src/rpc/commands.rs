@@ -496,6 +496,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
 /// `compaction_start {type, reason, customInstructions?}` and
 /// `compaction_end {type, reason, result?, aborted, willRetry,
 /// customInstructions?}`.
+#[must_use]
 pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&Value>) -> Value {
     if kind == "compaction_start" {
         let mut frame = json!({ "type": kind, "reason": "requested" });

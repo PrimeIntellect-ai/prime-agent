@@ -47,6 +47,7 @@ impl Eq for SessionUsageSummary {}
 
 /// TS `sessionUsageSummaryFrom`: `None` — an absent wire field — when the
 /// session recorded no billable work at all.
+#[must_use]
 pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> {
     let input_tokens = usage
         .input
@@ -224,6 +225,7 @@ impl UsageScan {
     /// The totals behind [`summary`](Self::summary): `own` subtracts the
     /// attributed child spend, `total` keeps it (the deletion capture reads
     /// both from the child's frozen file).
+    #[must_use]
     pub fn totals(&self) -> SessionUsageTotals {
         let mut total = Usage::default();
         for (_, usage) in &self.assistant_usage_by_id.entries {
@@ -238,6 +240,7 @@ impl UsageScan {
     /// TS `snapshotSessionInfo`'s total: the assistant aggregates plus the
     /// summarization calls, minus every attributed child block (clamped
     /// at zero to absorb attribution drift).
+    #[must_use]
     pub fn summary(&self) -> Option<SessionUsageSummary> {
         session_usage_summary_from(&self.totals().own)
     }
@@ -324,6 +327,7 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
 /// Whole-file own usage (the saved-row summary): the worker's live
 /// own-usage summary reads this, so live rows and saved rows never
 /// disagree.
+#[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
 }
@@ -331,6 +335,7 @@ pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
 /// Whole-file own + total usage (the deletion capture reads both from the
 /// child's frozen file: `own` for the child's own row, `total` for the
 /// spend the parent's attribution carries).
+#[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
 }

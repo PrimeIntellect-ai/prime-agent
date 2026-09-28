@@ -1,7 +1,37 @@
 //! The worker's client-visible surface: summaries, snapshots, the
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
-use super::*;
+use super::{
+    AgentConnectionState,
+    Arc,
+    AtomicU64,
+    DaemonOutbound,
+    DaemonSessionClosedReason,
+    Duration,
+    Map,
+    Mutex,
+    Ordering,
+    Result,
+    SessionActionSnapshot,
+    SessionEngine,
+    SessionFile,
+    Value,
+    VecDeque,
+    Worker,
+    broadcast,
+    config,
+    create_daemon_event_meta,
+    effective_service_tier,
+    env,
+    is_rlm_child_status_item,
+    json,
+    lifecycle,
+    new,
+    queue,
+    summary,
+    supports_fast_mode,
+    turn,
+};
 
 use crate::types::SessionSummary;
 

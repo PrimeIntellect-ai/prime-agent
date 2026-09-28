@@ -107,6 +107,7 @@ struct Identity {
 /// Returns `None` when the worker has no supervisor socket (a standalone
 /// worker run directly by a test or user); such a worker has nobody to
 /// register with.
+#[must_use]
 pub fn start(config: &WorkerConfig) -> Option<RegistrationHandle> {
     if config.supervisor_socket_path.as_os_str().is_empty() {
         return None;
@@ -245,7 +246,7 @@ impl RegistrationTask {
             socket_path: self.identity.socket_path.clone(),
             worker_instance_id: self.identity.worker_instance_id.clone(),
             token: self.identity.token.clone(),
-            pid: std::process::id() as u64,
+            pid: u64::from(std::process::id()),
             rest: Map::default(),
         };
         let envelope = json!({

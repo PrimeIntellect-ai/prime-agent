@@ -354,7 +354,7 @@ fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
             let rest = line.strip_prefix("compaction-trace: ")?;
             let value: Value = serde_json::from_str(rest).ok()?;
             let phase = value.get("phase")?.as_str()?.to_string();
-            let elapsed = value.get("elapsedMicros")?.as_u64()? as u128;
+            let elapsed = u128::from(value.get("elapsedMicros")?.as_u64()?);
             let detail = value.get("detail").cloned().unwrap_or(Value::Null);
             Some((phase, elapsed, detail))
         })

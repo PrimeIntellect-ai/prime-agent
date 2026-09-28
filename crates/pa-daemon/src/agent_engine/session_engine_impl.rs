@@ -3,7 +3,34 @@
 //! the turn state machine, and the export/telemetry reads - as one
 //! impl block (a trait impl is one block per type; it moved whole).
 
-use super::*;
+use super::{
+    AgentSessionEngine,
+    Arc,
+    BranchSummaryOutcome,
+    BranchSummaryRequest,
+    BranchSummaryRun,
+    CompactionOutcome,
+    CompactionRequest,
+    CompactionRun,
+    DEFAULT_RLM_MAX_DEPTH,
+    EngineEvent,
+    EngineModelSelection,
+    ParentIdentity,
+    PromptRequest,
+    ProviderTarget,
+    SessionEngine,
+    SideQuestionOutcome,
+    SideQuestionRequest,
+    SupervisorChildSessions,
+    TurnPrompt,
+    Value,
+    config,
+    json,
+    map_thinking_level,
+    model,
+    persisted_rlm_max_depth,
+    turn,
+};
 
 impl SessionEngine for AgentSessionEngine {
     /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws

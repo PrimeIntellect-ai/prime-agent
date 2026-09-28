@@ -1,6 +1,25 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
-use super::*;
+use super::{
+    AUTONOMOUS_QUEUE_KEY,
+    Arc,
+    Duration,
+    Mutex,
+    Notify,
+    Result,
+    Value,
+    VecDeque,
+    WorkerRecoveryJournal,
+    broadcast,
+    commands,
+    input,
+    json,
+    new,
+    oneshot,
+    paths,
+    queue,
+    turn,
+};
 
 /// Queue delivery lanes (port of the session action store's two deliveries).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,6 +784,6 @@ fn is_bash_completion_notice_for(
         return false;
     }
     let details = row.get("details").unwrap_or(&Value::Null);
-    details.get("pid").and_then(Value::as_u64) == Some(notice.pid as u64)
+    details.get("pid").and_then(Value::as_u64) == Some(u64::from(notice.pid))
         && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
 }

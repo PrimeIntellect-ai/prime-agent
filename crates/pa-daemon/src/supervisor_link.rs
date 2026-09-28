@@ -89,11 +89,13 @@ pub struct SupervisorLink {
 }
 
 impl SupervisorLink {
+    #[must_use]
     pub fn new(socket_path: PathBuf) -> Self {
         Self { socket_path }
     }
 
     /// The supervisor socket this link dials.
+    #[must_use]
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }

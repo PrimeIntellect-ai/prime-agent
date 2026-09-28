@@ -28,6 +28,7 @@ impl From<Value> for ResponseData {
 /// A success response in the TS key order (`id`, `type`, `command`,
 /// `success`, `data`): `id` and `data` are omitted when absent, exactly
 /// like the TS object literals under `JSON.stringify`.
+#[must_use]
 pub fn success(id: Option<&Value>, command: &str, data: ResponseData) -> Value {
     let mut object = Map::new();
     if let Some(id) = id {
@@ -44,6 +45,7 @@ pub fn success(id: Option<&Value>, command: &str, data: ResponseData) -> Value {
 
 /// An error response: `id` echoed when the command carried one, the
 /// TS error text under `error`.
+#[must_use]
 pub fn error(id: Option<&Value>, command: &str, message: &str) -> Value {
     let mut object = Map::new();
     if let Some(id) = id {
@@ -79,6 +81,7 @@ pub enum ParsedLine {
 
 /// Parse one stdin line the way `runRpcModeWithConnectionInternal`'s
 /// `handleInputLine` does.
+#[must_use]
 pub fn parse_line(line: &str) -> ParsedLine {
     let trimmed = line.trim();
     let parsed: Value = match serde_json::from_str(trimmed) {

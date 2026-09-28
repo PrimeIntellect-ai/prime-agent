@@ -1,7 +1,37 @@
 //! The saved-session surfaces: the `list`/`list_saved_sessions`/`create`
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
-use super::*;
+use super::{
+    Arc,
+    DaemonCommand,
+    DaemonResponse,
+    DaemonSessionLifecycle,
+    NameScope,
+    Outbound,
+    Path,
+    PathBuf,
+    ResidentWorker,
+    Result,
+    RouteAdmission,
+    Supervisor,
+    Value,
+    anyhow,
+    bail,
+    clients,
+    json,
+    list_sessions,
+    mpsc,
+    name_unavailable_error,
+    new,
+    options,
+    paths,
+    reservation_key,
+    response_failure,
+    response_line,
+    response_success,
+    sessions,
+    subscribers,
+};
 
 /// One spawn-name reservation held across a fresh-launch create (TS
 /// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the

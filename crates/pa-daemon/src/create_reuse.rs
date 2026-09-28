@@ -577,7 +577,7 @@ mod tests {
     async fn the_spawned_identity_keeps_a_live_holder_alive() {
         let pid = std::process::id();
         let start_id = crate::lease::get_process_start_id(pid);
-        let resident = resident_with_identity(pid as u64, start_id.as_deref());
+        let resident = resident_with_identity(u64::from(pid), start_id.as_deref());
         assert!(resident_process_alive(&resident).await);
     }
 
@@ -587,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn a_recycled_pid_counts_as_dead() {
         let pid = std::process::id();
-        let resident = resident_with_identity(pid as u64, Some("1/1"));
+        let resident = resident_with_identity(u64::from(pid), Some("1/1"));
         assert!(!resident_process_alive(&resident).await);
     }
 
@@ -596,7 +596,7 @@ mod tests {
     #[tokio::test]
     async fn an_unverifiable_identity_counts_as_alive() {
         let pid = std::process::id();
-        let resident = resident_with_identity(pid as u64, None);
+        let resident = resident_with_identity(u64::from(pid), None);
         assert!(resident_process_alive(&resident).await);
     }
 }

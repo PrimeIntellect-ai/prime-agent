@@ -1,6 +1,20 @@
 //! The supervisor's operator-note surface: the daemon-event and session-channel
 //! notes, the rotating log line, and the spawn-ledger assembly.
-use super::*;
+use super::{
+    Arc,
+    Result,
+    Supervisor,
+    Value,
+    adoption,
+    clients,
+    new,
+    notes,
+    options,
+    paths,
+    sessions,
+    supervision,
+    util,
+};
 
 impl Supervisor {
     /// Emit the `daemon event` adoption signal for a session-archive sweep

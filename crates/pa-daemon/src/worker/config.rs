@@ -1,6 +1,18 @@
 //! The worker's spawn configuration: `WorkerConfig`, read from the
 //! supervisor-provided environment.
-use super::*;
+use super::{
+    WORKER_ACTIVE_SESSION_ID_ENV,
+    WORKER_INSTANCE_ID_ENV,
+    WORKER_RECOVERY_JOURNAL_ENV,
+    WORKER_SCRIPT_ENV,
+    WORKER_SOCKET_ENV,
+    WORKER_SUPERVISOR_SOCKET_ENV,
+    WORKER_TELEMETRY_DISABLED_ENV,
+    WORKER_TOKEN_ENV,
+    config,
+    create,
+    env,
+};
 
 use std::path::PathBuf;
 

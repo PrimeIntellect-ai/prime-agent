@@ -171,6 +171,7 @@ pub enum EnvelopeParseError {
 }
 
 impl EnvelopeParseError {
+    #[must_use]
     pub fn is_unknown_command(&self) -> bool {
         matches!(self, EnvelopeParseError::UnknownCommand(_))
     }
@@ -271,6 +272,7 @@ fn parse_daemon_command_value(
 }
 
 /// Current protocol identity for this build.
+#[must_use]
 pub fn current_protocol_info() -> DaemonProtocolInfo {
     DaemonProtocolInfo {
         name: DAEMON_PROTOCOL_NAME.to_string(),
@@ -279,6 +281,7 @@ pub fn current_protocol_info() -> DaemonProtocolInfo {
 }
 
 /// TS `normalizeClientCapabilities`: filter against the supported set.
+#[must_use]
 pub fn normalize_client_capabilities(capabilities: &[String]) -> Vec<String> {
     capabilities
         .iter()
@@ -287,10 +290,12 @@ pub fn normalize_client_capabilities(capabilities: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[must_use]
 pub fn default_client_capabilities() -> Vec<String> {
     vec!["attach_snapshot".to_string(), "event_sequence".to_string()]
 }
 
+#[must_use]
 pub fn supported_client_capabilities() -> &'static [&'static str] {
     &[
         "attach_snapshot",
@@ -359,6 +364,7 @@ pub fn parse_supervisor_command_line(
 
 /// `proc:<start_time>` identity of a process (shared platform contract).
 /// `None` when the platform has no procfs identity.
+#[must_use]
 pub fn process_start_id(pid: u32) -> Option<String> {
     pa_types::platform::process::process_start_id(pid)
 }
@@ -385,6 +391,7 @@ pub fn create_daemon_event_meta(
 }
 
 /// Port of `createDaemonReplayInfo`.
+#[must_use]
 pub fn create_daemon_replay_info(
     resume_cursor: Option<&DaemonResumeCursor>,
     last_event_sequence: DaemonEventSequence,
@@ -500,6 +507,7 @@ pub fn response_failure(
 /// `error`/`errorInfo`. `type` is inserted at its TS position, not appended:
 /// the JSON map preserves insertion order (the workspace's `serde_json`
 /// runs with `preserve_order`), so a trailing insert would emit the tag last.
+#[must_use]
 pub fn response_line(response: &DaemonResponse) -> Value {
     let mut obj = serde_json::Map::new();
     if let Some(id) = &response.id {
@@ -540,6 +548,7 @@ pub fn response_line(response: &DaemonResponse) -> Value {
 /// response line per command; at MB-class payloads (attach snapshots,
 /// `get_messages` histories) the clone dominated the response path's
 /// transient allocations.
+#[must_use]
 pub fn response_line_bytes(response: &DaemonResponse) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
     if write_response_line(&mut buf, response).is_err() {
@@ -583,6 +592,7 @@ fn write_response_line(buf: &mut Vec<u8>, response: &DaemonResponse) -> serde_js
 }
 
 /// Session selector carried by a command, when it has one.
+#[must_use]
 pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
     match command {
         DaemonCommand::GetDirectWorkerTransport {
@@ -915,6 +925,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
     }
 }
 
+#[must_use]
 pub fn command_type_name(command: &DaemonCommand) -> &'static str {
     match command {
         DaemonCommand::List { .. } => "list",

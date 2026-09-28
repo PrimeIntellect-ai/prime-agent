@@ -2,7 +2,36 @@
 //! build/adopt/retire cycle, the closed-state markers, the skill
 //! expansion and session-command funnels, and the kernel host
 //! wiring the session build installs (moved with its concern).
-use super::*;
+use super::{
+    AgentEngineConfig,
+    AgentSessionEngine,
+    Arc,
+    CoreSessionEngine,
+    EngineModelSelection,
+    HostRequestHandlers,
+    LinkAgentMessageController,
+    LinkAgentObserveController,
+    Model,
+    OverflowRecovery,
+    ProducerUsageSink,
+    ProviderTarget,
+    QuotaParkState,
+    SessionCommandExecution,
+    SessionCommandParams,
+    SessionEngineConfig,
+    SupervisorChildSessions,
+    Value,
+    config,
+    json,
+    json_round_trip,
+    lifecycle,
+    map_thinking_level,
+    model,
+    register_agent_message_host_handlers,
+    register_agent_observe_host_handlers,
+    switchable_stream_fn,
+    turn,
+};
 
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection

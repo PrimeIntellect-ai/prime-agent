@@ -829,6 +829,7 @@ pub trait SessionEngine: Send + Sync {
 /// The resource snapshot for a session without a resource surface (the TS
 /// loader shape over empty lists): every category present, every list
 /// empty.
+#[must_use]
 pub fn empty_resource_snapshot() -> Value {
     json!({
         "contextFiles": [],
@@ -956,6 +957,7 @@ pub const SIDE_QUESTION_STATUS_CANCELLED: &str = "cancelled";
 pub const SIDE_QUESTION_STATUS_ERROR: &str = "error";
 
 /// Wire form of one side-question event (TS `SideQuestionEvent`).
+#[must_use]
 pub fn side_question_event_value(
     request: &SideQuestionRequest,
     answer: &str,
@@ -976,6 +978,7 @@ pub fn side_question_event_value(
 
 impl SideQuestionOutcome {
     /// The TS wire status of this outcome.
+    #[must_use]
     pub fn status_str(&self) -> &'static str {
         match self {
             SideQuestionOutcome::Complete { .. } => SIDE_QUESTION_STATUS_COMPLETE,
@@ -985,6 +988,7 @@ impl SideQuestionOutcome {
     }
 
     /// The answer text carried by the final event (partial on abort/failure).
+    #[must_use]
     pub fn answer(&self) -> &str {
         match self {
             SideQuestionOutcome::Complete { answer }
@@ -994,6 +998,7 @@ impl SideQuestionOutcome {
     }
 
     /// The error message carried by the final event, when the run failed.
+    #[must_use]
     pub fn error_message(&self) -> Option<&str> {
         match self {
             SideQuestionOutcome::Failed { error, .. } => Some(error.as_str()),

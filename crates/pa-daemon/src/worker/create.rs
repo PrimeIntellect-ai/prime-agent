@@ -1,6 +1,28 @@
 //! Session creation and reuse on the worker: the create command's
 //! construction of the live session.
-use super::*;
+use super::{
+    Arc,
+    EngineModelSelection,
+    Result,
+    RlmSessionIdentity,
+    SessionEngine,
+    SessionFile,
+    VecDeque,
+    Worker,
+    anyhow,
+    config,
+    connection,
+    create,
+    default_server_capabilities,
+    json,
+    new,
+    paths,
+    queue,
+    response_failure,
+    response_success,
+    session_file_name,
+    summary,
+};
 
 use serde_json::Value;
 

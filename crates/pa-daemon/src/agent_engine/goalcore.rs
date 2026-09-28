@@ -2,7 +2,16 @@
 //! writes (per-session custom entry + global settings), the goal-runtime
 //! mirror adopted onto each built session, and the `goal_update` emission
 //! family (moved with their concern).
-use super::*;
+use super::{
+    AgentSessionEngine,
+    CoreSessionEngine,
+    EngineEvent,
+    GoalRuntimeHandles,
+    Value,
+    config,
+    json,
+    turn,
+};
 
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` custom entry (TS

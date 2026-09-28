@@ -126,6 +126,7 @@ pub fn worker_launch_env(
 /// Panics only on an internal invariant violation: the freshly built
 /// payload not being a JSON object (the `json!` literal always is, so the
 /// panic is not reachable in practice).
+#[must_use]
 pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
     let mut payload = json!({ "type": "create" });
     let object = payload.as_object_mut().expect("object literal");
@@ -179,6 +180,7 @@ pub fn validate_descriptor(
     }
 }
 
+#[must_use]
 pub fn descriptor_lifecycle_str(descriptor: &WorkerDescriptor) -> String {
     serde_json::to_value(descriptor.lifecycle)
         .ok()
@@ -202,6 +204,7 @@ pub struct PersistedSupervisorConfig {
     pub default_session_dir: Option<String>,
 }
 
+#[must_use]
 pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
     agent_dir
         .join("daemon-workers")
@@ -249,6 +252,7 @@ pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> 
     write_file_atomic(path, &content)
 }
 
+#[must_use]
 pub fn load_descriptors(
     dir: &Path,
     supervisor_socket_path: &Path,
@@ -280,6 +284,7 @@ pub fn load_descriptors(
 }
 
 /// Read persisted supervisor config when it belongs to this socket.
+#[must_use]
 pub fn load_supervisor_config(
     path: &Path,
     socket_path: &Path,

@@ -21,6 +21,7 @@ const ELLIPSIS: &str = "...";
 /// credential-backed list `rlm.find_models` searches (the worker-style
 /// registry construction: the private-authorization disk cache is adopted,
 /// so entitled `internal/*` models resolve for spawned children).
+#[must_use]
 pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
     let registry = crate::state_getters::worker_model_registry(agent_dir);
     registry
@@ -189,12 +190,14 @@ fn model_unavailable_error(
 }
 
 /// Collapse whitespace and cap at the roster limit (TS `compactRlmText`).
+#[must_use]
 pub fn compact_rlm_text(text: &str) -> String {
     let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     cap_text(&compact, ANSWER_PREVIEW_MAX_CHARS)
 }
 
 /// One-line task label: collapsed prompt, capped for roster rows.
+#[must_use]
 pub fn rlm_child_label(prompt: &str) -> String {
     let collapsed: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let collapsed = if collapsed.is_empty() {

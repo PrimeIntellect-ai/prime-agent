@@ -11,6 +11,7 @@ use serde_json::Value;
 pub type AgentMessage = Value;
 
 /// Extract the text of a message content field (string or content blocks).
+#[must_use]
 pub fn message_text(message: &Value) -> String {
     let Some(content) = message.get("content") else {
         return String::new();
@@ -18,6 +19,7 @@ pub fn message_text(message: &Value) -> String {
     content_to_text(content)
 }
 
+#[must_use]
 pub fn content_to_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -176,6 +178,7 @@ pub struct RlmChildStatusIndices {
 impl RlmChildStatusIndices {
     /// Whether no lane item is marked (the wire omits the rider then, so
     /// a notice-free projection serializes byte-identical to TS).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.steering.is_empty() && self.follow_up.is_empty()
     }

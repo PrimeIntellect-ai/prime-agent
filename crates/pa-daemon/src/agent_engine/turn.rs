@@ -2,7 +2,39 @@
 //! machine - the model-turn runner, the turn boundary, the turn loop, the
 //! once-runner with its retry/failover and quota-park machinery, the
 //! queue-mode mapping, and the session-agent constructor.
-use super::*;
+use super::{
+    AbortController,
+    AgentSessionEngine,
+    Arc,
+    AutoCompactionRun,
+    BoundaryRun,
+    DaemonAllowlist,
+    EngineEvent,
+    GoalBoundary,
+    Model,
+    OverflowArmRun,
+    PromptRequest,
+    ProviderTarget,
+    QUOTA_WAKE_MAX_RETRIES,
+    QUOTA_WAKE_RETRY_DELAY_MS,
+    QuotaParkState,
+    StopReason,
+    TurnAdmission,
+    TurnOnce,
+    TurnPrompt,
+    TurnResult,
+    Value,
+    aborted_message,
+    artifacts,
+    config,
+    drop_trailing_assistant,
+    json,
+    json_round_trip,
+    map_thinking_level,
+    model,
+    retry_event_to_engine_event,
+    turn,
+};
 
 impl AgentSessionEngine {
     /// Map a wire/settings queue mode ("all"/"one-at-a-time") onto the

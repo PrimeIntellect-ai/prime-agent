@@ -93,6 +93,7 @@ fn roster_session_info(path: &Path) -> Option<SessionInfo> {
 /// a measured parallel fold loses to cross-core cacheline/futex costs on a
 /// loaded multi-core box (425ms vs 137ms over 1412 files), so the fold stays
 /// the loop the scan replaced.
+#[must_use]
 pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
     list_sessions_with(session_dir, |_, _, _| true)
 }

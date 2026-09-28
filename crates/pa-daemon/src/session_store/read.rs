@@ -2,7 +2,25 @@
 //! streamed and windowed opens, the bounded header-only readers, the
 //! file-layout helpers, and the in-memory create.
 
-use super::*;
+use super::{
+    HashMap,
+    Map,
+    Path,
+    PathBuf,
+    Read,
+    Result,
+    SessionEntry,
+    SessionFile,
+    SessionHeader,
+    SessionWindow,
+    Value,
+    anyhow,
+    fold_child_usage_attributions,
+    fs,
+    index,
+    message_text,
+    read,
+};
 
 const CURRENT_SESSION_VERSION: u32 = 3;
 
@@ -10,10 +28,12 @@ fn new_session_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+#[must_use]
 pub fn session_file_name(session_id: &str) -> String {
     format!("{session_id}.jsonl")
 }
 
+#[must_use]
 pub fn parse_session_entries(content: &str) -> Vec<Value> {
     content
         .lines()
@@ -99,6 +119,7 @@ fn strip_line_return(line: &[u8]) -> Vec<u8> {
 /// precedent: judge a file by its header line, not a full-file read).
 /// `None` also covers an over-long first line: the bounded read refuses to
 /// judge a truncated one.
+#[must_use]
 pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
     let line = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES)?;
     let text = std::str::from_utf8(&line).ok()?;
@@ -106,6 +127,7 @@ pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
 }
 
 /// Read the first line of a session file and parse it as a header.
+#[must_use]
 pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
     let file = fs::File::open(path).ok()?;
     let mut first = String::new();
@@ -115,6 +137,7 @@ pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
 
 /// A session file is valid when its first line is a `session` header with an
 /// id, judged on the bounded header read.
+#[must_use]
 pub fn is_valid_session_file(path: &Path) -> bool {
     read_session_header_bounded(path).is_some_and(|header| !header.id.is_empty())
 }
@@ -284,7 +307,7 @@ impl SessionFile {
             timestamp: crate::util::now_iso(),
             cwd: cwd.to_string(),
             parent_session: parent_session.map(str::to_string),
-            rlm_depth: Some(rlm_depth as u64),
+            rlm_depth: Some(u64::from(rlm_depth)),
             git: None,
             rest: Map::default(),
         };

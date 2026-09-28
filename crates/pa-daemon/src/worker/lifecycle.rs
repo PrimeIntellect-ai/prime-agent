@@ -1,6 +1,32 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
-use super::*;
+use super::{
+    Arc,
+    DaemonResponse,
+    Duration,
+    PathBuf,
+    QueuePriority,
+    Result,
+    RlmSessionIdentity,
+    SessionFile,
+    Value,
+    Worker,
+    anyhow,
+    config,
+    connection,
+    create,
+    env,
+    input,
+    json,
+    lifecycle,
+    new,
+    paths,
+    queue,
+    response_failure,
+    response_success,
+    summary,
+    turn,
+};
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a

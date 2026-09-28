@@ -197,7 +197,7 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
             .join("logs")
             .join(format!("worker-old{index:03}.stderr.log"));
         std::fs::write(&path, "leftover from an earlier daemon run\n").expect("leftover log");
-        let mtime = filetime::FileTime::from_unix_time(index as i64, 0);
+        let mtime = filetime::FileTime::from_unix_time(i64::from(index), 0);
         filetime::set_file_mtime(&path, mtime).expect("set mtime");
     }
     // PA_DAEMON_DEBUG makes the real worker narrate its boot on stderr

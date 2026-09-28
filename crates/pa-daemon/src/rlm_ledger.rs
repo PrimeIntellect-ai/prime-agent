@@ -46,6 +46,7 @@ pub enum RlmLedgerDeleteReason {
 
 impl RlmLedgerDeleteReason {
     /// The wire names (`user`, `parent-teardown`, `revoked`, `gc`).
+    #[must_use]
     pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "user" => Some(Self::User),
@@ -174,7 +175,7 @@ fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
             let Some(depth) = record.get("depth").and_then(Value::as_u64) else {
                 bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             };
-            if depth < 1 || depth > u32::MAX as u64 {
+            if depth < 1 || depth > u64::from(u32::MAX) {
                 bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             }
             Ok(Some(LedgerRecord::Spawn {
@@ -395,6 +396,7 @@ fn canonicalize_dir(dir: &Path) -> PathBuf {
 
 /// Ledger path for one sessions dir (TS `rlmLedgerPath`): a 16-hex sha256 of
 /// the canonical sessions dir under `<agent-dir>/rlm-ledger/`.
+#[must_use]
 pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
     let canonical = canonicalize_dir(sessions_dir);
     let hash = crate::paths::hash_key(&canonical.to_string_lossy(), 16);
@@ -1253,6 +1255,7 @@ pub struct RlmSubagentDisplayEntry {
 
 /// Read one child's display entry; `None` when absent, unreadable, or not
 /// describing the requested child (a stale file from a re-used session dir).
+#[must_use]
 pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagentDisplayEntry> {
     let content = fs::read_to_string(child_session_dir.join("rlm-subagent.json")).ok()?;
     let entry: RlmSubagentDisplayEntry = serde_json::from_str(&content).ok()?;

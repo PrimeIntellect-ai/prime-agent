@@ -1,7 +1,50 @@
 //! The child-lifecycle concern: session creation (create/launch), the
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
-use super::*;
+use super::{
+    Arc,
+    CREATE_TIMEOUT_MS,
+    ChildCloseReason,
+    ChildRecord,
+    DaemonCommand,
+    DaemonSessionLifecycle,
+    Duration,
+    IDLE_WAIT_GRACE_MS,
+    KILL_TIMEOUT_MS,
+    Map,
+    Mutex,
+    NOTICE_DELIVERY_TIMEOUT_MS,
+    PROMPT_TIMEOUT_MS,
+    ParentIdentity,
+    Path,
+    PromptInput,
+    RUNTIME_METADATA_PROMPT_MAX,
+    Result,
+    RlmChildTerminalNotice,
+    STATE_TIMEOUT_MS,
+    SupervisorChildSessionsInner,
+    Value,
+    WATCH_MAX_UNREACHABLE_POLLS,
+    WATCH_POLL_INTERVAL_MS,
+    WATCH_SETTLE_GRACE_MS,
+    WATCH_WAIT_SLICE_MS,
+    anyhow,
+    clone,
+    command,
+    compact_rlm_text,
+    create_rlm_child_terminal_notice,
+    entry,
+    fire_settle_hook,
+    json,
+    lifecycle,
+    matches,
+    new,
+    now_ms,
+    registry,
+    rlm_max_depth,
+    usage,
+    wire_marker,
+};
 
 /// Parsed ids of one created child session.
 struct CreatedSessionIds {

@@ -51,7 +51,7 @@ pub(crate) struct WorkerSnapshot {
 pub(crate) fn supervisor_identity(generation: String) -> UpdateSupervisorIdentity {
     let pid = std::process::id();
     UpdateSupervisorIdentity {
-        pid: pid as u64,
+        pid: u64::from(pid),
         process_start_id: crate::protocol::process_start_id(pid),
         generation,
     }

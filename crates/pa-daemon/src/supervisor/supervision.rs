@@ -1,7 +1,46 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
 use super::routing::fail_unsent_request;
-use super::*;
+use super::{
+    Arc,
+    Child,
+    Command,
+    DEFAULT_PRIVATE_FRAME_LIMITS,
+    DaemonWorkerLifecycle,
+    Duration,
+    Ordering,
+    Path,
+    PathBuf,
+    PrivateFrameReader,
+    ResidentWorker,
+    Result,
+    RouteAdmission,
+    Supervisor,
+    TypedCreateRejection,
+    Value,
+    WORKER_AUTH_FLOOR_MS,
+    WorkerReply,
+    WorkerRequest,
+    adoption,
+    anyhow,
+    broadcast,
+    connect_transport,
+    create_command_payload,
+    json,
+    mpsc,
+    new,
+    options,
+    persist_worker,
+    probe_worker_socket,
+    routing,
+    run,
+    sessions,
+    socket,
+    supervision,
+    util,
+    worker_connect_deadline,
+    write_frame,
+};
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
@@ -447,7 +486,7 @@ impl Supervisor {
             // holder checks can only recognize a recycled pid when the
             // descriptor carries the start id the original holder had.
             let child_pid = child.id().unwrap_or(0);
-            descriptor.pid = child_pid as u64;
+            descriptor.pid = u64::from(child_pid);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);

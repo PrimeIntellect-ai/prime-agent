@@ -2,7 +2,7 @@
 //! the window/settings reads, the compacted message fold and its scalars,
 //! and the wire-shape message helpers.
 
-use super::*;
+use super::{Cow, MessageWindowScalars, SessionEntry, SessionFile, Value, index, json, read, view};
 
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
@@ -19,18 +19,22 @@ const CONTENT_ENTRY_TYPES: &[&str] = &[
 ];
 
 impl SessionFile {
+    #[must_use]
     pub fn entries(&self) -> &[SessionEntry] {
         &self.entries
     }
 
+    #[must_use]
     pub fn entry(&self, id: &str) -> Option<&SessionEntry> {
         self.by_id.get(id).map(|&index| &self.entries[index])
     }
 
+    #[must_use]
     pub fn leaf_id(&self) -> Option<&str> {
         self.leaf_id.as_deref()
     }
 
+    #[must_use]
     pub fn session_id(&self) -> &str {
         &self.header.id
     }
@@ -38,6 +42,7 @@ impl SessionFile {
     /// The header's RLM depth (TS `sessionManager.getHeader()?.rlmDepth`):
     /// a resumed session inherits its persisted depth when the create
     /// payload does not carry one (TS `config.rlmDepth ?? header.rlmDepth`).
+    #[must_use]
     pub fn rlm_depth(&self) -> Option<u32> {
         self.header
             .rlm_depth
@@ -47,6 +52,7 @@ impl SessionFile {
     /// Walk the leaf-to-root entry path (the active branch). A corrupt
     /// file can hold a parent cycle; the walk must terminate anyway (the
     /// same guard `build_session_context` has).
+    #[must_use]
     pub fn branch(&self) -> Vec<&SessionEntry> {
         let mut path = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -83,6 +89,7 @@ impl SessionFile {
     /// serves the cumulative usage accounting (`get_session_stats`, the
     /// /context totals). Forks resolve by parent id; only a missing
     /// parent bridges.
+    #[must_use]
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
         self.branch_bridged_positions()
             .into_iter()
@@ -249,6 +256,7 @@ impl SessionFile {
     /// retained messages from `firstKeptEntryId`, then everything appended
     /// after the compaction. Without a compaction this is the plain
     /// message list.
+    #[must_use]
     pub fn messages(&self) -> Vec<Value> {
         let mut messages = Vec::new();
         self.walk_message_values(|message| messages.push(message.into_owned()));
@@ -262,6 +270,7 @@ impl SessionFile {
     /// message count — without materializing the transcript. One borrowed
     /// walk of the same sequence [`Self::messages`] folds, so the scan can
     /// never disagree with the materialized fold.
+    #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
         self.walk_message_values(|message| {
@@ -417,6 +426,7 @@ impl SessionFile {
             .map(str::to_string)
     }
 
+    #[must_use]
     pub fn message_count(&self) -> usize {
         match &self.window {
             Some(window) => {
@@ -450,6 +460,7 @@ impl SessionFile {
     /// True when the session holds user-meaningful persisted content (port of
     /// `hasUserContent`): the default model/thinking/service-tier creation
     /// prefix is skipped.
+    #[must_use]
     pub fn has_user_content(&self) -> bool {
         let content: Vec<&SessionEntry> = self
             .entries
