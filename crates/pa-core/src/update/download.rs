@@ -774,6 +774,8 @@ mod tests {
 
     /// A release archive whose `prime-agent` is an executable script
     /// reporting a fixed version (the probe path a real binary takes).
+    /// Unix only: its callers are the unix symlink/exec probe tests.
+    #[cfg(unix)]
     fn fixture_versioned_archive(dir: &Path, name: &str, version: &str) -> (PathBuf, String) {
         let payload = fixture_payload(dir, "archive-staging", version);
         let archive = dir.join(name);

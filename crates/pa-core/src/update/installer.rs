@@ -429,6 +429,8 @@ mod tests {
     /// Serve `body` over one plain HTTP request (the hermetic source the
     /// funnel fetches its mock installer from): bind an ephemeral loopback
     /// socket, answer the first request, return the URL the funnel uses.
+    /// Unix only: its callers are the unix shell-installer tests.
+    #[cfg(unix)]
     fn serve(body: &'static str) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let address = listener.local_addr().expect("local address");
@@ -462,7 +464,11 @@ mod tests {
     /// installer world shares (`<home>/.prime/agent/sessions/…`), with
     /// its exact bytes snapshotted for the byte-identity assert.
     struct Preserve {
+        // The byte-identity readers are the unix `assert_untouched`
+        // checks; on other platforms the fixture only stages the file.
+        #[cfg_attr(not(unix), allow(dead_code))]
         session_file: PathBuf,
+        #[cfg_attr(not(unix), allow(dead_code))]
         bytes: Vec<u8>,
     }
 
@@ -484,6 +490,9 @@ mod tests {
         }
 
         /// The session store must survive the update byte-identical.
+        /// Unix only: the update-flow tests that read the snapshot sit
+        /// behind the unix gate.
+        #[cfg(unix)]
         fn assert_untouched(&self) {
             let observed =
                 std::fs::read(&self.session_file).expect("session file survives the update");
@@ -497,7 +506,9 @@ mod tests {
     /// The mock installer the funnel downloads in the tests: it installs a
     /// launcher that answers a stamped `--version`, exactly the takeover's
     /// contract (the real script's own artifact download stays the
-    /// installer-takeover lane's sandbox test).
+    /// installer-takeover lane's sandbox test). Unix only: the script is
+    /// `#!/bin/sh` and its users are the unix installer tests.
+    #[cfg(unix)]
     const MOCK_INSTALLER: &str = r#"#!/bin/sh
 set -eu
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
@@ -507,7 +518,9 @@ echo "installed: 9.9.9-continuous.0123456789abcdef"
 "#;
 
     /// The pre-takeover installer: the launcher carries the legacy
-    /// `prime-agent-rust` name the probe still accepts.
+    /// `prime-agent-rust` name the probe still accepts. Unix only: same
+    /// sh-script class as [`MOCK_INSTALLER`].
+    #[cfg(unix)]
     const LEGACY_INSTALLER: &str = r#"#!/bin/sh
 set -eu
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"

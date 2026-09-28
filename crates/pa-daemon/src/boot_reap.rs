@@ -88,7 +88,9 @@ pub(crate) struct ReapTarget {
 pub(crate) enum ReapKind {
     /// A leftover session worker of a previous daemon on this socket.
     Worker,
-    /// A wedged supervisor process bound to this socket path.
+    /// A wedged supervisor process bound to this socket path. Constructed
+    /// only by the linux supervisor census.
+    #[cfg(target_os = "linux")]
     Supervisor,
 }
 
@@ -150,6 +152,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
                     "boot reap: {} pid {} (start id {:?}) - {:?}",
                     match target.kind {
                         ReapKind::Worker => "leftover worker",
+                        #[cfg(target_os = "linux")]
                         ReapKind::Supervisor => "wedged supervisor",
                     },
                     target.pid,
@@ -471,6 +474,8 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 /// what the harnesses execute). A reap target's executable must be one of
 /// these - a session's arbitrary long-running command (`python worker`, a
 /// tool server) never qualifies, whatever it inherited.
+/// Unix only: the same linux/unix callers as [`is_worker_argv`].
+#[cfg(unix)]
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
         Path::new(exe).file_name().and_then(|name| name.to_str()),
@@ -484,6 +489,8 @@ pub(crate) fn is_product_binary(exe: &str) -> bool {
 /// hazard classes this gate exists for: a session kernel, bash child, or
 /// tool server that merely INHERITED the worker env, and a user's
 /// same-socket command that happens to carry a `worker` argument.
+/// Unix only: the linux census and the unix tests are its users.
+#[cfg(unix)]
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
     argv.first().is_some_and(|exe| is_product_binary(exe))
         && argv.get(1).map(String::as_str) == Some("worker")
@@ -530,7 +537,7 @@ fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
     false
 }

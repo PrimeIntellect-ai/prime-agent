@@ -31,11 +31,15 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
 }
 
 /// Staleness after which the cleanup lock of a crashed holder is reclaimed
-/// (TS `DAEMON_SOCKET_LOCK_STALE_MS`).
+/// (TS `DAEMON_SOCKET_LOCK_STALE_MS`). Unix only: every taker of the
+/// cleanup lock sits behind the unix stale-file wall.
+#[cfg(unix)]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
 /// Live-lock retry cadence (TS `DAEMON_SOCKET_RELEASE_POLL_MS`) and cap
 /// (TS `acquireDaemonSocketPathLease`'s 600 retries): ~15s total.
+#[cfg(unix)]
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(unix)]
 const LOCK_RETRIES: u32 = 600;
 
 /// Acquire the cross-process cleanup lock (TS `acquireDaemonSocketPathLease`):
