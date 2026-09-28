@@ -941,7 +941,7 @@ elif [ -d "$old" ]; then
 fi
 echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
 
-echo "next steps: docs/RUST_QUICKSTART.md ships inside the payload"
-echo "  ${share_dir}/docs/RUST_QUICKSTART.md"
+echo "next steps: the README's Install section ships inside the payload"
+echo "  ${share_dir}/README.md"
 
 rm -rf "$dl"

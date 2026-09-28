@@ -104,7 +104,7 @@ Every contributor (human or agent) must read this before working on this repo.
 ## Adoption telemetry
 
 Every user-visible feature ships its adoption telemetry event in the same PR as the feature:
-the event name + properties are added to `docs/telemetry-events.md` (schema versioned), and a
+the event name + properties join the versioned schema (`pa-telemetry`), and a
 seam emits it from day one. Telemetry properties never carry prompt, session, or file content
 (primitives only; see `pa-telemetry`).
 
@@ -162,5 +162,4 @@ Layering rules:
 
 ## References
 
-- `docs/` contains the product docs (the Rust quickstart, the keybindings reference, the telemetry event catalog, the model-facing surface contract, request timing, and the keyboard startup probe).
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.

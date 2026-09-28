@@ -449,6 +449,20 @@ pub(crate) fn session_summary(
     }
 }
 
+/// One lane's typed-provenance indices: the parked items matching the
+/// classifier, by lane index (the rider shape both projections share).
+fn indices(
+    items: &std::collections::VecDeque<QueuedItem>,
+    classified: impl Fn(&QueuedItem) -> bool,
+) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| classified(item))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The queue snapshot for one core (TS `sessionActions`).
 pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
     // TS `queuedAgentMessagePreview`: a parked row reads the
@@ -464,21 +478,26 @@ pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
     // derive from the parked rows' injected custom rows, so the
     // classification rides the wire and a user-typed message that
     // merely looks like a notice preview never marks.
-    let rlm_child_status = |items: &std::collections::VecDeque<QueuedItem>| {
-        items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| is_rlm_child_status_item(item))
-            .map(|(index, _)| index)
-            .collect::<Vec<usize>>()
-    };
+    let rlm_child_status =
+        |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_rlm_child_status_item);
+    // The engine-minted continuations fold by their own typed
+    // provenance (the injected, queue-invisible admissions): TS's
+    // projection filters these items out entirely — Rust keeps them
+    // visible as the strip's counted row instead (operator directive
+    // 2026-09-28), so the human still sees the parked harness work.
+    let injected_prompts =
+        |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_injected_prompt_item);
     SessionActionSnapshot {
         queued_count: (core.steering.len() + core.follow_up.len()) as u32,
         steering: lane(&core.steering),
         follow_ups: lane(&core.follow_up),
-        rlm_child_status: crate::types::RlmChildStatusIndices {
+        rlm_child_status: crate::types::QueueLaneIndices {
             steering: rlm_child_status(&core.steering),
             follow_up: rlm_child_status(&core.follow_up),
+        },
+        injected_prompts: crate::types::QueueLaneIndices {
+            steering: injected_prompts(&core.steering),
+            follow_up: injected_prompts(&core.follow_up),
         },
         active: core.active_action.clone(),
     }
