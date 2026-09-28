@@ -157,6 +157,20 @@ product by design) must never be created, migrated, or deleted"
   done
 }
 
+# A unique aside/rollback slot. The namespaces can carry entries forever
+# (unstamped migrated slots are deliberately kept; pid reuse can revisit a
+# name), so a name built from $$ alone can collide — and `mv` into an
+# existing directory NESTS instead of replacing. Take the next free suffix.
+fresh_slot() { # base name without suffix
+  slot="$1.$$"
+  n=1
+  while [ -e "$slot" ]; do
+    n=$((n + 1))
+    slot="$1.$$.${n}"
+  done
+  printf '%s' "$slot"
+}
+
 case "$PREFIX" in
   /*) ;;
   *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}" ;;
@@ -493,6 +507,16 @@ ts_managed() {
   [ -f "$1/.managed" ] && [ "$(cat "$1/.managed" 2>/dev/null)" = "prime-agent-native-v1" ]
 }
 
+# The pre-takeover layout's ownership shape: the old installer always
+# published the binary beside prime-agent-runtime/ (RELEASE_ASSETS) — the
+# move AND the leftover sweep use the same rule, so a tree one path refuses
+# is never deleted by the other.
+ts_owned_old_layout() {
+  [ -x "$1/prime-agent" ] \
+    && [ -d "$1/prime-agent-runtime" ] \
+    && ! ts_managed "$1"
+}
+
 # A TS managed root elsewhere (XDG_DATA_HOME) does not block this install and
 # is left in place — only the keyword is taken over.
 if [ "$ts_managed_root" != "$share_dir" ] && [ -d "$ts_managed_root" ] && ts_managed "$ts_managed_root"; then
@@ -611,7 +635,7 @@ restore_ts_root() {
 }
 if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   preserved_to="$legacy_dir"
-  if [ -e "$preserved_to" ]; then preserved_to="${legacy_dir}.$$"; fi
+  if [ -e "$preserved_to" ]; then preserved_to="$(fresh_slot "$legacy_dir")"; fi
   guard_preserved "$preserved_to"
   mv "$share_dir" "$preserved_to" \
     || die "could not preserve the TypeScript install at ${share_dir}; nothing was deleted — resolve and re-run"
@@ -639,7 +663,7 @@ installer's managed root; move it aside and re-run"
   fi
 fi
 
-old="${PREFIX}/share/prime-agent.old.$$"
+old="$(fresh_slot "${PREFIX}/share/prime-agent.old")"
 guard_preserved "$old"
 had_share_dir=0
 had_old_layout=0
@@ -652,9 +676,7 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   # shape check is not proof of ownership, so nothing the sweep can
   # auto-delete ever rides on it. The migrated tree is PRESERVED in its
   # .old slot (the user removes it when they are done with the rollback).
-  if [ ! -x "${old_layout_dir}/prime-agent" ] \
-     || [ ! -d "${old_layout_dir}/prime-agent-runtime" ] \
-     || ts_managed "$old_layout_dir"; then
+  if ! ts_owned_old_layout "$old_layout_dir"; then
     die "refusing to move ${old_layout_dir}: it is not this installer's payload tree"
   fi
   had_old_layout=1
@@ -676,11 +698,19 @@ if ! mv "$stage" "$share_dir"; then
   die "could not publish ${share_dir}"
 fi
 # A leftover old-layout tree when a new-layout tree also existed: it is
-# superseded by the fresh publish — sweep it (shape-checked: ours is a flat
-# executable payload tree, never a TS managed root).
-if [ -d "$old_layout_dir" ] && [ -x "${old_layout_dir}/prime-agent" ] && ! ts_managed "$old_layout_dir"; then
-  rm -rf "$old_layout_dir"
-  echo "removed the superseded ${old_layout_dir} tree (its payload now lives under ${share_dir})"
+# superseded by the fresh publish. The ownership rule is EXACTLY the
+# migration's (the pre-takeover payload always shipped the binary beside
+# prime-agent-runtime/) — a tree the migration would refuse is never
+# deleted here either; it is left in place with a note instead. Best-effort:
+# the payload is already live, so an un-removable leftover warns, not dies.
+if [ -d "$old_layout_dir" ] && ts_owned_old_layout "$old_layout_dir"; then
+  if ! rm -rf "$old_layout_dir" 2>/dev/null; then
+    echo "warning: could not remove the superseded ${old_layout_dir} tree; remove it by hand"
+  else
+    echo "removed the superseded ${old_layout_dir} tree (its payload now lives under ${share_dir})"
+  fi
+elif [ -d "$old_layout_dir" ]; then
+  echo "note: ${old_layout_dir} is not this installer's payload tree; it was left in place"
 fi
 
 # --- the launcher (the takeover lives here) -----------------------------------
@@ -703,7 +733,7 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
     :   # this installer's own previous launcher (a REGULAR file — the
     :   # marker grep never opens a special file): plain replace below
   else
-    preserved_cmd_path="${bin_dir}/prime-agent.pre-takeover.$$"
+    preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.pre-takeover")"
     mv "$launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${launcher}; resolve it and re-run"
     preserved_launcher="$preserved_cmd_path"

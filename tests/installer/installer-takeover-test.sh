@@ -589,6 +589,55 @@ done
 assert_eq "case 8 the FIFO was preserved as a FIFO, not read" 1 "$fifo_preserved"
 assert_eq "case 8 the store is untouched" "$store_before_f" "$(store_snapshot "$mach8")"
 
+# ==============================================================================
+echo "== case 9: slot collisions take the next free suffix; unowned leftovers stay ==="
+mach9="$(new_machine collisions)"
+write_gh_mock "$mach9/mocks/gh"
+write_npm_mock "$mach9/mocks/npm"
+build_fixture "$mach9" "$FIXTURE_TRIPLE"
+seed_ts_native "$mach9"
+seed_store "$mach9"
+# Occupy both legacy slot names: the TS tree must go to the next free suffix.
+mkdir -p "$mach9/home/.local/share/prime-agent-legacy"
+mkdir -p "$mach9/home/.local/share/prime-agent-legacy.$$"
+store_before_c="$(store_snapshot "$mach9")"
+run_installer "$mach9"
+rcc=$?
+assert_eq "case 9 the installer completed despite occupied legacy slots" 0 "$rcc"
+legacy_slots=0
+for d in "$mach9"/home/.local/share/prime-agent-legacy*; do
+  [ -e "$d/.managed" ] && legacy_slots=$((legacy_slots + 1))
+done
+assert_eq "case 9 the TS tree landed in a fresh legacy slot" 1 "$legacy_slots"
+# The two pre-occupied names are untouched (still empty dirs): the TS tree
+# went to a fresh suffix, nothing was overwritten or nested into them.
+assert_eq "case 9 no occupied slot was overwritten or nested" "yes" \
+  "$([ -d "$mach9/home/.local/share/prime-agent-legacy" ] \
+      && [ -d "$mach9/home/.local/share/prime-agent-legacy.$$" ] \
+      && [ -z "$(ls -A "$mach9/home/.local/share/prime-agent-legacy.$$")" ] \
+      && [ -z "$(ls -A "$mach9/home/.local/share/prime-agent-legacy")" ] \
+      && echo yes || echo no)"
+# An old-layout tree the migration/sweep would refuse (no prime-agent-runtime)
+# is left in place, never deleted.
+mkdir -p "$mach9/home/.local/share/prime-agent-rust"
+printf '#!/bin/sh\necho not-ours\n' > "$mach9/home/.local/share/prime-agent-rust/prime-agent"
+chmod 0755 "$mach9/home/.local/share/prime-agent-rust/prime-agent"
+printf 'leave me\n' > "$mach9/home/.local/share/prime-agent-rust/keep.txt"
+run_installer "$mach9" --update
+rcd=$?
+assert_eq "case 9 the --update re-run completed with the leftover present" 0 "$rcd"
+assert_eq "case 9 the unowned old-layout tree was left in place" "yes" \
+  "$([ -f "$mach9/home/.local/share/prime-agent-rust/keep.txt" ] && echo yes || echo no)"
+assert_contains "case 9 the install notes the refused leftover" "$mach9/install.log" "left in place"
+# Every rollback slot keeps the payload at its ROOT (no mv-nesting).
+for d in "$mach9"/home/.local/share/prime-agent.old.*; do
+  if [ -d "$d" ] && [ ! -f "$d/prime-agent" ] && [ -d "$d/prime-agent" ]; then
+    fail "case 9 a rollback slot nested the tree: $d"
+  fi
+done
+ok "case 9 no rollback slot nested a tree"
+assert_eq "case 9 the store is untouched" "$store_before_c" "$(store_snapshot "$mach9")"
+
 echo
 echo "passed: $passed  failed: $failures"
 [ "$failures" -eq 0 ] || exit 1
