@@ -243,7 +243,7 @@ fn write_fixture(sessions_dir: &Path, name: &str) -> String {
     let mut session = pa_daemon::session_store::SessionFile::create("/work", None, 0);
     let id = session.session_id().to_string();
     session.append_session_info(name);
-    session.append_message(serde_json::json!({
+    session.append_message(&serde_json::json!({
         "role": "user", "content": "hi", "timestamp": 1u64
     }));
     let path = sessions_dir.join(format!("{id}.jsonl"));

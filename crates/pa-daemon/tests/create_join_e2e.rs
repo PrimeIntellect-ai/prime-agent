@@ -248,7 +248,7 @@ fn write_padded_session_file(dir: &Path) -> PathBuf {
         pa_daemon::session_store::SessionFile::create(dir.to_str().expect("utf8 dir"), None, 0);
     session.append_model_change("battery", "mock-1");
     for index in 0..2_000 {
-        session.append_message(json!({
+        session.append_message(&json!({
             "role": "user",
             "content": format!("filler {index}"),
             "timestamp": index as u64,

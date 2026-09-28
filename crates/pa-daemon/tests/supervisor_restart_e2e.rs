@@ -1114,7 +1114,7 @@ fn write_revival_fixture(
     let worker_id = format!("w{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     let mut session =
         pa_daemon::session_store::SessionFile::create(&dir.to_string_lossy(), None, 0);
-    session.append_message(json!({
+    session.append_message(&json!({
         "role": "user", "content": "lane work", "timestamp": 1u64
     }));
     session.append_session_state(session_state);
