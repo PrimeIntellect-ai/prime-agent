@@ -19,6 +19,12 @@ use crate::refinement::{load_harness_state, merge_harness_states, HarnessScope};
 
 use super::messages::{COMPACTION_SUMMARY_PREFIX, HARNESS_DIGEST_PREFIX, HARNESS_DIGEST_SUFFIX};
 
+// The window-direction oracles (TS `_buildHarnessDigestQueryTerms`
+// `.slice(-4).reverse()`) live in the child module at the same tree
+// position, mirroring compact_session::tests.
+#[cfg(test)]
+mod direction;
+
 /// Session-scoped digest inputs: where harness state lives and which
 /// interfaces the digest may reference.
 #[derive(Debug, Clone)]
