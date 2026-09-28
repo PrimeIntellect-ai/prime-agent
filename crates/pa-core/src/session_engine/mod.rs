@@ -672,22 +672,22 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        let snapshot = self.session.lock().await.history_snapshot();
-        let entries = snapshot.await?;
-        let messages: Vec<SessionAgentMessage> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                FileEntry::Message { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect();
+        // The transcript's consumed artifacts (the message rows plus the
+        // in-session refinement history) are extracted under this first
+        // lock straight from the retained rows: no owned copy of the full
+        // entry set, no second clone of the message rows.
+        let parts = self.session.lock().await.refine_transcript_parts();
+        let crate::session::manager::RefineTranscriptParts {
+            messages,
+            refinement_history,
+        } = parts.await?;
         let result = {
             let mut session = self.session.lock().await;
             refine::execute_refinement(
                 &mut session,
                 refine::RefinementTranscript {
                     messages: &messages,
-                    historical_entries: &entries,
+                    refinement_history: &refinement_history,
                 },
                 &global_harness_dir,
                 model,
