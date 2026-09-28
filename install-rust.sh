@@ -568,7 +568,16 @@ trap on_exit EXIT
 
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
-rm -rf "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.* 2>/dev/null || true
+# ONLY generations this installer stamped (the .prime-agent-install marker)
+# are swept: the rollback namespace is a glob, and a user-made directory that
+# merely RESEMBLES the name (prime-agent.old.backup) must never be deleted.
+# Pre-takeover-era crash leftovers (prime-agent-rust.old.*, never stamped)
+# are therefore left in place — harmless, and the user's to remove.
+for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
+  [ -d "$sweep_dir" ] || continue
+  [ -f "${sweep_dir}/.prime-agent-install" ] || continue
+  rm -rf "$sweep_dir"
+done
 
 # The TypeScript takeover, inside the lock: preserve a TS managed root that
 # occupies this installer's share dir under a legacy name (Pi's legacy-pi
@@ -637,6 +646,11 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   fi
   had_old_layout=1
   mv "$old_layout_dir" "$old"
+  # The migrated tree carries no marker (the pre-takeover script stamped
+  # nothing): stamp the slot now so the NEXT install's sweep recognizes it
+  # as this installer's generation.
+  printf 'install-rust.sh continuous run %s\ncommit %s\nmigrated from prime-agent-rust\n' \
+    "$RUN" "${commit:-unknown}" > "${old}/.prime-agent-install"
   echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
 fi
 if [ -d "$share_dir" ]; then
@@ -675,8 +689,9 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   if [ -L "$launcher" ]; then
     echo "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
     echo "  the keyword is the Rust port's now"
-  elif grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
-    :   # this installer's own previous launcher: plain replace below
+  elif [ -f "$launcher" ] && grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
+    :   # this installer's own previous launcher (a REGULAR file — the
+    :   # marker grep never opens a special file): plain replace below
   else
     preserved_cmd_path="${bin_dir}/prime-agent.pre-takeover.$$"
     mv "$launcher" "$preserved_cmd_path" \

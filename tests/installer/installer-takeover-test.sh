@@ -240,6 +240,7 @@ seed_store() { # mach  — ~/.prime/agent with one session file
     > "$sessions/sess-0001.jsonl"
 }
 
+# assert that a user-made lookalike in the rollback namespace survives
 seed_old_rust_layout() { # mach  — a pre-takeover install-rust.sh machine
   home="$1/home"
   old="$home/.local/share/prime-agent-rust"
@@ -368,6 +369,11 @@ assert_eq "case 1 lock released" "gone" \
   "$([ -e "$mach/home/.local/share/.prime-agent-install.lock" ] && echo here || echo gone)"
 assert_contains "case 1 install log names the source commit" "$mach/install.log" "0000042"
 
+# A user-made lookalike in the rollback namespace must SURVIVE the sweep
+# (only marker-carrying generations are swept).
+mkdir -p "$mach/home/.local/share/prime-agent.old.backup"
+printf 'user backup, hands off\n' > "$mach/home/.local/share/prime-agent.old.backup/keep-me.txt"
+
 # (g) idempotent re-run via --update
 store_before2="$(store_snapshot "$mach")"
 run_installer "$mach" --update
@@ -377,13 +383,25 @@ store_after2="$(store_snapshot "$mach")"
 assert_eq "case 1 (g) ~/.prime/agent still untouched" "$store_before2" "$store_after2"
 old_count2=0
 for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  case "$d" in *.backup) continue ;; esac
   [ -e "$d" ] && old_count2=$((old_count2 + 1))
 done
-assert_eq "case 1 (g) still exactly one .old generation" 1 "$old_count2"
+assert_eq "case 1 (g) still exactly one real .old generation" 1 "$old_count2"
+# The remaining generation is run 2's fresh slot (run 1's payload tree), not
+# the migrated old-layout tree: the stamped slot was swept.
+for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  case "$d" in *.backup) continue ;; esac
+  [ -e "$d/old-tree-marker.txt" ] \
+    && fail "case 1 (g) the migrated old-layout slot was swept: $d still holds it" \
+    || ok "case 1 (g) the migrated old-layout slot was swept (only the fresh payload slot remains)"
+done
 assert_eq "case 1 (g) launcher still ours after --update" "yes" \
   "$([ -f "$mach/home/.local/bin/prime-agent" ] && [ ! -L "$mach/home/.local/bin/prime-agent" ] && echo yes || echo no)"
 uninstalls=$(grep -c "uninstall -g prime-agent" "$mach/logs/npm-mock.log" || true)
 assert_eq "case 1 (g) exactly one npm uninstall across both runs" 1 "$uninstalls"
+assert_eq "case 1 (g) the user-made .old.backup survived the sweep" "yes" \
+  "$([ -f "$mach/home/.local/share/prime-agent.old.backup/keep-me.txt" ] && echo yes || echo no)"
+
 
 # ==============================================================================
 echo "== case 2: a BUSY TS daemon is left running (stop-when-idle, never a kill) =="
@@ -541,6 +559,28 @@ assert_eq "case 7 no pre-takeover aside file exists" "gone" \
   "$(for f in "$mach7"/home/.local/bin/prime-agent.pre-takeover.*; do [ -e "$f" ] && echo here; done; echo gone | head -1)"
 assert_eq "case 7 our launcher never landed" "gone" \
   "$([ -f "$mach7/home/.local/share/prime-agent/.prime-agent-install" ] && echo here || echo gone)"
+
+# ==============================================================================
+echo "== case 8: a FIFO at bin/prime-agent is never opened - preserved aside =="
+mach8="$(new_machine fifo)"
+write_gh_mock "$mach8/mocks/gh"
+write_npm_mock "$mach8/mocks/npm"
+build_fixture "$mach8" "$FIXTURE_TRIPLE"
+seed_store "$mach8"
+mkdir -p "$mach8/home/.local/bin"
+mkfifo "$mach8/home/.local/bin/prime-agent"
+store_before_f="$(store_snapshot "$mach8")"
+run_installer "$mach8"
+rcf=$?
+assert_eq "case 8 the installer did not hang on the FIFO and completed" 0 "$rcf"
+assert_eq "case 8 our launcher took the keyword" "yes" \
+  "$([ -f "$mach8/home/.local/bin/prime-agent" ] && [ ! -L "$mach8/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+fifo_preserved=0
+for preserved in "$mach8"/home/.local/bin/prime-agent.pre-takeover.*; do
+  [ -p "$preserved" ] && fifo_preserved=$((fifo_preserved + 1))
+done
+assert_eq "case 8 the FIFO was preserved as a FIFO, not read" 1 "$fifo_preserved"
+assert_eq "case 8 the store is untouched" "$store_before_f" "$(store_snapshot "$mach8")"
 
 echo
 echo "passed: $passed  failed: $failures"
