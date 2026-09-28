@@ -335,14 +335,15 @@ fn win32_node_path_resolve(base: &str, path: &str) -> String {
 /// whether the answer applies).
 #[cfg(any(windows, test))]
 fn win32_device_cwd(device: &str) -> String {
-    std::env::var_os(format!("={device}"))
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| {
+    std::env::var_os(format!("={device}")).map_or_else(
+        || {
             std::env::current_dir()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned()
-        })
+        },
+        |value| value.to_string_lossy().into_owned(),
+    )
 }
 
 /// The resolver core, with the drive-cwd lookup injected so the drive
@@ -434,14 +435,12 @@ fn win32_resolve_with(base: &str, path: &str, device_cwd: &dyn Fn(&str) -> Strin
             }
         }
         if !device.is_empty() {
-            if !resolved_device.is_empty() {
-                if !device.eq_ignore_ascii_case(&resolved_device) {
-                    // This path points to another device so it is not
-                    // applicable.
-                    continue;
-                }
-            } else {
+            if resolved_device.is_empty() {
                 resolved_device = device;
+            } else if !device.eq_ignore_ascii_case(&resolved_device) {
+                // This path points to another device so it is not
+                // applicable.
+                continue;
             }
         }
         if resolved_absolute {
