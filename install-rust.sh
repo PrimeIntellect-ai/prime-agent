@@ -246,10 +246,16 @@ if [ -n "$uv_bin" ]; then
   # EXECUTE with GITHUB_TOKEN in its environment, before any artifact
   # validation. The flag restricts the resolution to system-level
   # interpreters (uv's own managed installs count).
-  UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
+  # UV_PYTHON_INSTALL_DIR is cleared on EVERY uv call in this
+  # resolution (find and install both): uv uses it as the single
+  # managed-Python directory for discovery AS WELL AS installation, so
+  # an inherited value would make the find look only in a custom root
+  # while the install (cleared) lands in the default one — the
+  # just-installed interpreter would never be found.
+  UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
   if [ -z "$UVPY" ]; then
     if env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python install 3.11 >/dev/null 2>&1; then
-      UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
+      UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
     fi
   fi
 fi
