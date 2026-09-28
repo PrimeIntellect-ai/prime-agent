@@ -992,62 +992,151 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
 }
 
 /// A deterministic large session fixture in the corpus row schema (the
-/// bench generator's shapes: the session header, the base harness-digest
-/// rows, then plain user/assistant text turns). A resumable session
-/// whose compaction's pre-summarizer CPU span is data-scaled — the same
-/// property the canonical 10MiB bench fixture has, sized for the
-/// compaction-visibility oracles.
+/// bench generator's exact row shapes: the session header, the base
+/// harness-digest rows, then user -> assistant(tool call) -> toolResult
+/// turns with digest rows every 20 turns, and the final marker pair). A
+/// resumable session whose compaction's pre-summarizer CPU span is
+/// data-scaled — the same property the canonical 10MiB bench fixture
+/// has, sized for the compaction-visibility oracles.
 fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
-    use std::fmt::Write as _;
     let home = path.parent().unwrap().parent().unwrap();
-    let mut rows = String::new();
-    let push = |rows: &mut String, row: &str| {
-        rows.push_str(row);
-        rows.push('\n');
-    };
-    push(&mut rows, &format!(
-        "{{\"type\":\"session\",\"id\":\"cvis-e2e-corpus\",\"version\":3,\"timestamp\":\"2026-09-16T18:40:16.600Z\",\"cwd\":{:?},\"rlmDepth\":0}}",
-        home.display().to_string()
-    ));
-    let mut counter = 0u64;
-    let mut next_id = |counter: &mut u64| {
-        *counter += 1;
-        format!("{:08x}", *counter)
-    };
+    let mut rows: Vec<Value> = Vec::new();
+    rows.push(json!({
+        "type": "session", "id": "cvis-e2e-corpus", "version": 3,
+        "timestamp": "2026-09-16T18:40:16.600Z",
+        "cwd": home.display().to_string(), "rlmDepth": 0,
+    }));
+    let mut counter: u64 = 0;
     let mut parent = String::new();
+    let mut entry = |counter: &mut u64, parent: &mut String, fields: Value| {
+        *counter += 1;
+        let id = format!("{:08x}", *counter);
+        let mut row = fields;
+        row["id"] = json!(id);
+        row["parentId"] = json!(parent);
+        row["timestamp"] = json!(format!(
+            "2026-09-16T18:{:02}:{:02}.{:03}Z",
+            (*counter / 60) % 60,
+            *counter % 60,
+            *counter % 1000
+        ));
+        *parent = id;
+        row
+    };
     for base in 0..11 {
-        let id = next_id(&mut counter);
-        push(&mut rows, &format!(
-            "{{\"customType\":\"harness_digest\",\"content\":\"[harness-digest] base note {base}: persistent state summary for the corpus.\",\"type\":\"custom_message\",\"id\":\"{id}\",\"parentId\":\"{parent}\",\"timestamp\":\"2026-09-16T18:00:00.{base:03}Z\"}}"
-        ));
-        parent = id;
+        let row = entry(&mut counter, &mut parent, json!({
+            "customType": "harness_digest",
+            "content": format!(
+                "[harness-digest] base note {base}: persistent state summary for the corpus."
+            ),
+            "type": "custom_message",
+        }));
+        rows.push(row);
     }
-    // ~44KB of assistant text per turn keeps the fixture at ~`size_mib`
-    // MiB over the turn count the bench corpus uses for 10MiB.
-    let paragraph = "Latency tools daemon terminal kernel parity settle memory viewport streaming cadence corpus sentinel transcript snapshot. ".repeat(8);
-    let turn_text = paragraph.repeat(80);
-    let target = size_mib * (1 << 20);
-    let per_turn = turn_text.len() + 512;
-    let turns = target / per_turn;
+    // ~40KB of assistant text per turn keeps the fixture at `size_mib`
+    // MiB over a few hundred turns (the bench corpus's per-turn scale).
+    let paragraph = "Latency tools daemon terminal kernel parity settle memory viewport \
+                     streaming cadence corpus sentinel transcript snapshot roster. "
+        .repeat(10);
+    let turn_text = paragraph.repeat(90);
+    let per_turn = turn_text.len() + 1024;
+    let turns = (size_mib * (1 << 20)) / per_turn;
     for turn in 0..turns {
-        let id = next_id(&mut counter);
-        push(&mut rows, &format!(
-            "{{\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"please do task number {turn}\"}}],\"timestamp\":{}}},\"type\":\"message\",\"id\":\"{id}\",\"parentId\":\"{parent}\",\"timestamp\":\"2026-09-16T18:00:{:02}.000Z\"}}",
-            1789584016603 + turn,
-            turn % 60
-        ));
-        parent = id;
-        let id = next_id(&mut counter);
-        let _ = writeln!(
-            rows,
-            "{{\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"task {turn}: run the corpus command\"}},{{\"type\":\"text\",\"text\":\"{turn_text}\"}}],\"timestamp\":{}}},\"type\":\"message\",\"id\":\"{id}\",\"parentId\":\"{parent}\",\"timestamp\":\"2026-09-16T18:01:{:02}.000Z\"}}",
-            1789584016603 + turn,
-            turn % 60
-        );
-        parent = id;
+        let row = entry(&mut counter, &mut parent, json!({
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
+                "timestamp": 1789584016603 + turn,
+            },
+            "type": "message",
+        }));
+        rows.push(row);
+        let call_id = format!("call_{turn:06}");
+        let row = entry(&mut counter, &mut parent, json!({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": format!("task {turn}: run the corpus command") },
+                    { "type": "text", "text": turn_text },
+                ],
+                "toolCalls": [{
+                    "id": call_id,
+                    "name": "ipython",
+                    "arguments": { "code": format!("print('corpus {turn}')") },
+                }],
+                "api": "openai-completions",
+                "provider": "prime-inference",
+                "model": "mock-1",
+                "usage": {
+                    "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
+                    "totalTokens": 130,
+                    "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
+                },
+                "stopReason": "tool_calls",
+                "timestamp": 1789584016603 + turn,
+            },
+            "type": "message",
+        }));
+        rows.push(row);
+        let row = entry(&mut counter, &mut parent, json!({
+            "message": {
+                "role": "toolResult",
+                "toolCallId": call_id,
+                "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
+                "isError": false,
+                "timestamp": 1789584016603 + turn,
+            },
+            "type": "message",
+        }));
+        rows.push(row);
+        if (turn + 1) % 20 == 0 {
+            let row = entry(&mut counter, &mut parent, json!({
+                "customType": "harness_digest",
+                "content": format!(
+                    "[harness-digest] note {turn}: persistent state summary for the corpus."
+                ),
+                "type": "custom_message",
+            }));
+            rows.push(row);
+        }
     }
+    let row = entry(&mut counter, &mut parent, json!({
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": "final marker request" }],
+            "timestamp": 1789584016603,
+        },
+        "type": "message",
+    }));
+    rows.push(row);
+    let row = entry(&mut counter, &mut parent, json!({
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "final marker" },
+                { "type": "text", "text": "CVIS-E2E-TAIL end of corpus." },
+            ],
+            "api": "openai-completions",
+            "provider": "prime-inference",
+            "model": "mock-1",
+            "usage": {
+                "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
+                "totalTokens": 130,
+                "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
+            },
+            "stopReason": "stop",
+            "timestamp": 1789584016603,
+        },
+        "type": "message",
+    }));
+    rows.push(row);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, rows).unwrap();
+    let mut text = String::new();
+    for row in rows {
+        text.push_str(&serde_json::to_string(&row).unwrap());
+        text.push('\n');
+    }
+    std::fs::write(path, text).unwrap();
 }
 
 /// One timestamped RPC child for the compaction-visibility oracles: the
