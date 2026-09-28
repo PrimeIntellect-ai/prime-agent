@@ -301,9 +301,8 @@ impl AgentSession {
         // `request_output_budget`'s read) rides the decision: a mid-run
         // `/effort` or model switch must not route with the build-time
         // level.
-        let live_level = provider_adapter::model_thinking_level(
-            self.agent.state().await.thinking_level,
-        );
+        let live_level =
+            provider_adapter::model_thinking_level(self.agent.state().await.thinking_level);
         let route = (router.decide)(carries_images, live_level).map_err(anyhow::Error::msg)?;
         let Some(resolved) = route.as_ref() else {
             (router.swap_target)(None);
