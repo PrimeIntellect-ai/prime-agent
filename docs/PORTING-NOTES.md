@@ -2022,6 +2022,15 @@ or uninstall logic is duplicated in Rust.
   `-continuous.<commit>` count — the TypeScript product's own
   `bin/prime-agent` never matches), and `--check`'s run-list read (the
   same workflow-runs REST query the installer's non-`gh` path sends).
+- The fetch source flips to the OFFICIAL DOMAIN install endpoint
+  (`https://app.primeintellect.ai/prime-agent/install.sh`) at the
+  rust-to-main merge, per the operator's 2026-09-28 clarification: the
+  domain serves the TypeScript product's official installer today, and
+  `prime-agent update` must not run that — the operator flips the
+  domain's content at merge-to-main time, and the command's contract is
+  "fetch from the official source, run it". Until then the branch's
+  `install-rust.sh` stays the default, and
+  `PRIME_AGENT_RUST_INSTALLER_URL` overrides the source for testing.
 - pa-cli `installer_update` is the CLI body: the bare command runs the
   funnel with the installer's own output streaming to the terminal, and
   `--check` (alias `--version`) prints the platform, the running version,
