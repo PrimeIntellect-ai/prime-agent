@@ -3,7 +3,18 @@
 //! session's live-model and thinking-level surfaces, the request API-key
 //! seam, and the persisted max-depth read.
 
-use super::{EngineModelSelection, Model, SessionEngine, Value, json};
+use super::{
+    AgentSessionEngine,
+    EngineModelSelection,
+    Model,
+    RestoredSessionModel,
+    SessionEngine,
+    Value,
+    config,
+    json,
+    model,
+    turn,
+};
 
 impl AgentSessionEngine {
     /// The TS `createAgentSession` startup chain (the no-flagged-model

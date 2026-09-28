@@ -4,8 +4,10 @@
 //! queue-mode mapping, and the session-agent constructor.
 use super::{
     AbortController,
+    AgentSessionEngine,
     Arc,
     AutoCompactionRun,
+    BoundaryRun,
     DaemonAllowlist,
     EngineEvent,
     GoalBoundary,
@@ -13,11 +15,25 @@ use super::{
     OverflowArmRun,
     PromptRequest,
     ProviderTarget,
+    QUOTA_WAKE_MAX_RETRIES,
+    QUOTA_WAKE_RETRY_DELAY_MS,
+    QuotaParkState,
     StopReason,
+    TurnAdmission,
+    TurnOnce,
+    TurnPrompt,
+    TurnResult,
     Value,
+    aborted_message,
+    artifacts,
+    config,
+    drop_trailing_assistant,
     json,
     json_round_trip,
     map_thinking_level,
+    model,
+    retry_event_to_engine_event,
+    turn,
 };
 
 impl AgentSessionEngine {

@@ -3,7 +3,35 @@
 
 use std::sync::Arc;
 
-use super::{adoption, clients, options, routing, sessions, subscribers};
+use super::{
+    DaemonCommand,
+    DaemonResponse,
+    DaemonWorkerLifecycle,
+    Duration,
+    Ordering,
+    Path,
+    PathBuf,
+    ResidentWorker,
+    Result,
+    Supervisor,
+    Value,
+    WorkerRegistration,
+    adoption,
+    anyhow,
+    clients,
+    json,
+    load_descriptors,
+    options,
+    persist_worker,
+    response_failure,
+    response_success,
+    routing,
+    sessions,
+    socket,
+    subscribers,
+    util,
+    worker_connect_deadline,
+};
 
 /// The boot the descriptor-adoption pass runs under. An update boot
 /// relaunches kept workers from their descriptors before the roster

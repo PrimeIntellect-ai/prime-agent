@@ -1,7 +1,47 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
 use super::routing::fail_unsent_request;
-use super::{WORKER_AUTH_FLOOR_MS, adoption, options, routing, sessions, supervision};
+use super::{
+    Arc,
+    Child,
+    ClientRouting,
+    Command,
+    DEFAULT_PRIVATE_FRAME_LIMITS,
+    DaemonWorkerLifecycle,
+    Duration,
+    LONG_ROUTE_TIMEOUT_MS,
+    Ordering,
+    Path,
+    PathBuf,
+    PrivateFrameReader,
+    ROUTE_TIMEOUT_MS,
+    ResidentWorker,
+    Result,
+    RouteAdmission,
+    Supervisor,
+    TypedCreateRejection,
+    Value,
+    WORKER_AUTH_FLOOR_MS,
+    WorkerReply,
+    WorkerRequest,
+    adoption,
+    anyhow,
+    broadcast,
+    connect_transport,
+    create_command_payload,
+    json,
+    mpsc,
+    options,
+    persist_worker,
+    probe_worker_socket,
+    routing,
+    sessions,
+    socket,
+    supervision,
+    util,
+    worker_connect_deadline,
+    write_frame,
+};
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 

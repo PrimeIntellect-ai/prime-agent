@@ -5,7 +5,39 @@ use super::launch_budget::{
     DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_CONNECT_BACKOFF_MS, WORKER_CONNECT_PROBE_MS,
     WORKER_CONNECT_TIMEOUT_ENV,
 };
-use super::{adoption, clients, launch_budget, options, sessions};
+use super::{
+    Arc,
+    DaemonCommand,
+    DaemonErrorInfo,
+    DaemonWorkerDescriptor,
+    DaemonWorkerLifecycle,
+    DurableDaemonCreateCommand,
+    Duration,
+    EngineModelSelection,
+    LONG_ROUTE_TIMEOUT_MS,
+    Map,
+    Ordering,
+    Path,
+    ROUTE_TIMEOUT_MS,
+    ResidentWorker,
+    Result,
+    RouteAdmission,
+    Supervisor,
+    TypedCreateRejection,
+    Value,
+    adoption,
+    anyhow,
+    bail,
+    clients,
+    create_command_payload,
+    json,
+    launch_budget,
+    options,
+    persist_worker,
+    sessions,
+    socket,
+    util,
+};
 use crate::lease::is_process_alive;
 
 impl Supervisor {

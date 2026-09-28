@@ -3,6 +3,8 @@
 //! expansion and session-command funnels, and the kernel host
 //! wiring the session build installs (moved with its concern).
 use super::{
+    AgentEngineConfig,
+    AgentSessionEngine,
     Arc,
     CoreSessionEngine,
     EngineModelSelection,
@@ -11,19 +13,25 @@ use super::{
     LinkAgentObserveController,
     Model,
     OverflowRecovery,
+    ProducerUsageSink,
     ProviderTarget,
+    QuotaParkState,
     SessionCommandExecution,
     SessionCommandParams,
     SessionEngineConfig,
     SupervisorChildSessions,
     Value,
+    config,
     execute_session_command,
     json,
     json_round_trip,
+    lifecycle,
     map_thinking_level,
+    model,
     register_agent_message_host_handlers,
     register_agent_observe_host_handlers,
     switchable_stream_fn,
+    turn,
 };
 
 impl AgentSessionEngine {

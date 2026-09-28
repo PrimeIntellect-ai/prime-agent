@@ -21,7 +21,17 @@ use std::time::Duration;
 
 use pa_types::platform::transport::TransportListener;
 
-use super::{clients};
+use super::{
+    Arc,
+    Ordering,
+    Result,
+    Supervisor,
+    SupervisorOptions,
+    TransportStream,
+    anyhow,
+    clients,
+    socket,
+};
 
 /// The backoff before retrying a non-recoverable accept error (Codex
 /// parity: the control-socket acceptor sleeps 1s between retries).

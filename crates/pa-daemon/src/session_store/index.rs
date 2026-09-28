@@ -3,7 +3,7 @@
 //! end-of-load child-usage attribution folds, the rewrite-persist deferred
 //! fold, and the entry-id mint.
 
-use super::{HashMap, Value, index, read, view, write};
+use super::{HashMap, SessionEntry, SessionFile, Value, index, read, view, write};
 
 pub(crate) fn new_entry_id(used: &HashMap<String, ()>) -> String {
     for _ in 0..100 {

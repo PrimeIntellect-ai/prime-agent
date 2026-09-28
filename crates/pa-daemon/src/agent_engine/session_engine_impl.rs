@@ -4,6 +4,7 @@
 //! impl block (a trait impl is one block per type; it moved whole).
 
 use super::{
+    AgentSessionEngine,
     Arc,
     BranchSummaryOutcome,
     BranchSummaryRequest,
@@ -21,9 +22,16 @@ use super::{
     SideQuestionOutcome,
     SideQuestionRequest,
     SupervisorChildSessions,
+    TurnPrompt,
     Value,
+    artifact_reference,
+    config,
     json,
     map_thinking_level,
+    model,
+    now_millis,
+    persisted_rlm_max_depth,
+    turn,
 };
 
 impl SessionEngine for AgentSessionEngine {
