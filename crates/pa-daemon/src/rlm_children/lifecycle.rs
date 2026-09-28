@@ -12,12 +12,12 @@ struct CreatedSessionIds {
 }
 
 struct CreatedChild {
-    active_session_id: String,
-    session_id: Option<String>,
-    session_file: Option<String>,
-    session_name: Option<String>,
-    session_dir: String,
-    summary_rlm_depth: Option<u64>,
+    pub(super) active_session_id: String,
+    pub(super) session_id: Option<String>,
+    pub(super) session_file: Option<String>,
+    pub(super) session_name: Option<String>,
+    pub(super) session_dir: String,
+    pub(super) summary_rlm_depth: Option<u64>,
 }
 
 impl CreatedChild {
