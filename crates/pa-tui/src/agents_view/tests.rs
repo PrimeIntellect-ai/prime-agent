@@ -1,4 +1,4 @@
-//! The agents_view test harness and family index: the shared fixtures
+//! The `agents_view` test harness and family index: the shared fixtures
 //! every scenario family drives live here (the idle-row mode, the roster
 //! and catalog builders, the parent-child, anchor, bindings, and churn
 //! modes); the tests themselves sit in the family children under
@@ -9,18 +9,18 @@
 use super::*;
 
 mod click_surface;
-mod saved_catalog;
-mod delete_stop;
-mod notices;
-mod entry_anchor;
-mod running_lines;
-mod key_bindings;
-mod hints_render;
-mod drill_down;
-mod selection_churn;
-mod render_pulse;
-mod edge_jumps;
 mod cost_aggregates;
+mod delete_stop;
+mod drill_down;
+mod edge_jumps;
+mod entry_anchor;
+mod hints_render;
+mod key_bindings;
+mod notices;
+mod render_pulse;
+mod running_lines;
+mod saved_catalog;
+mod selection_churn;
 
 /// One idle row under test plus a holder row that keeps the selection,
 /// with the given title and one model id. The cost/age
