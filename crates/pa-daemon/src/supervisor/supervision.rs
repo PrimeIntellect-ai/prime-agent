@@ -3,8 +3,8 @@
 use super::routing::fail_unsent_request;
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
-    probe_worker_socket, socket, supervision, util, worker_connect_deadline, write_frame, Arc,
-    Child, ClientRouting, Command, Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf,
+    probe_worker_socket, supervision, util, worker_connect_deadline, write_frame, Arc, Child,
+    ClientRouting, Command, Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf,
     PrivateFrameReader, ResidentWorker, Result, RouteAdmission, Supervisor, TypedCreateRejection,
     Value, WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, LONG_ROUTE_TIMEOUT_MS,
     ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
