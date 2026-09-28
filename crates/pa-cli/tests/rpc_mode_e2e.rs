@@ -1426,12 +1426,13 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     // only retire by hitting the budget.
     let (messages, _) = client.command(&json!({ "type": "get_messages" }));
     let (id, _) = client.command(&json!({ "type": "compact" }));
-    std::thread::sleep(Duration::from_millis(500));
-    // The compaction ran BEHIND the stalled pipe: the budget expired
-    // (50ms) instead of waiting the reader out, so the durable
-    // compaction row is already in the session file. An unbounded drain
-    // would still be spinning in its wait loop — no row, and the test
-    // fails right here.
+    // The compaction must run BEHIND the stalled pipe: the budget
+    // expired (50ms) instead of waiting the reader out, so the durable
+    // compaction row lands in the session file while no reader drains
+    // the child. The row's appearance IS the readiness signal (polled,
+    // never a fixed sleep): an unbounded drain would still be spinning
+    // in its wait loop — no row ever lands while the reader is
+    // stalled, and the poll deadline fails right here.
     // The compaction runs BEHIND the stalled pipe: the budget expired
     // (50ms) instead of waiting the reader out, so the durable
     // compaction row lands in the session file while no reader drains
@@ -1464,4 +1465,106 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     client.begin_reading();
     let (response, _) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
+}
+
+/// The prompt-admitted `/compact`'s compaction frames ride the
+/// prompt-response buffer and publish AFTER the prompt's response (TS
+/// `promptResponsePending`: `outputConnectionEvent` buffers connection
+/// events while a prompt is pending; `handleInputLine`'s `finally`
+/// disarms and flushes them) — the port's buffered seam is the TS wire
+/// order, so NO early flush belongs on this path (the direct `compact`
+/// command's flush lives in its own handler, where no prompt buffer
+/// stands between the frame and the writer). The oracle pins the
+/// contract by ARRIVAL POSITION: the prompt response precedes
+/// `compaction_start`, which precedes `compaction_end` — an early
+/// publish (routing the frame past the buffer) or a late flush reorders
+/// the wire and fails the positions.
+#[test]
+fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
+    let home = tempfile::TempDir::new().unwrap();
+    let fixture = home.path().join("sess").join("fixture.jsonl");
+    write_corpus_fixture(&fixture, 10);
+    let script = json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    });
+    let mut client = TimedRpcChild::spawn(&fixture, &script);
+    let (id, _) = client.command(&json!({ "type": "prompt", "message": "/compact" }));
+    // Collect every frame until the prompt's response AND both
+    // compaction frames have arrived (the buffered frames flush at the
+    // handler's end, so they land right after the response).
+    let deadline = Instant::now() + TIMEOUT;
+    let mut seen: Vec<Value> = Vec::new();
+    loop {
+        let timeout_left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !timeout_left.is_zero(),
+            "timed out waiting for the prompt-admitted compact's frames"
+        );
+        match client
+            .frames
+            .as_ref()
+            .expect("reader started")
+            .recv_timeout(timeout_left)
+        {
+            Ok((_, frame)) => {
+                seen.push(frame);
+                let seen_response = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("response")
+                        && frame.get("id").and_then(Value::as_str) == Some(&id)
+                });
+                let has_cs = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("compaction_start")
+                });
+                let has_ce = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("compaction_end")
+                });
+                if seen_response && has_cs && has_ce {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!(
+                    "timed out mid-collection (seen: {:?})",
+                    seen.iter().map(|f| f.get("type")).collect::<Vec<_>>()
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("rpc child closed before the prompt-admitted compact's frames arrived")
+            }
+        }
+    }
+    let position = |kind: &str| {
+        seen.iter()
+            .position(|frame: &Value| frame.get("type").and_then(Value::as_str) == Some(kind))
+    };
+    let response_at = seen
+        .iter()
+        .position(|frame: &Value| {
+            frame.get("type").and_then(Value::as_str) == Some("response")
+                && frame.get("id").and_then(Value::as_str) == Some(&id)
+        })
+        .expect("the prompt response");
+    let response = &seen[response_at];
+    assert_eq!(response["success"], true, "the response: {response}");
+    let cs_at = position("compaction_start")
+        .expect("the buffered compaction_start flushed with the response window");
+    let ce_at = position("compaction_end")
+        .expect("the buffered compaction_end flushed with the response window");
+    assert!(
+        response_at < cs_at,
+        "the TS promptResponsePending contract: the prompt response (at {response_at}) \
+         must precede the buffered compaction_start (at {cs_at})"
+    );
+    assert!(
+        cs_at < ce_at,
+        "compaction_end (at {ce_at}) must follow compaction_start (at {cs_at})"
+    );
+    assert_eq!(seen[cs_at]["reason"], "requested");
 }

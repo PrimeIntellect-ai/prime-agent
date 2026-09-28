@@ -20,7 +20,6 @@ use pa_types::session::CustomMessage;
 
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
 use super::protocol::{self, ResponseData};
-use super::COMPACT_FRAME_FLUSH_BUDGET;
 
 /// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
 /// source: "rpc"})`): admission-level success — the response fires once
@@ -166,12 +165,15 @@ async fn run_session_command(
                 None,
             ))
             .await;
-        // Same flush as the direct `compact` command: the admitted
-        // `/compact` runs the identical pre-summarizer CPU span (the
-        // pa-core executor's compact branch), and TS shows the client
-        // the compaction start at the emit — the queued frame must not
-        // wait the span out behind it.
-        state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
+        // NO flush here, by TS parity: a prompt-admitted command runs
+        // with the prompt-response buffer armed (TS rpc-mode's
+        // `promptResponsePending`), so this `compaction_start` rides
+        // the buffered seam and publishes AFTER the prompt's response —
+        // the TS wire order (`outputConnectionEvent` buffers connection
+        // events while a prompt is pending; `handleInputLine`'s finally
+        // disarms and flushes them). The direct `compact` command's
+        // early flush lives in its own handler, where no prompt buffer
+        // stands between the frame and the writer.
     }
     let execution = {
         // The executor rebuilds session context on its compact branch
