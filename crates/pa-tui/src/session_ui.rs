@@ -1020,11 +1020,7 @@ impl SessionUi {
         // stale shutdown recovery's reconnect hang.
         self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
-        // The tray badge mirrors the session-scoped tier on every attach: a
-        // session reporting no tier clears the previous session's badge
-        // instead of leaving it stranded.
         self.service_tier.clone_from(&reconstructed.service_tier);
-        view.chrome.service_tier.clone_from(&self.service_tier);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -1243,6 +1239,11 @@ impl SessionUi {
             view.chrome.model_id = Some(model);
             view.chrome.model_provider = self.pending_model_provider.take();
         }
+        // The tray badge mirrors the session-scoped tier on every rebuild:
+        // an attach that reports no tier clears the previous session's
+        // badge instead of leaving it stranded (the rebuild is where the
+        // chrome fields re-sync from the reconstructed session).
+        view.chrome.service_tier.clone_from(&self.service_tier);
         // The tray's effort suffix moves with the same snapshot: an
         // attach's state either carries the session's level or reports a
         // model without reasoning, and the bare name wins in both cases.
