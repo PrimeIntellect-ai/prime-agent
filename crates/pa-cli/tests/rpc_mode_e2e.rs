@@ -1146,13 +1146,24 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
 struct TimedRpcChild {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
-    frames: std::sync::mpsc::Receiver<(std::time::Instant, Value)>,
+    frames: Option<std::sync::mpsc::Receiver<(std::time::Instant, Value)>>,
+    /// Held while the reader is deferred (the stalled-reader oracle).
+    pending_stdout: Option<std::process::ChildStdout>,
     next_id: u64,
     home: tempfile::TempDir,
 }
 
 impl TimedRpcChild {
     fn spawn(fixture: &std::path::Path, script: &Value) -> TimedRpcChild {
+        let mut child = Self::spawn_stalled(fixture, script);
+        child.begin_reading();
+        child
+    }
+
+    /// Spawn with the reader thread deferred: the stalled-reader oracle
+    /// holds the child's stdout pipe unread (a full pipe blocks the
+    /// writer task mid-write) until `begin_reading` starts the drain.
+    fn spawn_stalled(fixture: &std::path::Path, script: &Value) -> TimedRpcChild {
         let home = tempfile::TempDir::new().unwrap();
         let bin = env!("CARGO_BIN_EXE_prime-agent");
         let mut child = Command::new(bin)
@@ -1179,7 +1190,21 @@ impl TimedRpcChild {
             let mut stderr = stderr;
             while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {}
         });
+        TimedRpcChild {
+            child,
+            stdin,
+            frames: None,
+            pending_stdout: Some(stdout),
+            next_id: 0,
+            home,
+        }
+    }
+
+    /// Start the deferred reader thread (the stalled-reader oracle holds
+    /// it back until the stall window closes).
+    fn begin_reading(&mut self) {
         let (tx, frames) = std::sync::mpsc::channel();
+        let stdout = self.pending_stdout.take().expect("reader started once");
         std::thread::spawn(move || {
             use std::io::Read;
             let mut stdout = stdout;
@@ -1191,7 +1216,7 @@ impl TimedRpcChild {
                     Ok(n) => {
                         let arrived = Instant::now();
                         buf.extend_from_slice(&chunk[..n]);
-                        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                        while let Some(pos) = buf.iter().position(|&b| b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = String::from_utf8_lossy(&line).trim().to_owned();
                             if line.is_empty() {
@@ -1207,13 +1232,7 @@ impl TimedRpcChild {
                 }
             }
         });
-        TimedRpcChild {
-            child,
-            stdin,
-            frames,
-            next_id: 0,
-            home,
-        }
+        self.frames = Some(frames);
     }
 
     fn send(&mut self, frame: Value) {
@@ -1238,10 +1257,11 @@ impl TimedRpcChild {
     fn wait_response(&mut self, id: &str, timeout: Duration) -> (Value, Vec<(Instant, Value)>) {
         let deadline = Instant::now() + timeout;
         let mut events = Vec::new();
+        let frames = self.frames.as_ref().expect("reader started");
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
             assert!(!timeout_left.is_zero(), "timed out waiting for {id}");
-            match self.frames.recv_timeout(timeout_left) {
+            match frames.recv_timeout(timeout_left) {
                 Ok((arrived, frame)) => {
                     if frame.get("type").and_then(Value::as_str) == Some("response")
                         && frame.get("id").and_then(Value::as_str) == Some(id)
@@ -1357,29 +1377,45 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
-    let mut client = TimedRpcChild::spawn(
+    let mut client = TimedRpcChild::spawn_stalled(
         &fixture,
         &json!({
-        // The faux harness's response budget is finite (repeat-last is a
-        // daemon-seam key the CLI harness ignores): the split-turn cut
-        // makes two concurrent summarizer calls, so the script queues
-        // one response each.
-        "responses": [
-            { "text": "corpus history summary: the scale corpus ran" },
-            { "text": "corpus turn-prefix summary: the final marker" },
-        ],
-    }),
+            // The faux harness's response budget is finite (repeat-last is a
+            // daemon-seam key the CLI harness ignores): the split-turn cut
+            // makes two concurrent summarizer calls, so the script queues
+            // one response each.
+            "responses": [
+                { "text": "corpus history summary: the scale corpus ran" },
+                { "text": "corpus turn-prefix summary: the final marker" },
+            ],
+        }),
     );
-    // No reader thread touches stdout until the stall window closes:
-    // the get_state response (the session's whole serialized context,
-    // well over the pipe capacity) fills the pipe and the writer task
-    // blocks mid-write — `pending` stays nonzero through the compaction.
-    let (ready, _) = client.command(&json!({ "type": "get_state" }));
+    // No reader thread touches stdout: the get_messages response (the
+    // session's whole serialized context, well over the pipe capacity)
+    // fills the pipe and the writer task blocks mid-write — `pending`
+    // stays nonzero through the compaction, so its start-frame flush can
+    // only retire by hitting the budget.
+    let (messages, _) = client.command(&json!({ "type": "get_messages" }));
     let (id, _) = client.command(&json!({ "type": "compact" }));
-    std::thread::sleep(Duration::from_millis(400));
-    // The stall drains now; the compact must already have completed
-    // behind it (its response is queued, not pending on the reader).
-    let _ = ready;
+    std::thread::sleep(Duration::from_millis(500));
+    // The compaction ran BEHIND the stalled pipe: the budget expired
+    // (50ms) instead of waiting the reader out, so the durable
+    // compaction row is already in the session file. An unbounded drain
+    // would still be spinning in its wait loop — no row, and the test
+    // fails right here.
+    let session = std::fs::read_to_string(&fixture).expect("session file");
+    let compacted_behind_the_stall = session
+        .lines()
+        .any(|line| line.contains("\"type\":\"compaction\""));
+    assert!(
+        compacted_behind_the_stall,
+        "the compaction never ran behind the stalled reader: the flush \
+         wedged the command on the reader"
+    );
+    // The stall drains now: every held frame flows, the compact's
+    // response is among them, and the child never wedged.
+    let _ = messages;
+    client.begin_reading();
     let (response, _) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
 }
