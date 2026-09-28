@@ -1439,7 +1439,28 @@ impl SessionEngine for AgentSessionEngine {
                 batch: request.batch,
             },
         };
+        // TS commit-time routing decision (`_imageModelOverrideForTurns` at
+        // commit): a batch whose delivered messages attach image blocks
+        // routes to `settings.imageModel` when the session model cannot
+        // serve them, or the turn fails with the actionable refusal naming
+        // the setting - nothing silently downgrades the images to
+        // "(image omitted)" placeholders.
+        let carries_images = match &turn_prompt {
+            TurnPrompt::User { images, batch, .. } => {
+                !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
+            }
+            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+        };
+        if let Err(refusal) = self.arm_image_turn_route(carries_images) {
+            emit(EngineEvent::Done(Err(refusal)));
+            return;
+        }
         self.run_turns(turn_prompt, aborted, &mut emit);
+        // The episode settled: clear the routed image model and restore the
+        // session's serving target, so the next dispatched batch
+        // re-evaluates the routing against the session model (TS the next
+        // dispatch re-evaluates the override before pre-turn compaction).
+        self.clear_image_route();
     }
 
     fn abort_in_flight_turn(&self) {

@@ -126,7 +126,16 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 
 /// Stream one completion against `model` with `api_key` and the
 /// auth-resolved request `headers`.
-fn stream_once(
+/// Stream one completion against `model` (the per-request tail the
+/// switchable seams and the CLI's route-authoritative variant share).
+/// `pub`: the CLI headless's route-authoritative stream reads the armed
+/// image target ahead of the shared slot and streams with the same tail.
+///
+/// # Errors
+///
+/// Returns the provider stream's error when the request fails (the
+/// per-attempt failures the retry driver classifies).
+pub fn stream_once(
     model: Model,
     api_key: Option<String>,
     service_tier: Option<pa_types::ai::ServiceTier>,

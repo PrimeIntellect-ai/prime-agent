@@ -12,8 +12,9 @@ use pa_types::ai::Model;
 
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
+use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
+    json_round_trip, map_thinking_level, stream_once, switchable_stream_fn, ProviderTarget,
 };
 use pa_core::session_engine::session_events::agent_event_json;
 
@@ -470,7 +471,8 @@ async fn build_headless_engine_with(
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
     // The stream reads the provider target per call (the switchable seam
-    // the ACP pickers swap on a model switch).
+    // the ACP pickers swap on a model switch; image-model routing swaps it
+    // per dispatched batch).
     let provider_target: ProviderTargetSlot =
         std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
             api_key: resolved.api_key.clone(),
@@ -478,7 +480,34 @@ async fn build_headless_engine_with(
             service_tier: None,
             headers: resolved.headers.clone(),
         })));
-    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
+    // The armed image route's target, shared with the stream seam: while
+    // an episode is armed the stream serves THIS target (TS keeps the
+    // routed override over the whole turn, picker switches included), so
+    // a concurrent `set_model` picker write to the slot below cannot
+    // redirect an in-flight routed turn's continuation requests. The
+    // settle clears the slot, and the switch lands there (the settle's
+    // still-routed guard leaves it).
+    let armed_target: std::sync::Arc<std::sync::Mutex<Option<ProviderTarget>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let stream_fn = route_authoritative_stream_fn(
+        std::sync::Arc::clone(&provider_target),
+        std::sync::Arc::clone(&armed_target),
+    );
+    // TS settings.imageModel routing (the headless surfaces' host seam):
+    // image-attaching batches on a session model without image input
+    // route to the configured image model or fail the turn with the
+    // actionable refusal naming the setting.
+    // The routing decision reads the resolved session model live (a
+    // mid-run switch rewrites the serving slot) and receives the LIVE
+    // thinking level per batch (the engine passes its agent state's level,
+    // so a mid-run `/effort` or model switch never routes at a stale level).
+    let image_model_router = headless_image_model_router(
+        std::sync::Arc::clone(&provider_target),
+        std::sync::Arc::clone(&armed_target),
+        config.cwd.clone(),
+        config.agent_dir.clone(),
+        model.clone(),
+    );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
     // Telemetry (TS `installAgentTelemetry` parity for headless sessions):
@@ -571,6 +600,7 @@ async fn build_headless_engine_with(
             on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
+            image_model_router: Some(image_model_router),
         },
     )
     .await
@@ -581,6 +611,222 @@ async fn build_headless_engine_with(
         api_key: resolved.api_key,
         provider_target,
     })
+}
+
+/// The headless stream seam over the shared provider-target slot with the
+/// armed image route kept AUTHORITATIVE while an episode is armed (TS
+/// keeps the routed override over the whole turn, mid-turn picker switches
+/// included): a `set_model` picker write to the slot lands only when the
+/// settle clears the armed target, exactly when TS's next dispatch would
+/// re-evaluate against the new selection.
+fn route_authoritative_stream_fn(
+    provider_target: ProviderTargetSlot,
+    armed_target: std::sync::Arc<std::sync::Mutex<Option<ProviderTarget>>>,
+) -> StreamFn {
+    std::sync::Arc::new(
+        move |_requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
+            let armed = armed_target
+                .lock()
+                .expect("armed image target lock")
+                .clone();
+            let target = armed
+                .or_else(|| {
+                    provider_target
+                        .read()
+                        .expect("provider target lock")
+                        .clone()
+                })
+                .expect("provider target set before the first stream");
+            let ProviderTarget {
+                api_key,
+                model,
+                service_tier,
+                headers,
+            } = target;
+            Box::pin(
+                async move { stream_once(model, api_key, service_tier, headers, context, options) },
+            )
+        },
+    )
+}
+
+/// The headless image-model router (TS `resolveImageModelOverride` over the
+/// CLI's settings + registry, applied to the session's swappable stream
+/// target): the routing decision for one dispatched batch — `Err` is the
+/// actionable refusal that fails the turn — and the serving-target swap
+/// (`None` restores the session target).
+fn headless_image_model_router(
+    provider_target: std::sync::Arc<
+        std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
+    >,
+    armed_target: std::sync::Arc<
+        std::sync::Mutex<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
+    >,
+    cwd: std::path::PathBuf,
+    agent_dir: std::path::PathBuf,
+    session_model: pa_types::ai::Model,
+) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
+    // The pre-route session target, captured at the FIRST arm (not at
+    // build): a mid-run model switch rewrites the live slot, and the
+    // capture-then-restore contract (arm -> serve the route -> settle ->
+    // restore) must return the SWITCHED-TO target, never the build-time
+    // snapshot. Cleared on every settle so the next arm re-captures
+    // whatever the session serves by then.
+    let armed_from = std::sync::Arc::new(std::sync::Mutex::new(None));
+    // `armed_target` (the caller's slot, shared with the stream seam) holds
+    // the routed target the arm wrote, so the settle can tell a slot that
+    // still holds the route from one a mid-run `/model` switch rewrote.
+    let armed_to = armed_target;
+    let decide_agent_dir = agent_dir.clone();
+    let decide_provider_target = std::sync::Arc::clone(&provider_target);
+    let decide_armed_from = std::sync::Arc::clone(&armed_from);
+    let decide = std::sync::Arc::new(
+        move |carries_images: bool,
+              thinking_level: pa_types::ai::ModelThinkingLevel|
+              -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
+            if !carries_images {
+                return Ok(None);
+            }
+            // The routing decision runs at commit and needs the SESSION
+            // model. During an armed episode the live slot holds the
+            // ROUTED target (a consecutive image batch re-decides before
+            // the previous episode settles), so the capture is the
+            // session model; un-armed, the live slot is the session
+            // target (a mid-run model switch rewrote it). The build-time
+            // pair is the fallback only when both are somehow empty.
+            let armed_capture = decide_armed_from
+                .lock()
+                .expect("armed-from lock")
+                .as_ref()
+                .map(
+                    |target: &pa_core::session_engine::provider_adapter::ProviderTarget| {
+                        target.model.clone()
+                    },
+                );
+            let session_model = armed_capture
+                .or_else(|| {
+                    decide_provider_target
+                        .read()
+                        .expect("provider target lock")
+                        .as_ref()
+                        .map(|target| target.model.clone())
+                })
+                .unwrap_or_else(|| session_model.clone());
+            let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
+            let image_model_reference = settings.get_image_model();
+            let block_images = settings.get_block_images();
+            let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
+            let mut registry =
+                pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
+            registry.load_private_authorization_from_cache();
+            let available: Vec<pa_types::ai::Model> =
+                registry.get_available().into_iter().cloned().collect();
+            // Route acceptance uses the same resolved-auth result the arm
+            // path installs: a provider can be signed in (the status
+            // probe) while its key resolution still fails, and a route
+            // accepted on the status probe alone would arm an
+            // unauthenticated target — the image turn's content would
+            // reach the provider without credentials instead of the
+            // actionable unresolvable-reference refusal (TS resolves the
+            // auth at request time and fails the turn before any request
+            // leaves; the port refuses the reference up front).
+            let resolvable_auth: std::collections::HashSet<(String, String)> = available
+                .iter()
+                .filter(|model| {
+                    registry
+                        .get_api_key_and_headers(model, model.headers.as_ref())
+                        .ok
+                })
+                .map(|model| (model.provider.clone(), model.id.clone()))
+                .collect();
+            pa_core::models::resolve_image_model_override(
+                &pa_core::models::ImageModelRoutingInputs {
+                    session_model: &session_model,
+                    thinking_level,
+                    service_tier: None,
+                    image_model_reference: image_model_reference.as_deref(),
+                    available_models: &available,
+                    // Keyed (provider, id): one provider's authenticated
+                    // row must not vouch for another provider's same-id
+                    // model (the catalog allows shared ids across
+                    // providers).
+                    has_configured_auth: &|model| {
+                        resolvable_auth.contains(&(model.provider.clone(), model.id.clone()))
+                    },
+                    block_images,
+                },
+            )
+        },
+    );
+    let swap_target = {
+        let provider_target = std::sync::Arc::clone(&provider_target);
+        let armed_to = std::sync::Arc::clone(&armed_to);
+        std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
+            if let Some(resolved) = route {
+                // The first swap of the episode captures the session
+                // target it replaces (the later arms re-write the slot,
+                // so only the arm preceding them holds it).
+                let mut armed_from = armed_from.lock().expect("armed-from lock");
+                if armed_from.is_none() {
+                    armed_from.clone_from(&provider_target.read().expect("provider target lock"));
+                }
+                // The routed model's request auth resolves like the
+                // session model's did at startup (registry + headers).
+                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                let mut registry =
+                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                registry.load_private_authorization_from_cache();
+                let resolved_auth = registry
+                    .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
+                let target = pa_core::session_engine::provider_adapter::ProviderTarget {
+                    api_key: resolved_auth.api_key,
+                    headers: resolved_auth.headers,
+                    model: resolved.model.clone(),
+                    service_tier: resolved.service_tier,
+                };
+                // The arm records the routed target it writes so the
+                // settle's still-routed guard can tell a slot the route
+                // still holds from one a mid-run `/model` switch rewrote
+                // (without this write the guard always passes).
+                *armed_to.lock().expect("armed-to lock") = Some(target.clone());
+                *provider_target.write().expect("provider target lock") = Some(target);
+            } else {
+                // Restore the captured session target ONLY when the slot
+                // still holds the routed target the arm wrote: a mid-run
+                // `/model` switch rewrote the slot with the new session
+                // target, and the settle must not drag requests back to
+                // the pre-route model.
+                let captured = armed_from.lock().expect("armed-from lock").take();
+                let routed = armed_to.lock().expect("armed-to lock").take();
+                let current = provider_target
+                    .read()
+                    .expect("provider target lock")
+                    .clone();
+                // The full serving target, credentials included: an ACP
+                // model switch may keep the same model id while rotating
+                // its api key or headers, and the guard must treat that
+                // slot as switched, not as the route's own.
+                let still_routed = match (&current, &routed) {
+                    (Some(current), Some(routed)) => {
+                        current.model.id == routed.model.id
+                            && current.service_tier == routed.service_tier
+                            && current.api_key == routed.api_key
+                            && current.headers == routed.headers
+                    }
+                    _ => true,
+                };
+                if still_routed {
+                    if let Some(target) = captured.or(current) {
+                        *provider_target.write().expect("provider target lock") = Some(target);
+                    }
+                }
+            }
+        })
+    };
+    pa_core::session_engine::image_model_routing::ImageModelRouter {
+        decide,
+        swap_target,
+    }
 }
 
 /// The engine alone (callers that do not drive session commands).
@@ -1405,6 +1651,7 @@ async fn build_faux_engine_with(
             on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
+            image_model_router: None,
         },
     )
     .await
@@ -1420,6 +1667,101 @@ async fn build_faux_engine_with(
 #[cfg(test)]
 mod tests {
     // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
+
+    /// The arm records the routed target it writes, so the settle
+    /// restores the captured session target only while the slot still
+    /// holds the route; a mid-run `/model` switch rewrote the slot with
+    /// the new session target, and the settle must leave it (the
+    /// regression this pins: the arm once skipped the `armed_to` write,
+    /// so the settle's still-routed guard always passed and dragged the
+    /// slot back to the pre-route session target).
+    #[test]
+    fn headless_image_router_settle_preserves_a_mid_run_model_switch() {
+        fn fixture_model(id: &str) -> pa_types::ai::Model {
+            pa_types::ai::Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                base_url: "https://x".to_string(),
+                reasoning: true,
+                thinking_level_map: None,
+                input: vec![
+                    pa_types::ai::ModelInput::Text,
+                    pa_types::ai::ModelInput::Image,
+                ],
+                cost: pa_types::ai::ModelCost {
+                    input: 1.0.into(),
+                    output: 2.0.into(),
+                    cache_read: 0.0.into(),
+                    cache_write: 0.0.into(),
+                },
+                context_window: 200_000,
+                max_tokens: 8192,
+                featured: None,
+                headers: None,
+                compat: None,
+            }
+        }
+        fn target(
+            model: pa_types::ai::Model,
+        ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
+            pa_core::session_engine::provider_adapter::ProviderTarget {
+                api_key: None,
+                headers: None,
+                model,
+                service_tier: None,
+            }
+        }
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let session_model = fixture_model("session-model");
+        let provider_target =
+            std::sync::Arc::new(std::sync::RwLock::new(Some(target(session_model.clone()))));
+        let armed_target: std::sync::Arc<
+            std::sync::Mutex<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let router = super::headless_image_model_router(
+            std::sync::Arc::clone(&provider_target),
+            std::sync::Arc::clone(&armed_target),
+            home.path().to_path_buf(),
+            agent_dir,
+            session_model,
+        );
+        let routed = pa_core::models::ResolvedImageModel {
+            model: fixture_model("image-model"),
+            thinking_level: pa_types::ai::ModelThinkingLevel::High,
+            service_tier: None,
+        };
+        // Arm: the slot now serves the routed image model.
+        (router.swap_target)(Some(&routed));
+        assert_eq!(
+            provider_target.read().unwrap().as_ref().unwrap().model.id,
+            "image-model"
+        );
+        // A mid-run `/model` switch rewrites the live slot with the new
+        // session target while the route is still armed.
+        let switched_to = target(fixture_model("switched-model"));
+        *provider_target.write().unwrap() = Some(switched_to);
+        // Settle: the switch wins; the settle must not drag the slot back
+        // to the pre-route session target.
+        (router.swap_target)(None);
+        assert_eq!(
+            provider_target.read().unwrap().as_ref().unwrap().model.id,
+            "switched-model"
+        );
+        // The next episode captures the live slot at ITS first arm, so its
+        // baseline is the post-switch session model: the plain arm ->
+        // serve -> settle contract restores that baseline (the
+        // capture-at-arm, restore-at-settle pair).
+        (router.swap_target)(Some(&routed));
+        (router.swap_target)(None);
+        assert_eq!(
+            provider_target.read().unwrap().as_ref().unwrap().model.id,
+            "switched-model"
+        );
+    }
 
     /// The print session's MCP manager serves a settings-declared server
     /// through the `mcp.config` host request the kernel dispatches

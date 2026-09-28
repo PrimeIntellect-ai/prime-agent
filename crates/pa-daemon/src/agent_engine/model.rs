@@ -335,7 +335,7 @@ impl AgentSessionEngine {
     /// flagged create); a model that cannot be resolved degrades to
     /// "off". Resolved once at the create/restore seam and cached so
     /// summary/state calls stay side-effect-free while turns run.
-    pub(super) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
+    pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
             .effective_thinking
             .read()

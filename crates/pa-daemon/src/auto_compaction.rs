@@ -59,12 +59,21 @@ impl AgentSessionEngine {
         let Ok(model) = self.session_model() else {
             return AutoCompactionRun::NotDue;
         };
+        // TS `_thresholdCompactionNeeded` reads `_runModel()` — the
+        // routed image model while a routed turn is armed — so the
+        // threshold decision compares the live context against the model
+        // that actually serves the requests; the summarizer below stays
+        // on the session model (TS `_runAutoCompaction` resolves the
+        // summary request's auth from `this.model`).
+        let run_model = self
+            .armed_image_route()
+            .map_or_else(|| model.clone(), |route| route.target.model);
         let due = {
             let guard = self.session.blocking_lock();
             match guard.as_deref() {
                 Some(engine) => self
                     .runtime
-                    .block_on(async { engine.session.auto_compaction_due(&model).await }),
+                    .block_on(async { engine.session.auto_compaction_due(&run_model).await }),
                 // No built session: the live context is empty (nothing to
                 // compact), matching the TS pre-turn check on a fresh
                 // session whose first turn has not run yet.
