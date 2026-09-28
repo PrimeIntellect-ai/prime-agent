@@ -1,0 +1,106 @@
+# The Windows runtime triage loop (operator directive 2026-09-28): the
+# windows-latest runner is a full Windows Server VM, so this on-demand
+# workflow runs the real crate batteries on ANY ref - the iteration
+# surface for the runtime reds. The mandatory windows-latest CI job on
+# PR heads stays the merge-bar authority; this dispatchable run is the
+# fast loop (fix -> push -> dispatch -> triage -> repeat).
+name: windows-runtime-triage
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "The ref to battery on Windows (branch, tag, or SHA; empty = this branch's head)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-runtime-triage-${{ github.ref }}
+  # A triage dispatch is a deliberate, operator-visible act: never
+  # cancel a battery mid-run for a newer one.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows-battery:
+    name: windows battery (on-demand)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-triage
+      - name: Strip the fleet's hostile-env vars (the gate-env contract)
+        shell: pwsh
+        run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
+          "env stripped"
+      - name: pa-types battery
+        id: pa_types
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test --locked -p pa-types 2>&1 | Tee-Object -FilePath pa-types_win.log
+          exit $LASTEXITCODE
+      - name: pa-core battery
+        id: pa_core
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test --locked -p pa-core 2>&1 | Tee-Object -FilePath pa-core_win.log
+          exit $LASTEXITCODE
+      - name: pa-daemon battery
+        id: pa_daemon
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test --locked -p pa-daemon 2>&1 | Tee-Object -FilePath pa-daemon_win.log
+          exit $LASTEXITCODE
+      - name: pa-tui battery
+        id: pa_tui
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test --locked -p pa-tui 2>&1 | Tee-Object -FilePath pa-tui_win.log
+          exit $LASTEXITCODE
+      - name: pa-cli battery (unit + the e2e set)
+        id: pa_cli
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test --locked -p pa-cli 2>&1 | Tee-Object -FilePath pa-cli_win.log
+          exit $LASTEXITCODE
+      - name: Summary + the overall verdict
+        shell: pwsh
+        run: |
+          $summary = "WIN_BATTERY pa-types=$(steps.pa_types.outcome) pa-core=$(steps.pa_core.outcome) pa-daemon=$(steps.pa_daemon.outcome) pa-tui=$(steps.pa_tui.outcome) pa-cli=$(steps.pa_cli.outcome)"
+          Add-Content -Path win_battery_summary.log -Value $summary
+          Write-Output $summary
+          if (@(steps.pa_types.outcome, steps.pa_core.outcome, steps.pa_daemon.outcome, steps.pa_tui.outcome, steps.pa_cli.outcome) -contains 'failure') { exit 1 }
+      - name: Upload the per-crate logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-battery-logs-${{ github.run_id }}
+          path: |
+            pa-types_win.log
+            pa-core_win.log
+            pa-daemon_win.log
+            pa-tui_win.log
+            pa-cli_win.log
+            win_battery_summary.log
+          if-no-files-found: warn
