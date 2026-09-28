@@ -152,4 +152,25 @@ mod tests {
         let err = dec.feed(&[0xff, b'\n']).unwrap_err();
         assert!(err.to_string().contains("UTF-8"));
     }
+
+    #[test]
+    fn decoder_scans_a_long_line_once_across_small_chunks() {
+        // 4 MiB in 1 KiB feeds: rescanning the buffered prefix per feed scans
+        // ~8.6 GB (~14 s in a debug build); one pass scans 4 MiB.
+        let line = "x".repeat(4 * 1024 * 1024);
+        let payload = format!("{line}\r\n{{\"id\":2}}\n");
+        let mut dec = LineDecoder::new(LineLimits::default());
+        let started = std::time::Instant::now();
+        let mut lines = Vec::new();
+        for chunk in payload.as_bytes().chunks(1024) {
+            lines.extend(dec.feed(chunk).unwrap());
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(lines, vec![line, "{\"id\":2}".to_string()]);
+        assert_eq!(dec.buffered_bytes(), 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "4 MiB line took {elapsed:?}"
+        );
+    }
 }
